@@ -155,7 +155,7 @@ mod tests {
         let view = Viewport::centered(Pos::new(20, 20), 37, 11);
         let mut f = CellFrame::new();
         f.resize(37, 13);
-        render_cells(&world.stage, view, &mut f);
+        render_cells(&world.stage, view, 255, &mut f);
         f.put_text(11, "status @ 12 ~#", TEXT_FG, TEXT_BG);
         f.put_text(12, "keys", Color::rgb(1, 2, 3), Color::rgb(9, 8, 7));
         f

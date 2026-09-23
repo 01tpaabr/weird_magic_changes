@@ -3,7 +3,8 @@
 //! Rows are the parallel unit: row `r` of the frame is written by exactly one
 //! task, reads only `&Stage`, and does one chunk lookup per (row, chunk) span,
 //! never per cell. No reduction, so the result is a pure function of
-//! `(stage, view)` whatever the thread count.
+//! `(stage, view, light)` whatever the thread count. `light` (day/night) is
+//! applied here, per cell, so the status bar and the pixel phase never see it.
 
 use rayon::prelude::*;
 use sim_core::{CHUNK_SIZE, Pos, Stage};
@@ -92,10 +93,12 @@ impl CellFrame {
     }
 }
 
-/// Fill the first `view.height` rows of `frame` from `stage`.
-/// `frame` must already be `view.width` columns wide and at least
-/// `view.height` rows tall (extra rows are left for the caller: status text).
-pub fn render_cells(stage: &Stage, view: Viewport, frame: &mut CellFrame) {
+/// Fill the first `view.height` rows of `frame` from `stage`, with every
+/// colour scaled by `light` (255 = the palette as is, see
+/// [`super::palette::brightness`]). `frame` must already be `view.width`
+/// columns wide and at least `view.height` rows tall (extra rows are left for
+/// the caller: status text).
+pub fn render_cells(stage: &Stage, view: Viewport, light: u8, frame: &mut CellFrame) {
     let cols = frame.cols;
     let rows = view.height as usize;
     assert_eq!(cols, view.width as usize, "frame width != viewport width");
@@ -106,12 +109,13 @@ pub fn render_cells(stage: &Stage, view: Viewport, frame: &mut CellFrame) {
         .zip(frame.fg[..n].par_chunks_mut(cols))
         .zip(frame.bg[..n].par_chunks_mut(cols))
         .enumerate()
-        .for_each(|(row, ((glyph, fg), bg))| render_row(stage, view, row, glyph, fg, bg));
+        .for_each(|(row, ((glyph, fg), bg))| render_row(stage, view, light, row, glyph, fg, bg));
 }
 
 fn render_row(
     stage: &Stage,
     view: Viewport,
+    light: u8,
     row: usize,
     glyph: &mut [u8],
     fg: &mut [u32],
@@ -140,14 +144,14 @@ fn render_row(
                 for (((&g, &f), o), (go, (fo, bo))) in cells.zip(outs) {
                     let s = style(g, f, !o.is_none());
                     *go = s.glyph;
-                    *fo = s.fg.0;
-                    *bo = s.bg.0;
+                    *fo = s.fg.scaled(light).0;
+                    *bo = s.bg.scaled(light).0;
                 }
             }
             None => {
                 g_out.fill(VOID.glyph);
-                f_out.fill(VOID.fg.0);
-                b_out.fill(VOID.bg.0);
+                f_out.fill(VOID.fg.scaled(light).0);
+                b_out.fill(VOID.bg.scaled(light).0);
             }
         }
         x = span_end;
@@ -161,7 +165,7 @@ mod tests {
     use sim_core::stage::worldgen::GenParams;
     use sim_core::{World, WorldConfig};
 
-    fn frame_with(threads: usize, view: Viewport, world: &World) -> CellFrame {
+    fn frame_with(threads: usize, view: Viewport, light: u8, world: &World) -> CellFrame {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build()
@@ -169,7 +173,7 @@ mod tests {
             .install(|| {
                 let mut f = CellFrame::new();
                 f.resize(view.width as usize, view.height as usize + 2);
-                render_cells(&world.stage, view, &mut f);
+                render_cells(&world.stage, view, light, &mut f);
                 f
             })
     }
@@ -184,14 +188,37 @@ mod tests {
         });
         // Straddles chunk borders and unloaded space on every side.
         let view = Viewport::centered(Pos::new(30, 40), 173, 97);
-        let a = frame_with(1, view, &world);
-        let b = frame_with(8, view, &world);
+        let a = frame_with(1, view, 200, &world);
+        let b = frame_with(8, view, 200, &world);
         assert_eq!(a.glyph, b.glyph);
         assert_eq!(a.fg, b.fg);
         assert_eq!(a.bg, b.bg);
         // Extra rows untouched.
         let n = 173 * 97;
         assert!(a.glyph[n..].iter().all(|&g| g == b' '));
+    }
+
+    #[test]
+    fn light_scales_every_colour_and_nothing_else() {
+        let world = World::new(&WorldConfig {
+            width: 100,
+            height: 100,
+            seed: 4,
+            params: GenParams::default(),
+        });
+        let view = Viewport::centered(Pos::new(90, 90), 40, 30); // includes unloaded cells
+        let day = frame_with(2, view, 255, &world);
+        let dusk = frame_with(2, view, 128, &world);
+        let night = frame_with(2, view, 0, &world);
+        assert_eq!(day.glyph, dusk.glyph);
+        assert_eq!(day.glyph, night.glyph);
+        let n = 40 * 30;
+        assert!(night.fg[..n].iter().all(|&c| c == 0));
+        assert!(night.bg[..n].iter().all(|&c| c == 0));
+        for (&d, &k) in day.bg[..n].iter().zip(&dusk.bg[..n]) {
+            assert_eq!(Color(d).scaled(128), Color(k));
+        }
+        assert_ne!(day.bg, dusk.bg);
     }
 
     #[test]

@@ -3,15 +3,17 @@
 //! of an unexplored world is a few dozen bytes.
 //!
 //! ```text
-//! <dir>/world.wmc              magic, version, seed, tick, initial size, gen params
-//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, then each layer as raw bytes
+//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params
+//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, then each layer as raw bytes
 //! ```
 //!
 //! Everything is little-endian, fixed layout, written to a temp file and
 //! renamed into place (a crash mid-write leaves the old file intact). No
 //! serde: the layout is `ChunkCells` verbatim, so a save is a memcpy.
-//! Bump [`FORMAT_VERSION`] whenever a layer, `CHUNK_BITS`, or `GenParams`
-//! changes; old saves are refused rather than misread.
+//! Bump [`FORMAT_VERSION`] whenever a layer, `CHUNK_BITS`, `GenParams` or a
+//! header field changes; old saves are refused rather than misread. The header
+//! also carries `TICKS_PER_DAY`: every duration in a world is in ticks, so a
+//! build with a different day length must not open it.
 //!
 //! Revisit when a save directory grows past a few thousand chunk files:
 //! pack chunks into region files (32x32 chunks per file with an offset table).
@@ -22,8 +24,9 @@ use std::path::{Path, PathBuf};
 
 use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord};
+use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -36,6 +39,16 @@ pub struct WorldMeta {
     pub initial_width: u32,
     pub initial_height: u32,
     pub params: GenParams,
+}
+
+/// One chunk as it sits on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedChunk {
+    pub cells: ChunkCells,
+    /// World tick the cells correspond to: the tick at which the chunk was
+    /// last simulated (i.e. written). A future catch-up on load reads
+    /// `world.tick - last_ticked`; today it is only recorded.
+    pub last_ticked: u64,
 }
 
 /// A save directory. Cheap to clone; holds no open files.
@@ -74,9 +87,17 @@ impl Store {
             Err(e) => return Err(e),
         };
         let mut r = Reader::new(&bytes, WORLD_MAGIC)?;
+        let seed = r.u64()?;
+        let tick = r.u64()?;
+        let ticks_per_day = r.u64()?;
+        if ticks_per_day != TICKS_PER_DAY {
+            return Err(bad(format!(
+                "save uses {ticks_per_day} ticks/day, build uses {TICKS_PER_DAY}"
+            )));
+        }
         let meta = WorldMeta {
-            seed: r.u64()?,
-            tick: r.u64()?,
+            seed,
+            tick,
             initial_width: r.u32()?,
             initial_height: r.u32()?,
             params: GenParams {
@@ -94,6 +115,7 @@ impl Store {
         let mut w = Writer::new(WORLD_MAGIC);
         w.u64(m.seed);
         w.u64(m.tick);
+        w.u64(TICKS_PER_DAY);
         w.u32(m.initial_width);
         w.u32(m.initial_height);
         w.f32(m.params.water_scale);
@@ -108,7 +130,7 @@ impl Store {
     }
 
     /// `Ok(None)` if the chunk was never saved (regenerate it).
-    pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<ChunkCells>> {
+    pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<SavedChunk>> {
         let bytes = match fs::read(self.chunk_path(c)) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -119,6 +141,7 @@ impl Store {
         if (x, y) != (c.x, c.y) {
             return Err(bad(format!("chunk file for {c:?} claims ({x}, {y})")));
         }
+        let last_ticked = r.u64()?;
         let mut cells = ChunkCells::default();
         let ground = r.bytes(CHUNK_CELLS)?;
         let feature = r.bytes(CHUNK_CELLS)?;
@@ -134,13 +157,20 @@ impl Store {
             o.0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
         }
         r.finish()?;
-        Ok(Some(cells))
+        Ok(Some(SavedChunk { cells, last_ticked }))
     }
 
-    pub fn write_chunk(&self, c: ChunkCoord, cells: &ChunkCells) -> io::Result<()> {
+    /// Write a chunk whose cells are current as of `last_ticked`.
+    pub fn write_chunk(
+        &self,
+        c: ChunkCoord,
+        cells: &ChunkCells,
+        last_ticked: u64,
+    ) -> io::Result<()> {
         let mut w = Writer::new(CHUNK_MAGIC);
         w.i32(c.x);
         w.i32(c.y);
+        w.u64(last_ticked);
         w.buf.extend_from_slice(bytemuck::cast_slice(&cells.ground));
         w.buf
             .extend_from_slice(bytemuck::cast_slice(&cells.feature));
@@ -281,6 +311,12 @@ mod tests {
         };
         s.write_meta(&m).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(m));
+        // A header written for a different day length is refused.
+        let mut bytes = fs::read(s.meta_path()).unwrap();
+        bytes[12 + 16] ^= 1; // magic(4) version(4) bits(4) seed(8) tick(8) -> ticks/day
+        fs::write(s.meta_path(), &bytes).unwrap();
+        let err = s.read_meta().unwrap_err().to_string();
+        assert!(err.contains("ticks/day"), "{err}");
         fs::remove_dir_all(s.dir()).unwrap();
     }
 
@@ -295,11 +331,12 @@ mod tests {
         cells.ground[CHUNK_CELLS - 1] = Ground::Water;
         assert!(!s.has_chunk(c));
         assert_eq!(s.read_chunk(c).unwrap(), None);
-        s.write_chunk(c, &cells).unwrap();
+        s.write_chunk(c, &cells, 4242).unwrap();
         assert!(s.has_chunk(c));
         let back = s.read_chunk(c).unwrap().unwrap();
-        assert_eq!(back.hash(), cells.hash());
-        assert_eq!(back.occupant[100], ActorId(0xABCD));
+        assert_eq!(back.last_ticked, 4242);
+        assert_eq!(back.cells.hash(), cells.hash());
+        assert_eq!(back.cells.occupant[100], ActorId(0xABCD));
         assert!(!s.chunk_path(c).with_extension("tmp").exists());
         fs::remove_dir_all(s.dir()).unwrap();
     }
@@ -310,15 +347,15 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x01\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x02\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
         let mut cells = ChunkCells::default();
         generate_chunk(1, &GenParams::default(), c, &mut cells);
-        s.write_chunk(c, &cells).unwrap();
+        s.write_chunk(c, &cells, 0).unwrap();
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[20] = 200; // an invalid Ground discriminant
+        bytes[28] = 200; // an invalid Ground discriminant (after magic, version, bits, coord, tick)
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
         fs::remove_dir_all(s.dir()).unwrap();

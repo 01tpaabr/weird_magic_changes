@@ -18,6 +18,27 @@ impl Color {
     pub const fn bytes(self) -> [u8; 4] {
         self.0.to_le_bytes()
     }
+
+    /// Scaled towards black: `light` 255 is the colour itself, 0 is black.
+    /// Per channel `(c * light + 127) / 255`, exact at both ends.
+    pub const fn scaled(self, light: u8) -> Color {
+        let [b, g, r, _] = self.bytes();
+        Color::rgb(scale(r, light), scale(g, light), scale(b, light))
+    }
+}
+
+const fn scale(c: u8, light: u8) -> u8 {
+    ((c as u32 * light as u32 + 127) / 255) as u8
+}
+
+/// Map brightness at deep night: dim, still readable.
+pub const NIGHT_FLOOR: u8 = 0x66;
+
+/// Map brightness for a sim daylight level (`sim_core::time::daylight`):
+/// full sun draws the palette as is, night draws it at [`NIGHT_FLOOR`].
+pub const fn brightness(daylight: u8) -> u8 {
+    let span = (255 - NIGHT_FLOOR) as u32;
+    NIGHT_FLOOR + ((span * daylight as u32 + 127) / 255) as u8
 }
 
 pub const SOIL_BG: Color = Color::rgb(0xc4, 0x9e, 0x6c); // light brown
@@ -70,6 +91,17 @@ mod tests {
     fn color_is_softbuffer_0rgb() {
         assert_eq!(Color::rgb(1, 2, 3).0, 0x0001_0203);
         assert_eq!(Color::rgb(1, 2, 3).bytes(), [3, 2, 1, 0]);
+    }
+
+    #[test]
+    fn scaling_is_exact_at_the_ends_and_rounds_in_between() {
+        let c = Color::rgb(200, 100, 3);
+        assert_eq!(c.scaled(255), c);
+        assert_eq!(c.scaled(0), Color::rgb(0, 0, 0));
+        assert_eq!(c.scaled(128), Color::rgb(100, 50, 2));
+        assert_eq!(brightness(255), 255);
+        assert_eq!(brightness(0), NIGHT_FLOOR);
+        assert!(brightness(128) > NIGHT_FLOOR && brightness(128) < 255);
     }
 
     #[test]

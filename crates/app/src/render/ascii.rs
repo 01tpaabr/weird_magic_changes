@@ -9,7 +9,7 @@ use super::cells::{CellFrame, Viewport, render_cells};
 pub fn render(stage: &Stage, view: Viewport) -> String {
     let mut frame = CellFrame::new();
     frame.resize(view.width as usize, view.height as usize);
-    render_cells(stage, view, &mut frame);
+    render_cells(stage, view, 255, &mut frame);
     let mut out = String::with_capacity((frame.cols() + 1) * frame.rows());
     for row in frame.glyph.chunks_exact(frame.cols().max(1)) {
         out.extend(row.iter().map(|&b| char::from(b)));

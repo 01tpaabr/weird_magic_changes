@@ -220,6 +220,11 @@ pub struct ChunkMeta {
     /// Modified since it was generated or loaded from disk. Clean chunks are
     /// never written: they can be regenerated from the seed.
     pub dirty: bool,
+    /// World tick the chunk's state was current at when it entered the slab
+    /// (the tick it was generated, or `last_ticked` from its save file).
+    /// While loaded the live value is `World::tick`; `World` refreshes this
+    /// whenever the chunk is written. Not part of the checksum.
+    pub last_ticked: u64,
 }
 
 /// Everything a cell holds, copied out. For convenience APIs, not hot loops.
@@ -297,6 +302,7 @@ impl Stage {
             coord,
             loaded: true,
             dirty,
+            last_ticked: 0,
         };
         let slot = if let Some(s) = self.free.pop() {
             self.meta[s as usize] = meta;

@@ -10,7 +10,9 @@ When two of these conflict, the higher one wins.
 
 1. **Determinism.** Same seed + same inputs => bit-identical state, on 1 thread or 64.
    Fixed reduction order, seeded RNG per entity/chunk (never a global RNG), no wall-clock
-   in the sim, no iteration over HashMap. Every system gets a test that runs it with
+   in the sim, no iteration over HashMap. Time is integer ticks (`sim_core::time`), never
+   floats; a system's *cadence* (every 2^k ticks, staggered by chunk coord) is separate
+   from the tick and from real-time speed (`app::clock`). Every system gets a test that runs it with
    `num_threads(1)` and `num_threads(N)` and compares checksums. If it isn't
    deterministic, it isn't done.
 2. **Data layout before algorithms.** Flat `Vec<T>` structure-of-arrays, indices not
@@ -47,7 +49,8 @@ docs/               ARCHITECTURE.md (decisions), PERF.md (baselines)
 
 ```
 make            build (dev: opt-level 1, Zig ReleaseSafe -> bounds checks on)
-make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=tick, p=save, q=quit)
+make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=pause, .=step, [ ]=speed, p=save, q=quit)
+make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (RAYON_NUM_THREADS=1 must match)
 make check      fmt + clippy -D warnings + zig fmt        (pre-commit runs this)
 make test       zig build test + cargo test
 make ci         check + test  == "done"

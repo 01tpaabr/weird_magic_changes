@@ -40,7 +40,7 @@ fn bench_cells(c: &mut Criterion) {
     for threads in [1, 8] {
         let p = pool(threads);
         g.bench_with_input(BenchmarkId::new("160x90", threads), &threads, |b, _| {
-            b.iter(|| p.install(|| render_cells(&world.stage, view, &mut frame)));
+            b.iter(|| p.install(|| render_cells(&world.stage, view, 200, &mut frame)));
         });
     }
     g.finish();
@@ -51,7 +51,7 @@ fn bench_blit(c: &mut Criterion) {
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
-    render_cells(&world.stage, view, &mut frame);
+    render_cells(&world.stage, view, 255, &mut frame);
     let atlas = GlyphAtlas::build(CELL);
     let stride = (COLS * CELL) as usize;
     let mut out = vec![0u8; stride * (ROWS * CELL) as usize * 4];

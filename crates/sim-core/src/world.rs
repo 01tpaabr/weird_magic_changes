@@ -8,6 +8,10 @@
 //! Only loaded chunks simulate. Which chunks are loaded is a function of the
 //! inputs (camera moves, [`LoadPolicy`]), so a replay with the same inputs
 //! loads the same chunks in the same order and stays bit-identical.
+//!
+//! Time is the integer `tick` (see [`crate::time`]). A chunk that is not
+//! loaded is frozen: its save file records the tick it was last simulated
+//! (`last_ticked`), which is all a future catch-up-on-load needs.
 
 use std::io;
 
@@ -16,6 +20,7 @@ use rayon::prelude::*;
 use crate::stage::worldgen::{GenParams, generate_chunk};
 use crate::stage::{CHUNK_SIZE, ChunkCoord, Pos, Stage};
 use crate::store::{Store, WorldMeta};
+use crate::time::START_TICK;
 
 /// How a new world is made.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -54,6 +59,7 @@ pub struct StreamStats {
 #[derive(Debug)]
 pub struct World {
     pub seed: u64,
+    /// Ticks since the world began; see [`crate::time`] for the calendar.
     pub tick: u64,
     pub params: GenParams,
     pub initial_width: u32,
@@ -67,7 +73,7 @@ impl World {
     pub fn new(cfg: &WorldConfig) -> Self {
         let mut w = Self {
             seed: cfg.seed,
-            tick: 0,
+            tick: START_TICK,
             params: cfg.params,
             initial_width: cfg.width,
             initial_height: cfg.height,
@@ -115,8 +121,9 @@ impl World {
         for s in self.stage.active().to_vec() {
             let m = &mut self.stage.meta[s as usize];
             if m.dirty {
-                store.write_chunk(m.coord, &self.stage.cells[s as usize])?;
+                store.write_chunk(m.coord, &self.stage.cells[s as usize], self.tick)?;
                 m.dirty = false;
+                m.last_ticked = self.tick;
                 written += 1;
             }
         }
@@ -165,7 +172,7 @@ impl World {
             let dirty = self.stage.meta[slot].dirty;
             match (dirty, store) {
                 (true, Some(st)) => {
-                    st.write_chunk(c, &self.stage.cells[slot])?;
+                    st.write_chunk(c, &self.stage.cells[slot], self.tick)?;
                     stats.written += 1;
                 }
                 (true, None) => continue,
@@ -189,8 +196,9 @@ impl World {
         self.stage.reserve(coords.len());
         for &c in coords {
             match store.map(|s| s.read_chunk(c)).transpose()?.flatten() {
-                Some(cells) => {
-                    self.stage.insert(c, cells, false);
+                Some(saved) => {
+                    let slot = self.stage.insert(c, saved.cells, false);
+                    self.stage.meta[slot as usize].last_ticked = saved.last_ticked;
                     read += 1;
                 }
                 None => to_gen.push(c),
@@ -201,6 +209,9 @@ impl World {
             .iter()
             .map(|&c| self.stage.insert_blank(c, false))
             .collect();
+        for &s in &slots {
+            self.stage.meta[s as usize].last_ticked = self.tick;
+        }
         let mut pairs: Vec<(u32, ChunkCoord)> =
             slots.iter().copied().zip(to_gen.iter().copied()).collect();
         pairs.sort_unstable_by_key(|&(s, _)| s);
@@ -258,12 +269,46 @@ mod tests {
     }
 
     #[test]
+    fn new_world_starts_at_dawn() {
+        let w = World::new(&cfg(5));
+        assert_eq!(w.tick, START_TICK);
+        assert_eq!(crate::time::Clock::at(w.tick).to_string(), "day 0 06:00");
+        for &s in w.stage.active() {
+            assert_eq!(w.stage.meta[s as usize].last_ticked, START_TICK);
+        }
+    }
+
+    #[test]
     fn step_advances_tick_and_changes_checksum() {
         let mut w = World::new(&cfg(5));
         let c0 = w.checksum();
         w.step();
-        assert_eq!(w.tick, 1);
+        assert_eq!(w.tick, START_TICK + 1);
         assert_ne!(w.checksum(), c0);
+    }
+
+    fn checksum_after(threads: usize, ticks: u64) -> u64 {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap()
+            .install(|| {
+                let mut w = World::new(&cfg(77));
+                for _ in 0..ticks {
+                    w.step();
+                }
+                w.checksum()
+            })
+    }
+
+    /// The determinism gate every system must keep passing: same seed, same
+    /// number of ticks, same checksum on one thread and on many.
+    #[test]
+    fn stepping_is_identical_across_thread_counts() {
+        let one = checksum_after(1, 200);
+        assert_eq!(one, checksum_after(8, 200));
+        assert_eq!(one, checksum_after(3, 200));
+        assert_ne!(one, checksum_after(1, 199));
     }
 
     #[test]
@@ -306,18 +351,26 @@ mod tests {
         assert_eq!(s.unloaded, 5);
         assert!(w.stage.is_loaded(cc));
 
-        // With a store: written on unload, read back on load, bit-exact.
+        // With a store: written on unload, read back on load, bit-exact, and
+        // stamped with the tick it was frozen at.
         let store = tmp_store("dirty");
         let before = w.stage.chunk(cc).unwrap().hash();
+        w.step();
+        w.step();
+        let frozen_at = w.tick;
         let s = w
             .ensure_loaded(Pos::new(1000, 1000), policy, Some(&store))
             .unwrap();
         assert_eq!((s.written, s.unloaded), (1, 1));
         assert!(!w.stage.is_loaded(cc));
+        w.step();
         let s = w.ensure_loaded(p, policy, Some(&store)).unwrap();
         assert_eq!((s.read, s.generated), (1, 0));
         assert_eq!(w.stage.chunk(cc).unwrap().hash(), before);
-        assert!(!w.stage.meta[w.stage.slot(cc).unwrap() as usize].dirty);
+        let m = w.stage.meta[w.stage.slot(cc).unwrap() as usize];
+        assert!(!m.dirty);
+        assert_eq!(m.last_ticked, frozen_at);
+        assert_eq!(w.tick, frozen_at + 1);
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
@@ -334,7 +387,7 @@ mod tests {
         let expect = w.checksum();
 
         let mut back = World::open(&store).unwrap().unwrap();
-        assert_eq!((back.tick, back.seed), (2, 11));
+        assert_eq!((back.tick, back.seed), (START_TICK + 2, 11));
         assert_eq!(back.stage.loaded_count(), 0);
         // Load exactly the initial region again.
         back.ensure_loaded(

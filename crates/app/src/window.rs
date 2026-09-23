@@ -1,23 +1,24 @@
 //! Windowed front end: a resizable `winit` window, a `softbuffer` framebuffer
 //! and the keyboard camera.
 //!
-//! A frame is: stream chunks around the camera -> `render_cells` (row-parallel)
-//! -> `blit` (band-parallel Zig kernel) -> present. The loop is event-driven:
-//! a redraw follows input or a resize, and while the camera is moving each
-//! frame requests the next one, which AppKit paces to the display refresh.
-//! The sim ticks on demand; when it runs continuously this becomes a
-//! fixed-timestep loop and the frame pipeline does not change.
+//! A frame is: advance the camera -> stream chunks around it -> run the
+//! ticks the [`Clock`] owes (bounded by [`TICK_BUDGET`]) -> `render_cells`
+//! (row-parallel, dimmed by the sim's daylight) -> `blit` (band-parallel Zig
+//! kernel) -> present. The loop is event-driven: a redraw follows input or a
+//! resize, and while the camera moves or the sim runs each frame requests the
+//! next one, which AppKit paces to the display refresh.
 //!
 //! Keys: hold `w a s d` / arrows to glide (two keys = diagonal), Shift for
-//! x4 speed; `space` steps the sim; `p` saves; `+`/`-` zoom; `q` / `Esc` /
-//! close saves and quits.
+//! x4 speed; `space` pauses/resumes the sim; `.` runs one tick and pauses;
+//! `[` / `]` slow down / speed up (1x .. 16x, max); `p` saves; `+`/`-` zoom;
+//! `q` / `Esc` / close saves and quits.
 
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, anyhow};
-use sim_core::{CHUNK_SIZE, LoadPolicy, Pos, Store, StreamStats, World};
+use sim_core::{CHUNK_SIZE, LoadPolicy, Pos, Store, StreamStats, World, time};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
 use winit::event::{ElementState, WindowEvent};
@@ -26,10 +27,11 @@ use winit::keyboard::{KeyCode, ModifiersState, PhysicalKey};
 use winit::window::{Window, WindowId};
 
 use crate::camera::{Camera, Input};
+use crate::clock::Clock;
 use crate::render::atlas::GlyphAtlas;
 use crate::render::blit::{Target, blit};
 use crate::render::cells::{CellFrame, Viewport, render_cells};
-use crate::render::palette::{TEXT_BG, TEXT_FG};
+use crate::render::palette::{TEXT_BG, TEXT_FG, brightness};
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the atlas is built for.
@@ -41,7 +43,11 @@ const ZOOM_STEP: u32 = 2;
 const STATUS_ROWS: usize = 2;
 /// Longest frame time fed to the camera: a stall becomes a small step, not a leap.
 const MAX_DT: f64 = 0.1;
-const HELP: &str = "hold wasd/arrows to move, shift x4, space tick, p save, +/- zoom, q quit";
+/// Sim time per frame. The rest of a 60 Hz frame is for streaming and drawing;
+/// at max speed this is how long each frame ticks for.
+pub const TICK_BUDGET: Duration = Duration::from_millis(10);
+const HELP: &str =
+    "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | +/- zoom | q quit";
 
 /// Load radius that keeps the whole view plus one chunk of margin loaded.
 fn policy_for(view_w: u32, view_h: u32) -> LoadPolicy {
@@ -102,6 +108,7 @@ pub fn run(world: &mut World, camera: &mut Camera, store: &Store) -> anyhow::Res
         buf_height: 0,
         held: Held::default(),
         modifiers: ModifiersState::empty(),
+        clock: Clock::new(),
         last_frame: None,
         last_stats: None,
         error: None,
@@ -165,7 +172,9 @@ struct App<'a> {
     buf_height: usize,
     held: Held,
     modifiers: ModifiersState,
-    /// When the previous frame was drawn, while the camera is animating.
+    clock: Clock,
+    /// When the previous frame was drawn, while the camera is animating or
+    /// the sim is running.
     last_frame: Option<Instant>,
     last_stats: Option<StreamStats>,
     /// First fatal error; the loop exits and `run` returns it.
@@ -256,10 +265,10 @@ impl App<'_> {
         let now = Instant::now();
         let dt = self
             .last_frame
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f64().min(MAX_DT));
+            .map_or(0.0, |t| now.duration_since(t).as_secs_f64());
         self.camera
-            .update(dt, self.held.input(self.modifiers.shift_key()));
-        let animating = self.held.any() || self.camera.moving();
+            .update(dt.min(MAX_DT), self.held.input(self.modifiers.shift_key()));
+        let animating = self.held.any() || self.camera.moving() || self.clock.running();
         self.last_frame = animating.then_some(now);
 
         let cell = atlas.cell();
@@ -279,17 +288,25 @@ impl App<'_> {
             self.last_stats = Some(stats);
         }
 
-        // Phase 1: cells.
+        // Sim: the ticks this frame owes, on the loaded set.
+        let world = &mut *self.world;
+        self.clock.run(dt, TICK_BUDGET, || world.step());
+
+        // Phase 1: cells, dimmed by the sim's daylight.
         self.map.resize(layout.cols, layout.rows);
         let view = Viewport {
             origin: layout.origin,
             width: layout.cols as u32,
             height: layout.rows as u32,
         };
-        render_cells(&self.world.stage, view, &mut self.map);
+        let light = brightness(time::daylight(self.world.tick));
+        render_cells(&self.world.stage, view, light, &mut self.map);
 
         let status = format!(
-            "cam ({:.1}, {:.1}) chunk ({}, {}) | {}x{} cells @ {}px | loaded {} | tick {} | last stream: {}",
+            "{} | {} | tick {} | cam ({:.1}, {:.1}) chunk ({}, {}) | {}x{} @ {}px | loaded {} | stream: {}",
+            time::Clock::at(self.world.tick),
+            self.clock.label(),
+            self.world.tick,
             self.camera.x,
             self.camera.y,
             self.camera.cell().split().0.x,
@@ -298,7 +315,6 @@ impl App<'_> {
             layout.rows,
             cell,
             self.world.stage.loaded_count(),
-            self.world.tick,
             self.last_stats.map_or_else(
                 || "-".to_string(),
                 |s| format!(
@@ -373,7 +389,13 @@ impl App<'_> {
         }
         match code {
             KeyCode::KeyQ | KeyCode::Escape => return Ok(true),
-            KeyCode::Space => self.world.step(),
+            KeyCode::Space => self.clock.toggle_pause(),
+            KeyCode::Period => {
+                self.clock.pause();
+                self.world.step();
+            }
+            KeyCode::BracketLeft => self.clock.slower(),
+            KeyCode::BracketRight => self.clock.faster(),
             KeyCode::KeyP => save(self.world, self.camera, self.store)?,
             KeyCode::Equal | KeyCode::NumpadAdd => self.zoom(ZOOM_STEP as i32)?,
             KeyCode::Minus | KeyCode::NumpadSubtract => self.zoom(-(ZOOM_STEP as i32))?,
