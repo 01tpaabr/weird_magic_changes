@@ -1,10 +1,13 @@
 [package]
 name = "app"
-description = "Game / sim entry point"
+description = "Game / sim entry point: window, input, rendering"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+
+[lib]
+path = "src/lib.rs"
 
 [[bin]]
 name = "wmc"
@@ -14,7 +17,17 @@ path = "src/main.rs"
 sim-core.workspace = true
 zig-kernels.workspace = true
 anyhow.workspace = true
-crossterm.workspace = true
+rayon.workspace = true
+winit.workspace = true
+pixels.workspace = true
+fontdue.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "render"
+harness = false

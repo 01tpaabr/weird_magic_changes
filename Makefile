@@ -55,7 +55,7 @@ zig-test:
 ci: check test
 
 bench:
-	cargo bench -p sim-core
+	cargo bench --workspace
 
 ## environment ----------------------------------------------------------------
 

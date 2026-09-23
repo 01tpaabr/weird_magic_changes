@@ -2,14 +2,10 @@
 //!
 //! ```text
 //! wmc show [width] [height] [seed]        print the initial region once and exit
-//! wmc play <save_dir> [width height seed] interactive: WASD camera, streaming, saves
+//! wmc play <save_dir> [width height seed] open a window: WASD camera, streaming, saves
 //! ```
 //! `play` opens the world in `save_dir` if one exists (size/seed args are then
 //! ignored), otherwise creates it. Defaults: 80 24 42.
-mod camera;
-mod render;
-mod tui;
-
 use std::io::Write;
 use std::time::Instant;
 
@@ -17,8 +13,10 @@ use anyhow::{Context, bail};
 use sim_core::stage::worldgen::GenParams;
 use sim_core::{Feature, Ground, Pos, Store, World, WorldConfig};
 
-use camera::Camera;
-use render::ascii::{Viewport, render};
+use app::camera::Camera;
+use app::render::ascii::render;
+use app::render::cells::Viewport;
+use app::window;
 
 fn main() -> anyhow::Result<()> {
     if let Err(v) = zig_kernels::check_abi() {
@@ -110,5 +108,5 @@ fn play(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
             i32::try_from(world.initial_height / 2).unwrap_or(0),
         ))
     });
-    tui::run(&mut world, &mut camera, &store)
+    window::run(&mut world, &mut camera, &store)
 }

@@ -1,90 +1,27 @@
-//! ASCII renderer: one glyph per cell, one line per row.
-//!
-//! Glyphs: `.` soil, `~` water, `#` rock (on anything), `@` any actor,
-//! space for cells whose chunk is not loaded.
+//! Text view of a [`CellFrame`]: one glyph per cell, one line per row.
+//! Used by `wmc show` and by tests; the window never goes through here.
 
-use sim_core::{CHUNK_SIZE, Feature, Ground, Pos, Stage};
+use sim_core::Stage;
 
-/// Rectangle of the world to draw, in cells.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Viewport {
-    /// Top-left cell.
-    pub origin: Pos,
-    pub width: u32,
-    pub height: u32,
-}
+use super::cells::{CellFrame, Viewport, render_cells};
 
-impl Viewport {
-    /// A viewport of `width x height` centred on `center`.
-    pub fn centered(center: Pos, width: u32, height: u32) -> Self {
-        let half = |n: u32| i32::try_from(n / 2).expect("viewport fits i32");
-        Self {
-            origin: Pos::new(
-                center.x.saturating_sub(half(width)),
-                center.y.saturating_sub(half(height)),
-            ),
-            width,
-            height,
-        }
-    }
-}
-
-pub fn glyph(ground: Ground, feature: Feature, occupied: bool) -> char {
-    if occupied {
-        return '@';
-    }
-    match (feature, ground) {
-        (Feature::Rock, _) => '#',
-        (Feature::None, Ground::Soil) => '.',
-        (Feature::None, Ground::Water) => '~',
-    }
-}
-
-/// Render `view` into `out` (cleared first), rows separated by `newline`.
-/// Reuse `out` across frames to avoid allocating. Works span by span: one
-/// chunk lookup per (row, chunk) pair, never per cell.
-pub fn render_into(stage: &Stage, view: Viewport, newline: &str, out: &mut String) {
-    out.clear();
-    let w = i32::try_from(view.width).expect("viewport width fits i32");
-    let h = i32::try_from(view.height).expect("viewport height fits i32");
-    out.reserve((view.width as usize + newline.len()) * view.height as usize);
-    for row in 0..h {
-        let y = view.origin.y.saturating_add(row);
-        let x_end = view.origin.x.saturating_add(w);
-        let mut x = view.origin.x;
-        while x < x_end {
-            let (cc, local) = Pos::new(x, y).split();
-            let chunk_end = cc.origin().x + CHUNK_SIZE;
-            let span_end = chunk_end.min(x_end);
-            let n = (span_end - x) as usize;
-            match stage.chunk(cc) {
-                Some(c) => {
-                    let cells = c.ground[local..local + n]
-                        .iter()
-                        .zip(&c.feature[local..local + n])
-                        .zip(&c.occupant[local..local + n]);
-                    for ((&g, &f), o) in cells {
-                        out.push(glyph(g, f, !o.is_none()));
-                    }
-                }
-                None => out.extend(std::iter::repeat_n(' ', n)),
-            }
-            x = span_end;
-        }
-        out.push_str(newline);
-    }
-}
-
+/// Render `view` as text, rows separated by `\n`.
 pub fn render(stage: &Stage, view: Viewport) -> String {
-    let mut s = String::new();
-    render_into(stage, view, "\n", &mut s);
-    s
+    let mut frame = CellFrame::new();
+    frame.resize(view.width as usize, view.height as usize);
+    render_cells(stage, view, &mut frame);
+    let mut out = String::with_capacity((frame.cols() + 1) * frame.rows());
+    for row in frame.glyph.chunks_exact(frame.cols().max(1)) {
+        out.extend(row.iter().map(|&b| char::from(b)));
+        out.push('\n');
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sim_core::{ActorId, ChunkCells, ChunkCoord};
+    use sim_core::{ActorId, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos};
 
     #[test]
     fn renders_every_glyph_and_blank_for_unloaded() {
@@ -116,11 +53,5 @@ mod tests {
             height: 1,
         };
         assert_eq!(render(&s, v), "..  \n");
-    }
-
-    #[test]
-    fn centered_viewport() {
-        let v = Viewport::centered(Pos::new(10, 10), 7, 3);
-        assert_eq!(v.origin, Pos::new(7, 9));
     }
 }

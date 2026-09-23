@@ -1,7 +1,7 @@
 # Architecture
 
-Status: Stage (chunked, unbounded terrain grid), streaming, persistence and an ASCII
-camera are built; actors and systems next. This file records decisions that
+Status: Stage (chunked, unbounded terrain grid), streaming, persistence and a windowed
+ASCII renderer with a WASD camera are built; actors and systems next. This file records decisions that
 are already made and the shape the design must fit into.
 
 ## Decisions
@@ -21,11 +21,13 @@ are already made and the shape the design must fit into.
 | 11 | Two terrain layers: `Ground` (what a cell is: Soil/Water) and `Feature` (what rests on it: None/Rock) | Rock on soil and rock on water are the same rock; keeps enum products from exploding | If features need per-cell state beyond a tag: add a parallel `Vec` for that state |
 | 12 | At most one actor per cell (`occupant: Vec<ActorId>`, `ActorId::NONE` = empty) | Movement/collision become a per-cell ownership question with no spatial index | If stacking is a game requirement: occupant becomes a head index into a per-actor linked list |
 | 13 | Worldgen is a pure function of `(seed, x, y)` via `hash_cell` + value noise; no sequential state | Bit-identical for any thread count *and* any chunk size; the test recomputes every cell serially | If gen needs global passes (rivers, erosion): those become phases with their own determinism tests |
-| 14 | Rendering lives in `app` (`render/ascii.rs`); `sim-core` has no glyphs. Renders span by span (one chunk lookup per row-chunk pair) | Layering; ASCII is a stand-in for a real backend | When a windowed renderer lands |
+| 14 | Rendering lives in `app` (`render/`); `sim-core` has no glyphs or colours. `palette.rs` is the one place a tile becomes (glyph, fg, bg): the ground picks the cell background, the thing on it picks glyph + foreground | Layering; a system never needs to know how it looks | If tiles get per-cell scalar visuals (moisture tint): palette takes the scalar layers as input |
 | 15 | Streaming: `World::ensure_loaded(focus, LoadPolicy)` loads chunks within `load` chunks of the focus and unloads beyond `unload` (`unload > load` = hysteresis). Only loaded chunks simulate | Loaded set is a pure function of inputs, so replays stay bit-identical; the camera is just one source of focus | When actors wander off-screen: add per-actor focus points (or a "simulation bubble") to the same call |
 | 16 | Persistence = a directory: `world.wmc` meta + `chunks/<x>_<y>.wmcc`, raw little-endian layer dumps, atomic rename on write. **Only dirty chunks are written**; clean ones are regenerated from the seed | Zero-copy format (memcpy of `ChunkCells`), saves of an unexplored world are bytes not megabytes. `FORMAT_VERSION` + `CHUNK_BITS` fingerprint refuse mismatched files | When a save has thousands of chunk files: region files (32x32 chunks per file with an offset table) |
 | 17 | Camera is app state, saved in `camera.txt` beside the world, not inside the sim | The sim must not know where a player is looking; several viewers must be possible | Never |
-| 18 | Terminal I/O via `crossterm` (only non-sim dependency added so far) | Raw mode needs termios; the rules forbid `unsafe` outside `zig-kernels` | When a windowed renderer replaces the TUI |
+| 18 | A frame is two pure phases: `cells::render_cells` (Stage viewport -> `CellFrame`, three SoA `Vec`s glyph/fg/bg, **row-parallel**, one chunk lookup per row-chunk span) then `blit::blit` (`CellFrame` + glyph atlas -> RGBA8, **band-parallel** over `BAND_ROWS` cell rows, Zig kernel `wmc_blit_cells` per band). No reduction anywhere, so 1 thread == N threads bit-for-bit (tested) | Same shape as a sim tick (read shared, write owned slices); the Zig kernel is a pure function over caller-owned buffers, the Rust `blit_reference` is its oracle and bench baseline | If the blit is measured hot at 4K: move the blend to a wgpu shader with the same `CellFrame` as input; the cell phase stays |
+| 19 | Window = `winit` + `pixels` (CPU RGBA framebuffer uploaded through wgpu) + `fontdue`. The TUI and `crossterm` are gone; `wmc show` prints text through the same cell phase | A CPU framebuffer keeps the whole picture a flat buffer we own and can hand to Zig/rayon; `pixels` already sits on wgpu, so a GPU path later is a swap of phase 2, not a rewrite | When phase 2 moves to a shader (see 18) |
+| 20 | Glyph atlas: bundled JetBrains Mono NL (OFL, `crates/app/assets/`) rasterized once per **physical** cell size into square `cell x cell` coverage boxes for printable ASCII; glyph centred in the square. Cell = logical 16 px x window scale factor; `+`/`-` zoom rebuilds the atlas. Event-driven loop (`ControlFlow::Wait`): redraw on input/resize only | Square cells for a top-down grid; per-physical-pixel atlas means crisp text on Retina; bundling makes the picture identical on every machine | When the sim runs continuously: fixed-timestep loop with the same frame pipeline; when Unicode glyphs are wanted: atlas becomes a map from char to box |
 
 ## Layers
 
@@ -56,7 +58,7 @@ reads come later via a second slab (`cells_next`) so all of `cells` is readable 
 Walkability: `Ground::walkable && !Feature::blocks` (soil yes, water no, rock blocks). One place
 to change. Per-cell scalars (moisture, heat, mana...) are further arrays in `ChunkCells`.
 
-Streaming per frame (`app/tui.rs`): load radius = chunks needed to cover half the view + 1,
+Streaming per frame (`app/window.rs`): load radius = chunks needed to cover half the view + 1,
 unload radius = load + 2. Unload of a dirty chunk writes it; without a store, dirty chunks stay.
 
 ## Open questions (fill in as the design lands)
@@ -66,5 +68,4 @@ unload radius = load + 2. Unload of a dirty chunk writes it; without a store, di
 - Movement/conflict resolution when two actors want one cell (per-chunk intents + in-order merge?)
 - Actors crossing chunk borders / standing in a chunk that gets unloaded (freeze with the chunk?)
 - Cross-chunk neighbour reads for cell systems: `cells_next` slab + halo, or stitched 66x66 scratch?
-- Rendering backend / windowing crate? (ASCII for now)
 - Save/replay format?

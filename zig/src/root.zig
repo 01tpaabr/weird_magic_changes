@@ -11,9 +11,10 @@
 const std = @import("std");
 
 pub const saxpy = @import("kernels/saxpy.zig");
+pub const blit = @import("kernels/blit.zig");
 
 /// ABI version. Bump when an exported signature changes; Rust checks it at startup.
-pub const abi_version: u32 = 1;
+pub const abi_version: u32 = 2;
 
 export fn wmc_abi_version() u32 {
     return abi_version;
@@ -28,6 +29,41 @@ export fn wmc_saxpy_f32(a: f32, x: [*]const f32, y: [*]f32, n: usize) void {
 /// reproducible across runs; do not "optimize" into a non-associative fast path.
 export fn wmc_sum_f32(x: [*]const f32, n: usize) f32 {
     return saxpy.sum(x[0..n]);
+}
+
+/// Number of glyph boxes an atlas must hold (printable ASCII). Rust asserts
+/// its atlas against this before calling `wmc_blit_cells`.
+export fn wmc_atlas_glyphs() usize {
+    return blit.atlas_glyphs;
+}
+
+/// Paint `cols x rows` cells into an RGBA8 buffer. See `kernels/blit.zig` for
+/// the layout contract. Pure and deterministic: output depends only on inputs.
+/// Buffers must not overlap. Caller partitions `out` into bands of whole cell
+/// rows for parallelism.
+export fn wmc_blit_cells(
+    glyph: [*]const u8,
+    fg: [*]const u32,
+    bg: [*]const u32,
+    cols: usize,
+    rows: usize,
+    atlas: [*]const u8,
+    cell: usize,
+    out: [*]u8,
+    stride_px: usize,
+) void {
+    const n = cols * rows;
+    blit.blitCells(
+        glyph[0..n],
+        fg[0..n],
+        bg[0..n],
+        cols,
+        rows,
+        atlas[0 .. blit.atlas_glyphs * cell * cell],
+        cell,
+        out[0 .. rows * cell * stride_px * 4],
+        stride_px,
+    );
 }
 
 test {
