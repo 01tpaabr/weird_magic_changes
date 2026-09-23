@@ -1,7 +1,7 @@
 # Dev pipeline. Deliberately small: a game breaking is cheap, a slow loop is not.
 #
 #   make            -> build (dev profile: opt-level 1, Zig ReleaseSafe)
-#   make run        -> build + run the app (ARGS="1000000 600")
+#   make run        -> build + run the app (ARGS="80 24 42")
 #   make check      -> fmt-check + clippy + zig fmt-check   (fast, runs in pre-commit)
 #   make test       -> Zig tests + Rust tests
 #   make ci         -> check + test (what "green" means for this repo)

@@ -1,8 +1,16 @@
-//! Entry point. Currently a headless smoke run; rendering/input come later.
+//! Entry point. Generates a stage and prints it as ASCII.
+//!
+//! `wmc [width] [height] [seed]`   (defaults: 80 24 42)
+mod render;
+
+use std::io::Write;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
-use sim_core::World;
+use sim_core::stage::worldgen::GenParams;
+use sim_core::{Feature, Ground, World};
+
+use render::ascii::{Viewport, render};
 
 fn main() -> anyhow::Result<()> {
     if let Err(v) = zig_kernels::check_abi() {
@@ -12,34 +20,39 @@ fn main() -> anyhow::Result<()> {
         );
     }
 
-    let n: usize = std::env::args()
-        .nth(1)
-        .map_or(Ok(1_000_000), |s| s.parse())
-        .context("entity count")?;
-    let steps: u64 = std::env::args()
-        .nth(2)
-        .map_or(Ok(600), |s| s.parse())
-        .context("step count")?;
+    let arg = |i: usize, default: u64, what: &str| -> anyhow::Result<u64> {
+        std::env::args()
+            .nth(i)
+            .map_or(Ok(default), |s| s.parse())
+            .with_context(|| format!("bad {what}"))
+    };
+    let width = u32::try_from(arg(1, 80, "width")?).context("width")?;
+    let height = u32::try_from(arg(2, 24, "height")?).context("height")?;
+    let seed = arg(3, 42, "seed")?;
 
-    let mut world = World::new(n, 42);
     let t0 = Instant::now();
-    for _ in 0..steps {
-        world.step(1.0 / 60.0);
-    }
-    let dt = t0.elapsed();
+    let world = World::generate(width, height, seed, &GenParams::default());
+    let gen_time = t0.elapsed();
 
-    println!("entities:   {n}");
-    println!("steps:      {steps}");
-    println!("threads:    {}", rayon_threads());
-    println!("total:      {dt:.2?}");
-    println!(
-        "per step:   {:.2?}",
-        dt / u32::try_from(steps).unwrap_or(u32::MAX)
-    );
-    println!("checksum:   {:.6}", world.checksum());
+    let stage = &world.stage;
+    let water = stage.ground.iter().filter(|g| **g == Ground::Water).count();
+    let rocks = stage
+        .feature
+        .iter()
+        .filter(|f| **f == Feature::Rock)
+        .count();
+
+    let mut out = std::io::stdout().lock();
+    out.write_all(render(stage, Viewport::full(stage)).as_bytes())?;
+    writeln!(out)?;
+    writeln!(out, "stage:     {width}x{height} seed={seed}")?;
+    writeln!(
+        out,
+        "water:     {water} ({:.1}%)",
+        100.0 * water as f64 / stage.len() as f64
+    )?;
+    writeln!(out, "rocks:     {rocks}")?;
+    writeln!(out, "generate:  {gen_time:.2?}")?;
+    writeln!(out, "checksum:  {:016x}", world.checksum())?;
     Ok(())
-}
-
-fn rayon_threads() -> usize {
-    std::thread::available_parallelism().map_or(1, |n| n.get())
 }

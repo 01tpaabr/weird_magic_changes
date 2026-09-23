@@ -8,7 +8,9 @@ license.workspace = true
 
 [dependencies]
 rayon.workspace = true
-zig-kernels.workspace = true
+bytemuck.workspace = true
+rand.workspace = true
+rand_xoshiro.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

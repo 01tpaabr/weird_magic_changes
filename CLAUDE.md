@@ -35,8 +35,8 @@ When two of these conflict, the higher one wins.
 ## Layout
 
 ```
-crates/app          binary `wmc` (entry point, later: window/render/input)
-crates/sim-core     world state + systems + tick (Rust, rayon)
+crates/app          binary `wmc` (entry point, ASCII renderer; later: window/input)
+crates/sim-core     World, Stage (grid layers), worldgen, rng, tick (Rust, rayon)
 crates/zig-kernels  the ONLY unsafe crate; build.rs runs `zig build`, safe wrappers
 zig/                Zig package -> libwmc_kernels.a; src/root.zig = exported C ABI
 docs/               ARCHITECTURE.md (decisions), PERF.md (baselines)
@@ -47,7 +47,7 @@ docs/               ARCHITECTURE.md (decisions), PERF.md (baselines)
 
 ```
 make            build (dev: opt-level 1, Zig ReleaseSafe -> bounds checks on)
-make run ARGS="1000000 600"
+make run ARGS="80 24 42"
 make check      fmt + clippy -D warnings + zig fmt        (pre-commit runs this)
 make test       zig build test + cargo test
 make ci         check + test  == "done"

@@ -4,7 +4,7 @@ Massively parallel game / simulation. Rust for orchestration, Zig for SIMD kerne
 
 ```
 make setup     # installs zig (brew), rust components, git hooks, runs make ci
-make run ARGS="1000000 600"
+make run ARGS="80 24 42"
 make ci        # fmt + clippy + zig fmt + zig tests + cargo tests
 ```
 
