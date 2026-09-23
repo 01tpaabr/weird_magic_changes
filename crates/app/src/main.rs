@@ -7,34 +7,29 @@
 //! ```
 //! `play` and `run` open the world in `save_dir` if one exists (size/seed args
 //! are then ignored), otherwise create it. Defaults: 80 24 42. `run` never
-//! saves: run it twice, or with `RAYON_NUM_THREADS=1` and again without, and
-//! the checksums must match.
+//! saves: run it twice, or with `WMC_THREADS=1` and again without, and the
+//! checksums must match. `show` and `run` are headless: a bare `bevy_ecs`
+//! world, no `App`.
 use std::io::Write;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
 use sim_core::stage::worldgen::GenParams;
 use sim_core::time::Clock;
-use sim_core::{Feature, Ground, LoadPolicy, Pos, Store, World, WorldConfig};
+use sim_core::{ChunkCells, Feature, Ground, LoadPolicy, Pos, Stage, Store, WorldConfig};
+use sim_core::{par, sim, stage};
 
-use app::camera::Camera;
+use app::play;
 use app::render::ascii::render;
 use app::render::cells::Viewport;
-use app::window;
 
 fn main() -> anyhow::Result<()> {
-    if let Err(v) = zig_kernels::check_abi() {
-        bail!(
-            "Zig kernel ABI mismatch: rust={} zig={v}",
-            zig_kernels::ABI_VERSION
-        );
-    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("show") => show(&config(&args[1..])?),
         Some("play") => {
             let dir = args.get(1).context("play needs a save directory")?;
-            play(dir, &config(&args[2..])?)
+            play::run(dir, &config(&args[2..])?)
         }
         Some("run") => {
             let dir = args.get(1).context("run needs a save directory")?;
@@ -68,13 +63,11 @@ fn config(args: &[String]) -> anyhow::Result<WorldConfig> {
 
 fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
     let t0 = Instant::now();
-    let world = World::new(cfg);
+    let mut world = sim::new_world(cfg);
     let gen_time = t0.elapsed();
 
-    let stage = &world.stage;
     let (mut water, mut rocks, mut n) = (0usize, 0usize, 0usize);
-    for &s in stage.active() {
-        let c = &stage.cells[s as usize];
+    for c in world.query::<&ChunkCells>().iter(&world) {
         n += c.ground.len();
         water += c.ground.iter().filter(|g| **g == Ground::Water).count();
         rocks += c.feature.iter().filter(|f| **f == Feature::Rock).count();
@@ -84,17 +77,17 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
         width: cfg.width,
         height: cfg.height,
     };
+    let text = render(|c| stage::chunk(&world, c), view);
+    let loaded = world.resource::<Stage>().loaded_count();
+    let checksum = sim::checksum(&mut world);
 
     let mut out = std::io::stdout().lock();
-    out.write_all(render(stage, view).as_bytes())?;
+    out.write_all(text.as_bytes())?;
     writeln!(out)?;
     writeln!(
         out,
-        "stage:     {}x{} seed={} ({} chunks, {n} cells)",
-        cfg.width,
-        cfg.height,
-        cfg.seed,
-        stage.loaded_count()
+        "stage:     {}x{} seed={} ({loaded} chunks, {n} cells)",
+        cfg.width, cfg.height, cfg.seed,
     )?;
     writeln!(
         out,
@@ -102,70 +95,52 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
         100.0 * water as f64 / n as f64
     )?;
     writeln!(out, "rocks:     {rocks}")?;
-    writeln!(out, "generate:  {gen_time:.2?}")?;
-    writeln!(out, "checksum:  {:016x}", world.checksum())?;
+    writeln!(
+        out,
+        "generate:  {gen_time:.2?} ({} threads)",
+        par::thread_count()
+    )?;
+    writeln!(out, "checksum:  {checksum:016x}")?;
     Ok(())
-}
-
-/// The saved camera, or the middle of the initial region.
-fn camera_for(world: &World, store: &Store) -> Camera {
-    Camera::load(store.dir()).unwrap_or_else(|| {
-        Camera::new(Pos::new(
-            i32::try_from(world.initial_width / 2).unwrap_or(0),
-            i32::try_from(world.initial_height / 2).unwrap_or(0),
-        ))
-    })
-}
-
-fn play(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
-    let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let mut world = match World::open(&store).context("reading save")? {
-        Some(w) => w,
-        None => {
-            let w = World::new(cfg);
-            store.write_meta(&w.meta()).context("writing save meta")?;
-            w
-        }
-    };
-    let mut camera = camera_for(&world, &store);
-    window::run(&mut world, &mut camera, &store)
 }
 
 /// Headless: the determinism check and the tick benchmark. A saved world
 /// loads the chunks around its camera; a new one keeps its initial region.
 fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let mut world = match World::open(&store).context("reading save")? {
+    let mut world = match sim::open_world(&store).context("reading save")? {
         Some(mut w) => {
-            let camera = camera_for(&w, &store);
-            w.ensure_loaded(camera.cell(), LoadPolicy::default(), Some(&store))
+            let camera = play::camera_for(&w, &store);
+            sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
                 .context("streaming chunks")?;
             w
         }
-        None => World::new(cfg),
+        None => sim::new_world(cfg),
     };
-    let from = world.tick;
+    let from = sim::tick(&world);
     let t0 = Instant::now();
     for _ in 0..ticks {
-        world.step();
+        sim::step(&mut world);
     }
     let wall = t0.elapsed();
+    let to = sim::tick(&world);
+    let loaded = world.resource::<Stage>().loaded_count();
+    let checksum = sim::checksum(&mut world);
 
     let mut out = std::io::stdout().lock();
     writeln!(
         out,
-        "ticks:     {ticks} ({from} -> {}; {} -> {})",
-        world.tick,
+        "ticks:     {ticks} ({from} -> {to}; {} -> {})",
         Clock::at(from),
-        Clock::at(world.tick)
+        Clock::at(to)
     )?;
-    writeln!(out, "chunks:    {}", world.stage.loaded_count())?;
+    writeln!(out, "chunks:    {loaded}")?;
     writeln!(
         out,
         "wall:      {wall:.2?} ({:.2} µs/tick, {} threads)",
         wall.as_secs_f64() * 1e6 / ticks.max(1) as f64,
-        rayon::current_num_threads()
+        par::thread_count()
     )?;
-    writeln!(out, "checksum:  {:016x}", world.checksum())?;
+    writeln!(out, "checksum:  {checksum:016x}")?;
     Ok(())
 }

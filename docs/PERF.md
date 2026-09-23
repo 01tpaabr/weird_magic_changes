@@ -2,9 +2,10 @@
 
 Update when the hot path changes. Always record: machine, thread count, `n`, profile.
 Run: `make bench` (criterion, `target/criterion/report/index.html`) and
-`cargo run --release -p app --bin wmc -- show 4096 4096 7`.
+`cargo run --release -p app --bin wmc -- show 4096 4096 7`. Thread count: `WMC_THREADS=n`.
 Render benches (`crates/app/benches/render.rs`) are sized like a 2560x1440 window at a
-16 px cell: 160x90 cells, 3.7 Mpx.
+16 px cell: 160x90 cells. Rows before 2026-09-23 "bevy" are from the rayon + Zig build;
+the `blit/*` rows are obsolete (the GPU draws the tiles now) and kept for the record.
 
 | date | commit | machine | bench | n | result | notes |
 |------|--------|---------|-------|---|--------|-------|

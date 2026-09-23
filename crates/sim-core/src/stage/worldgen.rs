@@ -6,9 +6,8 @@
 //! threads it was generated. This is what makes unloading a clean chunk free:
 //! it can always be regenerated.
 
-use rayon::prelude::*;
-
 use super::{CHUNK_CELLS, ChunkCells, ChunkCoord, Feature, Ground};
+use crate::par::par_map;
 use crate::rng::{hash_cell, unit_f32};
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
@@ -53,16 +52,14 @@ pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mu
     out.occupant = [super::ActorId::NONE; CHUNK_CELLS];
 }
 
-/// Generate many chunks in parallel, results in input order.
+/// Generate many chunks in parallel (one task per chunk on the compute
+/// pool), results in input order.
 pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Vec<ChunkCells> {
-    coords
-        .par_iter()
-        .map(|&c| {
-            let mut cells = ChunkCells::default();
-            generate_chunk(seed, params, c, &mut cells);
-            cells
-        })
-        .collect()
+    par_map(coords, 1, |&c| {
+        let mut cells = ChunkCells::default();
+        generate_chunk(seed, params, c, &mut cells);
+        cells
+    })
 }
 
 /// The whole rule set for one cell. Pure.
@@ -128,28 +125,33 @@ mod tests {
     use super::*;
     use crate::stage::Pos;
 
-    fn with_threads<R: Send>(n: usize, f: impl FnOnce() -> R + Send) -> R {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(n)
-            .build()
-            .unwrap()
-            .install(f)
-    }
-
     fn grid(r: i32) -> Vec<ChunkCoord> {
         (-r..r)
             .flat_map(|y| (-r..r).map(move |x| ChunkCoord::new(x, y)))
             .collect()
     }
 
+    /// Parallel generation equals serial generation, chunk for chunk. The
+    /// thread-count half of the gate is `crates/app/tests/determinism.rs`
+    /// (`WMC_THREADS=1` vs default on the real binary).
     #[test]
-    fn generate_is_deterministic_across_thread_counts() {
+    fn generate_many_matches_serial_generation() {
+        crate::par::init_task_pool();
         let p = GenParams::default();
         let coords = grid(3);
-        let hash = |cs: Vec<ChunkCells>| cs.iter().map(ChunkCells::hash).collect::<Vec<_>>();
-        let a = with_threads(1, || hash(generate_many(42, &p, &coords)));
-        let b = with_threads(8, || hash(generate_many(42, &p, &coords)));
-        assert_eq!(a, b);
+        let par: Vec<u64> = generate_many(42, &p, &coords)
+            .iter()
+            .map(ChunkCells::hash)
+            .collect();
+        let serial: Vec<u64> = coords
+            .iter()
+            .map(|&c| {
+                let mut cells = ChunkCells::default();
+                generate_chunk(42, &p, c, &mut cells);
+                cells.hash()
+            })
+            .collect();
+        assert_eq!(par, serial);
     }
 
     #[test]
@@ -175,6 +177,7 @@ mod tests {
 
     #[test]
     fn different_seeds_differ_and_have_all_tile_kinds() {
+        crate::par::init_task_pool();
         let p = GenParams::default();
         let a = generate_many(1, &p, &grid(2));
         let b = generate_many(2, &p, &grid(2));

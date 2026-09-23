@@ -1,16 +1,25 @@
 //! Glyph coverage atlas: every printable ASCII glyph rasterized once into a
 //! square `cell x cell` box, one coverage byte per pixel (0 = background,
-//! 255 = glyph). Built when the cell size changes (zoom, DPI), never per frame.
+//! 255 = glyph), plus one solid box for cell backgrounds. Built when the
+//! physical cell size changes (zoom, DPI), never per frame, then handed to
+//! the GPU as a 2D array texture ([`GlyphAtlas::tileset`]): one layer per
+//! box, white, coverage in alpha, so a per-tile tint gives the glyph colour.
 //!
 //! The font is bundled (`assets/JetBrainsMonoNL-Regular.ttf`, OFL) so the
 //! binary is self-contained and the picture is identical on every machine.
 
+use bevy::asset::RenderAssetUsages;
+use bevy::image::{Image, ImageSampler};
+use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use fontdue::{Font, FontSettings};
 
 pub const FIRST_GLYPH: u8 = b' ';
 pub const LAST_GLYPH: u8 = b'~';
 pub const GLYPH_COUNT: usize = (LAST_GLYPH - FIRST_GLYPH + 1) as usize;
-const _: () = assert!(GLYPH_COUNT == zig_kernels::ATLAS_GLYPHS);
+/// Tileset layer of the fully covered box (cell backgrounds).
+pub const SOLID: u16 = GLYPH_COUNT as u16;
+/// Layers in the tileset: the glyphs and the solid box.
+pub const LAYERS: usize = GLYPH_COUNT + 1;
 
 static FONT: &[u8] = include_bytes!("../../assets/JetBrainsMonoNL-Regular.ttf");
 
@@ -91,6 +100,39 @@ impl GlyphAtlas {
         let n = self.cell * self.cell;
         &self.coverage[Self::index(byte) * n..][..n]
     }
+
+    /// Tileset layer for `byte` (unknown bytes draw as `?`).
+    #[inline]
+    pub fn layer(byte: u8) -> u16 {
+        Self::index(byte) as u16
+    }
+
+    /// The atlas as a GPU array texture: [`LAYERS`] layers of `cell x cell`
+    /// RGBA8 (sRGB), white with coverage in alpha; the last layer is solid.
+    /// Sampled linearly: displayed 1:1 with physical pixels it is exact, and
+    /// off by a fraction of a pixel (odd scale factors) it stays smooth.
+    pub fn tileset(&self) -> Image {
+        let cell = u32::try_from(self.cell).expect("cell fits u32");
+        let n = self.cell * self.cell;
+        let mut data = Vec::with_capacity(LAYERS * n * 4);
+        for &cov in &self.coverage {
+            data.extend_from_slice(&[255, 255, 255, cov]);
+        }
+        data.extend(std::iter::repeat_n([255u8; 4], n).flatten());
+        let mut image = Image::new(
+            Extent3d {
+                width: cell,
+                height: cell,
+                depth_or_array_layers: LAYERS as u32,
+            },
+            TextureDimension::D2,
+            data,
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        image.sampler = ImageSampler::linear();
+        image
+    }
 }
 
 #[cfg(test)]
@@ -103,7 +145,7 @@ mod tests {
         assert_eq!(a.cell(), 16);
         assert_eq!(a.coverage().len(), GLYPH_COUNT * 256);
         assert!(a.glyph(b' ').iter().all(|&v| v == 0));
-        for g in [b'.', b'~', b'#', b'@', b'M', b'g'] {
+        for g in *b".~#@Mg" {
             assert!(
                 a.glyph(g).iter().any(|&v| v > 128),
                 "glyph {} empty",
@@ -135,5 +177,33 @@ mod tests {
             let a = GlyphAtlas::build(c);
             assert_eq!(a.coverage().len(), GLYPH_COUNT * (c * c) as usize);
         }
+    }
+
+    #[test]
+    fn tileset_is_one_white_layer_per_box_plus_solid() {
+        let a = GlyphAtlas::build(8);
+        let img = a.tileset();
+        assert_eq!(
+            img.texture_descriptor.size.depth_or_array_layers,
+            LAYERS as u32
+        );
+        assert_eq!((img.width(), img.height()), (8, 8));
+        let data = img.data.as_ref().unwrap();
+        assert_eq!(data.len(), LAYERS * 64 * 4);
+        // Glyph layers: white, alpha = coverage. `#` has ink, space has none.
+        let layer = |l: usize| &data[l * 64 * 4..][..64 * 4];
+        assert!(
+            layer(GlyphAtlas::index(b' '))
+                .chunks(4)
+                .all(|p| p == [255, 255, 255, 0])
+        );
+        assert!(layer(GlyphAtlas::index(b'#')).chunks(4).any(|p| p[3] > 128));
+        assert!(
+            layer(SOLID as usize)
+                .chunks(4)
+                .all(|p| p == [255, 255, 255, 255])
+        );
+        assert_eq!(GlyphAtlas::layer(b' '), 0);
+        assert_eq!(GlyphAtlas::layer(200), GlyphAtlas::layer(b'?'));
     }
 }

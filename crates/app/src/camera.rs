@@ -4,9 +4,11 @@
 //! App state, not sim state: it is driven by wall-clock frame time and never
 //! feeds back into the simulation, so nothing here affects determinism.
 
-use sim_core::Pos;
 use std::fs;
 use std::path::Path;
+
+use bevy::prelude::Resource;
+use sim_core::Pos;
 
 /// Cruising speed, cells per second.
 const SPEED: f64 = 14.0;
@@ -28,8 +30,8 @@ pub struct Input {
     pub fast: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Camera {
+#[derive(Resource, Debug, Clone, Copy, PartialEq)]
+pub struct ViewCamera {
     /// Centre of the view, in cells; `(0.0, 0.0)` is the top-left corner of cell (0, 0).
     pub x: f64,
     pub y: f64,
@@ -37,7 +39,7 @@ pub struct Camera {
     vy: f64,
 }
 
-impl Camera {
+impl ViewCamera {
     pub fn new(center: Pos) -> Self {
         Self {
             x: f64::from(center.x) + 0.5,
@@ -100,7 +102,7 @@ impl Camera {
 mod tests {
     use super::*;
 
-    fn run(cam: &mut Camera, secs: f64, input: Input) {
+    fn run(cam: &mut ViewCamera, secs: f64, input: Input) {
         let dt = 1.0 / 120.0;
         let mut t = 0.0;
         while t < secs {
@@ -111,8 +113,8 @@ mod tests {
 
     #[test]
     fn diagonal_is_as_fast_as_straight() {
-        let mut a = Camera::new(Pos::new(0, 0));
-        let mut d = Camera::new(Pos::new(0, 0));
+        let mut a = ViewCamera::new(Pos::new(0, 0));
+        let mut d = ViewCamera::new(Pos::new(0, 0));
         run(
             &mut a,
             2.0,
@@ -140,7 +142,7 @@ mod tests {
 
     #[test]
     fn eases_in_and_comes_to_rest() {
-        let mut c = Camera::new(Pos::new(0, 0));
+        let mut c = ViewCamera::new(Pos::new(0, 0));
         c.update(
             1.0 / 120.0,
             Input {
@@ -172,7 +174,7 @@ mod tests {
 
     #[test]
     fn fast_is_faster_and_cell_floors() {
-        let mut c = Camera::new(Pos::new(-3, 7));
+        let mut c = ViewCamera::new(Pos::new(-3, 7));
         assert_eq!(c.cell(), Pos::new(-3, 7));
         run(
             &mut c,
@@ -191,7 +193,7 @@ mod tests {
     fn save_load_roundtrip_and_legacy_ints() {
         let dir = std::env::temp_dir().join(format!("wmc-cam-{}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
-        let mut c = Camera::new(Pos::new(1, 2));
+        let mut c = ViewCamera::new(Pos::new(1, 2));
         run(
             &mut c,
             0.3,
@@ -202,11 +204,11 @@ mod tests {
             },
         );
         c.save(&dir).unwrap();
-        let back = Camera::load(&dir).unwrap();
+        let back = ViewCamera::load(&dir).unwrap();
         assert_eq!((back.x, back.y), (c.x, c.y));
         assert!(!back.moving());
         fs::write(dir.join("camera.txt"), "10 -4\n").unwrap();
-        assert_eq!(Camera::load(&dir).unwrap().cell(), Pos::new(10, -4));
+        assert_eq!(ViewCamera::load(&dir).unwrap().cell(), Pos::new(10, -4));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

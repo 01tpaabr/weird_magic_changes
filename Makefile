@@ -1,56 +1,53 @@
 # Dev pipeline. Deliberately small: a game breaking is cheap, a slow loop is not.
 #
-#   make            -> build (dev profile: opt-level 1, Zig ReleaseSafe)
+#   make            -> build (dev profile: opt-level 1, deps at opt-level 3, Bevy dynamically linked)
 #   make run        -> build + run the app (ARGS="show 80 24 42" or ARGS="play saves/dev")
-#   make check      -> fmt-check + clippy + zig fmt-check   (fast, runs in pre-commit)
-#   make test       -> Zig tests + Rust tests
+#   make check      -> fmt-check + clippy          (fast, runs in pre-commit)
+#   make test       -> cargo test (includes the 1-thread vs N-thread determinism gate)
 #   make ci         -> check + test (what "green" means for this repo)
 #   make bench      -> criterion benches
-#   make release    -> optimized build (LTO, ReleaseFast)
+#   make release    -> optimized build (LTO, static Bevy)
 #   make fmt        -> format everything in place
 #   make setup      -> install toolchains + git hooks (idempotent)
 #   make clean
+#
+# Dev builds pass `--features dev`, which turns on Bevy's `dynamic_linking`: the
+# engine becomes one shared library that is linked once, so an app-crate change
+# relinks in a second or two instead of tens. Release and bench builds never use it.
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := build
-ZIG ?= zig
 ARGS ?=
+DEV := --features app/dev
 
-.PHONY: build run release check test ci bench fmt fmt-check lint zig-test zig-fmt-check setup hooks clean help
+.PHONY: build run release check test ci bench fmt fmt-check lint setup hooks clean help
 
 build:
-	cargo build --workspace
+	cargo build --workspace $(DEV)
 
 run: build
-	cargo run -p app --bin wmc -- $(ARGS)
+	cargo run -p app --bin wmc $(DEV) -- $(ARGS)
 
 release:
 	cargo build --workspace --release
 
 ## quality gates -------------------------------------------------------------
 
-check: fmt-check lint zig-fmt-check
+check: fmt-check lint
 
 fmt:
 	cargo fmt --all
-	cd zig && $(ZIG) fmt .
 
 fmt-check:
 	cargo fmt --all -- --check
 
-zig-fmt-check:
-	cd zig && $(ZIG) fmt --check .
-
 lint:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets $(DEV) -- -D warnings
 
 ## tests ----------------------------------------------------------------------
 
-test: zig-test
-	cargo test --workspace
-
-zig-test:
-	cd zig && $(ZIG) build test
+test:
+	cargo test --workspace $(DEV)
 
 ci: check test
 
@@ -68,7 +65,6 @@ hooks:
 
 clean:
 	cargo clean
-	rm -rf zig/zig-out zig/.zig-cache
 
 help:
 	@grep -E '^#   make' Makefile | sed 's/^#   //'

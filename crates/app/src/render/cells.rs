@@ -1,15 +1,21 @@
 //! Phase 1 of a frame: the viewport as three flat per-cell buffers.
 //!
-//! Rows are the parallel unit: row `r` of the frame is written by exactly one
-//! task, reads only `&Stage`, and does one chunk lookup per (row, chunk) span,
-//! never per cell. No reduction, so the result is a pure function of
-//! `(stage, view, light)` whatever the thread count. `light` (day/night) is
-//! applied here, per cell, so the status bar and the pixel phase never see it.
+//! Rows are the parallel unit: a band of [`ROW_BAND`] rows is one task on the
+//! compute pool, writes only its own slices, reads only through the chunk
+//! lookup, and does one lookup per (row, chunk) span, never per cell. No
+//! reduction, so the result is a pure function of `(chunks, view, light)`
+//! whatever the thread count. `light` (day/night) is applied here, per cell,
+//! so the status bar and the GPU never see it.
 
-use rayon::prelude::*;
-use sim_core::{CHUNK_SIZE, Pos, Stage};
+use bevy::prelude::Resource;
+use bevy::tasks::ComputeTaskPool;
+use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
 use super::palette::{Color, VOID, style};
+
+/// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
+/// small frames run on one task and skip the pool entirely.
+pub const ROW_BAND: usize = 8;
 
 /// Rectangle of the world to draw, in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,7 +43,7 @@ impl Viewport {
 
 /// `cols x rows` cells, structure of arrays, row-major. Reused across frames;
 /// only a size change reallocates.
-#[derive(Debug, Default)]
+#[derive(Resource, Debug, Default)]
 pub struct CellFrame {
     cols: usize,
     rows: usize,
@@ -93,27 +99,56 @@ impl CellFrame {
     }
 }
 
-/// Fill the first `view.height` rows of `frame` from `stage`, with every
-/// colour scaled by `light` (255 = the palette as is, see
-/// [`super::palette::brightness`]). `frame` must already be `view.width`
-/// columns wide and at least `view.height` rows tall (extra rows are left for
-/// the caller: status text).
-pub fn render_cells(stage: &Stage, view: Viewport, light: u8, frame: &mut CellFrame) {
+/// Fill the first `view.height` rows of `frame` from the chunks `chunk`
+/// returns (`None` = not loaded, drawn as void), with every colour scaled by
+/// `light` (255 = the palette as is, see [`super::palette::brightness`]).
+/// `frame` must already be `view.width` columns wide and at least
+/// `view.height` rows tall (extra rows are left for the caller: status text).
+pub fn render_cells<'c>(
+    chunk: impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync,
+    view: Viewport,
+    light: u8,
+    frame: &mut CellFrame,
+) {
     let cols = frame.cols;
     let rows = view.height as usize;
     assert_eq!(cols, view.width as usize, "frame width != viewport width");
     assert!(rows <= frame.rows, "viewport taller than frame");
     let n = cols * rows;
-    frame.glyph[..n]
-        .par_chunks_mut(cols)
-        .zip(frame.fg[..n].par_chunks_mut(cols))
-        .zip(frame.bg[..n].par_chunks_mut(cols))
-        .enumerate()
-        .for_each(|(row, ((glyph, fg), bg))| render_row(stage, view, light, row, glyph, fg, bg));
+    if n == 0 {
+        return;
+    }
+    let band = cols * ROW_BAND;
+    let bands = frame.glyph[..n]
+        .chunks_mut(band)
+        .zip(frame.fg[..n].chunks_mut(band))
+        .zip(frame.bg[..n].chunks_mut(band))
+        .enumerate();
+    let chunk = &chunk;
+    let render_band = move |b: usize, glyph: &mut [u8], fg: &mut [u32], bg: &mut [u32]| {
+        let rows = glyph
+            .chunks_mut(cols)
+            .zip(fg.chunks_mut(cols))
+            .zip(bg.chunks_mut(cols));
+        for (i, ((g, f), bg)) in rows.enumerate() {
+            render_row(chunk, view, light, b * ROW_BAND + i, g, f, bg);
+        }
+    };
+    if rows <= ROW_BAND {
+        for (b, ((g, f), bg)) in bands {
+            render_band(b, g, f, bg);
+        }
+        return;
+    }
+    ComputeTaskPool::get().scope(|s| {
+        for (b, ((g, f), bg)) in bands {
+            s.spawn(async move { render_band(b, g, f, bg) });
+        }
+    });
 }
 
-fn render_row(
-    stage: &Stage,
+fn render_row<'c>(
+    chunk: &(impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync),
     view: Viewport,
     light: u8,
     row: usize,
@@ -134,7 +169,7 @@ fn render_row(
         let span_end = (cc.origin().x + CHUNK_SIZE).min(x_end);
         let n = (span_end - x) as usize;
         let (g_out, f_out, b_out) = (&mut glyph[i..i + n], &mut fg[i..i + n], &mut bg[i..i + n]);
-        match stage.chunk(cc) {
+        match chunk(cc) {
             Some(c) => {
                 let cells = c.ground[local..local + n]
                     .iter()
@@ -162,54 +197,73 @@ fn render_row(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::ecs::world::World;
     use sim_core::stage::worldgen::GenParams;
-    use sim_core::{World, WorldConfig};
+    use sim_core::{StageCells, WorldConfig, sim, stage};
 
-    fn frame_with(threads: usize, view: Viewport, light: u8, world: &World) -> CellFrame {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(threads)
-            .build()
-            .unwrap()
-            .install(|| {
-                let mut f = CellFrame::new();
-                f.resize(view.width as usize, view.height as usize + 2);
-                render_cells(&world.stage, view, light, &mut f);
-                f
-            })
+    fn world(w: u32, h: u32, seed: u64) -> World {
+        sim::new_world(&WorldConfig {
+            width: w,
+            height: h,
+            seed,
+            params: GenParams::default(),
+        })
+    }
+
+    fn frame_with(world: &World, view: Viewport, light: u8) -> CellFrame {
+        let mut f = CellFrame::new();
+        f.resize(view.width as usize, view.height as usize + 2);
+        render_cells(|c| stage::chunk(world, c), view, light, &mut f);
+        f
     }
 
     #[test]
-    fn same_cells_on_one_and_many_threads() {
-        let world = World::new(&WorldConfig {
-            width: 200,
-            height: 150,
-            seed: 9,
-            params: GenParams::default(),
-        });
-        // Straddles chunk borders and unloaded space on every side.
+    fn parallel_bands_match_a_per_cell_walk_and_the_system_param_view() {
+        let mut world = world(200, 150, 9);
+        // Straddles chunk borders and unloaded space on every side; 97 rows
+        // is many bands with a ragged last one.
         let view = Viewport::centered(Pos::new(30, 40), 173, 97);
-        let a = frame_with(1, view, 200, &world);
-        let b = frame_with(8, view, 200, &world);
+        let a = frame_with(&world, view, 200);
+        let n = 173 * 97;
+        for r in 0..97usize {
+            for c in 0..173usize {
+                let p = Pos::new(view.origin.x + c as i32, view.origin.y + r as i32);
+                let (cc, i) = p.split();
+                let want = match stage::chunk(&world, cc) {
+                    Some(ch) => style(ch.ground[i], ch.feature[i], !ch.occupant[i].is_none()),
+                    None => VOID,
+                };
+                let k = r * 173 + c;
+                assert_eq!(a.glyph[k], want.glyph, "{p:?}");
+                assert_eq!(a.fg[k], want.fg.scaled(200).0, "{p:?}");
+                assert_eq!(a.bg[k], want.bg.scaled(200).0, "{p:?}");
+            }
+        }
+        // Extra rows untouched.
+        assert!(a.glyph[n..].iter().all(|&g| g == b' '));
+        // The same picture through the read-only system param.
+        let b = world
+            .run_system_once(move |s: StageCells| {
+                let mut f = CellFrame::new();
+                f.resize(173, 99);
+                render_cells(|c| s.chunk(c), view, 200, &mut f);
+                f
+            })
+            .unwrap();
         assert_eq!(a.glyph, b.glyph);
         assert_eq!(a.fg, b.fg);
         assert_eq!(a.bg, b.bg);
-        // Extra rows untouched.
-        let n = 173 * 97;
-        assert!(a.glyph[n..].iter().all(|&g| g == b' '));
     }
+
+    use bevy::ecs::system::RunSystemOnce;
 
     #[test]
     fn light_scales_every_colour_and_nothing_else() {
-        let world = World::new(&WorldConfig {
-            width: 100,
-            height: 100,
-            seed: 4,
-            params: GenParams::default(),
-        });
+        let world = world(100, 100, 4);
         let view = Viewport::centered(Pos::new(90, 90), 40, 30); // includes unloaded cells
-        let day = frame_with(2, view, 255, &world);
-        let dusk = frame_with(2, view, 128, &world);
-        let night = frame_with(2, view, 0, &world);
+        let day = frame_with(&world, view, 255);
+        let dusk = frame_with(&world, view, 128);
+        let night = frame_with(&world, view, 0);
         assert_eq!(day.glyph, dusk.glyph);
         assert_eq!(day.glyph, night.glyph);
         let n = 40 * 30;
@@ -232,6 +286,16 @@ mod tests {
         assert_eq!(&f.glyph[..4], b"x   ");
         f.put_text(7, "nope", Color(0), Color(0));
         assert_eq!(&f.glyph[..4], b"x   ");
+    }
+
+    #[test]
+    fn empty_and_tiny_viewports() {
+        let world = world(64, 64, 1);
+        let f = frame_with(&world, Viewport::centered(Pos::new(0, 0), 0, 0), 255);
+        assert!(f.glyph.is_empty());
+        let f = frame_with(&world, Viewport::centered(Pos::new(5, 5), 1, 1), 255);
+        assert_eq!(f.glyph.len(), 3);
+        assert_ne!(f.glyph[0], VOID.glyph);
     }
 
     #[test]

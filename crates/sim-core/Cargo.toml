@@ -1,13 +1,14 @@
 [package]
 name = "sim-core"
-description = "Simulation kernel: world state, systems, deterministic tick"
+description = "Simulation kernel: chunk entities, systems, deterministic tick (bevy_ecs, no engine)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-rayon.workspace = true
+bevy_ecs.workspace = true
+bevy_tasks.workspace = true
 bytemuck.workspace = true
 rand.workspace = true
 rand_xoshiro.workspace = true

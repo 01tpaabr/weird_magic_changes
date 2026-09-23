@@ -1,6 +1,6 @@
 [package]
 name = "app"
-description = "Game / sim entry point: window, input, rendering"
+description = "Game / sim entry point: Bevy app, window, input, rendering"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,14 @@ path = "src/lib.rs"
 name = "wmc"
 path = "src/main.rs"
 
+[features]
+# `make` builds with this: Bevy as one shared library, relinked once. Never in release.
+dev = ["bevy/dynamic_linking"]
+
 [dependencies]
 sim-core.workspace = true
-zig-kernels.workspace = true
+bevy.workspace = true
 anyhow.workspace = true
-rayon.workspace = true
-winit.workspace = true
-softbuffer.workspace = true
 bytemuck.workspace = true
 fontdue.workspace = true
 

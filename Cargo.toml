@@ -5,39 +5,39 @@ members = ["crates/*"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 
 # Pre-approved dependencies. Reference them from a crate with `foo.workspace = true`.
 # Add new ones here first so every crate agrees on a version.
 [workspace.dependencies]
-# --- parallelism / concurrency ---
-rayon = "1.10"             # data-parallel iterators, join, scope (default for CPU-bound work)
-crossbeam = "0.8"          # channels, scoped threads, epoch GC, lock-free queues
-parking_lot = "0.12"       # faster Mutex/RwLock than std, no poisoning
-atomic_float = "1"         # AtomicF32/F64 when a lock is overkill
+# --- engine ---
+# `app` takes the umbrella crate (window, render, input, assets). `sim-core` takes only the
+# ECS and the task pool so it can never see a clock, an asset or a window. Same version,
+# always: Cargo unifies them into one bevy_ecs.
+bevy = { version = "0.19.1", default-features = false, features = [
+    "std", "multi_threaded", "async_executor",
+    "bevy_log", "bevy_asset", "bevy_window", "bevy_winit",
+    "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_sprite_render", "bevy_image",
+    "sysinfo_plugin",
+] }
+bevy_ecs = "0.19.1"
+bevy_tasks = "0.19.1"
 # --- data layout / numerics ---
-bytemuck = { version = "1", features = ["derive"] }  # safe Pod casting for flat buffers / FFI
-glam = "0.30"              # SIMD vec/mat math
-wide = "0.7"               # portable SIMD types
+bytemuck = { version = "1", features = ["derive"] }  # safe Pod casting for flat buffers
 # --- rng (deterministic, seedable, fast) ---
 rand = "0.9"
 rand_xoshiro = "0.7"
-# --- window / rendering ---
-winit = "0.30"             # window + input events (event-driven ApplicationHandler)
-softbuffer = "0.4"         # presents a CPU u32 framebuffer in a window, no GPU stack
-fontdue = "0.9"            # TTF rasterizer; builds the glyph atlas once per cell size
+# --- rendering helpers ---
+fontdue = "0.9"            # TTF rasterizer; builds the glyph tileset once per cell size
 # --- utilities ---
 anyhow = "1"
 thiserror = "2"
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # --- dev / bench ---
 criterion = { version = "0.6", features = ["html_reports"] }
 proptest = "1"
 # --- internal crates ---
 sim-core = { path = "crates/sim-core" }
-zig-kernels = { path = "crates/zig-kernels" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "warn"
@@ -47,7 +47,11 @@ missing_debug_implementations = "warn"
 all = { level = "warn", priority = -1 }
 # Things that matter for a hot-loop sim:
 large_stack_arrays = "warn"
-needless_pass_by_value = "warn"
+# Bevy systems take `Res<T>`/`Query<..>` by value and often have 8+ parameters and
+# long query types; these lints would fire on every system.
+needless_pass_by_value = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
 # Things that are noise for a game:
 module_name_repetitions = "allow"
 must_use_candidate = "allow"

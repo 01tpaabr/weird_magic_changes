@@ -22,6 +22,8 @@ use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+use bevy_ecs::resource::Resource;
+
 use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord};
 use crate::time::TICKS_PER_DAY;
@@ -51,8 +53,9 @@ pub struct SavedChunk {
     pub last_ticked: u64,
 }
 
-/// A save directory. Cheap to clone; holds no open files.
-#[derive(Debug, Clone)]
+/// A save directory. Cheap to clone; holds no open files. A `Resource` so
+/// the app can keep the open save beside the world it belongs to.
+#[derive(Resource, Debug, Clone)]
 pub struct Store {
     dir: PathBuf,
 }
@@ -153,8 +156,8 @@ impl Store {
             bytemuck::checked::try_cast_slice(feature).map_err(|e| bad(e.to_string()))?,
         );
         // Occupant ids are u32 LE; on LE targets this is a memcpy.
-        for (o, b) in cells.occupant.iter_mut().zip(occupant.chunks_exact(4)) {
-            o.0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+        for (o, b) in cells.occupant.iter_mut().zip(occupant.as_chunks::<4>().0) {
+            o.0 = u32::from_le_bytes(*b);
         }
         r.finish()?;
         Ok(Some(SavedChunk { cells, last_ticked }))

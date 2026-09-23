@@ -8,9 +8,5 @@ cd "$(git rev-parse --show-toplevel)"
 changed=$(git diff --cached --name-only --diff-filter=ACMR)
 if echo "$changed" | grep -qE '\.(rs|toml)$'; then
   cargo fmt --all -- --check || { echo "run: make fmt"; exit 1; }
-  cargo clippy --workspace --all-targets -- -D warnings
-fi
-if echo "$changed" | grep -qE '\.zig$'; then
-  (cd zig && zig fmt --check .) || { echo "run: make fmt"; exit 1; }
-  (cd zig && zig build test)
+  cargo clippy --workspace --all-targets --features app/dev -- -D warnings
 fi

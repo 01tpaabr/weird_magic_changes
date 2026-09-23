@@ -1,21 +1,20 @@
-//! Frame pipeline benches: `render_cells` (phase 1) and `blit` (phase 2), the
-//! latter as scalar Rust reference, Zig kernel on one thread, and the
-//! band-parallel driver. Sized like a 2560x1440 window at a 16 px cell.
+//! Frame pipeline benches: `render_cells` (phase 1) and `grid::upload`
+//! (phase 2), sized like a 2560x1440 window at a 16 px cell. Thread count
+//! comes from `WMC_THREADS` (default: all cores); run twice to compare.
 
+use bevy::sprite_render::TilemapChunkTileData;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use app::render::atlas::GlyphAtlas;
-use app::render::blit::{Target, blit, blit_reference};
 use app::render::cells::{CellFrame, Viewport, render_cells};
+use app::render::grid;
 use sim_core::stage::worldgen::GenParams;
-use sim_core::{Pos, World, WorldConfig};
+use sim_core::{Pos, WorldConfig, par, sim, stage};
 
 const COLS: u32 = 160;
 const ROWS: u32 = 90;
-const CELL: u32 = 16;
 
-fn world() -> World {
-    World::new(&WorldConfig {
+fn world() -> bevy::ecs::world::World {
+    sim::new_world(&WorldConfig {
         width: 512,
         height: 256,
         seed: 7,
@@ -23,62 +22,36 @@ fn world() -> World {
     })
 }
 
-fn pool(threads: usize) -> rayon::ThreadPool {
-    rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .build()
-        .unwrap()
-}
-
 fn bench_cells(c: &mut Criterion) {
     let world = world();
+    let threads = par::thread_count();
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
     let mut g = c.benchmark_group("render_cells");
     g.throughput(Throughput::Elements(u64::from(COLS * ROWS)));
-    for threads in [1, 8] {
-        let p = pool(threads);
-        g.bench_with_input(BenchmarkId::new("160x90", threads), &threads, |b, _| {
-            b.iter(|| p.install(|| render_cells(&world.stage, view, 200, &mut frame)));
-        });
-    }
+    g.bench_with_input(BenchmarkId::new("160x90", threads), &threads, |b, _| {
+        b.iter(|| render_cells(|cc| stage::chunk(&world, cc), view, 200, &mut frame));
+    });
     g.finish();
 }
 
-fn bench_blit(c: &mut Criterion) {
+fn bench_upload(c: &mut Criterion) {
     let world = world();
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
-    render_cells(&world.stage, view, 255, &mut frame);
-    let atlas = GlyphAtlas::build(CELL);
-    let stride = (COLS * CELL) as usize;
-    let mut out = vec![0u8; stride * (ROWS * CELL) as usize * 4];
-
-    let mut g = c.benchmark_group("blit");
-    g.throughput(Throughput::Elements(u64::from(COLS * CELL * ROWS * CELL)));
-    fn target(out: &mut [u8], stride: usize) -> Target<'_> {
-        Target {
-            pixels: out,
-            stride_px: stride,
-            width: stride,
-            height: (ROWS * CELL) as usize,
-            origin_x: 0,
-            origin_y: 0,
-        }
-    }
-    g.bench_function("reference/1", |b| {
-        b.iter(|| blit_reference(&frame, &atlas, target(&mut out, stride)));
+    render_cells(|cc| stage::chunk(&world, cc), view, 255, &mut frame);
+    let n = (COLS * ROWS) as usize;
+    let mut bg = TilemapChunkTileData(vec![None; n]);
+    let mut fg = TilemapChunkTileData(vec![None; n]);
+    let mut g = c.benchmark_group("grid_upload");
+    g.throughput(Throughput::Elements(u64::from(COLS * ROWS)));
+    g.bench_function("160x90", |b| {
+        b.iter(|| grid::upload(&frame, &mut bg, &mut fg))
     });
-    for threads in [1, 8] {
-        let p = pool(threads);
-        g.bench_with_input(BenchmarkId::new("zig", threads), &threads, |b, _| {
-            b.iter(|| p.install(|| blit(&frame, &atlas, target(&mut out, stride))));
-        });
-    }
     g.finish();
 }
 
-criterion_group!(benches, bench_cells, bench_blit);
+criterion_group!(benches, bench_cells, bench_upload);
 criterion_main!(benches);

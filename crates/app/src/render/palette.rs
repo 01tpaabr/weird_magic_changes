@@ -3,9 +3,9 @@
 
 use sim_core::{Feature, Ground};
 
-/// Packed `0x00RRGGBB`: the `softbuffer` pixel format, one `u32` per pixel,
-/// top byte ignored. In little-endian memory that is `[b, g, r, 0]`; the blit
-/// kernel blends the four bytes without caring which channel is which.
+/// Packed `0x00RRGGBB` sRGB, one `u32` per cell: 4 bytes in the frame
+/// buffers instead of Bevy's 16-byte `Color`. Converted once per cell when
+/// the frame is turned into tiles ([`Color::tint`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Color(pub u32);
 
@@ -14,9 +14,30 @@ impl Color {
         Self((r as u32) << 16 | (g as u32) << 8 | b as u32)
     }
 
-    /// The four bytes as they sit in the pixel buffer.
+    /// `[b, g, r, 0]`: the little-endian bytes of the packed value.
     pub const fn bytes(self) -> [u8; 4] {
         self.0.to_le_bytes()
+    }
+
+    /// `(r, g, b)` in `0..=255`, sRGB.
+    pub const fn channels(self) -> (u8, u8, u8) {
+        let [b, g, r, _] = self.bytes();
+        (r, g, b)
+    }
+
+    /// This colour as a tile tint for `TilemapChunk`.
+    ///
+    /// The tilemap shader multiplies the sampled (linear) texel by the tint's
+    /// 8-bit channels **without** an sRGB-to-linear step, and the 2D pipeline
+    /// then encodes its linear output to sRGB. Feeding it the palette bytes as
+    /// is would brighten every colour (0xC4 would come out ~0xE3). So the tint
+    /// carries the palette's *linear* light in the channel bytes: what the
+    /// shader treats as linear is linear, and the palette shows as designed.
+    /// Cost: 8-bit quantisation of linear light, coarse in the darks, which
+    /// this palette never displays alone (the void is the darkest at 0x10).
+    pub fn tint(self) -> bevy::color::Color {
+        let (r, g, b) = self.channels();
+        bevy::color::Color::srgb(linear(r), linear(g), linear(b))
     }
 
     /// Scaled towards black: `light` 255 is the colour itself, 0 is black.
@@ -24,6 +45,16 @@ impl Color {
     pub const fn scaled(self, light: u8) -> Color {
         let [b, g, r, _] = self.bytes();
         Color::rgb(scale(r, light), scale(g, light), scale(b, light))
+    }
+}
+
+/// sRGB byte -> linear light in `[0, 1]` (the IEC 61966-2-1 transfer curve).
+fn linear(c: u8) -> f32 {
+    let c = f32::from(c) / 255.0;
+    if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
     }
 }
 
@@ -88,9 +119,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn color_is_softbuffer_0rgb() {
+    fn color_is_packed_0rgb() {
         assert_eq!(Color::rgb(1, 2, 3).0, 0x0001_0203);
         assert_eq!(Color::rgb(1, 2, 3).bytes(), [3, 2, 1, 0]);
+        assert_eq!(Color::rgb(1, 2, 3).channels(), (1, 2, 3));
+    }
+
+    #[test]
+    fn tint_carries_linear_light_in_the_channels() {
+        let t = Color::rgb(255, 0, 0x80).tint().to_srgba();
+        assert!((t.red - 1.0).abs() < 1e-6);
+        assert_eq!(t.green, 0.0);
+        // 0x80 sRGB is ~0.216 linear.
+        assert!((t.blue - 0.2158).abs() < 1e-3, "{}", t.blue);
+        assert!((linear(0x0A) - 0.003_035).abs() < 1e-5);
     }
 
     #[test]

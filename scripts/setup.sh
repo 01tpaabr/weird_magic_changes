@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# One-shot, idempotent environment setup for this repo (macOS + Homebrew assumed;
-# adjust the zig line for Linux). Safe to re-run.
+# One-shot, idempotent environment setup for this repo. Safe to re-run.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -11,24 +10,16 @@ if ! need rustup; then
   echo "rustup not found. Install from https://rustup.rs then re-run." >&2
   exit 1
 fi
+rustup update stable >/dev/null
 rustup component add rustfmt clippy >/dev/null
 rustc --version && cargo --version
-
-echo "== zig"
-if ! need zig; then
-  if need brew; then brew install zig; else
-    echo "zig not found and no Homebrew. Install zig >= 0.16 from https://ziglang.org/download/" >&2
-    exit 1
-  fi
-fi
-zig version
 
 echo "== git hooks"
 git config core.hooksPath .githooks
 chmod +x .githooks/*
 
-echo "== smoke build"
+echo "== smoke build (first Bevy build takes a few minutes)"
 make ci
 
 echo
-echo "ready. try: make run ARGS=\"100000 60\""
+echo "ready. try: make run ARGS=\"show 80 24 42\""

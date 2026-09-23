@@ -2,7 +2,6 @@
   "permissions": {
     "allow": [
       "Bash(cargo *)",
-      "Bash(zig *)",
       "Bash(make *)",
       "Bash(rustfmt *)",
       "Bash(rustup *)",
@@ -24,8 +23,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/skills/zig-rust-dev/SKILL.md\"",
-            "statusMessage": "Loading zig-rust-dev skill"
+            "command": "cat \"${CLAUDE_PROJECT_DIR:-.}/.claude/skills/bevy-dev/SKILL.md\"",
+            "statusMessage": "Loading bevy-dev skill"
           }
         ]
       }
@@ -36,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.rs) rustfmt --edition 2024 \"$f\" ;; *.zig) zig fmt \"$f\" ;; esac 2>/dev/null || true"
+            "command": "f=$(jq -r '.tool_input.file_path // empty'); case \"$f\" in *.rs) rustfmt --edition 2024 \"$f\" ;; esac 2>/dev/null || true"
           }
         ]
       }

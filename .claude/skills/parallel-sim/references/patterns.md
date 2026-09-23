@@ -1,84 +1,112 @@
-# Parallel sim patterns (Rust + rayon), copy-paste ready
+# Parallel sim patterns (Rust + Bevy 0.19), copy-paste ready
 
-## Phase over chunks with a Zig kernel inside
+Exact API signatures: `.claude/skills/bevy-dev/references/ecs-tasks-app.md`.
+
+## Phase over chunks: one system, `par_iter_mut`
+
 ```rust
-pub const CHUNK: usize = 4096;
-pos.par_chunks_mut(CHUNK)
-   .zip(vel.par_chunks(CHUNK))
-   .for_each(|(p, v)| zig_kernels::saxpy(dt, v, p));
+fn grow(tick: Res<Tick>, cfg: Res<SimConfig>,
+        mut chunks: Query<(&ChunkCoord, &mut ChunkCells, &mut ChunkMeta)>) {
+    chunks.par_iter_mut().for_each(|(coord, mut cells, mut meta)| {
+        let mut rng = rng_for(cfg.seed, tick.0, coord_id(*coord));   // derived seed, never shared
+        for i in 0..CHUNK_CELLS { /* this chunk only */ }
+        meta.dirty = true;
+    });
+}
+// install: schedule.add_systems(grow.in_set(Phase::Simulate));
 ```
+Each task gets whole entities; writes never overlap; batch size is irrelevant to the result.
 
-## Double buffer
+## Double buffer across chunks (neighbour reads)
+
 ```rust
-pub struct Buf<T> { pub prev: Vec<T>, pub next: Vec<T> }
-impl<T> Buf<T> { pub fn swap(&mut self) { std::mem::swap(&mut self.prev, &mut self.next); } }
-// phase: reads prev (shared &), writes next (partitioned &mut)
-let prev = &state.prev;
-state.next.par_chunks_mut(CHUNK).enumerate().for_each(|(ci, out)| {
-    let base = ci * CHUNK;
-    for (i, o) in out.iter_mut().enumerate() { *o = rule(prev, base + i); }
-});
-state.swap();
+#[derive(Component)] struct CellsPrev(ChunkCells);          // snapshot of last tick
+
+fn snapshot(mut q: Query<(&ChunkCells, &mut CellsPrev)>) {  // Phase::Snapshot
+    q.par_iter_mut().for_each(|(cur, mut prev)| prev.0.clone_from(cur));
+}
+fn diffuse(stage: Res<Stage>, prev: Query<&CellsPrev>,       // read ANY chunk's prev
+           mut cur: Query<(&ChunkCoord, &mut ChunkCells)>) {  // write OWN chunk's cur
+    cur.par_iter_mut().for_each(|(c, mut cells)| {
+        let north = stage.entity(ChunkCoord::new(c.x, c.y - 1)).and_then(|e| prev.get(e).ok());
+        /* read prev of self + neighbours, write cells */
+    });
+}
+// configure_sets((Phase::Snapshot, Phase::Simulate).chain())
 ```
+Two queries on different components: Bevy accepts it; one mutable + one read-only on the
+same component would not compile, which is the point.
 
-## Per-chunk accumulate, deterministic merge
+## Per-chunk accumulate, merge in coordinate order
+
 ```rust
-// scratch.per_chunk: Vec<Vec<Effect>>, one per chunk, pre-allocated and cleared each tick
-scratch.per_chunk.par_iter_mut().enumerate().for_each(|(ci, out)| {
-    out.clear();
-    for e in chunk_entities(ci) { if let Some(fx) = compute(e) { out.push(fx); } }
-});
-for list in &scratch.per_chunk {          // sequential, chunk order => deterministic
-    for fx in list { apply(&mut world, fx); }
+#[derive(Component, Default)] struct Outbox(Vec<Effect>);   // on the chunk entity
+
+fn emit(mut q: Query<(&ChunkCells, &mut Outbox)>) {           // parallel: write own outbox
+    q.par_iter_mut().for_each(|(cells, mut out)| { out.0.clear(); /* push effects */ });
+}
+fn apply(stage: Res<Stage>, boxes: Query<&Outbox>, mut cells: Query<&mut ChunkCells>) {
+    for &(_, e) in stage.active() {                            // sequential, fixed order
+        for fx in &boxes.get(e).unwrap().0 { /* apply to cells.get_mut(target) */ }
+    }
 }
 ```
+Never `f32` atomics. `bevy::utils::Parallel<Vec<T>>` works too, but `drain()` is in thread
+order: `sort_unstable_by_key` on a stable key before applying.
 
-## Deterministic float reduction
+## Arbitrary parallel map with ordered results (task pool scope)
+
 ```rust
-let partial: Vec<f32> = data.par_chunks(CHUNK).map(zig_kernels::sum).collect(); // chunk order preserved
-let total: f32 = partial.iter().sum();   // sequential, fixed order
+let hashes: Vec<u64> = sim_core::par::par_map(stage.active(), 16, |&(coord, e)| {
+    splitmix64(cells.get(e).unwrap().hash() ^ coord_bits(coord))
+});                                                            // input order, any thread count
+let total = hashes.iter().fold(SEED, |a, &h| splitmix64(a ^ h));
+```
+Underneath: `ComputeTaskPool::get().scope(|s| for batch in .. { s.spawn(async move {..}) })`
+returns `Vec<T>` in spawn order. Disjoint `&mut` slices are split *before* the scope and
+moved into the tasks (see `app/src/render/cells.rs`).
+
+## Spatial bucketing (counting sort, deterministic)
+
+```rust
+// 1. count per cell (parallel per chunk into the chunk's own counts), 2. exclusive prefix
+// sum sequentially in active() order, 3. scatter (parallel per chunk, each writes its own
+// range). Query = read-only slice of `sorted[start[c]..start[c+1]]`.
 ```
 
-## Derived RNG (no shared state)
+## Deterministic RNG per work unit
+
 ```rust
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256PlusPlus;
-fn splitmix64(mut z: u64) -> u64 {
-    z = z.wrapping_add(0x9E3779B97F4A7C15);
-    z = (z ^ (z >> 30)).wrapping_mul(0xBF58476D1CE4E5B9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94D049BB133111EB);
-    z ^ (z >> 31)
-}
-pub fn rng_for(seed: u64, tick: u64, id: u32) -> Xoshiro256PlusPlus {
-    Xoshiro256PlusPlus::seed_from_u64(splitmix64(seed ^ splitmix64(tick) ^ (id as u64) << 32))
-}
+let mut rng = rng_for(cfg.seed, tick.0, coord_id(coord));   // Xoshiro256++ from splitmix64
+let v = hash_cell(cfg.seed, STREAM_ROCK, x, y);             // or a pure hash per cell
+```
+Never an `Entity`, never a slot, never a global RNG.
+
+## Determinism test
+
+```rust
+// In-process: two fresh worlds agree.
+let a = { let mut w = sim::new_world(&cfg); for _ in 0..200 { sim::step(&mut w); } sim::checksum(&mut w) };
+let b = { let mut w = sim::new_world(&cfg); for _ in 0..200 { sim::step(&mut w); } sim::checksum(&mut w) };
+assert_eq!(a, b);
+// Across thread counts: crates/app/tests/determinism.rs runs the binary with
+// WMC_THREADS=1, 3, 8 and compares the `checksum:` lines (the pool is per process).
 ```
 
-## Uniform grid rebuilt per tick (counting sort; parallel-friendly, deterministic)
-```rust
-// 1. cell id per entity (par, pure)            cell[i] = hash_cell(pos[i])
-// 2. histogram per chunk, then prefix sum over (chunk, cell) in fixed order -> offsets
-// 3. scatter entity ids into `sorted` using per-chunk offsets (each chunk writes disjoint ranges)
-// 4. queries: for each neighbor cell, iterate sorted[start[c]..start[c+1]] — read only
-```
+## Ambiguity as a build error
 
-## Padded per-thread counters (avoid false sharing)
 ```rust
-#[repr(align(64))] #[derive(Default)] struct Padded(std::sync::atomic::AtomicU64);
+schedule.set_build_settings(ScheduleBuildSettings {
+    ambiguity_detection: LogLevel::Error, ..Default::default() });
 ```
+Two systems in a phase that both write `ChunkCells` with no `.before/.after/.chain()` make
+`run_schedule` panic on first run. That is the executor refusing to pick an order for you.
 
-## Thread-count determinism test
-```rust
-fn run(threads: usize) -> u32 {
-    rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap().install(|| {
-        let mut w = World::new(100_000, 42);
-        for _ in 0..10 { w.step(1.0 / 60.0); }
-        w.checksum().to_bits()
-    })
-}
-#[test] fn deterministic_across_threads() { assert_eq!(run(1), run(8)); }
-```
+## Anti-patterns (rejected in review)
 
-## Sim/render handoff (triple buffer, no lock on the hot path)
-Sim writes into `bufs[write]`, publishes index via `AtomicUsize` (Release); render loads
-(Acquire) and reads. Or `crossbeam::channel::bounded(1)` with `try_send` and drop-if-full.
+- `Arc<Mutex<..>>`, `RwLock`, `RefCell` inside a phase.
+- `Commands` spawn/despawn inside a phase; chunk entities change only in `ensure_loaded`.
+- Iterating a query and letting its order matter (sort via `stage.active()` instead).
+- `par_iter().for_each` that pushes to a shared `Vec` or adds to a shared float.
+- Seeding from `Entity`, `Instant`, thread id, or a global RNG.
+- Reading `Time` or any wall clock inside `sim-core`.

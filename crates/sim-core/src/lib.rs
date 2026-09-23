@@ -1,28 +1,35 @@
-//! Simulation core.
+//! Simulation core, on `bevy_ecs`.
 //!
-//! Shape of everything in here: **data in flat arrays, systems as pure
-//! functions over slices, parallelism at the chunk level, determinism by
-//! construction.** See `docs/ARCHITECTURE.md` for the decisions and
-//! `/parallel-sim` for the patterns.
+//! Shape of everything in here: **chunks are entities, a chunk's cells are one
+//! component of flat arrays, systems are plain functions over queries,
+//! parallelism is `par_iter_mut` over chunks, determinism by construction.**
+//! See `docs/ARCHITECTURE.md` for the decisions and `/parallel-sim` +
+//! `/bevy-dev` for the patterns.
+//!
+//! This crate depends on `bevy_ecs` and `bevy_tasks` only: no clock, no
+//! assets, no window. The engine-facing `App`, plugins and rendering live in
+//! `app`.
 //!
 //! Modules:
 //! - [`stage`]: the chunked, unbounded 2D grid every actor stands on.
 //! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
 //! - [`store`]: save directory format (meta + per-chunk files).
 //! - [`time`]: the integer clock: ticks per day, calendar, daylight.
-//! - [`world`]: seed + tick + stage (+ actors, later), streaming, the phase
-//!   sequence.
+//! - [`sim`]: resources (`SimConfig`, `Tick`), the `SimTick` schedule and its
+//!   phases, world creation, streaming, save/load, checksum.
+//! - [`par`]: deterministic parallel helpers over the compute task pool.
 
+pub mod par;
 pub mod rng;
+pub mod sim;
 pub mod stage;
 pub mod store;
 pub mod time;
-pub mod world;
 
+pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick, WorldConfig};
 pub use stage::{
-    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, Feature, Ground,
-    Pos, Stage,
+    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, ChunkMeta, Feature,
+    Ground, Pos, Stage, StageCells,
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};
-pub use world::{LoadPolicy, StreamStats, World, WorldConfig};
