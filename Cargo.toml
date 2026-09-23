@@ -21,8 +21,11 @@ bevy = { version = "0.19.1", default-features = false, features = [
     "bevy_render", "bevy_core_pipeline", "bevy_sprite", "bevy_sprite_render", "bevy_image",
     "sysinfo_plugin",
 ] }
-bevy_ecs = "0.19.1"
-bevy_tasks = "0.19.1"
+# `multi_threaded` is NOT a default feature of these two: without it the compute pool runs
+# every task on the calling thread. The umbrella turns it on for `app`; sim-core built or
+# tested alone must ask for it itself.
+bevy_ecs = { version = "0.19.1", features = ["multi_threaded"] }
+bevy_tasks = { version = "0.19.1", features = ["multi_threaded"] }
 # --- data layout / numerics ---
 bytemuck = { version = "1", features = ["derive"] }  # safe Pod casting for flat buffers
 # --- rng (deterministic, seedable, fast) ---
