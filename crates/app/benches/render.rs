@@ -5,7 +5,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 use app::render::atlas::GlyphAtlas;
-use app::render::blit::{blit, blit_reference};
+use app::render::blit::{Target, blit, blit_reference};
 use app::render::cells::{CellFrame, Viewport, render_cells};
 use sim_core::stage::worldgen::GenParams;
 use sim_core::{Pos, World, WorldConfig};
@@ -58,13 +58,23 @@ fn bench_blit(c: &mut Criterion) {
 
     let mut g = c.benchmark_group("blit");
     g.throughput(Throughput::Elements(u64::from(COLS * CELL * ROWS * CELL)));
+    fn target(out: &mut [u8], stride: usize) -> Target<'_> {
+        Target {
+            pixels: out,
+            stride_px: stride,
+            width: stride,
+            height: (ROWS * CELL) as usize,
+            origin_x: 0,
+            origin_y: 0,
+        }
+    }
     g.bench_function("reference/1", |b| {
-        b.iter(|| blit_reference(&frame, &atlas, &mut out, stride));
+        b.iter(|| blit_reference(&frame, &atlas, target(&mut out, stride)));
     });
     for threads in [1, 8] {
         let p = pool(threads);
         g.bench_with_input(BenchmarkId::new("zig", threads), &threads, |b, _| {
-            b.iter(|| p.install(|| blit(&frame, &atlas, &mut out, stride)));
+            b.iter(|| p.install(|| blit(&frame, &atlas, target(&mut out, stride))));
         });
     }
     g.finish();

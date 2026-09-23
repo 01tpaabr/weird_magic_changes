@@ -14,7 +14,7 @@ pub const saxpy = @import("kernels/saxpy.zig");
 pub const blit = @import("kernels/blit.zig");
 
 /// ABI version. Bump when an exported signature changes; Rust checks it at startup.
-pub const abi_version: u32 = 2;
+pub const abi_version: u32 = 3;
 
 export fn wmc_abi_version() u32 {
     return abi_version;
@@ -37,10 +37,11 @@ export fn wmc_atlas_glyphs() usize {
     return blit.atlas_glyphs;
 }
 
-/// Paint `cols x rows` cells into a 4-bytes-per-pixel buffer. See `kernels/blit.zig` for
-/// the layout contract. Pure and deterministic: output depends only on inputs.
-/// Buffers must not overlap. Caller partitions `out` into bands of whole cell
-/// rows for parallelism.
+/// Paint `cols x rows` cells into a 4-bytes-per-pixel `out_w x out_h` window
+/// (`stride_px` pixels per row) with the grid's top-left at `(origin_x,
+/// origin_y)`, clipping to the window. See `kernels/blit.zig` for the layout
+/// contract. Pure and deterministic. Buffers must not overlap. Caller
+/// partitions `out` into bands of whole pixel rows for parallelism.
 export fn wmc_blit_cells(
     glyph: [*]const u8,
     fg: [*]const u32,
@@ -51,6 +52,10 @@ export fn wmc_blit_cells(
     cell: usize,
     out: [*]u8,
     stride_px: usize,
+    out_w: usize,
+    out_h: usize,
+    origin_x: isize,
+    origin_y: isize,
 ) void {
     const n = cols * rows;
     blit.blitCells(
@@ -61,8 +66,14 @@ export fn wmc_blit_cells(
         rows,
         atlas[0 .. blit.atlas_glyphs * cell * cell],
         cell,
-        out[0 .. rows * cell * stride_px * 4],
-        stride_px,
+        .{
+            .out = out[0 .. out_h * stride_px * 4],
+            .stride_px = stride_px,
+            .width = out_w,
+            .height = out_h,
+            .origin_x = origin_x,
+            .origin_y = origin_y,
+        },
     );
 }
 
