@@ -19,7 +19,8 @@ zig-kernels.workspace = true
 anyhow.workspace = true
 rayon.workspace = true
 winit.workspace = true
-pixels.workspace = true
+softbuffer.workspace = true
+bytemuck.workspace = true
 fontdue.workspace = true
 
 [dev-dependencies]

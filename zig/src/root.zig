@@ -37,7 +37,7 @@ export fn wmc_atlas_glyphs() usize {
     return blit.atlas_glyphs;
 }
 
-/// Paint `cols x rows` cells into an RGBA8 buffer. See `kernels/blit.zig` for
+/// Paint `cols x rows` cells into a 4-bytes-per-pixel buffer. See `kernels/blit.zig` for
 /// the layout contract. Pure and deterministic: output depends only on inputs.
 /// Buffers must not overlap. Caller partitions `out` into bands of whole cell
 /// rows for parallelism.

@@ -1,13 +1,14 @@
-//! Glyph blit: paint a grid of cells (glyph byte + fg + bg colour) into an
-//! RGBA8 pixel buffer using a coverage atlas.
+//! Glyph blit: paint a grid of cells (glyph byte + fg + bg colour) into a
+//! 4-bytes-per-pixel buffer using a coverage atlas.
 //!
 //! Layout contract (shared with `crates/app/src/render`):
 //!   * `glyph`, `fg`, `bg` are row-major `cols * rows` cells. A glyph is the
 //!     printable ASCII byte itself; anything outside `' '..='~'` draws `'?'`.
 //!   * `atlas` holds `atlas_glyphs` boxes of `cell * cell` coverage bytes
 //!     (0 = background, 255 = foreground), box `i` = glyph `' ' + i`.
-//!   * Colours are packed `r | g << 8 | b << 16 | a << 24`, i.e. the
-//!     little-endian byte order is `[r, g, b, a]` = the pixel layout.
+//!   * A colour is a `u32` whose little-endian bytes are the pixel's four
+//!     bytes. Each byte is blended independently; which byte is which channel
+//!     is the caller's business (the app uses softbuffer's `0x00RRGGBB`).
 //!   * `out` is `rows * cell` pixel rows of `stride_px` pixels, 4 bytes each.
 //!     Only the first `cols * cell` pixels of each row are written.
 //!

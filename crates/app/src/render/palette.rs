@@ -3,37 +3,39 @@
 
 use sim_core::{Feature, Ground};
 
-/// Packed RGBA, `r` in the low byte. In little-endian memory that is
-/// `[r, g, b, a]`, exactly the pixel buffer layout, so a `u32` store is a pixel.
+/// Packed `0x00RRGGBB`: the `softbuffer` pixel format, one `u32` per pixel,
+/// top byte ignored. In little-endian memory that is `[b, g, r, 0]`; the blit
+/// kernel blends the four bytes without caring which channel is which.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Rgba(pub u32);
+pub struct Color(pub u32);
 
-impl Rgba {
+impl Color {
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self(u32::from_le_bytes([r, g, b, 0xff]))
+        Self((r as u32) << 16 | (g as u32) << 8 | b as u32)
     }
 
+    /// The four bytes as they sit in the pixel buffer.
     pub const fn bytes(self) -> [u8; 4] {
         self.0.to_le_bytes()
     }
 }
 
-pub const SOIL_BG: Rgba = Rgba::rgb(0xc4, 0x9e, 0x6c); // light brown
-pub const SOIL_FG: Rgba = Rgba::rgb(0x8b, 0x66, 0x3b);
-pub const WATER_BG: Rgba = Rgba::rgb(0x2b, 0x6f, 0xc8); // blue
-pub const WATER_FG: Rgba = Rgba::rgb(0x9f, 0xca, 0xf5);
-pub const ROCK_FG: Rgba = Rgba::rgb(0x3b, 0x3b, 0x3b);
-pub const ACTOR_FG: Rgba = Rgba::rgb(0xff, 0xf3, 0x9c);
-pub const VOID_BG: Rgba = Rgba::rgb(0x10, 0x10, 0x12); // chunk not loaded
-pub const TEXT_FG: Rgba = Rgba::rgb(0xe6, 0xe6, 0xe6);
-pub const TEXT_BG: Rgba = Rgba::rgb(0x1b, 0x1b, 0x20);
+pub const SOIL_BG: Color = Color::rgb(0xc4, 0x9e, 0x6c); // light brown
+pub const SOIL_FG: Color = Color::rgb(0x8b, 0x66, 0x3b);
+pub const WATER_BG: Color = Color::rgb(0x2b, 0x6f, 0xc8); // blue
+pub const WATER_FG: Color = Color::rgb(0x9f, 0xca, 0xf5);
+pub const ROCK_FG: Color = Color::rgb(0x3b, 0x3b, 0x3b);
+pub const ACTOR_FG: Color = Color::rgb(0xff, 0xf3, 0x9c);
+pub const VOID_BG: Color = Color::rgb(0x10, 0x10, 0x12); // chunk not loaded
+pub const TEXT_FG: Color = Color::rgb(0xe6, 0xe6, 0xe6);
+pub const TEXT_BG: Color = Color::rgb(0x1b, 0x1b, 0x20);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
     /// Printable ASCII byte.
     pub glyph: u8,
-    pub fg: Rgba,
-    pub bg: Rgba,
+    pub fg: Color,
+    pub bg: Color,
 }
 
 /// Cells whose chunk is not loaded.
@@ -65,8 +67,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rgba_bytes_are_pixel_order() {
-        assert_eq!(Rgba::rgb(1, 2, 3).bytes(), [1, 2, 3, 0xff]);
+    fn color_is_softbuffer_0rgb() {
+        assert_eq!(Color::rgb(1, 2, 3).0, 0x0001_0203);
+        assert_eq!(Color::rgb(1, 2, 3).bytes(), [3, 2, 1, 0]);
     }
 
     #[test]

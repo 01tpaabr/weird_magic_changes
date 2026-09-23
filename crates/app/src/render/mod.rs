@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! phase 1  cells::render_cells   Stage viewport -> CellFrame (glyph, fg, bg per cell)   row-parallel
-//! phase 2  blit::blit            CellFrame + GlyphAtlas -> RGBA8 pixels (Zig kernel)     band-parallel
+//! phase 2  blit::blit            CellFrame + GlyphAtlas -> pixels (Zig kernel)           band-parallel
 //! ```
 //! Each phase writes disjoint slices per task and reads only immutable state,
 //! so the picture is bit-identical for any thread count. `ascii` is a text

@@ -8,7 +8,7 @@
 use rayon::prelude::*;
 use sim_core::{CHUNK_SIZE, Pos, Stage};
 
-use super::palette::{Rgba, VOID, style};
+use super::palette::{Color, VOID, style};
 
 /// Rectangle of the world to draw, in cells.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,7 +42,7 @@ pub struct CellFrame {
     rows: usize,
     /// Printable ASCII byte per cell.
     pub glyph: Vec<u8>,
-    /// Packed [`Rgba`] per cell.
+    /// Packed [`Color`] per cell.
     pub fg: Vec<u32>,
     pub bg: Vec<u32>,
 }
@@ -72,7 +72,7 @@ impl CellFrame {
     /// Write `text` into row `row` starting at column 0, padding the rest of
     /// the row with spaces. Rows outside the frame are ignored, text is
     /// clipped, non-ASCII bytes draw as `?`.
-    pub fn put_text(&mut self, row: usize, text: &str, fg: Rgba, bg: Rgba) {
+    pub fn put_text(&mut self, row: usize, text: &str, fg: Color, bg: Color) {
         if row >= self.rows {
             return;
         }
@@ -198,12 +198,12 @@ mod tests {
     fn put_text_pads_clips_and_ignores_bad_rows() {
         let mut f = CellFrame::new();
         f.resize(4, 2);
-        f.put_text(1, "ab\u{e9}cdef", Rgba(1), Rgba(2));
+        f.put_text(1, "ab\u{e9}cdef", Color(1), Color(2));
         assert_eq!(&f.glyph[4..], b"ab??");
         assert_eq!(&f.fg[4..], &[1, 1, 1, 1]);
-        f.put_text(0, "x", Rgba(3), Rgba(4));
+        f.put_text(0, "x", Color(3), Color(4));
         assert_eq!(&f.glyph[..4], b"x   ");
-        f.put_text(7, "nope", Rgba(0), Rgba(0));
+        f.put_text(7, "nope", Color(0), Color(0));
         assert_eq!(&f.glyph[..4], b"x   ");
     }
 

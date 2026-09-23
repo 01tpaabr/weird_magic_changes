@@ -1,4 +1,4 @@
-//! Phase 2 of a frame: cells + atlas -> RGBA8 pixels.
+//! Phase 2 of a frame: cells + atlas -> pixels (4 bytes each).
 //!
 //! Work unit: a band of [`BAND_ROWS`] whole cell rows. Bands are fixed by
 //! index, each writes a disjoint slice of the framebuffer, and inside a band
@@ -18,7 +18,7 @@ use super::cells::CellFrame;
 /// `make bench` (`blit/parallel`).
 pub const BAND_ROWS: usize = 4;
 
-/// Paint `frame` into `out` (`stride_px` pixels per row, RGBA8). Pixels to
+/// Paint `frame` into `out` (`stride_px` pixels per row, 4 bytes each). Pixels to
 /// the right of `cols*cell` and below `rows*cell` are left untouched.
 pub fn blit(frame: &CellFrame, atlas: &GlyphAtlas, out: &mut [u8], stride_px: usize) {
     let (cols, rows, cell) = (frame.cols(), frame.rows(), atlas.cell());
@@ -83,7 +83,7 @@ pub fn blit_reference(frame: &CellFrame, atlas: &GlyphAtlas, out: &mut [u8], str
 mod tests {
     use super::*;
     use crate::render::cells::{Viewport, render_cells};
-    use crate::render::palette::{Rgba, TEXT_BG, TEXT_FG};
+    use crate::render::palette::{Color, TEXT_BG, TEXT_FG};
     use sim_core::stage::worldgen::GenParams;
     use sim_core::{Pos, World, WorldConfig};
 
@@ -99,7 +99,7 @@ mod tests {
         f.resize(37, 13);
         render_cells(&world.stage, view, &mut f);
         f.put_text(11, "status @ 12 ~#", TEXT_FG, TEXT_BG);
-        f.put_text(12, "keys", Rgba::rgb(1, 2, 3), Rgba::rgb(9, 8, 7));
+        f.put_text(12, "keys", Color::rgb(1, 2, 3), Color::rgb(9, 8, 7));
         f
     }
 

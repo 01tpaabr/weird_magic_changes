@@ -64,7 +64,8 @@ pub fn atlas_glyphs() -> usize {
 }
 
 /// A row-major grid of cells for [`blit_cells`]: printable ASCII glyph bytes
-/// (others draw `?`) and packed `r | g<<8 | b<<16 | a<<24` colours.
+/// (others draw `?`) and colours whose little-endian bytes are the pixel's
+/// four bytes (channel order is the caller's choice).
 #[derive(Debug, Clone, Copy)]
 pub struct CellGrid<'a> {
     pub glyph: &'a [u8],
@@ -81,7 +82,7 @@ pub struct Atlas<'a> {
     pub cell: usize,
 }
 
-/// Paint `cells` into an RGBA8 pixel buffer.
+/// Paint `cells` into a 4-bytes-per-pixel buffer.
 ///
 /// `out` holds `rows*cell` pixel rows of `stride_px` pixels; only the first
 /// `cols*cell` pixels of each row are written. Output is a pure function of

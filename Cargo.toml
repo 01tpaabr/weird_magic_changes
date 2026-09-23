@@ -25,7 +25,7 @@ rand = "0.9"
 rand_xoshiro = "0.7"
 # --- window / rendering ---
 winit = "0.30"             # window + input events (event-driven ApplicationHandler)
-pixels = "0.17"            # CPU RGBA framebuffer presented through wgpu
+softbuffer = "0.4"         # presents a CPU u32 framebuffer in a window, no GPU stack
 fontdue = "0.9"            # TTF rasterizer; builds the glyph atlas once per cell size
 # --- utilities ---
 anyhow = "1"

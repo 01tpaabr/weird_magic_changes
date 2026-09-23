@@ -1,5 +1,5 @@
-//! Windowed front end: a resizable `winit` window, a `pixels` framebuffer and
-//! the keyboard camera.
+//! Windowed front end: a resizable `winit` window, a `softbuffer` framebuffer
+//! and the keyboard camera.
 //!
 //! A frame is: stream chunks around the camera -> `render_cells` (row-parallel)
 //! -> `blit` (band-parallel Zig kernel) -> present. The loop is event-driven:
@@ -10,10 +10,10 @@
 //! Keys: `w a s d` / arrows pan by 1, with Shift by 8; `space` steps the sim;
 //! `p` saves; `+`/`-` zoom; `q` / `Esc` / close saves and quits.
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 
 use anyhow::{Context, anyhow};
-use pixels::{Pixels, SurfaceTexture};
 use sim_core::{CHUNK_SIZE, LoadPolicy, Store, StreamStats, World};
 use winit::application::ApplicationHandler;
 use winit::dpi::LogicalSize;
@@ -26,7 +26,7 @@ use crate::camera::Camera;
 use crate::render::atlas::GlyphAtlas;
 use crate::render::blit::blit;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
-use crate::render::palette::{TEXT_BG, TEXT_FG, VOID_BG};
+use crate::render::palette::{Color, TEXT_BG, TEXT_FG, VOID_BG};
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the atlas is built for.
@@ -64,6 +64,7 @@ pub fn run(world: &mut World, camera: &mut Camera, store: &Store) -> anyhow::Res
         cols: 0,
         rows: 0,
         buf_width: 0,
+        buf_height: 0,
         modifiers: ModifiersState::empty(),
         last_stats: None,
         error: None,
@@ -81,9 +82,12 @@ fn save(world: &mut World, camera: &Camera, store: &Store) -> anyhow::Result<()>
     Ok(())
 }
 
+/// Softbuffer surface: hands us a `u32` buffer per frame and presents it.
+type Surface = softbuffer::Surface<Arc<Window>, Arc<Window>>;
+
 struct Gpu {
     window: Arc<Window>,
-    pixels: Pixels<'static>,
+    surface: Surface,
 }
 
 struct App<'a> {
@@ -98,8 +102,9 @@ struct App<'a> {
     /// Grid that fits the current buffer, in cells (0 while minimised).
     cols: u32,
     rows: u32,
-    /// Pixel buffer width = row stride, in pixels.
+    /// Pixel buffer size; width is also the row stride, in pixels.
     buf_width: usize,
+    buf_height: usize,
     modifiers: ModifiersState,
     last_stats: Option<StreamStats>,
     /// First fatal error; the loop exits and `run` returns it.
@@ -120,11 +125,11 @@ impl App<'_> {
             .with_inner_size(LogicalSize::new(1280.0, 800.0))
             .with_min_inner_size(LogicalSize::new(240.0, 160.0));
         let window = Arc::new(event_loop.create_window(attrs).context("creating window")?);
-        let size = window.inner_size();
-        let surface = SurfaceTexture::new(size.width.max(1), size.height.max(1), window.clone());
-        let pixels = Pixels::new(size.width.max(1), size.height.max(1), surface)
-            .map_err(|e| anyhow!("creating pixel buffer: {e}"))?;
-        self.gpu = Some(Gpu { window, pixels });
+        let context = softbuffer::Context::new(window.clone())
+            .map_err(|e| anyhow!("creating softbuffer context: {e}"))?;
+        let surface = softbuffer::Surface::new(&context, window.clone())
+            .map_err(|e| anyhow!("creating softbuffer surface: {e}"))?;
+        self.gpu = Some(Gpu { window, surface });
         self.layout()
     }
 
@@ -149,19 +154,16 @@ impl App<'_> {
         {
             self.atlas = Some(GlyphAtlas::build(cell));
         }
-        gpu.pixels
-            .resize_surface(size.width, size.height)
+        let (Some(w), Some(h)) = (NonZeroU32::new(size.width), NonZeroU32::new(size.height)) else {
+            unreachable!("zero sizes handled above");
+        };
+        gpu.surface
+            .resize(w, h)
             .map_err(|e| anyhow!("resizing surface: {e}"))?;
-        gpu.pixels
-            .resize_buffer(size.width, size.height)
-            .map_err(|e| anyhow!("resizing pixel buffer: {e}"))?;
         self.buf_width = size.width as usize;
+        self.buf_height = size.height as usize;
         self.cols = size.width / cell;
         self.rows = size.height / cell;
-        // The blit never touches the partial cell at the right/bottom edge.
-        for px in gpu.pixels.frame_mut().chunks_exact_mut(4) {
-            px.copy_from_slice(&VOID_BG.bytes());
-        }
         gpu.window.request_redraw();
         Ok(())
     }
@@ -227,9 +229,27 @@ impl App<'_> {
         self.frame
             .put_text(map_rows as usize + 1, HELP, TEXT_FG, TEXT_BG);
 
-        blit(&self.frame, atlas, gpu.pixels.frame_mut(), self.buf_width);
-        gpu.pixels
-            .render()
+        let mut buffer = gpu
+            .surface
+            .buffer_mut()
+            .map_err(|e| anyhow!("acquiring frame buffer: {e}"))?;
+        let cell = atlas.cell();
+        clear_margins(
+            &mut buffer,
+            self.buf_width,
+            self.buf_height,
+            self.cols as usize * cell,
+            self.rows as usize * cell,
+            VOID_BG,
+        );
+        blit(
+            &self.frame,
+            atlas,
+            bytemuck::cast_slice_mut(&mut buffer),
+            self.buf_width,
+        );
+        buffer
+            .present()
             .map_err(|e| anyhow!("presenting frame: {e}"))
     }
 
@@ -299,9 +319,44 @@ impl ApplicationHandler for App<'_> {
     }
 }
 
+/// Fill the partial cells at the right and bottom edges, which the blit never
+/// writes. The buffer's previous contents are not guaranteed to survive a
+/// present, so this runs every frame; it is a few KB of writes.
+fn clear_margins(
+    buf: &mut [u32],
+    width: usize,
+    height: usize,
+    used_w: usize,
+    used_h: usize,
+    color: Color,
+) {
+    assert!(buf.len() >= width * height);
+    for row in buf[..width * used_h.min(height)].chunks_exact_mut(width) {
+        row[used_w.min(width)..].fill(color.0);
+    }
+    buf[width * used_h.min(height)..width * height].fill(color.0);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn margins_cleared_only_outside_used_area() {
+        let (w, h) = (7, 5);
+        let mut buf = vec![1u32; w * h];
+        clear_margins(&mut buf, w, h, 5, 3, Color(9));
+        for y in 0..h {
+            for x in 0..w {
+                let want = if x < 5 && y < 3 { 1 } else { 9 };
+                assert_eq!(buf[y * w + x], want, "({x},{y})");
+            }
+        }
+        // Exact fit: nothing cleared.
+        let mut buf = vec![1u32; w * h];
+        clear_margins(&mut buf, w, h, w, h, Color(9));
+        assert!(buf.iter().all(|&p| p == 1));
+    }
 
     #[test]
     fn policy_covers_the_view() {
