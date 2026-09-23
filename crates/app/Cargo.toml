@@ -14,6 +14,7 @@ path = "src/main.rs"
 sim-core.workspace = true
 zig-kernels.workspace = true
 anyhow.workspace = true
+crossterm.workspace = true
 
 [lints]
 workspace = true

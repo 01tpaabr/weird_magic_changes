@@ -23,6 +23,8 @@ wide = "0.7"               # portable SIMD types
 # --- rng (deterministic, seedable, fast) ---
 rand = "0.9"
 rand_xoshiro = "0.7"
+# --- terminal ---
+crossterm = "0.29"          # raw mode, key events, cursor control for the ASCII front end
 # --- utilities ---
 anyhow = "1"
 thiserror = "2"

@@ -1,41 +1,54 @@
-//! The Stage: a fixed `width x height` grid of cells that actors stand on.
+//! The Stage: an unbounded 2D grid of cells that actors stand on, stored as
+//! fixed-size **chunks**.
 //!
-//! Layout: **structure of arrays, row-major.** Cell `(x, y)` lives at index
-//! `y * width + x` in every layer. Layers are independent flat `Vec`s so a
-//! system that only cares about ground never touches occupancy memory, and so
-//! any layer can be handed to a Zig kernel as a plain byte slice.
+//! ```text
+//! world cell (x, y): i32          chunk coord = (x >> CHUNK_BITS, y >> CHUNK_BITS)
+//!                                 local index = (y & MASK) * CHUNK_SIZE + (x & MASK)
+//! ```
 //!
-//! Parallel work is split into **row bands** of [`CHUNK_ROWS`] rows
-//! (`Stage::chunk_len` cells). Bands are contiguous in memory (so
-//! `par_chunks_mut(stage.chunk_len())` works on any layer directly) and their
-//! boundaries fall on row boundaries (so a 2D neighbour system needs exactly a
-//! one-row halo above and below). Chunk `i` always covers the same rows
-//! regardless of thread count.
+//! A chunk is [`CHUNK_SIZE`]² cells with one contiguous array per layer
+//! ([`ChunkCells`]). It is, at the same time:
+//! - the **parallel work unit**: a phase is `cells.par_iter_mut()` over the slab;
+//! - the **streaming unit**: loaded around the camera, unloaded far away;
+//! - the **save unit**: one file per modified chunk (see `crate::store`).
+//!
+//! Loaded chunks live in a slab (`Vec`) addressed by slot. Slot numbers depend
+//! on load history, so **nothing observable may depend on slot order**: every
+//! sequential merge and the checksum walk [`Stage::active`], which is kept
+//! sorted by chunk coordinate. Per-chunk metadata ([`ChunkMeta`]) is a
+//! separate slab from the cell data so a later double-buffered phase can read
+//! all of `cells` immutably while writing a `cells_next` slab.
 //!
 //! Layers today:
 //! - `ground`: what the cell *is* ([`Ground`]).
 //! - `feature`: what sits *on* the ground but is not an actor ([`Feature`]).
 //! - `occupant`: which actor stands here, at most one ([`ActorId`]).
 //!
-//! Adding a per-cell scalar (moisture, heat, mana): add a `Vec<T>` here, size
-//! it in `Stage::new`, fold it into `checksum`, render it in `app`. Nothing
-//! else changes.
+//! Adding a per-cell scalar (moisture, heat, mana): add an array to
+//! [`ChunkCells`], fold it into `hash`, encode it in `store`, render it in `app`.
 
 pub mod worldgen;
 
-use bytemuck::{NoUninit, Pod, Zeroable};
+use std::collections::HashMap;
+
+use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
 use rayon::prelude::*;
 
 use crate::rng::splitmix64;
 
-/// Rows per parallel work unit. 16 rows x 1024 cols x 1 byte = 16 KiB per
-/// layer per chunk: comfortably in L1 for a few layers at once. Tune with
-/// `make bench`; changing it must not change any result.
-pub const CHUNK_ROWS: u32 = 16;
+/// log2 of the chunk side. 64² = 4096 cells: 4 KiB per byte layer, 16 KiB
+/// for the occupant layer, one rayon task. Tune with `make bench`; changing
+/// it changes save files (bump `store::FORMAT_VERSION`) but never sim results.
+pub const CHUNK_BITS: u32 = 6;
+/// Chunk side length in cells.
+pub const CHUNK_SIZE: i32 = 1 << CHUNK_BITS;
+/// Cells per chunk.
+pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
+const MASK: i32 = CHUNK_SIZE - 1;
 
 /// What a cell fundamentally is. Exactly one per cell.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit, CheckedBitPattern)]
 pub enum Ground {
     #[default]
     Soil = 0,
@@ -55,7 +68,7 @@ impl Ground {
 
 /// Something resting on the ground that is not an actor. At most one per cell.
 #[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit, CheckedBitPattern)]
 pub enum Feature {
     #[default]
     None = 0,
@@ -93,183 +106,336 @@ impl Default for ActorId {
     }
 }
 
-/// Flat index of a cell: `y * width + x`. Only meaningful for the stage that
-/// produced it.
-#[repr(transparent)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
-pub struct CellIdx(pub u32);
-
-impl CellIdx {
-    #[inline]
-    pub fn usize(self) -> usize {
-        self.0 as usize
-    }
-}
-
-/// Grid coordinate. `(0, 0)` is the top-left corner; `y` grows downward.
+/// World cell coordinate. Unbounded; `y` grows downward. The initial map
+/// occupies `[0, w) x [0, h)`, everything else is generated on demand.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct Pos {
-    pub x: u32,
-    pub y: u32,
+    pub x: i32,
+    pub y: i32,
 }
 
 impl Pos {
     #[inline]
-    pub const fn new(x: u32, y: u32) -> Self {
+    pub const fn new(x: i32, y: i32) -> Self {
         Self { x, y }
     }
-}
 
-/// The grid. Fields are `pub` on purpose: systems slice them directly.
-#[derive(Debug, Clone)]
-pub struct Stage {
-    width: u32,
-    height: u32,
-    pub ground: Vec<Ground>,
-    pub feature: Vec<Feature>,
-    pub occupant: Vec<ActorId>,
-}
-
-impl Stage {
-    /// An all-soil, empty stage. For a generated one see [`worldgen::generate`].
-    pub fn new(width: u32, height: u32) -> Self {
-        assert!(width > 0 && height > 0, "stage must be non-empty");
-        let n = width as usize * height as usize;
-        assert!(
-            n <= u32::MAX as usize,
-            "stage too large for u32 cell indices"
-        );
-        Self {
-            width,
-            height,
-            ground: vec![Ground::Soil; n],
-            feature: vec![Feature::None; n],
-            occupant: vec![ActorId::NONE; n],
-        }
-    }
-
+    /// `self + (dx, dy)`, `None` only on i32 overflow (the edge of the world).
     #[inline]
-    pub fn width(&self) -> u32 {
-        self.width
+    pub fn offset(self, dx: i32, dy: i32) -> Option<Pos> {
+        Some(Pos::new(self.x.checked_add(dx)?, self.y.checked_add(dy)?))
     }
 
-    #[inline]
-    pub fn height(&self) -> u32 {
-        self.height
-    }
-
-    /// Number of cells.
-    #[inline]
-    pub fn len(&self) -> usize {
-        self.ground.len()
-    }
-
-    #[inline]
-    pub fn is_empty(&self) -> bool {
-        self.ground.is_empty()
-    }
-
-    // ---- chunking ------------------------------------------------------------
-
-    /// Cells per parallel work unit (a band of [`CHUNK_ROWS`] rows). Use as the
-    /// argument to `par_chunks` / `par_chunks_mut` on any layer.
-    #[inline]
-    pub fn chunk_len(&self) -> usize {
-        self.width as usize * CHUNK_ROWS as usize
-    }
-
-    /// Number of chunks (the last one may be shorter).
-    #[inline]
-    pub fn chunk_count(&self) -> usize {
-        self.height.div_ceil(CHUNK_ROWS) as usize
-    }
-
-    /// First row covered by chunk `chunk`.
-    #[inline]
-    pub fn chunk_first_row(&self, chunk: usize) -> u32 {
-        u32::try_from(chunk).expect("chunk index fits u32") * CHUNK_ROWS
-    }
-
-    // ---- coordinates -----------------------------------------------------------
-
-    /// Index of an in-bounds position. Debug-asserts bounds; hot loops should
-    /// stay in index space and never call this per cell.
-    #[inline]
-    pub fn idx(&self, p: Pos) -> CellIdx {
-        debug_assert!(p.x < self.width && p.y < self.height, "{p:?} out of bounds");
-        CellIdx(p.y * self.width + p.x)
-    }
-
-    #[inline]
-    pub fn pos(&self, c: CellIdx) -> Pos {
-        Pos::new(c.0 % self.width, c.0 / self.width)
-    }
-
-    #[inline]
-    pub fn contains(&self, p: Pos) -> bool {
-        p.x < self.width && p.y < self.height
-    }
-
-    /// `p + (dx, dy)` if it stays on the stage.
-    #[inline]
-    pub fn offset(&self, p: Pos, dx: i32, dy: i32) -> Option<Pos> {
-        let x = p.x.checked_add_signed(dx)?;
-        let y = p.y.checked_add_signed(dy)?;
-        (x < self.width && y < self.height).then_some(Pos::new(x, y))
-    }
-
-    /// Von Neumann neighbours (N, E, S, W order), clipped at the edges.
-    /// Allocation-free; the order is fixed so callers stay deterministic.
-    pub fn neighbors4(&self, p: Pos) -> impl Iterator<Item = Pos> + '_ {
+    /// Von Neumann neighbours in fixed N, E, S, W order.
+    pub fn neighbors4(self) -> impl Iterator<Item = Pos> {
         const D: [(i32, i32); 4] = [(0, -1), (1, 0), (0, 1), (-1, 0)];
         D.into_iter()
-            .filter_map(move |(dx, dy)| self.offset(p, dx, dy))
+            .filter_map(move |(dx, dy)| self.offset(dx, dy))
     }
 
-    // ---- queries -----------------------------------------------------------------
-
-    /// Terrain permits standing here (ignores occupants).
+    /// Chunk containing this cell and the cell's index inside it.
     #[inline]
-    pub fn walkable(&self, c: CellIdx) -> bool {
-        let i = c.usize();
+    pub const fn split(self) -> (ChunkCoord, usize) {
+        let cc = ChunkCoord::new(self.x >> CHUNK_BITS, self.y >> CHUNK_BITS);
+        let local = ((self.y & MASK) * CHUNK_SIZE + (self.x & MASK)) as usize;
+        (cc, local)
+    }
+}
+
+/// Chunk coordinate = cell coordinate `>> CHUNK_BITS`. Ordered row-major
+/// (`y` first) so a sorted list of chunks walks the world top-down, left-right.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Pod, Zeroable)]
+pub struct ChunkCoord {
+    pub x: i32,
+    pub y: i32,
+}
+
+impl ChunkCoord {
+    #[inline]
+    pub const fn new(x: i32, y: i32) -> Self {
+        Self { x, y }
+    }
+
+    /// World position of this chunk's top-left cell.
+    #[inline]
+    pub const fn origin(self) -> Pos {
+        Pos::new(self.x << CHUNK_BITS, self.y << CHUNK_BITS)
+    }
+
+    /// World position of local cell `i`.
+    #[inline]
+    pub fn cell(self, i: usize) -> Pos {
+        let i = i32::try_from(i).expect("local index fits i32");
+        let o = self.origin();
+        Pos::new(o.x + (i & MASK), o.y + (i >> CHUNK_BITS))
+    }
+
+    #[inline]
+    fn key(self) -> (i32, i32) {
+        (self.y, self.x)
+    }
+}
+
+/// The cell data of one chunk. Structure of arrays, row-major inside.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChunkCells {
+    pub ground: [Ground; CHUNK_CELLS],
+    pub feature: [Feature; CHUNK_CELLS],
+    pub occupant: [ActorId; CHUNK_CELLS],
+}
+
+impl Default for ChunkCells {
+    fn default() -> Self {
+        Self {
+            ground: [Ground::Soil; CHUNK_CELLS],
+            feature: [Feature::None; CHUNK_CELLS],
+            occupant: [ActorId::NONE; CHUNK_CELLS],
+        }
+    }
+}
+
+impl ChunkCells {
+    /// Terrain permits standing on local cell `i` (ignores occupants).
+    #[inline]
+    pub fn walkable(&self, i: usize) -> bool {
         self.ground[i].walkable() && !self.feature[i].blocks()
     }
 
-    /// Terrain permits standing here and nobody is here.
-    #[inline]
-    pub fn free(&self, c: CellIdx) -> bool {
-        self.walkable(c) && self.occupant[c.usize()].is_none()
-    }
-
-    // ---- integrity ----------------------------------------------------------------
-
-    /// Order-independent-of-threads, order-dependent-on-data checksum of every
-    /// layer. Hashed per chunk in parallel, combined sequentially in chunk order.
-    pub fn checksum(&self) -> u64 {
-        let n = self.chunk_len();
-        let g = self
-            .ground
-            .par_chunks(n)
-            .map(|c| fnv1a(bytemuck::cast_slice(c)));
-        let f = self
-            .feature
-            .par_chunks(n)
-            .map(|c| fnv1a(bytemuck::cast_slice(c)));
-        let o = self
-            .occupant
-            .par_chunks(n)
-            .map(|c| fnv1a(bytemuck::cast_slice(c)));
-        let partial: Vec<u64> = g.chain(f).chain(o).collect();
-        partial.iter().fold(
-            splitmix64(u64::from(self.width) << 32 | u64::from(self.height)),
-            |acc, &h| splitmix64(acc ^ h),
-        )
+    /// Content hash, independent of where the chunk lives in memory.
+    pub fn hash(&self) -> u64 {
+        let h = fnv1a(0xCBF2_9CE4_8422_2325, bytemuck::cast_slice(&self.ground));
+        let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
+        fnv1a(h, bytemuck::cast_slice(&self.occupant))
     }
 }
 
-fn fnv1a(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(0xCBF2_9CE4_8422_2325, |h, &b| {
+/// Bookkeeping for one slab slot.
+#[derive(Debug, Clone, Copy)]
+pub struct ChunkMeta {
+    pub coord: ChunkCoord,
+    /// Slot holds a live chunk (free slots keep stale cell data).
+    pub loaded: bool,
+    /// Modified since it was generated or loaded from disk. Clean chunks are
+    /// never written: they can be regenerated from the seed.
+    pub dirty: bool,
+}
+
+/// Everything a cell holds, copied out. For convenience APIs, not hot loops.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Cell {
+    pub ground: Ground,
+    pub feature: Feature,
+    pub occupant: ActorId,
+}
+
+/// The set of loaded chunks.
+#[derive(Debug, Default)]
+pub struct Stage {
+    /// Slab of cell data; index = slot. Hot data, `par_iter_mut` over it.
+    pub cells: Vec<ChunkCells>,
+    /// Slab of metadata, same slot numbering.
+    pub meta: Vec<ChunkMeta>,
+    free: Vec<u32>,
+    /// Lookup only. Never iterated (order is random).
+    index: HashMap<ChunkCoord, u32>,
+    /// Loaded slots sorted by chunk coord: the only iteration order that may
+    /// influence results.
+    active: Vec<u32>,
+}
+
+impl Stage {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    // ---- chunk management -----------------------------------------------------------
+
+    /// Slot of a loaded chunk.
+    #[inline]
+    pub fn slot(&self, c: ChunkCoord) -> Option<u32> {
+        self.index.get(&c).copied()
+    }
+
+    #[inline]
+    pub fn is_loaded(&self, c: ChunkCoord) -> bool {
+        self.index.contains_key(&c)
+    }
+
+    /// Number of loaded chunks.
+    pub fn loaded_count(&self) -> usize {
+        self.active.len()
+    }
+
+    /// Loaded slots in chunk-coordinate order. Use this for any sequential
+    /// pass whose result may depend on order.
+    #[inline]
+    pub fn active(&self) -> &[u32] {
+        &self.active
+    }
+
+    /// Loaded chunk coords in canonical order.
+    pub fn loaded_coords(&self) -> impl Iterator<Item = ChunkCoord> + '_ {
+        self.active.iter().map(|&s| self.meta[s as usize].coord)
+    }
+
+    /// Add a chunk. Panics if already loaded. Returns its slot.
+    pub fn insert(&mut self, coord: ChunkCoord, cells: ChunkCells, dirty: bool) -> u32 {
+        let slot = self.insert_blank(coord, dirty);
+        self.cells[slot as usize] = cells;
+        slot
+    }
+
+    /// Claim a slot for `coord` **without writing its cells**: they hold
+    /// whatever the slot held before (stale data or `Default`). The caller
+    /// must fill every layer before the chunk is observed. Used by generation
+    /// to write each chunk exactly once, straight into the slab.
+    pub fn insert_blank(&mut self, coord: ChunkCoord, dirty: bool) -> u32 {
+        assert!(!self.is_loaded(coord), "chunk {coord:?} already loaded");
+        let meta = ChunkMeta {
+            coord,
+            loaded: true,
+            dirty,
+        };
+        let slot = if let Some(s) = self.free.pop() {
+            self.meta[s as usize] = meta;
+            s
+        } else {
+            self.cells.push(ChunkCells::default());
+            self.meta.push(meta);
+            u32::try_from(self.cells.len() - 1).expect("slot fits u32")
+        };
+        self.index.insert(coord, slot);
+        let at = self
+            .active
+            .binary_search_by_key(&coord.key(), |&s| self.meta[s as usize].coord.key())
+            .unwrap_err();
+        self.active.insert(at, slot);
+        slot
+    }
+
+    /// Make room for `n` more chunks without reallocating the slabs mid-batch.
+    pub fn reserve(&mut self, n: usize) {
+        let extra = n.saturating_sub(self.free.len());
+        self.cells.reserve(extra);
+        self.meta.reserve(extra);
+        self.index.reserve(n);
+        self.active.reserve(n);
+    }
+
+    /// Disjoint mutable borrows of the given slots, for a parallel pass over
+    /// a subset of chunks (`.into_par_iter()` the result). `slots` must be
+    /// strictly increasing. Does not touch dirty flags.
+    pub fn cells_mut_at(&mut self, slots: &[u32]) -> Vec<&mut ChunkCells> {
+        let mut out = Vec::with_capacity(slots.len());
+        let mut rest: &mut [ChunkCells] = &mut self.cells;
+        let mut base = 0usize;
+        for &s in slots {
+            let s = s as usize;
+            assert!(s >= base, "slots must be strictly increasing");
+            let (head, tail) = std::mem::take(&mut rest).split_at_mut(s - base + 1);
+            out.push(&mut head[s - base]);
+            rest = tail;
+            base = s + 1;
+        }
+        out
+    }
+
+    /// Remove a chunk, handing back its cells and whether they were dirty.
+    /// The slot is recycled; the cell data is cloned out (24 KiB), which is
+    /// fine at streaming rates.
+    pub fn remove(&mut self, coord: ChunkCoord) -> Option<(ChunkCells, bool)> {
+        let slot = self.index.remove(&coord)?;
+        let m = &mut self.meta[slot as usize];
+        m.loaded = false;
+        let dirty = m.dirty;
+        m.dirty = false;
+        let at = self
+            .active
+            .binary_search_by_key(&coord.key(), |&s| self.meta[s as usize].coord.key())
+            .expect("active list out of sync");
+        self.active.remove(at);
+        self.free.push(slot);
+        Some((self.cells[slot as usize].clone(), dirty))
+    }
+
+    /// Cells of a loaded chunk.
+    #[inline]
+    pub fn chunk(&self, c: ChunkCoord) -> Option<&ChunkCells> {
+        self.slot(c).map(|s| &self.cells[s as usize])
+    }
+
+    /// Mutable cells of a loaded chunk. Marks it dirty.
+    #[inline]
+    pub fn chunk_mut(&mut self, c: ChunkCoord) -> Option<&mut ChunkCells> {
+        let s = self.slot(c)? as usize;
+        self.meta[s].dirty = true;
+        Some(&mut self.cells[s])
+    }
+
+    /// Mark every loaded chunk dirty. Call after a phase that wrote to all
+    /// chunks via the slab directly.
+    pub fn mark_all_dirty(&mut self) {
+        for &s in &self.active {
+            self.meta[s as usize].dirty = true;
+        }
+    }
+
+    // ---- cell access (convenience; hot loops work on `ChunkCells` directly) ------------
+
+    /// `None` if the chunk is not loaded.
+    #[inline]
+    pub fn get(&self, p: Pos) -> Option<Cell> {
+        let (cc, i) = p.split();
+        let c = self.chunk(cc)?;
+        Some(Cell {
+            ground: c.ground[i],
+            feature: c.feature[i],
+            occupant: c.occupant[i],
+        })
+    }
+
+    /// Terrain permits standing here. `None` if not loaded.
+    #[inline]
+    pub fn walkable(&self, p: Pos) -> Option<bool> {
+        let (cc, i) = p.split();
+        self.chunk(cc).map(|c| c.walkable(i))
+    }
+
+    /// Terrain permits standing here and nobody is here. `None` if not loaded.
+    #[inline]
+    pub fn free(&self, p: Pos) -> Option<bool> {
+        let (cc, i) = p.split();
+        self.chunk(cc)
+            .map(|c| c.walkable(i) && c.occupant[i].is_none())
+    }
+
+    // ---- integrity ---------------------------------------------------------------------
+
+    /// Checksum of every loaded chunk. Hashed per chunk in parallel, combined
+    /// sequentially in coordinate order, so it is independent of thread count
+    /// and of slot assignment.
+    pub fn checksum(&self) -> u64 {
+        let per_chunk: Vec<u64> = self
+            .active
+            .par_iter()
+            .map(|&s| {
+                let m = &self.meta[s as usize];
+                splitmix64(
+                    self.cells[s as usize].hash()
+                        ^ ((m.coord.x as u32 as u64) << 32 | m.coord.y as u32 as u64),
+                )
+            })
+            .collect();
+        per_chunk
+            .iter()
+            .fold(0x5EED_5EED, |acc, &h| splitmix64(acc ^ h))
+    }
+}
+
+fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(seed, |h, &b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3)
     })
 }
@@ -279,83 +445,122 @@ mod tests {
     use super::*;
 
     #[test]
-    fn index_roundtrip_and_bounds() {
-        let s = Stage::new(7, 5);
-        for y in 0..5 {
-            for x in 0..7 {
-                let p = Pos::new(x, y);
-                assert_eq!(s.pos(s.idx(p)), p);
-                assert!(s.contains(p));
-            }
+    fn split_and_cell_roundtrip_including_negatives() {
+        for p in [
+            Pos::new(0, 0),
+            Pos::new(63, 63),
+            Pos::new(64, 0),
+            Pos::new(-1, -1),
+            Pos::new(-64, 5),
+            Pos::new(-65, -130),
+            Pos::new(1_000_003, -777_777),
+        ] {
+            let (cc, i) = p.split();
+            assert!(i < CHUNK_CELLS);
+            assert_eq!(cc.cell(i), p, "{p:?}");
         }
-        assert!(!s.contains(Pos::new(7, 0)));
-        assert!(!s.contains(Pos::new(0, 5)));
-        assert_eq!(s.offset(Pos::new(0, 0), -1, 0), None);
-        assert_eq!(s.offset(Pos::new(6, 4), 1, 0), None);
-        assert_eq!(s.offset(Pos::new(3, 3), -1, 1), Some(Pos::new(2, 4)));
+        assert_eq!(Pos::new(-1, -1).split().0, ChunkCoord::new(-1, -1));
+        assert_eq!(Pos::new(-1, -1).split().1, CHUNK_CELLS - 1);
+        assert_eq!(ChunkCoord::new(-1, 2).origin(), Pos::new(-64, 128));
     }
 
     #[test]
-    fn neighbors_are_clipped_and_ordered() {
-        let s = Stage::new(3, 3);
-        let corner: Vec<_> = s.neighbors4(Pos::new(0, 0)).collect();
-        assert_eq!(corner, vec![Pos::new(1, 0), Pos::new(0, 1)]);
-        let mid: Vec<_> = s.neighbors4(Pos::new(1, 1)).collect();
+    fn neighbors_are_ordered() {
+        let n: Vec<_> = Pos::new(0, 0).neighbors4().collect();
         assert_eq!(
-            mid,
+            n,
             vec![
+                Pos::new(0, -1),
                 Pos::new(1, 0),
-                Pos::new(2, 1),
-                Pos::new(1, 2),
-                Pos::new(0, 1)
+                Pos::new(0, 1),
+                Pos::new(-1, 0)
             ]
         );
+        assert_eq!(Pos::new(i32::MAX, 0).offset(1, 0), None);
     }
 
     #[test]
-    fn chunks_tile_the_stage_exactly() {
-        for h in [
-            1,
-            CHUNK_ROWS - 1,
-            CHUNK_ROWS,
-            CHUNK_ROWS + 1,
-            3 * CHUNK_ROWS + 5,
-        ] {
-            let s = Stage::new(10, h);
-            let n = s.ground.chunks(s.chunk_len()).count();
-            assert_eq!(n, s.chunk_count());
-            assert!(s.chunk_first_row(n - 1) < h);
+    fn insert_remove_keeps_active_sorted_and_recycles_slots() {
+        let mut s = Stage::new();
+        let a = s.insert(ChunkCoord::new(1, 1), ChunkCells::default(), false);
+        let b = s.insert(ChunkCoord::new(-3, 0), ChunkCells::default(), false);
+        let c = s.insert(ChunkCoord::new(0, 1), ChunkCells::default(), true);
+        assert_eq!((a, b, c), (0, 1, 2));
+        let order: Vec<_> = s.loaded_coords().collect();
+        assert_eq!(
+            order,
+            vec![
+                ChunkCoord::new(-3, 0),
+                ChunkCoord::new(0, 1),
+                ChunkCoord::new(1, 1)
+            ]
+        );
+        let (_, dirty) = s.remove(ChunkCoord::new(0, 1)).unwrap();
+        assert!(dirty);
+        assert_eq!(s.loaded_count(), 2);
+        assert!(!s.is_loaded(ChunkCoord::new(0, 1)));
+        // Recycled slot.
+        let d = s.insert(ChunkCoord::new(9, 9), ChunkCells::default(), false);
+        assert_eq!(d, 2);
+        assert_eq!(s.remove(ChunkCoord::new(42, 42)), None);
+    }
+
+    #[test]
+    fn cells_mut_at_gives_disjoint_borrows() {
+        let mut s = Stage::new();
+        for i in 0..5 {
+            s.insert_blank(ChunkCoord::new(i, 0), false);
         }
+        let mut views = s.cells_mut_at(&[0, 2, 4]);
+        for (k, c) in views.iter_mut().enumerate() {
+            c.ground[0] = if k == 1 { Ground::Water } else { Ground::Soil };
+        }
+        assert_eq!(s.cells[2].ground[0], Ground::Water);
+        assert_eq!(s.cells[0].ground[0], Ground::Soil);
+        assert_eq!(s.cells[4].ground[0], Ground::Soil);
+        assert!(s.cells_mut_at(&[4]).len() == 1);
+        assert!(s.cells_mut_at(&[]).is_empty());
     }
 
     #[test]
-    fn walkability_rules() {
-        let mut s = Stage::new(2, 2);
-        let c = s.idx(Pos::new(0, 0));
-        assert!(s.free(c));
-        s.feature[c.usize()] = Feature::Rock;
-        assert!(!s.walkable(c));
-        s.feature[c.usize()] = Feature::None;
-        s.ground[c.usize()] = Ground::Water;
-        assert!(!s.walkable(c));
-        s.ground[c.usize()] = Ground::Soil;
-        s.occupant[c.usize()] = ActorId(3);
-        assert!(s.walkable(c) && !s.free(c));
+    fn checksum_is_independent_of_slot_order() {
+        let mut cells = ChunkCells::default();
+        cells.ground[5] = Ground::Water;
+        let mut a = Stage::new();
+        a.insert(ChunkCoord::new(0, 0), cells.clone(), false);
+        a.insert(ChunkCoord::new(1, 0), ChunkCells::default(), false);
+        let mut b = Stage::new();
+        b.insert(ChunkCoord::new(1, 0), ChunkCells::default(), false);
+        b.insert(ChunkCoord::new(0, 0), cells, false);
+        assert_eq!(a.checksum(), b.checksum());
+        // But it does see position and content.
+        let mut c = Stage::new();
+        c.insert(ChunkCoord::new(0, 0), ChunkCells::default(), false);
+        c.insert(ChunkCoord::new(1, 0), ChunkCells::default(), false);
+        assert_ne!(a.checksum(), c.checksum());
+        let mut d = Stage::new();
+        d.insert(ChunkCoord::new(0, 1), ChunkCells::default(), false);
+        d.insert(ChunkCoord::new(1, 0), ChunkCells::default(), false);
+        assert_ne!(c.checksum(), d.checksum());
     }
 
     #[test]
-    fn checksum_sees_every_layer() {
-        let base = Stage::new(20, 40);
-        let h0 = base.checksum();
-        let mut s = base.clone();
-        s.ground[777] = Ground::Water;
-        assert_ne!(s.checksum(), h0);
-        let mut s = base.clone();
-        s.feature[777] = Feature::Rock;
-        assert_ne!(s.checksum(), h0);
-        let mut s = base.clone();
-        s.occupant[777] = ActorId(0);
-        assert_ne!(s.checksum(), h0);
-        assert_ne!(Stage::new(40, 20).checksum(), h0);
+    fn cell_queries_and_dirty_tracking() {
+        let mut s = Stage::new();
+        s.insert(ChunkCoord::new(0, 0), ChunkCells::default(), false);
+        let p = Pos::new(3, 4);
+        assert_eq!(s.free(p), Some(true));
+        assert_eq!(s.get(Pos::new(64, 0)), None);
+        let (cc, i) = p.split();
+        s.chunk_mut(cc).unwrap().feature[i] = Feature::Rock;
+        assert!(s.meta[0].dirty);
+        assert_eq!(s.walkable(p), Some(false));
+        s.chunk_mut(cc).unwrap().feature[i] = Feature::None;
+        s.chunk_mut(cc).unwrap().ground[i] = Ground::Water;
+        assert_eq!(s.walkable(p), Some(false));
+        s.chunk_mut(cc).unwrap().ground[i] = Ground::Soil;
+        s.chunk_mut(cc).unwrap().occupant[i] = ActorId(7);
+        assert_eq!((s.walkable(p), s.free(p)), (Some(true), Some(false)));
+        assert_eq!(s.get(p).unwrap().occupant, ActorId(7));
     }
 }

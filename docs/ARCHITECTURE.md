@@ -1,6 +1,7 @@
 # Architecture
 
-Status: Stage (terrain grid) built; actors and systems next. This file records decisions that
+Status: Stage (chunked, unbounded terrain grid), streaming, persistence and an ASCII
+camera are built; actors and systems next. This file records decisions that
 are already made and the shape the design must fit into.
 
 ## Decisions
@@ -15,12 +16,16 @@ are already made and the shape the design must fit into.
 | 6 | dev profile = opt-level 1 + Zig ReleaseSafe | opt-level 0 sim is unusable; ReleaseSafe keeps Zig bounds checks | If debug builds get too slow: `--profile fast` |
 | 7 | `target-cpu=native` / `-Dcpu=native` | Sim runs where it's built, for now | When shipping binaries: switch to baseline + runtime dispatch |
 | 8 | Git local only, commits on `main` | Solo, early | When a remote exists |
-| 9 | Stage is a fixed `width x height` grid, row-major, one flat `Vec` per layer (`ground`, `feature`, `occupant`) | SoA: a system touches only the layers it needs; any layer is a byte slice for Zig | If the world must be unbounded/streamed: chunk-major tiles behind the same API |
-| 10 | Parallel unit on the stage = a band of `CHUNK_ROWS` rows (`Stage::chunk_len()` cells) | Contiguous in memory so `par_chunks_mut` works directly; boundaries on row edges so 2D neighbour systems need a 1-row halo | If bench shows square tiles win on cache for neighbour-heavy systems |
+| 9 | Stage is an **unbounded** grid stored as 64x64 **chunks**; each chunk holds one contiguous array per layer (`ChunkCells`); cell coords are `i32` | The initial map has a known size but the world must grow in any direction and stream; a chunk is at once the parallel unit, the streaming unit and the save unit. Replaced the flat row-major `Vec` + row-band design of the first Stage commit | If a system needs finer parallel granularity than a chunk: split inside the chunk by rows, never re-layout |
+| 10 | Loaded chunks live in a slab (`Vec<ChunkCells>` + `Vec<ChunkMeta>`) with a free list; `HashMap` for lookup only; `active` = slots sorted by coord is the **only** iteration order allowed to affect results | Slot numbers depend on load history; sorting by coordinate makes every merge and the checksum independent of it. Meta is a separate slab so a double-buffered phase can read `cells` while writing `cells_next` | If the hash lookup shows up in profiles: swap for a 2-level array keyed by chunk coord |
 | 11 | Two terrain layers: `Ground` (what a cell is: Soil/Water) and `Feature` (what rests on it: None/Rock) | Rock on soil and rock on water are the same rock; keeps enum products from exploding | If features need per-cell state beyond a tag: add a parallel `Vec` for that state |
 | 12 | At most one actor per cell (`occupant: Vec<ActorId>`, `ActorId::NONE` = empty) | Movement/collision become a per-cell ownership question with no spatial index | If stacking is a game requirement: occupant becomes a head index into a per-actor linked list |
 | 13 | Worldgen is a pure function of `(seed, x, y)` via `hash_cell` + value noise; no sequential state | Bit-identical for any thread count *and* any chunk size; the test recomputes every cell serially | If gen needs global passes (rivers, erosion): those become phases with their own determinism tests |
-| 14 | Rendering lives in `app` (`render/ascii.rs`); `sim-core` has no glyphs | Layering; ASCII is a stand-in for a real backend | When a windowed renderer lands |
+| 14 | Rendering lives in `app` (`render/ascii.rs`); `sim-core` has no glyphs. Renders span by span (one chunk lookup per row-chunk pair) | Layering; ASCII is a stand-in for a real backend | When a windowed renderer lands |
+| 15 | Streaming: `World::ensure_loaded(focus, LoadPolicy)` loads chunks within `load` chunks of the focus and unloads beyond `unload` (`unload > load` = hysteresis). Only loaded chunks simulate | Loaded set is a pure function of inputs, so replays stay bit-identical; the camera is just one source of focus | When actors wander off-screen: add per-actor focus points (or a "simulation bubble") to the same call |
+| 16 | Persistence = a directory: `world.wmc` meta + `chunks/<x>_<y>.wmcc`, raw little-endian layer dumps, atomic rename on write. **Only dirty chunks are written**; clean ones are regenerated from the seed | Zero-copy format (memcpy of `ChunkCells`), saves of an unexplored world are bytes not megabytes. `FORMAT_VERSION` + `CHUNK_BITS` fingerprint refuse mismatched files | When a save has thousands of chunk files: region files (32x32 chunks per file with an offset table) |
+| 17 | Camera is app state, saved in `camera.txt` beside the world, not inside the sim | The sim must not know where a player is looking; several viewers must be possible | Never |
+| 18 | Terminal I/O via `crossterm` (only non-sim dependency added so far) | Raw mode needs termios; the rules forbid `unsafe` outside `zig-kernels` | When a windowed renderer replaces the TUI |
 
 ## Layers
 
@@ -36,20 +41,30 @@ Dependencies point downward only. `sim-core` never knows about rendering.
 ## Stage layout
 
 ```
-Stage { width, height,
-        ground:   Vec<Ground>   u8  per cell   Soil | Water
-        feature:  Vec<Feature>  u8  per cell   None | Rock
-        occupant: Vec<ActorId>  u32 per cell   NONE | dense actor id }
-index(x, y) = y * width + x        chunk i = rows [i*CHUNK_ROWS, (i+1)*CHUNK_ROWS)
+world cell (x, y): i32     chunk = (x >> 6, y >> 6)      local = (y & 63) * 64 + (x & 63)
+
+Stage { cells:  Vec<ChunkCells>   slot -> { ground: [Ground; 4096]   u8   Soil | Water
+                                            feature: [Feature; 4096] u8   None | Rock
+                                            occupant: [ActorId; 4096] u32  NONE | actor }
+        meta:   Vec<ChunkMeta>    slot -> { coord, loaded, dirty }
+        index:  HashMap<ChunkCoord, slot>   lookup only
+        active: Vec<slot>                   sorted by (y, x): THE iteration order }
 ```
 
+A phase is `stage.cells.par_iter_mut()` (or `cells_mut_at(slots)` for a subset). Cross-chunk
+reads come later via a second slab (`cells_next`) so all of `cells` is readable during a write.
 Walkability: `Ground::walkable && !Feature::blocks` (soil yes, water no, rock blocks). One place
-to change. Per-cell scalars (moisture, heat, mana...) are added as further `Vec<T>` layers.
+to change. Per-cell scalars (moisture, heat, mana...) are further arrays in `ChunkCells`.
+
+Streaming per frame (`app/tui.rs`): load radius = chunks needed to cover half the view + 1,
+unload radius = load + 2. Unload of a dirty chunk writes it; without a store, dirty chunks stay.
 
 ## Open questions (fill in as the design lands)
 
 - Actor model: SoA arrays keyed by `ActorId` with a free list; what components?
 - Tick model: fixed timestep? sub-stepping? interpolation for render?
 - Movement/conflict resolution when two actors want one cell (per-chunk intents + in-order merge?)
+- Actors crossing chunk borders / standing in a chunk that gets unloaded (freeze with the chunk?)
+- Cross-chunk neighbour reads for cell systems: `cells_next` slab + halo, or stitched 66x66 scratch?
 - Rendering backend / windowing crate? (ASCII for now)
 - Save/replay format?

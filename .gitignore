@@ -16,3 +16,6 @@ zig-cache/
 *.profraw
 /perf/
 /flamegraph*.svg
+
+# local save games
+saves/

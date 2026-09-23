@@ -6,13 +6,20 @@
 //! `/parallel-sim` for the patterns.
 //!
 //! Modules:
-//! - [`stage`]: the 2D grid every actor stands on (ground, features, occupancy).
+//! - [`stage`]: the chunked, unbounded 2D grid every actor stands on.
 //! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
-//! - [`world`]: seed + tick + stage (+ actors, later) and the phase sequence.
+//! - [`store`]: save directory format (meta + per-chunk files).
+//! - [`world`]: seed + tick + stage (+ actors, later), streaming, the phase
+//!   sequence.
 
 pub mod rng;
 pub mod stage;
+pub mod store;
 pub mod world;
 
-pub use stage::{ActorId, CellIdx, Feature, Ground, Pos, Stage};
-pub use world::World;
+pub use stage::{
+    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, Feature, Ground,
+    Pos, Stage,
+};
+pub use store::Store;
+pub use world::{LoadPolicy, StreamStats, World, WorldConfig};

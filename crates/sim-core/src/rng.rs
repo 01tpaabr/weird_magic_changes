@@ -24,10 +24,11 @@ pub fn splitmix64(mut z: u64) -> u64 {
     z ^ (z >> 31)
 }
 
-/// Pure hash of a cell coordinate for one named `stream`.
+/// Pure hash of a (signed) cell coordinate for one named `stream`.
 #[inline]
-pub fn hash_cell(seed: u64, stream: u64, x: u32, y: u32) -> u64 {
-    let xy = (u64::from(x) << 32) | u64::from(y);
+pub fn hash_cell(seed: u64, stream: u64, x: i32, y: i32) -> u64 {
+    // Bit patterns, so negative coords hash as well as positive ones.
+    let xy = (u64::from(x as u32) << 32) | u64::from(y as u32);
     splitmix64(seed ^ splitmix64(stream) ^ splitmix64(xy))
 }
 
@@ -53,11 +54,12 @@ mod tests {
         assert_ne!(hash_cell(1, 0, 3, 4), hash_cell(1, 1, 3, 4));
         assert_ne!(hash_cell(1, 0, 3, 4), hash_cell(1, 0, 4, 3));
         assert_ne!(hash_cell(1, 0, 3, 4), hash_cell(2, 0, 3, 4));
+        assert_ne!(hash_cell(1, 0, -3, 4), hash_cell(1, 0, 3, 4));
     }
 
     #[test]
     fn unit_f32_in_range() {
-        for i in 0..10_000u32 {
+        for i in -5_000..5_000i32 {
             let f = unit_f32(hash_cell(9, 9, i, 0));
             assert!((0.0..1.0).contains(&f));
         }
