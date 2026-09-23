@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Fast gate only: formatting + lints. Tests are NOT run here on purpose
+# (keep commits cheap; `make ci` is the full gate).
+# Skip with: git commit --no-verify
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+
+changed=$(git diff --cached --name-only --diff-filter=ACMR)
+if echo "$changed" | grep -qE '\.(rs|toml)$'; then
+  cargo fmt --all -- --check || { echo "run: make fmt"; exit 1; }
+  cargo clippy --workspace --all-targets -- -D warnings
+fi
+if echo "$changed" | grep -qE '\.zig$'; then
+  (cd zig && zig fmt --check .) || { echo "run: make fmt"; exit 1; }
+  (cd zig && zig build test)
+fi

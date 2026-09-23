@@ -1,0 +1,13 @@
+[package]
+name = "zig-kernels"
+description = "Safe Rust wrappers around the Zig kernel library (zig/), built and linked via build.rs"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+links = "wmc_kernels"
+
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+# Rust
+/target/
+**/*.rs.bk
+# Zig
+.zig-cache/
+zig-out/
+zig-cache/
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+# Claude local overrides
+.claude/settings.local.json
+# Profiling / bench output
+*.profraw
+/perf/
+/flamegraph*.svg

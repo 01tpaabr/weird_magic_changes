@@ -1,0 +1,10 @@
+# Workspace-wide cargo settings.
+# target-cpu=native: this is a sim that will live on the machine it is built on; let
+# the compiler use every SIMD lane the CPU has. Drop this line if shipping binaries.
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[alias]
+# Short aliases used by the Makefile and by agents.
+lint = "clippy --workspace --all-targets -- -D warnings"
+t = "test --workspace"

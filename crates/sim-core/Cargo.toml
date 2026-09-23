@@ -1,0 +1,21 @@
+[package]
+name = "sim-core"
+description = "Simulation kernel: world state, systems, deterministic tick"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+rayon.workspace = true
+zig-kernels.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "tick"
+harness = false

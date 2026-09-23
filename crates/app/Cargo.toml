@@ -1,0 +1,19 @@
+[package]
+name = "app"
+description = "Game / sim entry point"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "wmc"
+path = "src/main.rs"
+
+[dependencies]
+sim-core.workspace = true
+zig-kernels.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true
