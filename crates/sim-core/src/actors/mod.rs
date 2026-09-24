@@ -12,11 +12,18 @@
 //! appended during a tick and removed only by [`ActorsMut::compact`] at its
 //! end. Identity across ticks is [`ActorMind::uid`]. Both records are Pod so
 //! a chunk's actors save as one memcpy per array (`store`).
+//!
+//! The kind table and the programs live in `crate::rules`; the systems that
+//! run them each tick in [`systems`].
+
+pub mod systems;
 
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
 use crate::stage::{ActorId, CHUNK_CELLS};
+
+pub use systems::{Intent, Intents, Scratch};
 
 /// Need counters per actor, named per kind by its rules file.
 pub const NEED_SLOTS: usize = 4;
@@ -109,56 +116,6 @@ impl ChunkMinds {
         Self {
             rows: Vec::with_capacity(RESERVE),
         }
-    }
-}
-
-/// One kind of actor: the entry in the kind table a row's `kind` indexes.
-/// Today a name and a glyph (opaque to the sim; only the palette reads it);
-/// the rules compiler will grow it into the program's property table.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KindDef {
-    pub name: String,
-    pub glyph: u8,
-}
-
-/// The kind table: `row.kind` indexes `defs`. Saved by name in `world.wmc`;
-/// a save whose names do not match this build is refused. Built in for now
-/// (`Kinds::builtin`), read from rules files once the compiler lands.
-#[derive(Resource, Debug, Clone, PartialEq, Eq)]
-pub struct Kinds {
-    pub defs: Vec<KindDef>,
-    /// `defs[i].glyph`, for the renderer's per-cell lookup.
-    pub glyphs: Vec<u8>,
-}
-
-/// Kind index of the seed placed by worldgen.
-pub const SEED: u16 = 0;
-
-impl Kinds {
-    pub fn new(defs: Vec<KindDef>) -> Self {
-        assert!(defs.len() < usize::from(u16::MAX), "too many kinds");
-        let glyphs = defs.iter().map(|d| d.glyph).collect();
-        Self { defs, glyphs }
-    }
-
-    /// The kinds this build knows.
-    pub fn builtin() -> Self {
-        Self::new(vec![KindDef {
-            name: "seed".into(),
-            glyph: b',',
-        }])
-    }
-
-    pub fn len(&self) -> usize {
-        self.defs.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.defs.is_empty()
-    }
-
-    pub fn names(&self) -> impl Iterator<Item = &str> {
-        self.defs.iter().map(|d| d.name.as_str())
     }
 }
 
@@ -277,6 +234,7 @@ pub fn hash(pubs: &[ActorPub], minds: &[ActorMind]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::rules::SEED;
     use crate::stage::ChunkData;
 
     fn mind(uid: u64) -> ActorMind {
@@ -407,14 +365,5 @@ mod tests {
         d.actors.rows.swap(0, 1);
         d.minds.rows.swap(0, 1);
         assert_ne!(h, hash(&d.actors.rows, &d.minds.rows));
-    }
-
-    #[test]
-    fn kinds_table_exposes_glyphs_by_index() {
-        let k = Kinds::builtin();
-        assert_eq!(k.len(), 1);
-        assert!(!k.is_empty());
-        assert_eq!(k.glyphs[usize::from(SEED)], b',');
-        assert_eq!(k.names().collect::<Vec<_>>(), vec!["seed"]);
     }
 }

@@ -12,9 +12,10 @@
 //! - the **streaming unit**: loaded around the camera, unloaded far away;
 //! - the **save unit**: one file per modified chunk (see `crate::store`).
 //!
-//! A loaded chunk is an entity with three components: [`ChunkCoord`] (where),
+//! A loaded chunk is an entity with these components: [`ChunkCoord`] (where),
 //! [`ChunkCells`] (the layers; Bevy keeps all of them in one dense table
-//! column, i.e. a `Vec<ChunkCells>`), [`ChunkMeta`] (dirty flag, last tick).
+//! column, i.e. a `Vec<ChunkCells>`), the actor rows, [`ChunkMeta`] (dirty
+//! flag, last tick), and per-tick scratch (`Intents`, `Scratch`).
 //! Entity ids and table order depend on load history, so **nothing observable
 //! may depend on them**: every sequential merge and the checksum walk
 //! [`Stage::active`], the loaded set sorted by chunk coordinate.
@@ -40,7 +41,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
 
-use crate::actors::{self, ChunkActors, ChunkMinds};
+use crate::actors::{self, ChunkActors, ChunkMinds, Intents, Scratch};
 use crate::par::par_map;
 use crate::rng::splitmix64;
 
@@ -375,7 +376,13 @@ pub fn insert(
     last_ticked: u64,
 ) -> Entity {
     let e = world
-        .spawn((coord, data, ChunkMeta { dirty, last_ticked }))
+        .spawn((
+            coord,
+            data,
+            ChunkMeta { dirty, last_ticked },
+            Intents::default(),
+            Scratch::default(),
+        ))
         .id();
     world.resource_mut::<Stage>().add(coord, e);
     e

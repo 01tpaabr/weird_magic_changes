@@ -11,9 +11,10 @@
 //! dirty so it is saved rather than regenerated.
 
 use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
-use crate::actors::{ActorMind, SEED};
+use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
+use crate::rules::SEED;
 use bytemuck::Zeroable;
 
 /// Hash streams used by generation. Never reuse a value elsewhere.

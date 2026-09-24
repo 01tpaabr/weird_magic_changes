@@ -129,11 +129,19 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
     let wall = t0.elapsed();
     let to = sim::tick(&world);
     let loaded = world.resource::<Stage>().loaded_count();
-    let actors: usize = world
-        .query::<&ChunkActors>()
-        .iter(&world)
-        .map(|a| a.rows.len())
-        .sum();
+    let kinds = world.resource::<Kinds>().clone();
+    let mut per_kind = vec![0usize; kinds.len()];
+    for a in world.query::<&ChunkActors>().iter(&world) {
+        for r in &a.rows {
+            per_kind[usize::from(r.kind)] += 1;
+        }
+    }
+    let actors: usize = per_kind.iter().sum();
+    let by_kind: Vec<String> = kinds
+        .names()
+        .zip(&per_kind)
+        .map(|(n, c)| format!("{n} {c}"))
+        .collect();
     let checksum = sim::checksum(&mut world);
 
     let mut out = std::io::stdout().lock();
@@ -143,7 +151,11 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         Clock::at(from),
         Clock::at(to)
     )?;
-    writeln!(out, "chunks:    {loaded} ({actors} actors)")?;
+    writeln!(
+        out,
+        "chunks:    {loaded} ({actors} actors: {})",
+        by_kind.join(", ")
+    )?;
     writeln!(
         out,
         "wall:      {wall:.2?} ({:.2} µs/tick, {} threads)",

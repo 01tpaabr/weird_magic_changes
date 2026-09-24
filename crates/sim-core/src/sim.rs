@@ -25,7 +25,8 @@ use std::io;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
-use crate::actors::{ChunkActors, ChunkMinds, Kinds};
+use crate::actors::{ChunkActors, ChunkMinds, systems};
+use crate::rules::Kinds;
 use crate::stage::worldgen::{GenParams, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{Store, WorldMeta};
@@ -61,12 +62,19 @@ pub struct Tick(pub u64);
 #[derive(ScheduleLabel, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SimTick;
 
-/// Phases of a tick, in order. Systems go in one of these; systems in the
-/// same phase that touch the same data must be ordered explicitly.
+/// Phases of a tick, in order (`docs/ACTORS.md` §1). Systems go in one of
+/// these; systems in the same phase that touch the same data must be
+/// ordered explicitly.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// Cell and actor systems (none yet; the stage is static until actors land).
+    /// Cell systems (none yet).
     Simulate,
+    /// Every due actor runs its program; writes own minds + intents.
+    Think,
+    /// Own-chunk resolution: claims, die/become/spawn, result codes.
+    Apply,
+    /// Dead rows removed.
+    Compact,
     /// Bookkeeping: advance the tick.
     Advance,
 }
@@ -111,8 +119,22 @@ pub fn install(world: &mut World) {
         ambiguity_detection: LogLevel::Error,
         ..ScheduleBuildSettings::default()
     });
-    schedule.configure_sets((Phase::Simulate, Phase::Advance).chain());
-    schedule.add_systems(advance_tick.in_set(Phase::Advance));
+    schedule.configure_sets(
+        (
+            Phase::Simulate,
+            Phase::Think,
+            Phase::Apply,
+            Phase::Compact,
+            Phase::Advance,
+        )
+            .chain(),
+    );
+    schedule.add_systems((
+        systems::think.in_set(Phase::Think),
+        systems::apply.in_set(Phase::Apply),
+        systems::compact.in_set(Phase::Compact),
+        advance_tick.in_set(Phase::Advance),
+    ));
     world.add_schedule(schedule);
 }
 
@@ -310,29 +332,33 @@ pub fn ensure_loaded(
 /// Load `coords` (none may be loaded already): from the store when saved
 /// there, generated otherwise. Returns `(generated, read)`.
 ///
-/// Actor rows are stamped here: a loaded chunk's rows get `last_think = now`
-/// (they were frozen with the chunk, decision 29), a generated chunk's rows
-/// are born now. A generated chunk with rows is **dirty** from the start:
-/// its rows are state (their birth tick, and every think from now on), so
-/// it is saved on unload, never regenerated.
+/// Actor rows are stamped here. A loaded chunk was frozen from the tick it
+/// was written (`last_ticked`) until now: its rows' `last_think` and `born`
+/// shift forward by that interval, so no need decays and nobody ages while
+/// off screen (decision 29), and a reopen at the save tick is bit-identical
+/// to never stopping. A generated chunk's rows are born now, needs full,
+/// and the chunk is **dirty** from the start: its rows are state (their
+/// birth tick, and every think from now on), so it is saved on unload,
+/// never regenerated.
 fn load_chunks(
     world: &mut World,
     coords: &[ChunkCoord],
     store: Option<&Store>,
 ) -> io::Result<(usize, usize)> {
     let now = tick(world);
-    let now32 = now as u32;
-    let kinds = world.resource::<Kinds>().len();
+    let nkinds = world.resource::<Kinds>().len();
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
     for &c in coords {
         match store.map(|s| s.read_chunk(c)).transpose()?.flatten() {
             Some(mut saved) => {
-                saved.data.validate(kinds).map_err(|e| {
+                saved.data.validate(nkinds).map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("chunk {c:?}: {e}"))
                 })?;
+                let frozen = now.wrapping_sub(saved.last_ticked) as u32;
                 for m in &mut saved.data.minds.rows {
-                    m.last_think = now32;
+                    m.last_think = m.last_think.wrapping_add(frozen);
+                    m.born = m.born.wrapping_add(frozen);
                 }
                 stage::insert(world, c, saved.data, false, saved.last_ticked);
                 read += 1;
@@ -345,13 +371,17 @@ fn load_chunks(
         (c.seed, c.params)
     };
     // Every chunk is a pure function of (seed, coord): generated in parallel,
-    // spawned in coordinate order.
-    let chunks: Vec<ChunkData> = generate_many(seed, &params, &to_gen);
-    for (c, mut data) in to_gen.iter().zip(chunks) {
-        for m in &mut data.minds.rows {
-            m.born = now32;
-            m.last_think = now32;
+    // spawned in coordinate order. Its rows are born now, needs full.
+    let mut chunks: Vec<ChunkData> = generate_many(seed, &params, &to_gen);
+    {
+        let kinds = world.resource::<Kinds>();
+        for data in &mut chunks {
+            for (p, m) in data.actors.rows.iter().zip(&mut data.minds.rows) {
+                *m = systems::newborn(kinds, p.kind, m.uid, now);
+            }
         }
+    }
+    for (c, data) in to_gen.iter().zip(chunks) {
         let inhabited = !data.actors.rows.is_empty();
         stage::insert(world, *c, data, inhabited, now);
     }
@@ -359,9 +389,11 @@ fn load_chunks(
 }
 
 /// Checksum of all loaded state, for determinism tests and bug reports.
+/// The rules are an input: their hash is folded in.
 pub fn checksum(world: &mut World) -> u64 {
     let t = tick(world);
-    crate::rng::splitmix64(stage::checksum(world) ^ t)
+    let rules = world.resource::<Kinds>().hash;
+    crate::rng::splitmix64(crate::rng::splitmix64(stage::checksum(world) ^ t) ^ rules)
 }
 
 #[cfg(test)]
@@ -497,46 +529,47 @@ mod tests {
                     .all(|r| r.born == born && r.last_think == born)
             );
         }
-        // Save everything, reopen, load the same region: bit-identical, and
-        // the rows say they were frozen at the tick they were reloaded.
+        // Save everything, reopen at the same tick, load the same region:
+        // bit-identical.
         let store = tmp_store("inhabited");
         step(&mut w);
         step(&mut w);
         let expect = checksum(&mut w);
         let n = save(&mut w, &store).unwrap();
         assert_eq!(n, 6, "every inhabited chunk is written");
-        let mut back = open_world(&store).unwrap().unwrap();
-        step(&mut back);
         let policy = LoadPolicy { load: 1, unload: 1 };
+        let prune = |back: &mut World| {
+            let row2: Vec<ChunkCoord> = back
+                .resource::<Stage>()
+                .loaded_coords()
+                .filter(|c| c.y == 2)
+                .collect();
+            for c in row2 {
+                stage::remove(back, c);
+            }
+        };
+        let mut back = open_world(&store).unwrap().unwrap();
         let s = ensure_loaded(&mut back, Pos::new(64, 64), policy, Some(&store)).unwrap();
         assert_eq!((s.read, s.generated), (6, 3));
-        let row2: Vec<ChunkCoord> = back
-            .resource::<Stage>()
-            .loaded_coords()
-            .filter(|c| c.y == 2)
-            .collect();
-        for c in row2 {
-            stage::remove(&mut back, c);
+        prune(&mut back);
+        assert_eq!(checksum(&mut back), expect);
+        // Reopened later: the rows were frozen meanwhile, so their clocks
+        // shift by exactly the frozen interval (here: 3 ticks).
+        let mut later = open_world(&store).unwrap().unwrap();
+        for _ in 0..3 {
+            step(&mut later);
         }
-        // Freeze: last_think is the reload tick, born is untouched, so the
-        // checksum differs from the continuous run by exactly that stamp.
-        let reload = tick(&back) as u32;
-        for m in back.query::<&ChunkMinds>().iter(&back) {
+        ensure_loaded(&mut later, Pos::new(64, 64), policy, Some(&store)).unwrap();
+        prune(&mut later);
+        let saved_at = tick(&w) as u32;
+        for m in later.query::<&ChunkMinds>().iter(&later) {
             assert!(
                 m.rows
                     .iter()
-                    .all(|r| r.born == born && r.last_think == reload)
+                    .all(|r| r.born == born + 3 && r.last_think + 2 >= saved_at + 3)
             );
         }
-        assert_ne!(checksum(&mut back), expect);
-        for mut m in back.query::<&mut ChunkMinds>().iter_mut(&mut back) {
-            for r in &mut m.rows {
-                r.last_think = born;
-            }
-        }
-        // Same tick as the saved world for the comparison.
-        step(&mut w);
-        assert_eq!(checksum(&mut back), checksum(&mut w));
+        assert_ne!(checksum(&mut later), expect);
         // A save from a build with other kinds is refused.
         let mut m = meta(&w);
         m.kinds = vec!["seed".into(), "gremlin".into()];
@@ -547,6 +580,104 @@ mod tests {
                 .to_string()
                 .contains("kinds")
         );
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    fn count_kinds(w: &mut World) -> Vec<usize> {
+        let n = w.resource::<Kinds>().len();
+        let mut counts = vec![0; n];
+        for a in w.query::<&ChunkActors>().iter(w) {
+            for r in &a.rows {
+                counts[usize::from(r.kind)] += 1;
+            }
+        }
+        counts
+    }
+
+    /// Seeds become trees, trees drop seeds: the forest changes and spreads,
+    /// only onto free walkable cells, with every row invariant intact.
+    #[test]
+    fn a_forest_grows_and_spreads() {
+        use crate::rules::{SEED, TREE};
+        let mut w = new_world(&WorldConfig {
+            width: 128,
+            height: 128,
+            ..cfg_seeded(31)
+        });
+        let start = count_kinds(&mut w);
+        assert!(start[usize::from(SEED)] > 0 && start[usize::from(TREE)] == 0);
+        for _ in 0..crate::time::days(4) {
+            step(&mut w);
+        }
+        let end = count_kinds(&mut w);
+        assert!(
+            end[usize::from(TREE)] > 0,
+            "seeds by water became trees: {end:?}"
+        );
+        assert!(
+            end[usize::from(SEED)] + end[usize::from(TREE)] != start[usize::from(SEED)],
+            "seeds died away from water and trees dropped new ones: {start:?} -> {end:?}"
+        );
+        let kinds = w.resource::<Kinds>().len();
+        for (cells, a, m) in w
+            .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
+            .iter(&w)
+        {
+            crate::actors::validate(&cells.occupant, &a.rows, &m.rows, kinds).unwrap();
+            for r in &a.rows {
+                assert!(cells.walkable(usize::from(r.cell)));
+            }
+            for mind in &m.rows {
+                assert!(mind.needs[0] > 0, "a living actor has water");
+            }
+        }
+        // Reproducible from scratch after thousands of ticks.
+        let mut again = new_world(&WorldConfig {
+            width: 128,
+            height: 128,
+            ..cfg_seeded(31)
+        });
+        for _ in 0..crate::time::days(4) {
+            step(&mut again);
+        }
+        assert_eq!(checksum(&mut w), checksum(&mut again));
+        assert_eq!(count_kinds(&mut again), end);
+    }
+
+    /// Save at T, reopen, step to T+N: the same as never stopping (the
+    /// freeze stamp is the reload tick, which here is the save tick).
+    #[test]
+    fn reload_mid_run_continues_identically() {
+        let store = tmp_store("mid-run");
+        let mut w = new_world(&cfg_seeded(8));
+        let half = crate::time::hours(30);
+        for _ in 0..half {
+            step(&mut w);
+        }
+        save(&mut w, &store).unwrap();
+        let mut back = open_world(&store).unwrap().unwrap();
+        ensure_loaded(
+            &mut back,
+            Pos::new(64, 64),
+            LoadPolicy { load: 1, unload: 1 },
+            Some(&store),
+        )
+        .unwrap();
+        let row2: Vec<ChunkCoord> = back
+            .resource::<Stage>()
+            .loaded_coords()
+            .filter(|c| c.y == 2)
+            .collect();
+        for c in row2 {
+            stage::remove(&mut back, c);
+        }
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        for _ in 0..half {
+            step(&mut w);
+            step(&mut back);
+        }
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        assert_eq!(count_kinds(&mut back), count_kinds(&mut w));
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

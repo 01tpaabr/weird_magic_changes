@@ -88,7 +88,9 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **RNG**: counter-based, no stream state: draw `n` for `uid` at `tick` is
   `splitmix64(splitmix64(seed ^ STREAM_THINK ^ splitmix64(tick) ^ uid) + n)`. Claim key
   `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`.
-- **Frozen chunks**: on load `last_think = now` (decision 29: freeze, not catch-up).
+- **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
+  (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
+  bit-identical to never stopping (decision 29: freeze, not catch-up).
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
@@ -275,7 +277,7 @@ slot range inside the chunk), or a border stampede (bucket outboxes by target ch
 | stagger | per actor `uid` | organic motion, no phase jump on migration |
 | social bytes | `signal`, `look` in the row from commit one | avoids a format bump for the first social creature |
 | public surface | kind, look, signal, position | an actor controls what it broadcasts; needs stay private |
-| off-screen | freeze | decision 25 as it stands |
+| off-screen | freeze (clocks shift by the frozen interval) | decision 25 as it stands; reload at the save tick equals the continuous run |
 | borders | home advantage | one asymmetric case; the symmetric protocol is the hatch |
 | rows | `Vec` + compaction, not fixed slabs or a free list | dense scans, no hidden capacity, no mid-tick slot reuse |
 

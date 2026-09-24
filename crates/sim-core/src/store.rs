@@ -352,7 +352,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::actors::SEED;
+    use crate::rules::SEED;
     use crate::stage::worldgen::generate_chunk;
     use crate::stage::{ActorId, Feature, Ground};
 
