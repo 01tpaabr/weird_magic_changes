@@ -2,9 +2,9 @@
 
 Status: Stage (chunked, unbounded terrain grid), streaming, persistence, a windowed
 ASCII renderer with a WASD camera, and the time model (integer ticks, day/night, speed
-control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27); actors and systems
-next. This file records decisions that are already made and the shape the design must fit
-into. Rows superseded by the Bevy move are struck through and kept for the record.
+control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27). Actors are designed
+(`ACTORS.md`, decisions 28-30) and being built in its §11 order. This file records
+decisions that are already made and the shape the design must fit into. Rows superseded by the Bevy move are struck through and kept for the record.
 
 ## Decisions
 
@@ -37,6 +37,9 @@ into. Rows superseded by the Bevy move are struck through and kept for the recor
 | 25 | Save format v2: header carries `TICKS_PER_DAY` (mismatch = refused), each chunk file carries `last_ticked` (the world tick it was written at, also kept in `ChunkMeta`). Unloaded chunks are **frozen**; nothing catches up on load yet | Whether off-screen chunks grow while away is undecided until actors exist; recording the tick they froze at costs 8 bytes and keeps both answers open. Old dev saves are simply refused | When the actor decision lands: per-system `catch_up(elapsed)` on load, exact because time is integers |
 | 26 | Day/night is rendered in phase 1 (`render_cells` takes `light: u8`): `palette::brightness(daylight)` maps sim light to `NIGHT_FLOOR (0x66)..=255` and every cell colour is scaled per channel with integer math; the status bar and the tile upload are untouched. `wmc run <dir> <ticks>` steps headless and prints rate + checksum (`WMC_THREADS=1` vs default must agree) | 14k cells per frame is negligible, keeps the tile phase pure, and the status text stays readable at night. `run` is the determinism gate and tick bench in one command | If lighting becomes per cell (torches, shade): the light becomes a per-cell layer in `ChunkCells` that phase 1 reads, same place |
 | 27 | **The engine is Bevy 0.19** (2026-09-23; the Zig kernels, rayon, winit+softbuffer and the `zig-kernels` crate are gone). `sim-core` depends on `bevy_ecs` + `bevy_tasks` only; `app` on the `bevy` umbrella with trimmed features. A tick is the `SimTick` schedule: `Phase` sets chained, systems inside a phase with disjoint access (`ambiguity_detection = Error` refuses anything else), chunks iterated with `Query::par_iter_mut`. Speed/pause stay in `SimClock`; `Time` is read only for the camera and the clock. Thread count via `WMC_THREADS` -> `TaskPoolPlugin`/`init_task_pool`; the determinism gate is cross-process (`crates/app/tests/determinism.rs` runs `wmc run` with 1/3/8 threads) because the compute pool is one per process | The project was always meant to be Rust + Bevy. Bevy's executor gives system-level parallelism from declared data access, its tables give the SoA slab, `par_iter_mut` gives the chunk phase, and the renderer takes the pixel work off the CPU; the sim keeps its own clock so speed, budget and stepping stay ours and deterministic | If a system needs finer parallel granularity than a chunk entity: `par_iter_mut` over a `ChunkCells` sub-range component, never a re-layout. If Bevy's executor ordering ever shows as a perf problem: `Schedule::set_executor(SingleThreadedExecutor)` on `SimTick` is a one-liner and bit-identical |
+| 28 | **Actors are rows in the chunk they stand on** (`ChunkActors` = 12-byte public `ActorPub` rows, `ChunkMinds` = 88-byte private `ActorMind` rows, both Pod, same order), never entities; `occupant` packs `(kind, slot)`; identity across ticks is a hashed `uid`, never a slot. A kind is a rules file compiled once into shared bytecode. Cadence stagger is **per actor** (`uid` low bits), amending 23's "by chunk coordinate" | The chunk already is the parallel, streaming and save unit, so actors inside it get all three for free; two components let Think read every chunk's public rows while writing its own minds; per-actor stagger moves a flock organically and a migrant keeps its rhythm. Full design: `ACTORS.md` | If the 12-byte due-scan ever shows in a profile: per-chunk "next due tick" cache, still keyed on uids |
+| 29 | Unloaded chunks **freeze**: on load `last_think = now`, needs do not decay for the frozen interval | Decision 25 as it stands; off-screen populations never starve while the player is away | If fairness to off-screen plants matters: leave `last_think` alone and add growth catch-up in the same commit (both one line) |
+| 30 | Conflicts are settled by state-derived keys, never by thread or slot: in-chunk claims take the `min` key in a parallel phase, cross-chunk effects run sequentially in `stage.active()` order, and a cell contested by an in-chunk and a cross-chunk mover goes to the in-chunk one (**home advantage**) | Bit-identical on any thread count with one parallel and one sequential pass; the asymmetry touches one rare case and is documented | If a herd at a border looks wrong: the symmetric owner-resolves protocol (an Outcomes component + one more parallel pass) |
 
 ## Layers
 
@@ -75,10 +78,7 @@ unload radius = load + 2. Unload of a dirty chunk writes it; without a store, di
 
 ## Open questions (fill in as the design lands)
 
-- Actor model: SoA arrays keyed by `ActorId` with a free list; what components?
 - Render interpolation between ticks, once something moves.
 - Tick-tagged input events + replay log, with the first player action that touches the sim.
-- Movement/conflict resolution when two actors want one cell (per-chunk intents + in-order merge?)
-- Actors crossing chunk borders / standing in a chunk that gets unloaded (freeze with the chunk?)
 - Cross-chunk neighbour reads for cell systems: `cells_next` slab + halo, or stitched 66x66 scratch?
 - Save/replay format?

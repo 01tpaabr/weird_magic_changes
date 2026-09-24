@@ -12,8 +12,9 @@ When two of these conflict, the higher one wins.
    Fixed reduction order, seeded RNG per entity/chunk (never a global RNG), no wall-clock
    in the sim, no iteration over `HashMap`, no reliance on entity spawn order or `Entity`
    ids. Time is integer ticks (`sim_core::time`), never floats; a system's *cadence*
-   (every 2^k ticks, staggered by chunk coord) is separate from the tick and from
-   real-time speed (`app::clock`). The sim schedule (`SimTick`) is built with ambiguity
+   (every 2^k ticks, staggered by a hash of a stable id: the chunk coord for cell
+   systems, the actor `uid` for actors) is separate from the tick and from real-time
+   speed (`app::clock`). The sim schedule (`SimTick`) is built with ambiguity
    detection set to **error**: two systems that touch the same data must be ordered
    explicitly. Every system gets a determinism test (`WMC_THREADS=1` vs default
    checksums, see `make test`). If it isn't deterministic, it isn't done.
@@ -43,8 +44,8 @@ When two of these conflict, the higher one wins.
 
 ```
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
-crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), worldgen, store, rng, time, SimTick
-docs/               ARCHITECTURE.md (decisions), PERF.md (baselines)
+crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk), worldgen, store, rng, time, SimTick
+docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
 
