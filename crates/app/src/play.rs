@@ -86,8 +86,9 @@ pub fn run(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
                 ..default()
             }),
     );
+    let kinds = crate::rules()?;
     let world = app.world_mut();
-    sim::install(world);
+    sim::install_with(world, kinds);
     if !sim::open(world, &store).context("reading save")? {
         sim::create(world, cfg);
         store

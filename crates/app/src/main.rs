@@ -4,7 +4,10 @@
 //! wmc show [width] [height] [seed]             print the initial region once and exit
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
 //! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
+//! wmc lint <rules dir or file>                 compile a rule set and print what it holds
 //! ```
+//! `WMC_RULES=<dir>` makes `show`, `play` and `run` use that directory's
+//! rules instead of the built-in ones.
 //! `play` and `run` open the world in `save_dir` if one exists (size/seed args
 //! are then ignored), otherwise create it. Defaults: 80 24 42. `run` never
 //! saves: run it twice, or with `WMC_THREADS=1` and again without, and the
@@ -41,9 +44,13 @@ fn main() -> anyhow::Result<()> {
                 .context("bad tick count")?;
             run(dir, ticks, &config(&args[3..])?)
         }
-        Some(other) => bail!("unknown command {other:?}; use `show`, `play` or `run`"),
+        Some("lint") => lint(
+            args.get(1)
+                .context("lint needs a rules directory or file")?,
+        ),
+        Some(other) => bail!("unknown command {other:?}; use `show`, `play`, `run` or `lint`"),
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed]"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc lint <rules>"
         ),
     }
 }
@@ -63,8 +70,9 @@ fn config(args: &[String]) -> anyhow::Result<WorldConfig> {
 }
 
 fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
+    let kinds = app::rules()?;
     let t0 = Instant::now();
-    let mut world = sim::new_world(cfg);
+    let mut world = sim::new_world_with(cfg, kinds);
     let gen_time = t0.elapsed();
 
     let (mut water, mut rocks, mut actors, mut n) = (0usize, 0usize, 0usize, 0usize);
@@ -112,14 +120,15 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
 /// loads the chunks around its camera; a new one keeps its initial region.
 fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let mut world = match sim::open_world(&store).context("reading save")? {
+    let kinds = app::rules()?;
+    let mut world = match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
         Some(mut w) => {
             let camera = play::camera_for(&w, &store);
             sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
                 .context("streaming chunks")?;
             w
         }
-        None => sim::new_world(cfg),
+        None => sim::new_world_with(cfg, kinds),
     };
     let from = sim::tick(&world);
     let t0 = Instant::now();
@@ -163,5 +172,58 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         par::thread_count()
     )?;
     writeln!(out, "checksum:  {checksum:016x}")?;
+    Ok(())
+}
+
+/// Compile a rule set and print its kind table: the fast way to check a
+/// rules file before a world runs it.
+fn lint(path: &str) -> anyhow::Result<()> {
+    let p = std::path::Path::new(path);
+    let kinds = if p.is_dir() {
+        sim_core::rules::compile_dir(p).map_err(|e| anyhow::anyhow!("{e}"))?
+    } else {
+        let text = std::fs::read_to_string(p).with_context(|| format!("reading {path}"))?;
+        let name = p
+            .file_name()
+            .map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
+        sim_core::rules::compile(&name, &text)?
+    };
+    let mut out = std::io::stdout().lock();
+    for k in &kinds.defs {
+        let needs: Vec<String> = k
+            .needs
+            .iter()
+            .map(|n| {
+                format!(
+                    "{} max {}{}{}",
+                    n.name,
+                    n.max,
+                    if n.decays { "" } else { " decay 0" },
+                    if n.vital { " vital" } else { "" }
+                )
+            })
+            .collect();
+        writeln!(
+            out,
+            "kind {:<12} glyph {:?} cadence {:<5} sight {:<2} fuel {:<4} entry {:<5} needs [{}] mem [{}]",
+            k.name,
+            char::from(k.glyph),
+            k.cadence(),
+            k.sight,
+            k.fuel,
+            k.entry,
+            needs.join(", "),
+            k.mems.join(", "),
+        )?;
+    }
+    writeln!(
+        out,
+        "{} kinds, {} ops, {} consts, {} subs, hash {:016x}",
+        kinds.len(),
+        kinds.code.len(),
+        kinds.consts.len(),
+        kinds.subs.len(),
+        kinds.hash
+    )?;
     Ok(())
 }

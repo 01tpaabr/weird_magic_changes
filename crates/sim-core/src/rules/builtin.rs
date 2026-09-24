@@ -1,4 +1,6 @@
-//! The built-in kinds, hand-assembled. What the compiler must produce for:
+//! The built-in kinds: `rules/plants.rules`, compiled at first use. The
+//! hand-assembled version below is kept as the test oracle for the
+//! compiler: what it must produce for
 //!
 //! ```text
 //! kind seed {
@@ -26,31 +28,32 @@
 //! of them lit). A tree counts sunny, well-watered thinks and drops a seed
 //! on a free cell within two every ~40 of them (about two days).
 
-use super::asm::Asm;
-use super::vm::{Action, OpCode, Sense, pred};
-use super::{KindDef, Kinds, NeedDef};
-use crate::stage::Ground;
-use crate::time::{days, hours};
+use super::Kinds;
+
+/// The rules text every build carries.
+pub const PLANTS: &str = include_str!("../../../../rules/plants.rules");
 
 pub const SEED: u16 = 0;
 pub const TREE: u16 = 1;
 
-const WATER: u8 = 0;
-const CADENCE_SHIFT: u8 = 9; // 512 ticks
-
-/// Constant pool indices.
-const K_6H: u16 = 0;
-const K_1D: u16 = 1;
-const K_12H: u16 = 2;
-const K_3D: u16 = 3;
-
 pub fn kinds() -> Kinds {
-    let consts = vec![
-        hours(6) as i32,
-        days(1) as i32,
-        hours(12) as i32,
-        days(3) as i32,
-    ];
+    super::compile::compile("plants.rules", PLANTS).expect("the built-in rules compile")
+}
+
+/// The plants, assembled by hand. Compiler oracle (see `compile::tests`).
+#[cfg(test)]
+pub fn hand_assembled() -> Kinds {
+    use super::asm::Asm;
+    use super::vm::{Action, OpCode, Sense, pred};
+    use super::{KindDef, NeedDef};
+    use crate::stage::Ground;
+    use crate::time::{days, hours, minutes};
+
+    const WATER: u8 = 0;
+    const CADENCE_SHIFT: u8 = 9; // 512 ticks
+    // Only 3d = 64 800 is beyond a 16-bit immediate: the pool holds it.
+    const K_3D: u16 = 0;
+    let consts = vec![days(3) as i32];
     let mut a = Asm::new();
 
     // ---- seed ---------------------------------------------------------------
@@ -65,9 +68,9 @@ pub fn kinds() -> Kinds {
         .op(OpCode::Gt)
         .jz(next);
     a.need(WATER)
-        .push_k(K_6H)
+        .push(hours(6) as i32)
         .op(OpCode::Add)
-        .push_k(K_1D)
+        .push(days(1) as i32)
         .op(OpCode::Min)
         .set_need(WATER);
     a.end_rule().bind(next);
@@ -94,7 +97,7 @@ pub fn kinds() -> Kinds {
         .op(OpCode::Gt)
         .jz(next);
     a.need(WATER)
-        .push_k(K_12H)
+        .push(hours(12) as i32)
         .op(OpCode::Add)
         .push_k(K_3D)
         .op(OpCode::Min)
@@ -103,7 +106,7 @@ pub fn kinds() -> Kinds {
     // when light > 128 and water > 1d => sun += 1
     let next = a.label();
     a.sense(Sense::Light).push(128).op(OpCode::Gt).jz(next);
-    a.need(WATER).push_k(K_1D).op(OpCode::Gt).jz(next);
+    a.need(WATER).push(days(1) as i32).op(OpCode::Gt).jz(next);
     a.mem(0).push(1).op(OpCode::Add).set_mem(0);
     a.end_rule().bind(next);
     // when sun >= 40 and nearest free within 2 as c => { sun = 0; spawn seed at c }
@@ -131,7 +134,7 @@ pub fn kinds() -> Kinds {
             cadence_shift: CADENCE_SHIFT,
             sight: 2,
             fuel: 512,
-            food: hours(1) as i32 / 2,
+            food: minutes(30) as i32,
             bite: 1,
             needs: vec![
                 need("water", days(1) as i32, true),

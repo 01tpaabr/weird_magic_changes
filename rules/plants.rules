@@ -1,0 +1,30 @@
+# Plants. Rules files are compiled at world open into the kind table; see
+# docs/ACTORS.md §5 for the language. Kinds are numbered in file-name order,
+# then declaration order, so `seed` is kind 0 and `tree` kind 1.
+
+kind seed {
+  glyph ","
+  cadence 512                       # a think every ~34 game minutes, 42 a day
+  sight 2
+  food 30min                        # what an eater gains
+  need water  max 1d vital          # dries out in a day away from water
+  need health max 1 decay 0 vital   # one bite
+  mem lit
+
+  when count water within 2 > 0 => water = min(water + 6h, 1d)
+  when light > 0                => lit += 1                 # bookkeeping: falls through
+  when lit >= 20                => become tree              # ~20 lit thinks: about a day
+}
+
+kind tree {
+  glyph "T"
+  cadence 512
+  sight 2
+  need water  max 3d vital
+  need health max 100 decay 0 vital
+  mem sun
+
+  when count water within 2 > 0   => water = min(water + 12h, 3d)
+  when light > 128 and water > 1d => sun += 1
+  when sun >= 40 and nearest free within 2 as c => { sun = 0; spawn seed at c }   # a seed per ~2 sunny days
+}

@@ -189,10 +189,14 @@ TIME     := INT ("min" | "h" | "d")
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
   override up to 4096. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
   `event(FUEL)` and bumps a per-chunk counter. The sim never panics on a rules file.
-- Compiled at world open and on hot reload: lex, parse, resolve, `Vec<Op>` with a constant
-  pool (immediates are 16-bit; `3d` = 64 800 needs the pool), kind ids in **sorted file
-  name then declaration order**, bytecode hash saved in `world.wmc` and folded into the
-  checksum. `wmc why <x> <y>` re-runs one actor's think with per-op logging.
+- Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
+  through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
+  64 800 goes to the pool), kind ids in **sorted file name then declaration order**, the
+  rules hash recorded in `world.wmc` and folded into the checksum. `rules/plants.rules` is
+  built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
+  prints the kind table. A radius after `within` is an additive expression, never a
+  comparison (`count water within 2 > 0` counts within 2). `wmc why <x> <y>` re-runs one
+  actor's think with per-op logging (step 7).
 
 **Example.**
 
@@ -306,8 +310,10 @@ where it touches the tick.
    `Op` literals; Think/Apply/Compact only (`idle`, `become`, `spawn`, decay, cadence,
    wake). Proves: the ISA, fuel, decay, `become`, spawn claims, the first `wmc run`
    checksum at 1/3/8 threads with a spreading forest.
-3. **Compiler for the plant subset**, `wmc lint`, `Programs.hash` in `world.wmc`. Replace
-   the literals; the step-2 checksum must not change. PERF row: `step/16x16` with 10k plants.
+3. **Compiler for the plant subset**, `wmc lint`, the rules hash in `world.wmc`. Replace
+   the literals; the compiled plants must reproduce the hand-assembled bytecode (they do,
+   after the assembler was aligned to the compiler's immediate-vs-pool choice, which moved
+   the rules hash once; populations and the `step` bench are unchanged).
 4. **Chicken.** `move`, claims, `Outbox`, Migrate, `result`, `sight`, subs, `graze`, `flee`.
    Determinism test with a pen straddling a chunk border.
 5. **Fox and eggs.** `eat`/`hit`/`bite`, Resolve/Exchange damage, death finalization, kill

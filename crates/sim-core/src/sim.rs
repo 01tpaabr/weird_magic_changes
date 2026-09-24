@@ -109,9 +109,14 @@ pub struct StreamStats {
 /// Idempotent per world. The compute task pool must exist
 /// (`par::init_task_pool` or an `App` with `TaskPoolPlugin`).
 pub fn install(world: &mut World) {
+    install_with(world, Kinds::builtin());
+}
+
+/// [`install`] with a compiled rule set instead of the built-in one.
+pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<Stage>();
     world.init_resource::<Tick>();
-    world.insert_resource(Kinds::builtin());
+    world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
         // Two systems with overlapping access and no explicit order would run
@@ -175,9 +180,14 @@ pub fn create(world: &mut World, cfg: &WorldConfig) {
 /// A standalone world (no `App`): task pool, [`install`], [`create`]. For
 /// tests, benches and `wmc show`.
 pub fn new_world(cfg: &WorldConfig) -> World {
+    new_world_with(cfg, Kinds::builtin())
+}
+
+/// [`new_world`] with a compiled rule set.
+pub fn new_world_with(cfg: &WorldConfig, kinds: Kinds) -> World {
     crate::par::init_task_pool();
     let mut world = World::new();
-    install(&mut world);
+    install_with(&mut world, kinds);
     create(&mut world, cfg);
     world
 }
@@ -209,9 +219,14 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
 
 /// A standalone world opened from `store`; `Ok(None)` if it holds no world.
 pub fn open_world(store: &Store) -> io::Result<Option<World>> {
+    open_world_with(store, Kinds::builtin())
+}
+
+/// [`open_world`] with a compiled rule set.
+pub fn open_world_with(store: &Store, kinds: Kinds) -> io::Result<Option<World>> {
     crate::par::init_task_pool();
     let mut world = World::new();
-    install(&mut world);
+    install_with(&mut world, kinds);
     Ok(open(&mut world, store)?.then_some(world))
 }
 
@@ -228,6 +243,7 @@ pub fn meta(world: &World) -> WorldMeta {
             .names()
             .map(str::to_string)
             .collect(),
+        rules_hash: world.resource::<Kinds>().hash,
     }
 }
 

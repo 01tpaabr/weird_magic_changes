@@ -3,12 +3,13 @@
 //!
 //! [`Kinds`] is one shared, read-only resource: every kind's properties
 //! ([`KindDef`]), all bytecode in one `Vec<Op>`, the constant pool and the
-//! sub table. Built in for now ([`builtin`]); the compiler will build the
-//! same structure from rules files. Its hash is part of the world's
-//! checksum: the rules are an input.
+//! sub table. [`compile`] builds it from rules text; [`builtin`] is the
+//! rules text every build carries (`rules/plants.rules`). Its hash is part
+//! of the world's checksum: the rules are an input.
 
 pub mod asm;
 pub mod builtin;
+pub mod compile;
 pub mod vm;
 
 use bevy_ecs::prelude::*;
@@ -18,6 +19,7 @@ use crate::rng::splitmix64;
 use vm::Op;
 
 pub use builtin::{SEED, TREE};
+pub use compile::{CompileError, compile, compile_dir, compile_files};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
 #[derive(Debug, Clone, PartialEq, Eq)]

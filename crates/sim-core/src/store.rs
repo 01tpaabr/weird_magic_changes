@@ -3,7 +3,7 @@
 //! of an unexplored world is a few dozen bytes.
 //!
 //! ```text
-//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params, kind names
+//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params, kind names, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes,
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
@@ -32,7 +32,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 3;
+pub const FORMAT_VERSION: u32 = 4;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -47,6 +47,10 @@ pub struct WorldMeta {
     pub params: GenParams,
     /// Kind table of the build that wrote the save, by index.
     pub kinds: Vec<String>,
+    /// `Kinds::hash` of the rules the save was last played with. Recorded,
+    /// not enforced: rules may be tuned between sessions; the checksum
+    /// says when they were.
+    pub rules_hash: u64,
 }
 
 /// One chunk as it sits on disk.
@@ -117,6 +121,7 @@ impl Store {
                 seed_density: r.f32()?,
             },
             kinds: Vec::new(),
+            rules_hash: 0,
         };
         let n = r.u32()?;
         if n > u32::from(u16::MAX) {
@@ -128,8 +133,13 @@ impl Store {
             let name = r.bytes(len as usize)?;
             kinds.push(String::from_utf8(name.to_vec()).map_err(|e| bad(e.to_string()))?);
         }
+        let rules_hash = r.u64()?;
         r.finish()?;
-        Ok(Some(WorldMeta { kinds, ..meta }))
+        Ok(Some(WorldMeta {
+            kinds,
+            rules_hash,
+            ..meta
+        }))
     }
 
     pub fn write_meta(&self, m: &WorldMeta) -> io::Result<()> {
@@ -149,6 +159,7 @@ impl Store {
             w.u32(u32::try_from(k.len()).expect("kind name fits u32"));
             w.buf.extend_from_slice(k.as_bytes());
         }
+        w.u64(m.rules_hash);
         write_atomic(&self.meta_path(), &w.buf)
     }
 
@@ -377,6 +388,7 @@ mod tests {
                 ..GenParams::default()
             },
             kinds: vec!["seed".into(), "árvore".into()],
+            rules_hash: 0xABCD,
         };
         s.write_meta(&m).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(m.clone()));
@@ -449,7 +461,7 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x03\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x04\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
@@ -487,15 +499,15 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v2 file is refused by version.
+        // A v3 file is refused by version.
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 2;
+        bytes[4] = 3;
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(
             s.read_chunk(c)
                 .unwrap_err()
                 .to_string()
-                .contains("format 2")
+                .contains("format 3")
         );
         fs::remove_dir_all(s.dir()).unwrap();
     }

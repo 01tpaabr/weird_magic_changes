@@ -44,7 +44,8 @@ When two of these conflict, the higher one wins.
 
 ```
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
-crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk), worldgen, store, rng, time, SimTick
+crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), worldgen, store, rng, time, SimTick
+rules/              *.rules files: the kinds (plants.rules is built into the binary)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
@@ -55,6 +56,7 @@ docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design
 make            build (dev: opt-level 1, deps opt-level 3, Bevy dynamic_linking)
 make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=pause, .=step, [ ]=speed, p=save, q=quit)
 make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (WMC_THREADS=1 must match)
+make run ARGS="lint rules/"        # compile a rules dir/file, print the kind table; WMC_RULES=<dir> makes show/play/run use it
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
 make ci         check + test  == "done"
@@ -77,7 +79,8 @@ make fmt
   `~/.cargo/registry/src/*/bevy_ecs-0.19.*/src`, or `cargo doc -p bevy --no-deps --open`.
   The skill's `references/` hold verified cheatsheets.
 - New sim system: a plain fn in `sim-core`, added to `SimTick` inside a `Phase` set, with a
-  checksum test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
+  checksum test. New actor kind: a `.rules` file (`docs/ACTORS.md` §5), `wmc lint` it. New
+  sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).
 - Git is local-only for now. Commit on `main` in small steps; no remote, no PRs yet.
