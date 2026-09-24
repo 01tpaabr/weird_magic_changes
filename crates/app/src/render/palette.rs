@@ -1,5 +1,7 @@
 //! What each tile looks like: the only place glyphs and colours are chosen.
-//! The ground picks the cell background; the thing on it picks glyph + foreground.
+//! The ground picks the cell background; the thing on it picks glyph +
+//! foreground. An actor's glyph comes from its kind (`Kinds::glyphs`, a byte
+//! the sim carries but never reads).
 
 use sim_core::{Feature, Ground};
 
@@ -97,21 +99,35 @@ pub const VOID: Style = Style {
     bg: VOID_BG,
 };
 
-pub fn style(ground: Ground, feature: Feature, occupied: bool) -> Style {
+/// Glyph drawn for a kind the table does not know (a save from a newer build).
+pub const UNKNOWN_ACTOR: u8 = b'?';
+
+/// `actor` is the glyph of the kind standing here, if any: look it up with
+/// [`actor_glyph`] from the occupant id.
+pub fn style(ground: Ground, feature: Feature, actor: Option<u8>) -> Style {
     let bg = match ground {
         Ground::Soil => SOIL_BG,
         Ground::Water => WATER_BG,
     };
-    let (glyph, fg) = if occupied {
-        (b'@', ACTOR_FG)
-    } else {
-        match (feature, ground) {
-            (Feature::Rock, _) => (b'#', ROCK_FG),
-            (Feature::None, Ground::Soil) => (b'.', SOIL_FG),
-            (Feature::None, Ground::Water) => (b'~', WATER_FG),
-        }
+    let (glyph, fg) = match (actor, feature, ground) {
+        (Some(glyph), _, _) => (glyph, ACTOR_FG),
+        (None, Feature::Rock, _) => (b'#', ROCK_FG),
+        (None, Feature::None, Ground::Soil) => (b'.', SOIL_FG),
+        (None, Feature::None, Ground::Water) => (b'~', WATER_FG),
     };
     Style { glyph, fg, bg }
+}
+
+/// The glyph for whoever stands on a cell: `None` for nobody, the kind's
+/// glyph from `glyphs` (indexed by kind), [`UNKNOWN_ACTOR`] past its end.
+#[inline]
+pub fn actor_glyph(occupant: sim_core::ActorId, glyphs: &[u8]) -> Option<u8> {
+    occupant.unpack().map(|(kind, _)| {
+        glyphs
+            .get(usize::from(kind))
+            .copied()
+            .unwrap_or(UNKNOWN_ACTOR)
+    })
 }
 
 #[cfg(test)]
@@ -147,9 +163,18 @@ mod tests {
     }
 
     #[test]
-    fn ground_picks_background() {
-        assert_eq!(style(Ground::Water, Feature::Rock, false).bg, WATER_BG);
-        assert_eq!(style(Ground::Soil, Feature::Rock, false).bg, SOIL_BG);
-        assert_eq!(style(Ground::Water, Feature::None, true).glyph, b'@');
+    fn ground_picks_background_and_the_kind_picks_the_glyph() {
+        assert_eq!(style(Ground::Water, Feature::Rock, None).bg, WATER_BG);
+        assert_eq!(style(Ground::Soil, Feature::Rock, None).bg, SOIL_BG);
+        assert_eq!(style(Ground::Water, Feature::None, Some(b'c')).glyph, b'c');
+        assert_eq!(style(Ground::Soil, Feature::Rock, Some(b'c')).glyph, b'c');
+        let glyphs = *b",T";
+        use sim_core::ActorId;
+        assert_eq!(actor_glyph(ActorId::NONE, &glyphs), None);
+        assert_eq!(actor_glyph(ActorId::pack(1, 40), &glyphs), Some(b'T'));
+        assert_eq!(
+            actor_glyph(ActorId::pack(2, 0), &glyphs),
+            Some(UNKNOWN_ACTOR)
+        );
     }
 }

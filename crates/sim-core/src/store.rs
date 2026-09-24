@@ -3,17 +3,20 @@
 //! of an unexplored world is a few dozen bytes.
 //!
 //! ```text
-//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params
-//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, then each layer as raw bytes
+//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params, kind names
+//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes,
+//!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
 //!
 //! Everything is little-endian, fixed layout, written to a temp file and
 //! renamed into place (a crash mid-write leaves the old file intact). No
-//! serde: the layout is `ChunkCells` verbatim, so a save is a memcpy.
-//! Bump [`FORMAT_VERSION`] whenever a layer, `CHUNK_BITS`, `GenParams` or a
-//! header field changes; old saves are refused rather than misread. The header
-//! also carries `TICKS_PER_DAY`: every duration in a world is in ticks, so a
-//! build with a different day length must not open it.
+//! serde: the layout is `ChunkCells` and the actor rows verbatim, so a save
+//! is a memcpy per array. Bump [`FORMAT_VERSION`] whenever a layer, a row
+//! type, `CHUNK_BITS`, `GenParams` or a header field changes; old saves are
+//! refused rather than misread. The header also carries `TICKS_PER_DAY`:
+//! every duration in a world is in ticks, so a build with a different day
+//! length must not open it. Kind names travel by name so rows can be
+//! checked against the build's kind table on open (`sim::open`).
 //!
 //! Revisit when a save directory grows past a few thousand chunk files:
 //! pack chunks into region files (32x32 chunks per file with an offset table).
@@ -24,16 +27,17 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::resource::Resource;
 
+use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds};
 use crate::stage::worldgen::GenParams;
-use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord};
+use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 2;
+pub const FORMAT_VERSION: u32 = 3;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
 /// World-level facts that must survive a restart.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WorldMeta {
     pub seed: u64,
     pub tick: u64,
@@ -41,12 +45,14 @@ pub struct WorldMeta {
     pub initial_width: u32,
     pub initial_height: u32,
     pub params: GenParams,
+    /// Kind table of the build that wrote the save, by index.
+    pub kinds: Vec<String>,
 }
 
 /// One chunk as it sits on disk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedChunk {
-    pub cells: ChunkCells,
+    pub data: ChunkData,
     /// World tick the cells correspond to: the tick at which the chunk was
     /// last simulated (i.e. written). A future catch-up on load reads
     /// `world.tick - last_ticked`; today it is only recorded.
@@ -108,10 +114,22 @@ impl Store {
                 water_level: r.f32()?,
                 rock_on_soil: r.f32()?,
                 rock_on_water: r.f32()?,
+                seed_density: r.f32()?,
             },
+            kinds: Vec::new(),
         };
+        let n = r.u32()?;
+        if n > u32::from(u16::MAX) {
+            return Err(bad(format!("{n} kinds")));
+        }
+        let mut kinds = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let len = r.u32()?;
+            let name = r.bytes(len as usize)?;
+            kinds.push(String::from_utf8(name.to_vec()).map_err(|e| bad(e.to_string()))?);
+        }
         r.finish()?;
-        Ok(Some(meta))
+        Ok(Some(WorldMeta { kinds, ..meta }))
     }
 
     pub fn write_meta(&self, m: &WorldMeta) -> io::Result<()> {
@@ -125,6 +143,12 @@ impl Store {
         w.f32(m.params.water_level);
         w.f32(m.params.rock_on_soil);
         w.f32(m.params.rock_on_water);
+        w.f32(m.params.seed_density);
+        w.u32(u32::try_from(m.kinds.len()).expect("kind count fits u32"));
+        for k in &m.kinds {
+            w.u32(u32::try_from(k.len()).expect("kind name fits u32"));
+            w.buf.extend_from_slice(k.as_bytes());
+        }
         write_atomic(&self.meta_path(), &w.buf)
     }
 
@@ -132,7 +156,9 @@ impl Store {
         self.chunk_path(c).is_file()
     }
 
-    /// `Ok(None)` if the chunk was never saved (regenerate it).
+    /// `Ok(None)` if the chunk was never saved (regenerate it). Row *shape*
+    /// is checked here (counts, sizes); the invariants that need the kind
+    /// table (`ChunkData::validate`) are the caller's.
     pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<SavedChunk>> {
         let bytes = match fs::read(self.chunk_path(c)) {
             Ok(b) => b,
@@ -159,17 +185,41 @@ impl Store {
         for (o, b) in cells.occupant.iter_mut().zip(occupant.as_chunks::<4>().0) {
             o.0 = u32::from_le_bytes(*b);
         }
+        let n = r.u32()? as usize;
+        if n > CHUNK_CELLS {
+            return Err(bad(format!("{n} actor rows for {CHUNK_CELLS} cells")));
+        }
+        let actors = ChunkActors {
+            rows: r.rows::<ActorPub>(n)?,
+        };
+        let minds = ChunkMinds {
+            rows: r.rows::<ActorMind>(n)?,
+        };
         r.finish()?;
-        Ok(Some(SavedChunk { cells, last_ticked }))
+        Ok(Some(SavedChunk {
+            data: ChunkData {
+                cells,
+                actors,
+                minds,
+            },
+            last_ticked,
+        }))
     }
 
-    /// Write a chunk whose cells are current as of `last_ticked`.
+    /// Write a chunk whose state is current as of `last_ticked`.
     pub fn write_chunk(
         &self,
         c: ChunkCoord,
         cells: &ChunkCells,
+        actors: &ChunkActors,
+        minds: &ChunkMinds,
         last_ticked: u64,
     ) -> io::Result<()> {
+        assert_eq!(
+            actors.rows.len(),
+            minds.rows.len(),
+            "row arrays out of step"
+        );
         let mut w = Writer::new(CHUNK_MAGIC);
         w.i32(c.x);
         w.i32(c.y);
@@ -180,6 +230,11 @@ impl Store {
         for o in &cells.occupant {
             w.buf.extend_from_slice(&o.0.to_le_bytes());
         }
+        w.u32(u32::try_from(actors.rows.len()).expect("row count fits u32"));
+        // Rows are `#[repr(C)]` Pod with explicit padding, LE on every target
+        // this runs on: their bytes are the format.
+        w.buf.extend_from_slice(bytemuck::cast_slice(&actors.rows));
+        w.buf.extend_from_slice(bytemuck::cast_slice(&minds.rows));
         write_atomic(&self.chunk_path(c), &w.buf)
     }
 }
@@ -276,6 +331,15 @@ impl<'a> Reader<'a> {
     fn f32(&mut self) -> io::Result<f32> {
         Ok(f32::from_bits(self.u32()?))
     }
+    /// `n` Pod rows. A file buffer is not aligned for `T`, so each row is
+    /// read with an unaligned copy (a memcpy of `size_of::<T>()`).
+    fn rows<T: bytemuck::Pod>(&mut self, n: usize) -> io::Result<Vec<T>> {
+        let size = size_of::<T>();
+        let bytes = self.bytes(n * size)?;
+        Ok((0..n)
+            .map(|i| bytemuck::pod_read_unaligned(&bytes[i * size..(i + 1) * size]))
+            .collect())
+    }
     fn finish(self) -> io::Result<()> {
         if self.rest.is_empty() {
             Ok(())
@@ -288,6 +352,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actors::SEED;
     use crate::stage::worldgen::generate_chunk;
     use crate::stage::{ActorId, Feature, Ground};
 
@@ -311,9 +376,16 @@ mod tests {
                 water_scale: 9.5,
                 ..GenParams::default()
             },
+            kinds: vec!["seed".into(), "árvore".into()],
         };
         s.write_meta(&m).unwrap();
-        assert_eq!(s.read_meta().unwrap(), Some(m));
+        assert_eq!(s.read_meta().unwrap(), Some(m.clone()));
+        let none = WorldMeta {
+            kinds: Vec::new(),
+            ..m
+        };
+        s.write_meta(&none).unwrap();
+        assert_eq!(s.read_meta().unwrap(), Some(none));
         // A header written for a different day length is refused.
         let mut bytes = fs::read(s.meta_path()).unwrap();
         bytes[12 + 16] ^= 1; // magic(4) version(4) bits(4) seed(8) tick(8) -> ticks/day
@@ -327,20 +399,47 @@ mod tests {
     fn chunk_roundtrip_is_bit_exact() {
         let s = tmp_store("chunk");
         let c = ChunkCoord::new(-7, 3);
-        let mut cells = ChunkCells::default();
-        generate_chunk(3, &GenParams::default(), c, &mut cells);
-        cells.occupant[100] = ActorId(0xABCD);
-        cells.feature[0] = Feature::Rock;
-        cells.ground[CHUNK_CELLS - 1] = Ground::Water;
+        let mut data = ChunkData::default();
+        generate_chunk(3, &GenParams::default(), c, &mut data);
+        assert!(!data.actors.rows.is_empty(), "the default density seeds");
+        data.cells.feature[0] = Feature::Rock;
+        data.cells.ground[CHUNK_CELLS - 1] = Ground::Water;
+        let mind = ActorMind {
+            uid: 0xDEAD_BEEF_0000_0001,
+            born: 7,
+            last_think: 9,
+            needs: [1, -2, 3, i32::MIN],
+            mem: [5; crate::actors::MEM_SLOTS],
+            state: 2,
+            events: 3,
+            hurt: 4,
+            hurt_dir: 5,
+            _pad: 0,
+        };
+        let cell = (0..CHUNK_CELLS)
+            .find(|&i| data.cells.occupant[i].is_none())
+            .unwrap();
+        let slot = data.actors_mut().push(cell, SEED, mind);
+        data.actors.rows[usize::from(slot)].signal = -300;
+        data.actors.rows[usize::from(slot)].look = 2;
         assert!(!s.has_chunk(c));
         assert_eq!(s.read_chunk(c).unwrap(), None);
-        s.write_chunk(c, &cells, 4242).unwrap();
+        s.write_chunk(c, &data.cells, &data.actors, &data.minds, 4242)
+            .unwrap();
         assert!(s.has_chunk(c));
         let back = s.read_chunk(c).unwrap().unwrap();
         assert_eq!(back.last_ticked, 4242);
-        assert_eq!(back.cells.hash(), cells.hash());
-        assert_eq!(back.cells.occupant[100], ActorId(0xABCD));
+        assert_eq!(back.data, data);
+        assert_eq!(back.data.hash(), data.hash());
+        assert_eq!(back.data.minds.rows[usize::from(slot)], mind);
+        assert_eq!(back.data.cells.occupant[cell], ActorId::pack(SEED, slot));
         assert!(!s.chunk_path(c).with_extension("tmp").exists());
+        // An empty chunk round-trips too.
+        let e = ChunkCoord::new(0, 0);
+        let empty = ChunkData::default();
+        s.write_chunk(e, &empty.cells, &empty.actors, &empty.minds, 1)
+            .unwrap();
+        assert_eq!(s.read_chunk(e).unwrap().unwrap().data, empty);
         fs::remove_dir_all(s.dir()).unwrap();
     }
 
@@ -350,17 +449,54 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x02\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x03\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
-        let mut cells = ChunkCells::default();
-        generate_chunk(1, &GenParams::default(), c, &mut cells);
-        s.write_chunk(c, &cells, 0).unwrap();
-        let mut bytes = fs::read(s.chunk_path(c)).unwrap();
+        let mut data = ChunkData::default();
+        generate_chunk(1, &GenParams::default(), c, &mut data);
+        s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
+            .unwrap();
+        let good = fs::read(s.chunk_path(c)).unwrap();
+        let mut bytes = good.clone();
         bytes[28] = 200; // an invalid Ground discriminant (after magic, version, bits, coord, tick)
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
+        // Row count that the file does not hold.
+        let n_at = 28 + CHUNK_CELLS * 6;
+        let mut bytes = good.clone();
+        bytes[n_at..n_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(s.read_chunk(c).unwrap_err().to_string().contains("rows"));
+        let mut bytes = good.clone();
+        bytes[n_at..n_at + 4].copy_from_slice(&((data.actors.rows.len() + 1) as u32).to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(
+            s.read_chunk(c)
+                .unwrap_err()
+                .to_string()
+                .contains("truncated")
+        );
+        // Trailing bytes.
+        let mut bytes = good;
+        bytes.push(0);
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(
+            s.read_chunk(c)
+                .unwrap_err()
+                .to_string()
+                .contains("trailing")
+        );
+        // A v2 file is refused by version.
+        let mut bytes = fs::read(s.chunk_path(c)).unwrap();
+        bytes[4] = 2;
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(
+            s.read_chunk(c)
+                .unwrap_err()
+                .to_string()
+                .contains("format 2")
+        );
         fs::remove_dir_all(s.dir()).unwrap();
     }
 }

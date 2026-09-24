@@ -8,7 +8,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use app::render::cells::{CellFrame, Viewport, render_cells};
 use app::render::grid;
 use sim_core::stage::worldgen::GenParams;
-use sim_core::{Pos, WorldConfig, par, sim, stage};
+use sim_core::{Kinds, Pos, WorldConfig, par, sim, stage};
 
 const COLS: u32 = 160;
 const ROWS: u32 = 90;
@@ -28,10 +28,19 @@ fn bench_cells(c: &mut Criterion) {
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
+    let glyphs = world.resource::<Kinds>().glyphs.clone();
     let mut g = c.benchmark_group("render_cells");
     g.throughput(Throughput::Elements(u64::from(COLS * ROWS)));
     g.bench_with_input(BenchmarkId::new("160x90", threads), &threads, |b, _| {
-        b.iter(|| render_cells(|cc| stage::chunk(&world, cc), view, 200, &mut frame));
+        b.iter(|| {
+            render_cells(
+                |cc| stage::chunk(&world, cc),
+                &glyphs,
+                view,
+                200,
+                &mut frame,
+            )
+        });
     });
     g.finish();
 }
@@ -41,7 +50,14 @@ fn bench_upload(c: &mut Criterion) {
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
-    render_cells(|cc| stage::chunk(&world, cc), view, 255, &mut frame);
+    let glyphs = world.resource::<Kinds>().glyphs.clone();
+    render_cells(
+        |cc| stage::chunk(&world, cc),
+        &glyphs,
+        view,
+        255,
+        &mut frame,
+    );
     let n = (COLS * ROWS) as usize;
     let mut bg = TilemapChunkTileData(vec![None; n]);
     let mut fg = TilemapChunkTileData(vec![None; n]);

@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, VOID, style};
+use super::palette::{Color, VOID, actor_glyph, style};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -102,10 +102,12 @@ impl CellFrame {
 /// Fill the first `view.height` rows of `frame` from the chunks `chunk`
 /// returns (`None` = not loaded, drawn as void), with every colour scaled by
 /// `light` (255 = the palette as is, see [`super::palette::brightness`]).
-/// `frame` must already be `view.width` columns wide and at least
-/// `view.height` rows tall (extra rows are left for the caller: status text).
+/// `glyphs` is the kind table's glyph per kind (`Kinds::glyphs`). `frame`
+/// must already be `view.width` columns wide and at least `view.height` rows
+/// tall (extra rows are left for the caller: status text).
 pub fn render_cells<'c>(
     chunk: impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync,
+    glyphs: &[u8],
     view: Viewport,
     light: u8,
     frame: &mut CellFrame,
@@ -131,7 +133,7 @@ pub fn render_cells<'c>(
             .zip(fg.chunks_mut(cols))
             .zip(bg.chunks_mut(cols));
         for (i, ((g, f), bg)) in rows.enumerate() {
-            render_row(chunk, view, light, b * ROW_BAND + i, g, f, bg);
+            render_row(chunk, glyphs, view, light, b * ROW_BAND + i, g, f, bg);
         }
     };
     if rows <= ROW_BAND {
@@ -149,6 +151,7 @@ pub fn render_cells<'c>(
 
 fn render_row<'c>(
     chunk: &(impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync),
+    glyphs: &[u8],
     view: Viewport,
     light: u8,
     row: usize,
@@ -176,8 +179,8 @@ fn render_row<'c>(
                     .zip(&c.feature[local..local + n])
                     .zip(&c.occupant[local..local + n]);
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
-                for (((&g, &f), o), (go, (fo, bo))) in cells.zip(outs) {
-                    let s = style(g, f, !o.is_none());
+                for (((&g, &f), &o), (go, (fo, bo))) in cells.zip(outs) {
+                    let s = style(g, f, actor_glyph(o, glyphs));
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = s.bg.scaled(light).0;
@@ -199,7 +202,7 @@ mod tests {
     use super::*;
     use bevy::ecs::world::World;
     use sim_core::stage::worldgen::GenParams;
-    use sim_core::{StageCells, WorldConfig, sim, stage};
+    use sim_core::{Kinds, StageCells, WorldConfig, sim, stage};
 
     fn world(w: u32, h: u32, seed: u64) -> World {
         sim::new_world(&WorldConfig {
@@ -213,7 +216,8 @@ mod tests {
     fn frame_with(world: &World, view: Viewport, light: u8) -> CellFrame {
         let mut f = CellFrame::new();
         f.resize(view.width as usize, view.height as usize + 2);
-        render_cells(|c| stage::chunk(world, c), view, light, &mut f);
+        let glyphs = &world.resource::<Kinds>().glyphs;
+        render_cells(|c| stage::chunk(world, c), glyphs, view, light, &mut f);
         f
     }
 
@@ -224,13 +228,22 @@ mod tests {
         // is many bands with a ragged last one.
         let view = Viewport::centered(Pos::new(30, 40), 173, 97);
         let a = frame_with(&world, view, 200);
+        let glyphs = world.resource::<Kinds>().glyphs.clone();
         let n = 173 * 97;
+        let mut actors = 0;
         for r in 0..97usize {
             for c in 0..173usize {
                 let p = Pos::new(view.origin.x + c as i32, view.origin.y + r as i32);
                 let (cc, i) = p.split();
                 let want = match stage::chunk(&world, cc) {
-                    Some(ch) => style(ch.ground[i], ch.feature[i], !ch.occupant[i].is_none()),
+                    Some(ch) => {
+                        actors += usize::from(!ch.occupant[i].is_none());
+                        style(
+                            ch.ground[i],
+                            ch.feature[i],
+                            actor_glyph(ch.occupant[i], &glyphs),
+                        )
+                    }
                     None => VOID,
                 };
                 let k = r * 173 + c;
@@ -239,14 +252,16 @@ mod tests {
                 assert_eq!(a.bg[k], want.bg.scaled(200).0, "{p:?}");
             }
         }
+        assert!(actors > 0, "worldgen seeds are drawn");
+        assert_eq!(a.glyph[..n].iter().filter(|&&g| g == b',').count(), actors);
         // Extra rows untouched.
         assert!(a.glyph[n..].iter().all(|&g| g == b' '));
         // The same picture through the read-only system param.
         let b = world
-            .run_system_once(move |s: StageCells| {
+            .run_system_once(move |s: StageCells, k: Res<Kinds>| {
                 let mut f = CellFrame::new();
                 f.resize(173, 99);
-                render_cells(|c| s.chunk(c), view, 200, &mut f);
+                render_cells(|c| s.chunk(c), &k.glyphs, view, 200, &mut f);
                 f
             })
             .unwrap();
@@ -255,7 +270,7 @@ mod tests {
         assert_eq!(a.bg, b.bg);
     }
 
-    use bevy::ecs::system::RunSystemOnce;
+    use bevy::ecs::system::{Res, RunSystemOnce};
 
     #[test]
     fn light_scales_every_colour_and_nothing_else() {

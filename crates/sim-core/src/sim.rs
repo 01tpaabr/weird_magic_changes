@@ -25,8 +25,9 @@ use std::io;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
+use crate::actors::{ChunkActors, ChunkMinds, Kinds};
 use crate::stage::worldgen::{GenParams, generate_many};
-use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkMeta, Pos, Stage};
+use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{Store, WorldMeta};
 use crate::time::START_TICK;
 
@@ -96,12 +97,13 @@ pub struct StreamStats {
 // ---- schedule --------------------------------------------------------------------------
 
 /// Give a world everything the sim needs: the `Stage` directory, a zero
-/// `Tick`, and the `SimTick` schedule with its phases. Idempotent per world.
-/// The compute task pool must exist (`par::init_task_pool` or an `App` with
-/// `TaskPoolPlugin`).
+/// `Tick`, the kind table, and the `SimTick` schedule with its phases.
+/// Idempotent per world. The compute task pool must exist
+/// (`par::init_task_pool` or an `App` with `TaskPoolPlugin`).
 pub fn install(world: &mut World) {
     world.init_resource::<Stage>();
     world.init_resource::<Tick>();
+    world.insert_resource(Kinds::builtin());
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
         // Two systems with overlapping access and no explicit order would run
@@ -160,11 +162,19 @@ pub fn new_world(cfg: &WorldConfig) -> World {
 
 /// Turn an installed world into the saved one in `store`. Nothing is loaded
 /// yet: call [`ensure_loaded`] around the camera. `Ok(false)` if the store
-/// holds no world.
+/// holds no world; an error if it was written with a different kind table
+/// (its rows would mean something else here).
 pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
     let Some(m) = store.read_meta()? else {
         return Ok(false);
     };
+    let ours: Vec<&str> = world.resource::<Kinds>().names().collect();
+    if m.kinds != ours {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("save has kinds {:?}, this build has {ours:?}", m.kinds),
+        ));
+    }
     world.insert_resource(SimConfig {
         seed: m.seed,
         params: m.params,
@@ -191,7 +201,29 @@ pub fn meta(world: &World) -> WorldMeta {
         initial_width: c.initial_width,
         initial_height: c.initial_height,
         params: c.params,
+        kinds: world
+            .resource::<Kinds>()
+            .names()
+            .map(str::to_string)
+            .collect(),
     }
+}
+
+/// Write one loaded chunk to the store.
+fn write_chunk(
+    world: &World,
+    store: &Store,
+    coord: ChunkCoord,
+    e: Entity,
+    now: u64,
+) -> io::Result<()> {
+    store.write_chunk(
+        coord,
+        world.get::<ChunkCells>(e).expect("chunk has cells"),
+        world.get::<ChunkActors>(e).expect("chunk has actors"),
+        world.get::<ChunkMinds>(e).expect("chunk has minds"),
+        now,
+    )
 }
 
 // ---- persistence ------------------------------------------------------------------------
@@ -207,11 +239,7 @@ pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
         if !dirty {
             continue;
         }
-        store.write_chunk(
-            coord,
-            world.get::<ChunkCells>(e).expect("chunk has cells"),
-            now,
-        )?;
+        write_chunk(world, store, coord, e, now)?;
         let mut m = world.get_mut::<ChunkMeta>(e).expect("chunk has meta");
         m.dirty = false;
         m.last_ticked = now;
@@ -267,7 +295,7 @@ pub fn ensure_loaded(
         let dirty = world.get::<ChunkMeta>(e).expect("chunk has meta").dirty;
         match (dirty, store) {
             (true, Some(st)) => {
-                st.write_chunk(c, world.get::<ChunkCells>(e).expect("chunk has cells"), now)?;
+                write_chunk(world, st, c, e, now)?;
                 stats.written += 1;
             }
             (true, None) => continue,
@@ -281,17 +309,32 @@ pub fn ensure_loaded(
 
 /// Load `coords` (none may be loaded already): from the store when saved
 /// there, generated otherwise. Returns `(generated, read)`.
+///
+/// Actor rows are stamped here: a loaded chunk's rows get `last_think = now`
+/// (they were frozen with the chunk, decision 29), a generated chunk's rows
+/// are born now. A generated chunk with rows is **dirty** from the start:
+/// its rows are state (their birth tick, and every think from now on), so
+/// it is saved on unload, never regenerated.
 fn load_chunks(
     world: &mut World,
     coords: &[ChunkCoord],
     store: Option<&Store>,
 ) -> io::Result<(usize, usize)> {
+    let now = tick(world);
+    let now32 = now as u32;
+    let kinds = world.resource::<Kinds>().len();
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
     for &c in coords {
         match store.map(|s| s.read_chunk(c)).transpose()?.flatten() {
-            Some(saved) => {
-                stage::insert(world, c, saved.cells, false, saved.last_ticked);
+            Some(mut saved) => {
+                saved.data.validate(kinds).map_err(|e| {
+                    io::Error::new(io::ErrorKind::InvalidData, format!("chunk {c:?}: {e}"))
+                })?;
+                for m in &mut saved.data.minds.rows {
+                    m.last_think = now32;
+                }
+                stage::insert(world, c, saved.data, false, saved.last_ticked);
                 read += 1;
             }
             None => to_gen.push(c),
@@ -301,12 +344,16 @@ fn load_chunks(
         let c = world.resource::<SimConfig>();
         (c.seed, c.params)
     };
-    let now = tick(world);
     // Every chunk is a pure function of (seed, coord): generated in parallel,
     // spawned in coordinate order.
-    let cells = generate_many(seed, &params, &to_gen);
-    for (c, cells) in to_gen.iter().zip(cells) {
-        stage::insert(world, *c, cells, false, now);
+    let chunks: Vec<ChunkData> = generate_many(seed, &params, &to_gen);
+    for (c, mut data) in to_gen.iter().zip(chunks) {
+        for m in &mut data.minds.rows {
+            m.born = now32;
+            m.last_think = now32;
+        }
+        let inhabited = !data.actors.rows.is_empty();
+        stage::insert(world, *c, data, inhabited, now);
     }
     Ok((to_gen.len(), read))
 }
@@ -322,12 +369,25 @@ mod tests {
     use super::*;
     use crate::stage::{Feature, Ground};
 
+    /// A stage with nobody on it: the streaming and save tests below count
+    /// clean chunks, and an inhabited chunk is dirty by design.
     fn cfg(seed: u64) -> WorldConfig {
         WorldConfig {
             seed,
             width: 150,
             height: 70,
+            params: GenParams {
+                seed_density: 0.0,
+                ..GenParams::default()
+            },
+        }
+    }
+
+    /// The default density: seeds everywhere.
+    fn cfg_seeded(seed: u64) -> WorldConfig {
+        WorldConfig {
             params: GenParams::default(),
+            ..cfg(seed)
         }
     }
 
@@ -417,6 +477,106 @@ mod tests {
         // Entities come and go: the ECS holds exactly the loaded set.
         let n = w.query::<&ChunkCells>().iter(&w).count();
         assert_eq!(n, w.resource::<Stage>().loaded_count());
+    }
+
+    #[test]
+    fn inhabited_chunks_are_dirty_and_round_trip_through_the_store() {
+        let mut w = new_world(&cfg_seeded(21));
+        let rows: usize = w
+            .query::<&ChunkActors>()
+            .iter(&w)
+            .map(|a| a.rows.len())
+            .sum();
+        assert!(rows > 0);
+        let born = START_TICK as u32;
+        for (m, meta) in w.query::<(&ChunkMinds, &ChunkMeta)>().iter(&w) {
+            assert_eq!(meta.dirty, !m.rows.is_empty());
+            assert!(
+                m.rows
+                    .iter()
+                    .all(|r| r.born == born && r.last_think == born)
+            );
+        }
+        // Save everything, reopen, load the same region: bit-identical, and
+        // the rows say they were frozen at the tick they were reloaded.
+        let store = tmp_store("inhabited");
+        step(&mut w);
+        step(&mut w);
+        let expect = checksum(&mut w);
+        let n = save(&mut w, &store).unwrap();
+        assert_eq!(n, 6, "every inhabited chunk is written");
+        let mut back = open_world(&store).unwrap().unwrap();
+        step(&mut back);
+        let policy = LoadPolicy { load: 1, unload: 1 };
+        let s = ensure_loaded(&mut back, Pos::new(64, 64), policy, Some(&store)).unwrap();
+        assert_eq!((s.read, s.generated), (6, 3));
+        let row2: Vec<ChunkCoord> = back
+            .resource::<Stage>()
+            .loaded_coords()
+            .filter(|c| c.y == 2)
+            .collect();
+        for c in row2 {
+            stage::remove(&mut back, c);
+        }
+        // Freeze: last_think is the reload tick, born is untouched, so the
+        // checksum differs from the continuous run by exactly that stamp.
+        let reload = tick(&back) as u32;
+        for m in back.query::<&ChunkMinds>().iter(&back) {
+            assert!(
+                m.rows
+                    .iter()
+                    .all(|r| r.born == born && r.last_think == reload)
+            );
+        }
+        assert_ne!(checksum(&mut back), expect);
+        for mut m in back.query::<&mut ChunkMinds>().iter_mut(&mut back) {
+            for r in &mut m.rows {
+                r.last_think = born;
+            }
+        }
+        // Same tick as the saved world for the comparison.
+        step(&mut w);
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        // A save from a build with other kinds is refused.
+        let mut m = meta(&w);
+        m.kinds = vec!["seed".into(), "gremlin".into()];
+        store.write_meta(&m).unwrap();
+        assert!(
+            open_world(&store)
+                .unwrap_err()
+                .to_string()
+                .contains("kinds")
+        );
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    #[test]
+    fn corrupt_rows_are_refused_on_load() {
+        let store = tmp_store("rows");
+        let mut w = new_world(&cfg_seeded(4));
+        save(&mut w, &store).unwrap();
+        let c = ChunkCoord::new(0, 0);
+        let mut saved = store.read_chunk(c).unwrap().unwrap();
+        saved.data.actors.rows[0].kind = 7;
+        store
+            .write_chunk(
+                c,
+                &saved.data.cells,
+                &saved.data.actors,
+                &saved.data.minds,
+                0,
+            )
+            .unwrap();
+        let mut back = open_world(&store).unwrap().unwrap();
+        let err = ensure_loaded(
+            &mut back,
+            Pos::new(0, 0),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown kind"), "{err}");
+        std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
     #[test]

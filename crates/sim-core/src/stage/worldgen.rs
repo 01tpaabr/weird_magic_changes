@@ -1,18 +1,26 @@
 //! Deterministic chunk generation.
 //!
 //! Every cell is a **pure function of `(seed, x, y)`**: ground comes from
-//! thresholded value noise, rocks from a per-cell hash. No sequential state,
-//! so a chunk's content never depends on when, in which order, or on how many
-//! threads it was generated. This is what makes unloading a clean chunk free:
-//! it can always be regenerated.
+//! thresholded value noise, rocks from a per-cell hash, and so is every
+//! actor row worldgen places (a seed on a walkable cell when its hash falls
+//! under `seed_density`, with a `uid` hashed from its position). No
+//! sequential state, so a chunk's content never depends on when, in which
+//! order, or on how many threads it was generated. Rows are pushed in cell
+//! order, so slot order is pure too. What is *not* pure is the tick a row
+//! was born at: `sim::load_chunks` stamps it, and marks an inhabited chunk
+//! dirty so it is saved rather than regenerated.
 
-use super::{CHUNK_CELLS, ChunkCells, ChunkCoord, Feature, Ground};
+use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
+use crate::actors::{ActorMind, SEED};
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
+use bytemuck::Zeroable;
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
 pub const STREAM_GROUND: u64 = 0x0001;
 pub const STREAM_ROCK: u64 = 0x0002;
+pub const STREAM_SEED: u64 = 0x0003;
+pub const STREAM_UID: u64 = 0x0004;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -26,6 +34,8 @@ pub struct GenParams {
     pub rock_on_soil: f32,
     /// Probability that a water cell holds a rock.
     pub rock_on_water: f32,
+    /// Probability that a walkable cell starts with a seed on it.
+    pub seed_density: f32,
 }
 
 impl Default for GenParams {
@@ -35,32 +45,55 @@ impl Default for GenParams {
             water_level: 0.30,
             rock_on_soil: 0.04,
             rock_on_water: 0.01,
+            seed_density: 0.01,
         }
     }
 }
 
-/// Fill `out` with chunk `coord`. Sequential inside the chunk; callers
-/// parallelise across chunks (see [`generate_many`]).
-pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mut ChunkCells) {
-    let ChunkCells {
-        ground, feature, ..
-    } = out;
-    for (i, (g, f)) in ground.iter_mut().zip(feature.iter_mut()).enumerate() {
+/// Fill `out` with chunk `coord`: cells, then the rows worldgen places on
+/// them. Sequential inside the chunk; callers parallelise across chunks
+/// (see [`generate_many`]). Rows come out with `born` and `last_think` zero.
+pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mut ChunkData) {
+    let cells = &mut out.cells;
+    for (i, (g, f)) in cells
+        .ground
+        .iter_mut()
+        .zip(cells.feature.iter_mut())
+        .enumerate()
+    {
         let p = coord.cell(i);
         (*g, *f) = gen_cell(seed, params, p.x, p.y);
     }
-    out.occupant = [super::ActorId::NONE; CHUNK_CELLS];
+    cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
+    out.actors.rows.clear();
+    out.minds.rows.clear();
+    for i in 0..CHUNK_CELLS {
+        let p = coord.cell(i);
+        if out.cells.walkable(i) && seed_here(seed, params, p.x, p.y) {
+            let mind = ActorMind {
+                uid: hash_cell(seed, STREAM_UID, p.x, p.y),
+                ..ActorMind::zeroed()
+            };
+            out.actors_mut().push(i, SEED, mind);
+        }
+    }
 }
 
 /// Generate many chunks in parallel, results in input order. Each task
 /// writes its chunks straight into their final slots (disjoint slices of
 /// the output), so nothing is copied afterwards.
-pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Vec<ChunkCells> {
-    let mut out = vec![ChunkCells::default(); coords.len()];
-    par_zip_mut(coords, &mut out, GEN_BATCH, |&c, cells| {
-        generate_chunk(seed, params, c, cells);
+pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Vec<ChunkData> {
+    let mut out = vec![ChunkData::default(); coords.len()];
+    par_zip_mut(coords, &mut out, GEN_BATCH, |&c, data| {
+        generate_chunk(seed, params, c, data);
     });
     out
+}
+
+/// Does a seed start on this (walkable) cell? Pure.
+#[inline]
+fn seed_here(seed: u64, p: &GenParams, x: i32, y: i32) -> bool {
+    unit_f32(hash_cell(seed, STREAM_SEED, x, y)) < p.seed_density
 }
 
 /// Chunks per generation task. Measured (`make bench`, `generate_many`):
@@ -129,7 +162,9 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::stage::Pos;
+    use crate::actors::ActorMind;
+    use crate::stage::{ActorId, Pos};
+    use bytemuck::Zeroable;
 
     fn grid(r: i32) -> Vec<ChunkCoord> {
         (-r..r)
@@ -147,14 +182,14 @@ mod tests {
         let coords = grid(3);
         let par: Vec<u64> = generate_many(42, &p, &coords)
             .iter()
-            .map(ChunkCells::hash)
+            .map(ChunkData::hash)
             .collect();
         let serial: Vec<u64> = coords
             .iter()
             .map(|&c| {
-                let mut cells = ChunkCells::default();
-                generate_chunk(42, &p, c, &mut cells);
-                cells.hash()
+                let mut data = ChunkData::default();
+                generate_chunk(42, &p, c, &mut data);
+                data.hash()
             })
             .collect();
         assert_eq!(par, serial);
@@ -164,8 +199,10 @@ mod tests {
     fn chunk_matches_per_cell_rule_and_is_order_free() {
         let p = GenParams::default();
         let coord = ChunkCoord::new(-2, 3);
-        let mut cells = ChunkCells::default();
-        generate_chunk(7, &p, coord, &mut cells);
+        let mut data = ChunkData::default();
+        generate_chunk(7, &p, coord, &mut data);
+        let cells = &data.cells;
+        let mut expect_rows = 0;
         for i in 0..CHUNK_CELLS {
             let Pos { x, y } = coord.cell(i);
             assert_eq!(
@@ -173,12 +210,36 @@ mod tests {
                 gen_cell(7, &p, x, y),
                 "{x},{y}"
             );
+            let seeded = cells.walkable(i) && seed_here(7, &p, x, y);
+            assert_eq!(!cells.occupant[i].is_none(), seeded, "{x},{y}");
+            if seeded {
+                let (kind, slot) = cells.occupant[i].unpack().unwrap();
+                assert_eq!(kind, SEED);
+                assert_eq!(usize::from(slot), expect_rows, "rows are in cell order");
+                let mind = data.minds.rows[expect_rows];
+                assert_eq!(mind.uid, hash_cell(7, STREAM_UID, x, y));
+                assert_eq!((mind.born, mind.last_think), (0, 0));
+                expect_rows += 1;
+            }
         }
+        assert!(expect_rows > 0, "default density places seeds");
+        assert_eq!(data.validate(1), Ok(()));
         // Regenerating into a dirty buffer gives the same bytes.
-        let mut again = ChunkCells::default();
-        again.occupant[3] = super::super::ActorId(1);
+        let mut again = ChunkData::default();
+        again.cells.occupant[3] = ActorId(1);
+        again.actors_mut().push(9, SEED, ActorMind::zeroed());
         generate_chunk(7, &p, coord, &mut again);
-        assert_eq!(cells.hash(), again.hash());
+        assert_eq!(data.hash(), again.hash());
+        assert_eq!(data, again);
+        // Density 0 is a stage with nobody on it.
+        let bare = GenParams {
+            seed_density: 0.0,
+            ..p
+        };
+        let mut empty = ChunkData::default();
+        generate_chunk(7, &bare, coord, &mut empty);
+        assert!(empty.actors.rows.is_empty());
+        assert_eq!(empty.cells.ground, data.cells.ground);
     }
 
     #[test]
@@ -188,7 +249,9 @@ mod tests {
         let a = generate_many(1, &p, &grid(2));
         let b = generate_many(2, &p, &grid(2));
         assert_ne!(a[0].hash(), b[0].hash());
-        let cells = a.iter().flat_map(|c| c.ground.iter().zip(&c.feature));
+        let cells = a
+            .iter()
+            .flat_map(|c| c.cells.ground.iter().zip(&c.cells.feature));
         let (mut water, mut rocks, mut rock_on_water, mut n) = (0, 0, 0, 0);
         for (g, f) in cells {
             n += 1;

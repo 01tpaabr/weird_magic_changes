@@ -14,9 +14,10 @@ use std::io::Write;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
+use sim_core::WorldConfig;
 use sim_core::stage::worldgen::GenParams;
 use sim_core::time::Clock;
-use sim_core::{ChunkCells, Feature, Ground, LoadPolicy, Pos, Stage, Store, WorldConfig};
+use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
 use sim_core::{par, sim, stage};
 
 use app::play;
@@ -66,18 +67,20 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
     let mut world = sim::new_world(cfg);
     let gen_time = t0.elapsed();
 
-    let (mut water, mut rocks, mut n) = (0usize, 0usize, 0usize);
-    for c in world.query::<&ChunkCells>().iter(&world) {
+    let (mut water, mut rocks, mut actors, mut n) = (0usize, 0usize, 0usize, 0usize);
+    for (c, a) in world.query::<(&ChunkCells, &ChunkActors)>().iter(&world) {
         n += c.ground.len();
         water += c.ground.iter().filter(|g| **g == Ground::Water).count();
         rocks += c.feature.iter().filter(|f| **f == Feature::Rock).count();
+        actors += a.rows.len();
     }
     let view = Viewport {
         origin: Pos::new(0, 0),
         width: cfg.width,
         height: cfg.height,
     };
-    let text = render(|c| stage::chunk(&world, c), view);
+    let glyphs = world.resource::<Kinds>().glyphs.clone();
+    let text = render(|c| stage::chunk(&world, c), &glyphs, view);
     let loaded = world.resource::<Stage>().loaded_count();
     let checksum = sim::checksum(&mut world);
 
@@ -95,6 +98,7 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
         100.0 * water as f64 / n as f64
     )?;
     writeln!(out, "rocks:     {rocks}")?;
+    writeln!(out, "actors:    {actors}")?;
     writeln!(
         out,
         "generate:  {gen_time:.2?} ({} threads)",
@@ -125,6 +129,11 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
     let wall = t0.elapsed();
     let to = sim::tick(&world);
     let loaded = world.resource::<Stage>().loaded_count();
+    let actors: usize = world
+        .query::<&ChunkActors>()
+        .iter(&world)
+        .map(|a| a.rows.len())
+        .sum();
     let checksum = sim::checksum(&mut world);
 
     let mut out = std::io::stdout().lock();
@@ -134,7 +143,7 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         Clock::at(from),
         Clock::at(to)
     )?;
-    writeln!(out, "chunks:    {loaded}")?;
+    writeln!(out, "chunks:    {loaded} ({actors} actors)")?;
     writeln!(
         out,
         "wall:      {wall:.2?} ({:.2} µs/tick, {} threads)",

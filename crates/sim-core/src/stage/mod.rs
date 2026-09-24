@@ -22,7 +22,12 @@
 //! Layers today:
 //! - `ground`: what the cell *is* ([`Ground`]).
 //! - `feature`: what sits *on* the ground but is not an actor ([`Feature`]).
-//! - `occupant`: which actor stands here, at most one ([`ActorId`]).
+//! - `occupant`: which actor stands here, at most one ([`ActorId`]: the
+//!   actor's kind and its row in the chunk's actor arrays).
+//!
+//! Actors are rows on the chunk entity too ([`ChunkActors`], [`ChunkMinds`];
+//! see `crate::actors`). [`ChunkData`] is the bundle of everything a chunk
+//! owns, the unit worldgen produces and the store reads and writes.
 //!
 //! Adding a per-cell scalar (moisture, heat, mana): add an array to
 //! [`ChunkCells`], fold it into `hash`, encode it in `store`, render it in `app`.
@@ -35,6 +40,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
 
+use crate::actors::{self, ChunkActors, ChunkMinds};
 use crate::par::par_map;
 use crate::rng::splitmix64;
 
@@ -88,13 +94,29 @@ impl Feature {
     }
 }
 
-/// Dense actor id. `ActorId::NONE` marks an empty cell in the occupancy layer.
+/// What stands on a cell: the actor's `kind << 16 | slot`, where `slot` is
+/// its row in the chunk's actor arrays (valid within a tick only; identity
+/// across ticks is `ActorMind::uid`). `ActorId::NONE` marks an empty cell,
+/// which reserves kind `0xFFFF`. Packing the kind here lets a vision scan
+/// learn what is where from the occupant array alone.
 #[repr(transparent)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Pod, Zeroable)]
 pub struct ActorId(pub u32);
 
 impl ActorId {
     pub const NONE: ActorId = ActorId(u32::MAX);
+
+    #[inline]
+    pub fn pack(kind: u16, slot: u16) -> ActorId {
+        debug_assert!(kind != u16::MAX, "kind 0xFFFF is reserved");
+        ActorId(u32::from(kind) << 16 | u32::from(slot))
+    }
+
+    /// `(kind, slot)` of a live id, `None` for an empty cell.
+    #[inline]
+    pub fn unpack(self) -> Option<(u16, u16)> {
+        (!self.is_none()).then_some(((self.0 >> 16) as u16, self.0 as u16))
+    }
 
     #[inline]
     pub fn is_none(self) -> bool {
@@ -222,6 +244,41 @@ impl ChunkCells {
     }
 }
 
+/// Everything a chunk owns besides its coordinate and bookkeeping: the cell
+/// layers and the actor rows. The unit worldgen fills and the store moves.
+#[derive(Bundle, Debug, Clone, Default, PartialEq, Eq)]
+pub struct ChunkData {
+    pub cells: ChunkCells,
+    pub actors: ChunkActors,
+    pub minds: ChunkMinds,
+}
+
+impl ChunkData {
+    /// Cells, actors and occupant layer as one mutable view.
+    pub fn actors_mut(&mut self) -> actors::ActorsMut<'_> {
+        actors::ActorsMut {
+            pubs: &mut self.actors.rows,
+            minds: &mut self.minds.rows,
+            occupant: &mut self.cells.occupant,
+        }
+    }
+
+    /// Row invariants hold against a kind table of `kinds` entries.
+    pub fn validate(&self, kinds: usize) -> Result<(), String> {
+        actors::validate(
+            &self.cells.occupant,
+            &self.actors.rows,
+            &self.minds.rows,
+            kinds,
+        )
+    }
+
+    /// Content hash: cells then rows.
+    pub fn hash(&self) -> u64 {
+        splitmix64(self.cells.hash() ^ actors::hash(&self.actors.rows, &self.minds.rows))
+    }
+}
+
 /// Bookkeeping for one chunk entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkMeta {
@@ -313,25 +370,32 @@ impl Stage {
 pub fn insert(
     world: &mut World,
     coord: ChunkCoord,
-    cells: ChunkCells,
+    data: ChunkData,
     dirty: bool,
     last_ticked: u64,
 ) -> Entity {
     let e = world
-        .spawn((coord, cells, ChunkMeta { dirty, last_ticked }))
+        .spawn((coord, data, ChunkMeta { dirty, last_ticked }))
         .id();
     world.resource_mut::<Stage>().add(coord, e);
     e
 }
 
-/// Despawn a chunk, handing back its cells and whether they were dirty. The
-/// cells are cloned out (24 KiB), which is fine at streaming rates.
-pub fn remove(world: &mut World, coord: ChunkCoord) -> Option<(ChunkCells, bool)> {
+/// Despawn a chunk, handing back its data and whether it was dirty. The data
+/// is cloned out (24 KiB of cells plus the rows), fine at streaming rates.
+pub fn remove(world: &mut World, coord: ChunkCoord) -> Option<(ChunkData, bool)> {
     let e = world.resource_mut::<Stage>().take(coord)?;
-    let cells = world.get::<ChunkCells>(e).expect("chunk has cells").clone();
+    let data = ChunkData {
+        cells: world.get::<ChunkCells>(e).expect("chunk has cells").clone(),
+        actors: world
+            .get::<ChunkActors>(e)
+            .expect("chunk has actors")
+            .clone(),
+        minds: world.get::<ChunkMinds>(e).expect("chunk has minds").clone(),
+    };
     let dirty = world.get::<ChunkMeta>(e).expect("chunk has meta").dirty;
     world.despawn(e);
-    Some((cells, dirty))
+    Some((data, dirty))
 }
 
 /// Cells of a loaded chunk, from exclusive world access.
@@ -348,16 +412,17 @@ pub fn chunk_mut(world: &mut World, c: ChunkCoord) -> Option<Mut<'_, ChunkCells>
     world.get_mut::<ChunkCells>(e)
 }
 
-/// Checksum of every loaded chunk. Hashed per chunk in parallel, combined
-/// sequentially in coordinate order, so it is independent of thread count
-/// and of entity ids.
+/// Checksum of every loaded chunk (cells and actor rows). Hashed per chunk
+/// in parallel, combined sequentially in coordinate order, so it is
+/// independent of thread count and of entity ids.
 pub fn checksum(world: &mut World) -> u64 {
-    let mut state = world.query::<&ChunkCells>();
-    let cells = state.query(world);
+    let mut state = world.query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>();
+    let chunks = state.query(world);
     let stage = world.resource::<Stage>();
     let per_chunk = par_map(stage.active(), 16, |&(coord, e)| {
-        let c = cells.get(e).expect("active chunk has cells");
-        splitmix64(c.hash() ^ coord.bits())
+        let (c, a, m) = chunks.get(e).expect("active chunk has data");
+        let rows = actors::hash(&a.rows, &m.rows);
+        splitmix64(splitmix64(c.hash() ^ rows) ^ coord.bits())
     });
     per_chunk
         .iter()
@@ -426,7 +491,7 @@ impl StageCells<'_, '_> {
     }
 }
 
-fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
+pub(crate) fn fnv1a(seed: u64, bytes: &[u8]) -> u64 {
     bytes.iter().fold(seed, |h, &b| {
         (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01B3)
     })
@@ -485,24 +550,18 @@ mod tests {
         let a = insert(
             &mut w,
             ChunkCoord::new(1, 1),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
         let b = insert(
             &mut w,
             ChunkCoord::new(-3, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
-        let c = insert(
-            &mut w,
-            ChunkCoord::new(0, 1),
-            ChunkCells::default(),
-            true,
-            0,
-        );
+        let c = insert(&mut w, ChunkCoord::new(0, 1), ChunkData::default(), true, 0);
         assert!(a != b && b != c);
         let order: Vec<_> = w.resource::<Stage>().loaded_coords().collect();
         assert_eq!(
@@ -525,14 +584,14 @@ mod tests {
 
     #[test]
     fn checksum_is_independent_of_insertion_order() {
-        let mut cells = ChunkCells::default();
-        cells.ground[5] = Ground::Water;
+        let mut cells = ChunkData::default();
+        cells.cells.ground[5] = Ground::Water;
         let mut a = world();
         insert(&mut a, ChunkCoord::new(0, 0), cells.clone(), false, 0);
         insert(
             &mut a,
             ChunkCoord::new(1, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
@@ -540,7 +599,7 @@ mod tests {
         insert(
             &mut b,
             ChunkCoord::new(1, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
@@ -551,14 +610,14 @@ mod tests {
         insert(
             &mut c,
             ChunkCoord::new(0, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
         insert(
             &mut c,
             ChunkCoord::new(1, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
@@ -567,14 +626,14 @@ mod tests {
         insert(
             &mut d,
             ChunkCoord::new(0, 1),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
         insert(
             &mut d,
             ChunkCoord::new(1, 0),
-            ChunkCells::default(),
+            ChunkData::default(),
             false,
             0,
         );
@@ -586,7 +645,7 @@ mod tests {
                 insert(
                     &mut e,
                     ChunkCoord::new(x, y),
-                    ChunkCells::default(),
+                    ChunkData::default(),
                     false,
                     0,
                 );
@@ -600,7 +659,7 @@ mod tests {
     fn cell_queries_and_dirty_tracking() {
         let mut w = world();
         let cc = ChunkCoord::new(0, 0);
-        insert(&mut w, cc, ChunkCells::default(), false, 0);
+        insert(&mut w, cc, ChunkData::default(), false, 0);
         let p = Pos::new(3, 4);
         let (_, i) = p.split();
         let free =

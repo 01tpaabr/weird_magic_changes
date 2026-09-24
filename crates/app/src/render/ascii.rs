@@ -5,14 +5,16 @@ use sim_core::{ChunkCells, ChunkCoord};
 
 use super::cells::{CellFrame, Viewport, render_cells};
 
-/// Render `view` as text, rows separated by `\n`.
+/// Render `view` as text, rows separated by `\n`; `glyphs` is the kind
+/// table's glyph per kind.
 pub fn render<'c>(
     chunk: impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync,
+    glyphs: &[u8],
     view: Viewport,
 ) -> String {
     let mut frame = CellFrame::new();
     frame.resize(view.width as usize, view.height as usize);
-    render_cells(chunk, view, 255, &mut frame);
+    render_cells(chunk, glyphs, view, 255, &mut frame);
     let mut out = String::with_capacity((frame.cols() + 1) * frame.rows());
     for row in frame.glyph.chunks_exact(frame.cols().max(1)) {
         out.extend(row.iter().map(|&b| char::from(b)));
@@ -25,27 +27,32 @@ pub fn render<'c>(
 mod tests {
     use super::*;
     use bevy::ecs::world::World;
-    use sim_core::{ActorId, CHUNK_SIZE, ChunkCells, Feature, Ground, Pos, Stage, stage};
+    use sim_core::{ActorId, CHUNK_SIZE, ChunkData, Feature, Ground, Pos, Stage, stage};
 
     #[test]
     fn renders_every_glyph_and_blank_for_unloaded() {
         sim_core::par::init_task_pool();
         let mut w = World::new();
         w.init_resource::<Stage>();
-        let mut c = ChunkCells::default();
+        let mut d = ChunkData::default();
+        let c = &mut d.cells;
         c.ground[1] = Ground::Water;
         c.feature[2] = Feature::Rock;
         c.ground[3] = Ground::Water;
         c.feature[3] = Feature::Rock;
-        c.occupant[CHUNK_SIZE as usize] = ActorId(0);
-        stage::insert(&mut w, ChunkCoord::new(0, 0), c, false, 0);
+        c.occupant[CHUNK_SIZE as usize] = ActorId::pack(0, 0);
+        c.occupant[CHUNK_SIZE as usize + 1] = ActorId::pack(1, 0);
+        c.occupant[CHUNK_SIZE as usize + 2] = ActorId::pack(9, 0);
+        stage::insert(&mut w, ChunkCoord::new(0, 0), d, false, 0);
+        let glyphs = *b",T";
         let look = |cc| stage::chunk(&w, cc);
+        let render = |look, v| render(look, &glyphs, v);
         let v = Viewport {
             origin: Pos::new(0, 0),
             width: 4,
             height: 2,
         };
-        assert_eq!(render(look, v), ".~##\n@...\n");
+        assert_eq!(render(look, v), ".~##\n,T?.\n");
         // Straddles the loaded chunk and an unloaded one on the left.
         let v = Viewport {
             origin: Pos::new(-2, 0),

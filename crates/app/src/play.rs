@@ -32,7 +32,8 @@ use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::sprite_render::{TilemapChunkTileData, update_tilemap_chunk_indices};
 use bevy::window::{PresentMode, PrimaryWindow, WindowCloseRequested, WindowResolution};
-use sim_core::{CHUNK_SIZE, LoadPolicy, Pos, SimConfig, StageCells, Store, StreamStats, Tick};
+use sim_core::Tick;
+use sim_core::{CHUNK_SIZE, Kinds, LoadPolicy, Pos, SimConfig, StageCells, Store, StreamStats};
 use sim_core::{WorldConfig, par, sim, time};
 
 use crate::camera::{Input, ViewCamera};
@@ -451,6 +452,7 @@ fn save(world: &mut World) -> anyhow::Result<usize> {
 /// Phase 1: chunks -> cells, plus the status rows.
 fn render_frame(
     stage: StageCells,
+    kinds: Res<Kinds>,
     tick: Res<Tick>,
     layout: Res<Layout>,
     camera: Res<ViewCamera>,
@@ -469,7 +471,13 @@ fn render_frame(
         height: map.rows as u32,
     };
     let light = brightness(time::daylight(tick.0));
-    render_cells(|c| stage.chunk(c), view, light, &mut frames.map);
+    render_cells(
+        |c| stage.chunk(c),
+        &kinds.glyphs,
+        view,
+        light,
+        &mut frames.map,
+    );
 
     let focus_chunk = camera.cell().split().0;
     let status = format!(
