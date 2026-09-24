@@ -25,7 +25,7 @@ use std::io;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
-use crate::actors::{ChunkActors, ChunkMinds, systems};
+use crate::actors::{ChunkActors, ChunkMinds, MigrateScratch, systems};
 use crate::rules::Kinds;
 use crate::stage::worldgen::{GenParams, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
@@ -71,9 +71,11 @@ pub enum Phase {
     Simulate,
     /// Every due actor runs its program; writes own minds + intents.
     Think,
-    /// Own-chunk resolution: claims, die/become/spawn, result codes.
+    /// Own-chunk resolution: claims, die/become/drink/move/spawn, result codes.
     Apply,
-    /// Dead rows removed.
+    /// Cross-chunk moves and spawns, sequentially in coordinate order.
+    Migrate,
+    /// Dead rows removed, claims reset.
     Compact,
     /// Bookkeeping: advance the tick.
     Advance,
@@ -116,6 +118,7 @@ pub fn install(world: &mut World) {
 pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<Stage>();
     world.init_resource::<Tick>();
+    world.init_resource::<MigrateScratch>();
     world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
@@ -129,6 +132,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
             Phase::Simulate,
             Phase::Think,
             Phase::Apply,
+            Phase::Migrate,
             Phase::Compact,
             Phase::Advance,
         )
@@ -137,6 +141,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     schedule.add_systems((
         systems::think.in_set(Phase::Think),
         systems::apply.in_set(Phase::Apply),
+        systems::migrate.in_set(Phase::Migrate),
         systems::compact.in_set(Phase::Compact),
         advance_tick.in_set(Phase::Advance),
     ));
@@ -386,17 +391,19 @@ fn load_chunks(
         let c = world.resource::<SimConfig>();
         (c.seed, c.params)
     };
-    // Every chunk is a pure function of (seed, coord): generated in parallel,
-    // spawned in coordinate order. Its rows are born now, needs full.
-    let mut chunks: Vec<ChunkData> = generate_many(seed, &params, &to_gen);
-    {
+    // Every chunk is a pure function of (seed, coord, kind table): generated
+    // in parallel, spawned in coordinate order. Its rows are born now, needs
+    // full.
+    let chunks: Vec<ChunkData> = {
         let kinds = world.resource::<Kinds>();
+        let mut chunks = generate_many(seed, &params, kinds, &to_gen);
         for data in &mut chunks {
             for (p, m) in data.actors.rows.iter().zip(&mut data.minds.rows) {
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
             }
         }
-    }
+        chunks
+    };
     for (c, data) in to_gen.iter().zip(chunks) {
         let inhabited = !data.actors.rows.is_empty();
         stage::insert(world, *c, data, inhabited, now);
@@ -426,6 +433,7 @@ mod tests {
             height: 70,
             params: GenParams {
                 seed_density: 0.0,
+                animal_density: 0.0,
                 ..GenParams::default()
             },
         }
@@ -695,6 +703,212 @@ mod tests {
         assert_eq!(checksum(&mut back), checksum(&mut w));
         assert_eq!(count_kinds(&mut back), count_kinds(&mut w));
         std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    fn check_invariants(w: &mut World) {
+        let kinds = w.resource::<Kinds>().len();
+        for (cells, a, m) in w
+            .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
+            .iter(w)
+        {
+            crate::actors::validate(&cells.occupant, &a.rows, &m.rows, kinds).unwrap();
+            for r in &a.rows {
+                assert!(cells.walkable(usize::from(r.cell)));
+            }
+        }
+    }
+
+    /// Chickens wander, drink and cross chunk borders for a game day with
+    /// every row invariant intact, and two fresh worlds agree.
+    #[test]
+    fn chickens_wander_drink_and_cross_borders() {
+        use crate::rules::CHICKEN;
+        let cfg = WorldConfig {
+            width: 128,
+            height: 128,
+            ..cfg_seeded(17)
+        };
+        let mut w = new_world(&cfg);
+        let chickens_at = |w: &mut World| -> Vec<(ChunkCoord, u64, u16)> {
+            let mut v = Vec::new();
+            for (c, a, m) in w
+                .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
+                .iter(w)
+            {
+                for (r, mind) in a.rows.iter().zip(&m.rows) {
+                    if r.kind == CHICKEN {
+                        v.push((*c, mind.uid, r.cell));
+                    }
+                }
+            }
+            v.sort_unstable_by_key(|(c, uid, cell)| (c.key(), *uid, *cell));
+            v
+        };
+        let start = chickens_at(&mut w);
+        assert!(start.len() > 10, "{}", start.len());
+        let mut crossed = 0;
+        let mut moved = 0;
+        let mut prev = start.clone();
+        let rounds = crate::time::days(1) / 256;
+        for _ in 0..rounds {
+            for _ in 0..256 {
+                step(&mut w);
+            }
+            check_invariants(&mut w);
+            let now = chickens_at(&mut w);
+            for &(c, uid, cell) in &now {
+                if let Some(&(pc, _, pcell)) = prev.iter().find(|(_, u, _)| *u == uid) {
+                    crossed += usize::from(pc != c);
+                    moved += usize::from(pc != c || pcell != cell);
+                }
+            }
+            prev = now;
+        }
+        let end = chickens_at(&mut w);
+        assert!(moved > start.len(), "chickens walk: {moved} moves");
+        assert!(crossed > 0, "some chicken crossed a chunk border");
+        // Chickens that start more than `sight` cells from water wander
+        // blind and dry out; the ones near a lake live.
+        assert!(
+            end.len() * 4 >= start.len(),
+            "chickens near water survive: {} of {}",
+            end.len(),
+            start.len()
+        );
+        // Every survivor drank at least once (max 2h, a day has passed).
+        for (_, _, m) in w
+            .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
+            .iter(&w)
+        {
+            for mind in &m.rows {
+                assert!(mind.needs[0] > 0);
+            }
+        }
+        let mut again = new_world(&cfg);
+        for _ in 0..rounds * 256 {
+            step(&mut again);
+        }
+        assert_eq!(checksum(&mut again), checksum(&mut w));
+    }
+
+    /// The Migrate phase on its own: a border crossing, two contenders for
+    /// one cell, an unloaded neighbour.
+    #[test]
+    fn migrate_moves_rows_between_chunks_by_key() {
+        use crate::actors::systems::{
+            Effect, EffectKind, Outbox, Scratch, compact, intent_key, migrate, newborn,
+        };
+        use crate::rules::CHICKEN;
+        use bevy_ecs::system::RunSystemOnce;
+        crate::par::init_task_pool();
+        let mut w = World::new();
+        install(&mut w);
+        create(
+            &mut w,
+            &WorldConfig {
+                width: 1,
+                height: 1,
+                ..cfg(1)
+            },
+        );
+        // Two bare chunks side by side; a chicken at the east edge of the
+        // west one and two more that want the same cell of the east one.
+        let kinds = w.resource::<Kinds>().clone();
+        let mut west = ChunkData::default();
+        let a_slot =
+            west.actors_mut()
+                .push(10 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 100, 0));
+        let b_slot =
+            west.actors_mut()
+                .push(20 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 200, 0));
+        let c_slot =
+            west.actors_mut()
+                .push(30 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 300, 0));
+        stage::remove(&mut w, ChunkCoord::new(0, 0));
+        let west_e = stage::insert(&mut w, ChunkCoord::new(0, 0), west, true, 0);
+        let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), ChunkData::default(), true, 0);
+        let tick = tick(&w);
+        let key = |uid| intent_key(uid, tick);
+        let mut ob = w.get_mut::<Outbox>(west_e).unwrap();
+        ob.list.push(Effect {
+            key: key(100),
+            slot: a_slot,
+            what: EffectKind::Move,
+            to: ChunkCoord::new(1, 0),
+            cell: 10 * 64,
+        });
+        ob.list.push(Effect {
+            key: key(200),
+            slot: b_slot,
+            what: EffectKind::Move,
+            to: ChunkCoord::new(1, 0),
+            cell: 25 * 64,
+        });
+        ob.list.push(Effect {
+            key: key(300),
+            slot: c_slot,
+            what: EffectKind::Move,
+            to: ChunkCoord::new(1, 0),
+            cell: 25 * 64,
+        });
+        // A fourth wants an unloaded chunk.
+        ob.list.push(Effect {
+            key: key(300),
+            slot: c_slot,
+            what: EffectKind::Spawn(CHICKEN),
+            to: ChunkCoord::new(0, 1),
+            cell: 0,
+        });
+        w.run_system_once(migrate).unwrap();
+        let east = w.get::<ChunkActors>(east_e).unwrap().rows.clone();
+        let east_minds = w.get::<ChunkMinds>(east_e).unwrap().rows.clone();
+        assert_eq!(east.len(), 2, "a and the lower-key contender arrived");
+        let by_uid = |uid: u64| east_minds.iter().position(|m| m.uid == uid);
+        let a = by_uid(100).expect("a crossed");
+        assert_eq!(east[a].cell, 10 * 64);
+        assert_eq!(
+            east_minds[a].events & crate::rules::vm::result::MASK,
+            crate::rules::vm::result::OK
+        );
+        let winner = if key(200) < key(300) { 200 } else { 300 };
+        let wslot = by_uid(winner).expect("the lower key crossed");
+        assert_eq!(east[wslot].cell, 25 * 64);
+        assert_eq!(
+            w.get::<ChunkCells>(east_e).unwrap().occupant[25 * 64],
+            crate::stage::ActorId::pack(CHICKEN, wslot as u16)
+        );
+        let west_minds = w.get::<ChunkMinds>(west_e).unwrap().rows.clone();
+        let west_pubs = w.get::<ChunkActors>(west_e).unwrap().rows.clone();
+        let loser_slot = if winner == 200 { c_slot } else { b_slot };
+        assert_eq!(
+            west_minds[usize::from(loser_slot)].events & crate::rules::vm::result::MASK,
+            crate::rules::vm::result::BLOCKED
+        );
+        assert!(west_pubs[usize::from(a_slot)].flags & crate::actors::flags::DEAD != 0);
+        assert!(w.get::<ChunkCells>(west_e).unwrap().occupant[10 * 64 + 63].is_none());
+        assert_eq!(w.get::<Scratch>(west_e).unwrap().deaths, 2);
+        w.run_system_once(compact).unwrap();
+        let west_pubs = w.get::<ChunkActors>(west_e).unwrap().rows.clone();
+        assert_eq!(west_pubs.len(), 1, "the loser stays");
+        check_invariants(&mut w);
+        // Same tick again: the filled cells are touched, so a second mover
+        // into them is BLOCKED even though the cell looks free... it is
+        // not free (occupied), and a vacated one is touched: neither enterable.
+        let mut ob = w.get_mut::<Outbox>(west_e).unwrap();
+        ob.list.push(Effect {
+            key: key(999),
+            slot: 0,
+            what: EffectKind::Move,
+            to: ChunkCoord::new(1, 0),
+            cell: 10 * 64,
+        });
+        w.run_system_once(migrate).unwrap();
+        let west_minds = w.get::<ChunkMinds>(west_e).unwrap().rows.clone();
+        assert_eq!(
+            west_minds[0].events & crate::rules::vm::result::MASK,
+            crate::rules::vm::result::BLOCKED
+        );
+        assert_eq!(w.get::<ChunkActors>(east_e).unwrap().rows.len(), 2);
     }
 
     #[test]

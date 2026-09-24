@@ -18,7 +18,7 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use vm::Op;
 
-pub use builtin::{SEED, TREE};
+pub use builtin::{CHICKEN, SEED, TREE};
 pub use compile::{CompileError, compile, compile_dir, compile_files};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
@@ -66,7 +66,8 @@ impl KindDef {
         1 << self.cadence_shift
     }
 
-    fn need_index(&self, name: &str) -> Option<usize> {
+    /// Slot of the need called `name`, if this kind has one.
+    pub fn need_named(&self, name: &str) -> Option<usize> {
         self.needs.iter().position(|n| n.name == name)
     }
 
@@ -92,7 +93,7 @@ impl Remap {
             mems: [Self::NONE; MEM_SLOTS],
         };
         for (i, n) in to.needs.iter().enumerate() {
-            if let Some(j) = from.need_index(&n.name) {
+            if let Some(j) = from.need_named(&n.name) {
                 r.needs[i] = j as u8;
             }
         }
@@ -231,14 +232,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_table_has_seed_then_tree_and_a_stable_hash() {
+    fn builtin_table_is_in_file_name_order_with_a_stable_hash() {
         let k = Kinds::builtin();
-        assert_eq!(k.names().collect::<Vec<_>>(), vec!["seed", "tree"]);
+        assert_eq!(
+            k.names().collect::<Vec<_>>(),
+            vec!["chicken", "seed", "tree"]
+        );
+        assert_eq!(k.def(CHICKEN).id, CHICKEN);
         assert_eq!(k.def(SEED).id, SEED);
         assert_eq!(k.def(TREE).id, TREE);
-        assert_eq!(k.glyphs, vec![b',', b'T']);
+        assert_eq!(k.glyphs, vec![b'c', b',', b'T']);
         assert_eq!(k.hash, Kinds::builtin().hash);
-        assert!(!k.is_empty() && k.len() == 2);
+        assert!(!k.is_empty() && k.len() == 3);
+        assert_eq!(k.def(CHICKEN).need_named("water"), Some(0));
+        assert_eq!(k.def(TREE).need_named("food"), None);
         let mut other = Kinds::builtin();
         other.defs[0].glyph = b'x';
         assert_ne!(

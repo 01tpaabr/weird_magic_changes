@@ -1,6 +1,8 @@
-//! The built-in kinds: `rules/plants.rules`, compiled at first use. The
-//! hand-assembled version below is kept as the test oracle for the
-//! compiler: what it must produce for
+//! The built-in kinds: `rules/animals.rules` and `rules/plants.rules`,
+//! compiled at first use in file-name order (the same order `compile_dir`
+//! uses, so `WMC_RULES=rules/` gives the same table). The hand-assembled
+//! version below is kept as the test oracle for the compiler: what it must
+//! produce for the plants file on its own
 //!
 //! ```text
 //! kind seed {
@@ -30,14 +32,24 @@
 
 use super::Kinds;
 
-/// The rules text every build carries.
-pub const PLANTS: &str = include_str!("../../../../rules/plants.rules");
+/// The rules text every build carries, in file-name order.
+pub const FILES: [(&str, &str); 2] = [
+    (
+        "animals.rules",
+        include_str!("../../../../rules/animals.rules"),
+    ),
+    (
+        "plants.rules",
+        include_str!("../../../../rules/plants.rules"),
+    ),
+];
 
-pub const SEED: u16 = 0;
-pub const TREE: u16 = 1;
+pub const CHICKEN: u16 = 0;
+pub const SEED: u16 = 1;
+pub const TREE: u16 = 2;
 
 pub fn kinds() -> Kinds {
-    super::compile::compile("plants.rules", PLANTS).expect("the built-in rules compile")
+    super::compile::compile_files(&FILES).expect("the built-in rules compile")
 }
 
 /// The plants, assembled by hand. Compiler oracle (see `compile::tests`).
@@ -49,6 +61,9 @@ pub fn hand_assembled() -> Kinds {
     use crate::stage::Ground;
     use crate::time::{days, hours, minutes};
 
+    // Ids as the plants file compiles on its own.
+    const SEED: u16 = 0;
+    const TREE: u16 = 1;
     const WATER: u8 = 0;
     const CADENCE_SHIFT: u8 = 9; // 512 ticks
     // Only 3d = 64 800 is beyond a 16-bit immediate: the pool holds it.

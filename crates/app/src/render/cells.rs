@@ -253,7 +253,11 @@ mod tests {
             }
         }
         assert!(actors > 0, "worldgen seeds are drawn");
-        assert_eq!(a.glyph[..n].iter().filter(|&&g| g == b',').count(), actors);
+        assert_eq!(
+            a.glyph[..n].iter().filter(|g| glyphs.contains(g)).count(),
+            actors,
+            "every actor draws its kind's glyph"
+        );
         // Extra rows untouched.
         assert!(a.glyph[n..].iter().all(|&g| g == b' '));
         // The same picture through the read-only system param.

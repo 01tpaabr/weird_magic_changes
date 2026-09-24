@@ -112,6 +112,12 @@ pub enum OpCode {
     /// `pred r -> found`; on success `locals[a], locals[a+1] = dx, dy` of the
     /// nearest matching cell (rings 1..=r, start rotated by one draw)
     Nearest,
+    /// `dx dy -> max(|dx|, |dy|)`
+    Dist,
+    /// `dx dy -> 1` if the cell there is walkable and empty at tick start
+    FreeAt,
+    /// `dx dy pred -> 1` if the cell there matches `pred`
+    IsAt,
     /// Emit action `a` (see [`Action`]); pops its operands
     Act,
     /// `next a`: switch to state `a` for the following think
@@ -187,6 +193,11 @@ pub enum Action {
     Become,
     /// `kind dx dy`
     Spawn,
+    /// `dx dy`: one step in that direction (Think reduces it to a unit step
+    /// and slides around a blocked cell)
+    Move,
+    /// `dx dy`: refill `water` from the water cell there
+    Drink,
 }
 
 impl Action {
@@ -196,6 +207,8 @@ impl Action {
             1 => Some(Self::Die),
             2 => Some(Self::Become),
             3 => Some(Self::Spawn),
+            4 => Some(Self::Move),
+            5 => Some(Self::Drink),
             _ => None,
         }
     }
@@ -322,12 +335,18 @@ impl<'a> Halo<'a> {
     }
 
     #[inline]
-    fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
+    pub fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
         match self.at(lx, ly, dx, dy) {
             Some((cells, _, i)) => matches(pred, cells, i),
             // Unloaded: rock, nobody.
             None => pred == pred::feature(Feature::Rock as u8),
         }
+    }
+
+    /// Walkable and empty at tick start.
+    #[inline]
+    pub fn free(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> bool {
+        self.matches(lx, ly, dx, dy, pred::FREE)
     }
 }
 
@@ -504,6 +523,13 @@ impl Machine<'_> {
                 self.out.kind = u16::try_from(kind).map_err(|_| Trap::BadAction)?;
                 self.out.dx = i8::try_from(dx).map_err(|_| Trap::BadAction)?;
                 self.out.dy = i8::try_from(dy).map_err(|_| Trap::BadAction)?;
+            }
+            Action::Move | Action::Drink => {
+                let dy = self.pop()?;
+                let dx = self.pop()?;
+                // Far targets are fine: Think reduces a move to one step.
+                self.out.dx = dx.clamp(-127, 127) as i8;
+                self.out.dy = dy.clamp(-127, 127) as i8;
             }
         }
         // `Idle` is an explicit action too: it ends the rule.
@@ -722,6 +748,24 @@ impl Machine<'_> {
                         }
                         None => self.push(0)?,
                     }
+                }
+                O::Dist => {
+                    let dy = self.pop()?;
+                    let dx = self.pop()?;
+                    self.push(dx.wrapping_abs().max(dy.wrapping_abs()))?;
+                }
+                O::FreeAt => {
+                    let dy = self.pop()?;
+                    let dx = self.pop()?;
+                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                    self.push(i32::from(self.ctx.halo.free(lx, ly, dx, dy)))?;
+                }
+                O::IsAt => {
+                    let pred = self.pop()?;
+                    let dy = self.pop()?;
+                    let dx = self.pop()?;
+                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                    self.push(i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred)))?;
                 }
                 O::Act => self.act(op.a)?,
                 O::Next => {

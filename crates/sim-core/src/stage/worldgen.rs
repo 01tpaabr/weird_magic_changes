@@ -2,8 +2,9 @@
 //!
 //! Every cell is a **pure function of `(seed, x, y)`**: ground comes from
 //! thresholded value noise, rocks from a per-cell hash, and so is every
-//! actor row worldgen places (a seed on a walkable cell when its hash falls
-//! under `seed_density`, with a `uid` hashed from its position). No
+//! actor row worldgen places (a `seed` on a walkable cell when its hash
+//! falls under `seed_density`, a `chicken` under `animal_density`, with a
+//! `uid` hashed from its position; a kind the rule set lacks is not placed). No
 //! sequential state, so a chunk's content never depends on when, in which
 //! order, or on how many threads it was generated. Rows are pushed in cell
 //! order, so slot order is pure too. What is *not* pure is the tick a row
@@ -14,7 +15,7 @@ use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
 use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
-use crate::rules::SEED;
+use crate::rules::Kinds;
 use bytemuck::Zeroable;
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
@@ -22,6 +23,7 @@ pub const STREAM_GROUND: u64 = 0x0001;
 pub const STREAM_ROCK: u64 = 0x0002;
 pub const STREAM_SEED: u64 = 0x0003;
 pub const STREAM_UID: u64 = 0x0004;
+pub const STREAM_ANIMAL: u64 = 0x0005;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -37,6 +39,8 @@ pub struct GenParams {
     pub rock_on_water: f32,
     /// Probability that a walkable cell starts with a seed on it.
     pub seed_density: f32,
+    /// Probability that a walkable cell without a seed starts with a chicken.
+    pub animal_density: f32,
 }
 
 impl Default for GenParams {
@@ -47,6 +51,7 @@ impl Default for GenParams {
             rock_on_soil: 0.04,
             rock_on_water: 0.01,
             seed_density: 0.01,
+            animal_density: 0.002,
         }
     }
 }
@@ -54,7 +59,13 @@ impl Default for GenParams {
 /// Fill `out` with chunk `coord`: cells, then the rows worldgen places on
 /// them. Sequential inside the chunk; callers parallelise across chunks
 /// (see [`generate_many`]). Rows come out with `born` and `last_think` zero.
-pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mut ChunkData) {
+pub fn generate_chunk(
+    seed: u64,
+    params: &GenParams,
+    kinds: &Kinds,
+    coord: ChunkCoord,
+    out: &mut ChunkData,
+) {
     let cells = &mut out.cells;
     for (i, (g, f)) in cells
         .ground
@@ -68,14 +79,26 @@ pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mu
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
     out.actors.rows.clear();
     out.minds.rows.clear();
+    let seed_kind = kinds.by_name("seed").map(|k| k.id);
+    let animal_kind = kinds.by_name("chicken").map(|k| k.id);
     for i in 0..CHUNK_CELLS {
         let p = coord.cell(i);
-        if out.cells.walkable(i) && seed_here(seed, params, p.x, p.y) {
+        if !out.cells.walkable(i) {
+            continue;
+        }
+        let kind = if seed_here(seed, params, p.x, p.y) {
+            seed_kind
+        } else if animal_here(seed, params, p.x, p.y) {
+            animal_kind
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
             let mind = ActorMind {
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
             };
-            out.actors_mut().push(i, SEED, mind);
+            out.actors_mut().push(i, kind, mind);
         }
     }
 }
@@ -83,10 +106,15 @@ pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mu
 /// Generate many chunks in parallel, results in input order. Each task
 /// writes its chunks straight into their final slots (disjoint slices of
 /// the output), so nothing is copied afterwards.
-pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Vec<ChunkData> {
+pub fn generate_many(
+    seed: u64,
+    params: &GenParams,
+    kinds: &Kinds,
+    coords: &[ChunkCoord],
+) -> Vec<ChunkData> {
     let mut out = vec![ChunkData::default(); coords.len()];
     par_zip_mut(coords, &mut out, GEN_BATCH, |&c, data| {
-        generate_chunk(seed, params, c, data);
+        generate_chunk(seed, params, kinds, c, data);
     });
     out
 }
@@ -95,6 +123,12 @@ pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Ve
 #[inline]
 fn seed_here(seed: u64, p: &GenParams, x: i32, y: i32) -> bool {
     unit_f32(hash_cell(seed, STREAM_SEED, x, y)) < p.seed_density
+}
+
+/// Does a chicken start on this (walkable, seedless) cell? Pure.
+#[inline]
+fn animal_here(seed: u64, p: &GenParams, x: i32, y: i32) -> bool {
+    unit_f32(hash_cell(seed, STREAM_ANIMAL, x, y)) < p.animal_density
 }
 
 /// Chunks per generation task. Measured (`make bench`, `generate_many`):
@@ -164,6 +198,7 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::actors::ActorMind;
+    use crate::rules::{CHICKEN, SEED};
     use crate::stage::{ActorId, Pos};
     use bytemuck::Zeroable;
 
@@ -180,8 +215,9 @@ mod tests {
     fn generate_many_matches_serial_generation() {
         crate::par::init_task_pool();
         let p = GenParams::default();
+        let kinds = Kinds::builtin();
         let coords = grid(3);
-        let par: Vec<u64> = generate_many(42, &p, &coords)
+        let par: Vec<u64> = generate_many(42, &p, &kinds, &coords)
             .iter()
             .map(ChunkData::hash)
             .collect();
@@ -189,7 +225,7 @@ mod tests {
             .iter()
             .map(|&c| {
                 let mut data = ChunkData::default();
-                generate_chunk(42, &p, c, &mut data);
+                generate_chunk(42, &p, &kinds, c, &mut data);
                 data.hash()
             })
             .collect();
@@ -199,11 +235,13 @@ mod tests {
     #[test]
     fn chunk_matches_per_cell_rule_and_is_order_free() {
         let p = GenParams::default();
+        let kinds = Kinds::builtin();
         let coord = ChunkCoord::new(-2, 3);
         let mut data = ChunkData::default();
-        generate_chunk(7, &p, coord, &mut data);
+        generate_chunk(7, &p, &kinds, coord, &mut data);
         let cells = &data.cells;
         let mut expect_rows = 0;
+        let mut chickens = 0;
         for i in 0..CHUNK_CELLS {
             let Pos { x, y } = coord.cell(i);
             assert_eq!(
@@ -212,10 +250,12 @@ mod tests {
                 "{x},{y}"
             );
             let seeded = cells.walkable(i) && seed_here(7, &p, x, y);
-            assert_eq!(!cells.occupant[i].is_none(), seeded, "{x},{y}");
-            if seeded {
+            let animal = cells.walkable(i) && !seeded && animal_here(7, &p, x, y);
+            assert_eq!(!cells.occupant[i].is_none(), seeded || animal, "{x},{y}");
+            if seeded || animal {
                 let (kind, slot) = cells.occupant[i].unpack().unwrap();
-                assert_eq!(kind, SEED);
+                assert_eq!(kind, if seeded { SEED } else { CHICKEN });
+                chickens += usize::from(animal);
                 assert_eq!(usize::from(slot), expect_rows, "rows are in cell order");
                 let mind = data.minds.rows[expect_rows];
                 assert_eq!(mind.uid, hash_cell(7, STREAM_UID, x, y));
@@ -223,23 +263,32 @@ mod tests {
                 expect_rows += 1;
             }
         }
-        assert!(expect_rows > 0, "default density places seeds");
-        assert_eq!(data.validate(1), Ok(()));
+        assert!(
+            expect_rows > chickens && chickens > 0,
+            "default densities place seeds and chickens"
+        );
+        assert_eq!(data.validate(kinds.len()), Ok(()));
         // Regenerating into a dirty buffer gives the same bytes.
         let mut again = ChunkData::default();
         again.cells.occupant[3] = ActorId(1);
         again.actors_mut().push(9, SEED, ActorMind::zeroed());
-        generate_chunk(7, &p, coord, &mut again);
+        generate_chunk(7, &p, &kinds, coord, &mut again);
         assert_eq!(data.hash(), again.hash());
         assert_eq!(data, again);
-        // Density 0 is a stage with nobody on it.
+        // Density 0 is a stage with nobody on it; a rule set without the
+        // kind places none of it either.
         let bare = GenParams {
             seed_density: 0.0,
+            animal_density: 0.0,
             ..p
         };
         let mut empty = ChunkData::default();
-        generate_chunk(7, &bare, coord, &mut empty);
+        generate_chunk(7, &bare, &kinds, coord, &mut empty);
         assert!(empty.actors.rows.is_empty());
+        let plants_only = crate::rules::compile("p", crate::rules::builtin::FILES[1].1).unwrap();
+        let mut no_animals = ChunkData::default();
+        generate_chunk(7, &p, &plants_only, coord, &mut no_animals);
+        assert_eq!(no_animals.actors.rows.len(), expect_rows - chickens);
         assert_eq!(empty.cells.ground, data.cells.ground);
     }
 
@@ -247,8 +296,9 @@ mod tests {
     fn different_seeds_differ_and_have_all_tile_kinds() {
         crate::par::init_task_pool();
         let p = GenParams::default();
-        let a = generate_many(1, &p, &grid(2));
-        let b = generate_many(2, &p, &grid(2));
+        let kinds = Kinds::builtin();
+        let a = generate_many(1, &p, &kinds, &grid(2));
+        let b = generate_many(2, &p, &kinds, &grid(2));
         assert_ne!(a[0].hash(), b[0].hash());
         let cells = a
             .iter()

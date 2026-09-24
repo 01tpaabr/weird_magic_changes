@@ -192,7 +192,10 @@ TIME     := INT ("min" | "h" | "d")
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
   64 800 goes to the pool), kind ids in **sorted file name then declaration order**, the
-  rules hash recorded in `world.wmc` and folded into the checksum. `rules/plants.rules` is
+  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`
+  and `free` are contextual words: predicates after `count`/`nearest`/`is`/`random`, plain
+  names elsewhere, so `need water` and `water < 40min` read as intended. `x` and `y` are
+  senses, so they cannot name a parameter or local. `rules/plants.rules` is
   built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
   prints the kind table. A radius after `within` is an additive expression, never a
   comparison (`count water within 2 > 0` counts within 2). `wmc why <x> <y>` re-runs one
@@ -314,8 +317,14 @@ where it touches the tick.
    the literals; the compiled plants must reproduce the hand-assembled bytecode (they do,
    after the assembler was aligned to the compiler's immediate-vs-pool choice, which moved
    the rules hash once; populations and the `step` bench are unchanged).
-4. **Chicken.** `move`, claims, `Outbox`, Migrate, `result`, `sight`, subs, `graze`, `flee`.
-   Determinism test with a pen straddling a chunk border.
+4. **Chicken.** `move` (unit steps that slide around a blocked cell), `drink`, in-chunk
+   claims, `Outbox` + the sequential Migrate phase (cross-chunk moves and spawns, contenders
+   by key, home advantage), `result`, subs with int/target/pred parameters and `return`,
+   targets (`toward`, `away`, `at`, `random free`, directions, `.dx`/`.dy`, `dist`, `free`,
+   `is`), `let`, `while`, `repeat`; chickens placed by worldgen (`animal_density`). Done:
+   `rules/animals.rules`; a game day of wandering with invariants checked; Migrate tested on
+   its own; 1/8-thread checksums equal with 21k chickens on 4096 chunks. `eat`/`graze` wait
+   for step 5 (they need damage resolution).
 5. **Fox and eggs.** `eat`/`hit`/`bite`, Resolve/Exchange damage, death finalization, kill
    credit, `hurt`, wake-on-event, `look`.
 6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v4), `state`

@@ -2,7 +2,7 @@
 //! Baseline numbers live in docs/PERF.md; update them when you change the hot path.
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use sim_core::stage::worldgen::{GenParams, generate_many};
-use sim_core::{ChunkCoord, LoadPolicy, Pos, Stage, WorldConfig, sim};
+use sim_core::{ChunkCoord, Kinds, LoadPolicy, Pos, Stage, WorldConfig, sim};
 
 fn grid(side: i32) -> Vec<ChunkCoord> {
     (0..side)
@@ -14,11 +14,12 @@ fn bench_generate(c: &mut Criterion) {
     sim_core::par::init_task_pool();
     let mut g = c.benchmark_group("generate_many");
     let p = GenParams::default();
+    let kinds = Kinds::builtin();
     for &side in &[4i32, 32] {
         let coords = grid(side);
         g.throughput(Throughput::Elements(coords.len() as u64 * 4096));
         g.bench_function(format!("{side}x{side} chunks"), |b| {
-            b.iter(|| generate_many(7, &p, &coords));
+            b.iter(|| generate_many(7, &p, &kinds, &coords));
         });
     }
     g.finish();

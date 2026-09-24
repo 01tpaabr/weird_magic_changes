@@ -32,7 +32,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 4;
+pub const FORMAT_VERSION: u32 = 5;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -119,6 +119,7 @@ impl Store {
                 rock_on_soil: r.f32()?,
                 rock_on_water: r.f32()?,
                 seed_density: r.f32()?,
+                animal_density: r.f32()?,
             },
             kinds: Vec::new(),
             rules_hash: 0,
@@ -154,6 +155,7 @@ impl Store {
         w.f32(m.params.rock_on_soil);
         w.f32(m.params.rock_on_water);
         w.f32(m.params.seed_density);
+        w.f32(m.params.animal_density);
         w.u32(u32::try_from(m.kinds.len()).expect("kind count fits u32"));
         for k in &m.kinds {
             w.u32(u32::try_from(k.len()).expect("kind name fits u32"));
@@ -363,7 +365,7 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rules::SEED;
+    use crate::rules::{Kinds, SEED};
     use crate::stage::worldgen::generate_chunk;
     use crate::stage::{ActorId, Feature, Ground};
 
@@ -412,7 +414,7 @@ mod tests {
         let s = tmp_store("chunk");
         let c = ChunkCoord::new(-7, 3);
         let mut data = ChunkData::default();
-        generate_chunk(3, &GenParams::default(), c, &mut data);
+        generate_chunk(3, &GenParams::default(), &Kinds::builtin(), c, &mut data);
         assert!(!data.actors.rows.is_empty(), "the default density seeds");
         data.cells.feature[0] = Feature::Rock;
         data.cells.ground[CHUNK_CELLS - 1] = Ground::Water;
@@ -461,12 +463,12 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x04\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x05\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
         let mut data = ChunkData::default();
-        generate_chunk(1, &GenParams::default(), c, &mut data);
+        generate_chunk(1, &GenParams::default(), &Kinds::builtin(), c, &mut data);
         s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
             .unwrap();
         let good = fs::read(s.chunk_path(c)).unwrap();
@@ -499,15 +501,15 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v3 file is refused by version.
+        // A v4 file is refused by version.
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 3;
+        bytes[4] = 4;
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(
             s.read_chunk(c)
                 .unwrap_err()
                 .to_string()
-                .contains("format 3")
+                .contains("format 4")
         );
         fs::remove_dir_all(s.dir()).unwrap();
     }

@@ -1,0 +1,26 @@
+# Animals. Shared subs first: a sub sees only its parameters and locals, so
+# any kind can call it. (Files compile in name order: this one before
+# plants.rules, so chicken is kind 0.)
+
+sub flee(t: target) {
+  if free(away t) { move away t } else { move random free }
+}
+
+sub drink_from(r) {                 # drink if beside water, else walk to it
+  if nearest water within 1 as w { drink w }
+  else if nearest water within r as w { move toward w }
+}
+
+sub wander() { choose { 3: move random free   2: idle } }
+
+kind chicken {
+  glyph "c"
+  cadence 8                         # thinks every 8 ticks (32 game seconds)
+  sight 6
+  need water  max 2h vital
+  need health max 20 decay 0 vital
+
+  when water < 40min              => drink_from(6)
+  when hour >= 20 or hour < 5     => idle             # roosts at night
+  when true                       => wander()
+}

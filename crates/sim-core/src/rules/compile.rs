@@ -1,16 +1,17 @@
 //! The rules compiler: text -> [`Kinds`] (`docs/ACTORS.md` §5).
 //!
 //! Three small passes over one file: a lexer (tokens with line and column),
-//! a recursive-descent parser (an AST per kind), and a code generator that
-//! drives [`Asm`]. Kinds are numbered in declaration order, files in
-//! sorted-name order, never directory order, so two processes agree on
-//! every kind id. Every error carries `file:line:col`; the sim never runs a
-//! program that did not compile.
+//! a recursive-descent parser (an AST per kind and per sub), and a code
+//! generator that drives [`Asm`]. Kinds are numbered in declaration order,
+//! files in sorted-name order, never directory order, so two processes agree
+//! on every kind id. Every error carries `file:line:col`; the sim never runs
+//! a program that did not compile.
 //!
-//! What is implemented is the subset the plants exercise (kind properties,
-//! needs, mem, `when` rules, `if`/`else`, `choose`, `count`, `nearest ... as`,
-//! `become`, `spawn`, `idle`, `die`, arithmetic, time literals). Every later
-//! keyword of the grammar arrives with the creature that needs it.
+//! Subs are file-scope and shared by every kind, so inside a sub a name is a
+//! parameter or a local, never a need or a mem slot. A sub that `return`s a
+//! value anywhere is a function (usable in expressions), otherwise a
+//! procedure (a statement). Targets are `(dx, dy)` pairs: two stack values
+//! in flight, two locals at rest.
 
 use std::fmt;
 
@@ -46,9 +47,10 @@ pub fn compile(file: &str, text: &str) -> Result<Kinds> {
 }
 
 /// Compile several files as one rule set, in the order given (callers sort
-/// by name). Kind names are global across files.
+/// by name). Kind and sub names are global across files.
 pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
-    let mut asts = Vec::new();
+    let mut kinds = Vec::new();
+    let mut subs = Vec::new();
     for (name, text) in files {
         let tokens = Lexer::new(name, text).lex()?;
         let mut p = Parser {
@@ -56,9 +58,9 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
             tokens,
             at: 0,
         };
-        asts.extend(p.file()?);
+        p.file(&mut kinds, &mut subs)?;
     }
-    Gen::new(&asts).generate()
+    Gen::new(&kinds, &subs).generate()
 }
 
 /// Compile every `*.rules` file in `dir`, in sorted file-name order.
@@ -105,9 +107,9 @@ struct Token {
     col: u32,
 }
 
-const SYMS: [&str; 22] = [
+const SYMS: [&str; 23] = [
     "=>", "==", "!=", "<=", ">=", "+=", "-=", "{", "}", "(", ")", ",", ":", "=", "<", ">", "+",
-    "-", "*", "/", "%", ";",
+    "-", "*", "/", "%", ";", ".",
 ];
 
 struct Lexer<'a> {
@@ -245,12 +247,34 @@ impl<'a> Lexer<'a> {
 
 // ---- AST ------------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ty {
+    Int,
+    Target,
+    Pred,
+}
+
+impl Ty {
+    /// Stack values / locals it occupies.
+    fn width(self) -> u8 {
+        match self {
+            Ty::Target => 2,
+            Ty::Int | Ty::Pred => 1,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
-struct KindAst {
+struct Pos {
     file: String,
-    name: String,
     line: u32,
     col: u32,
+}
+
+#[derive(Debug, Clone)]
+struct KindAst {
+    at: Pos,
+    name: String,
     glyph: u8,
     tags: Vec<String>,
     cadence_shift: u8,
@@ -261,6 +285,16 @@ struct KindAst {
     needs: Vec<NeedDef>,
     mems: Vec<String>,
     rules: Vec<Rule>,
+}
+
+#[derive(Debug, Clone)]
+struct SubAst {
+    at: Pos,
+    name: String,
+    params: Vec<(String, Ty)>,
+    body: Vec<Stmt>,
+    /// Has a `return expr` somewhere: a function.
+    returns: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -276,8 +310,7 @@ enum Cond {
         pred: Pred,
         r: Expr,
         bind: String,
-        line: u32,
-        col: u32,
+        at: Pos,
     },
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
@@ -285,18 +318,41 @@ enum Cond {
 }
 
 #[derive(Debug, Clone)]
+enum Target {
+    Named(String, Pos),
+    Here,
+    Dir(i32, i32),
+    Toward(Box<Target>),
+    Away(Box<Target>),
+    At(Box<Expr>, Box<Expr>),
+    RandomFree,
+}
+
+/// A call argument: typed by the callee's parameter at codegen.
+#[derive(Debug, Clone)]
+enum Arg {
+    Expr(Expr),
+    Target(Target),
+    /// A bare name: an int, a target or a pred, whatever the parameter says.
+    Name(String, Pos),
+}
+
+#[derive(Debug, Clone)]
 enum Stmt {
+    Set {
+        name: String,
+        at: Pos,
+        value: Expr,
+    },
     Assign {
         name: String,
-        line: u32,
-        col: u32,
+        at: Pos,
         op: OpCode,
         value: Expr,
     },
-    Set {
+    Let {
         name: String,
-        line: u32,
-        col: u32,
+        at: Pos,
         value: Expr,
     },
     If {
@@ -304,25 +360,42 @@ enum Stmt {
         then: Vec<Stmt>,
         els: Vec<Stmt>,
     },
+    While {
+        cond: Cond,
+        body: Vec<Stmt>,
+    },
+    Repeat {
+        count: Expr,
+        body: Vec<Stmt>,
+    },
     Choose(Vec<(Expr, Vec<Stmt>)>),
+    Call {
+        name: String,
+        args: Vec<Arg>,
+        at: Pos,
+    },
+    Return {
+        value: Option<Expr>,
+        at: Pos,
+    },
     Idle,
     Die,
     Become {
         kind: String,
-        line: u32,
-        col: u32,
+        at: Pos,
     },
     Spawn {
         kind: String,
-        at: Option<String>,
-        line: u32,
-        col: u32,
+        at: Target,
+        pos: Pos,
     },
+    Move(Target),
+    Drink(Target),
 }
 
 #[derive(Debug, Clone)]
 enum Pred {
-    Kind(String, u32, u32),
+    Kind(String, Pos),
     Ground(Ground),
     Feature(Feature),
     Free,
@@ -331,15 +404,25 @@ enum Pred {
 #[derive(Debug, Clone)]
 enum Expr {
     Int(i32),
-    Name(String, u32, u32),
+    Name(String, Pos),
+    /// `t.dx` (0) or `t.dy` (1).
+    Field(String, u8, Pos),
     Sense(Sense),
     Bin(OpCode, Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
     Rand(Box<Expr>),
     Chance(Box<Expr>),
     Count(Pred, Box<Expr>),
+    Dist(Target),
+    FreeAt(Target),
+    IsAt(Target, Pred),
     /// `min`, `max`, `abs`, `sign`, `clamp`: the opcode and its arguments.
     Fn(OpCode, Vec<Expr>),
+    Call {
+        name: String,
+        args: Vec<Arg>,
+        at: Pos,
+    },
 }
 
 // ---- parser ---------------------------------------------------------------------------
@@ -371,33 +454,56 @@ fn sense_named(name: &str) -> Option<Sense> {
     })
 }
 
-const KEYWORDS: [&str; 26] = [
-    "kind", "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "need", "max", "decay",
-    "vital", "mem", "when", "if", "else", "choose", "and", "or", "not", "nearest", "count",
-    "within", "as", "true", "false",
+// `water`, `soil`, `rock` and `free` are contextual: predicates after
+// `count`/`nearest`/`is`/`random`, plain names elsewhere (so a kind may
+// declare `need water`).
+const KEYWORDS: [&str; 46] = [
+    "kind", "sub", "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "need", "max",
+    "decay", "vital", "mem", "when", "if", "else", "while", "repeat", "let", "return", "choose",
+    "and", "or", "not", "nearest", "count", "within", "as", "true", "false", "idle", "die",
+    "become", "spawn", "move", "drink", "at", "here", "toward", "away", "random", "north", "east",
+    "south", "west",
 ];
+const DIRS: [(&str, i32, i32); 4] = [
+    ("north", 0, -1),
+    ("east", 1, 0),
+    ("south", 0, 1),
+    ("west", -1, 0),
+];
+
+fn is_reserved(n: &str) -> bool {
+    KEYWORDS.contains(&n) || sense_named(n).is_some()
+}
 
 impl Parser<'_> {
     fn peek(&self) -> &Tok {
         &self.tokens[self.at].tok
     }
 
-    fn pos(&self) -> (u32, u32) {
-        let t = &self.tokens[self.at];
-        (t.line, t.col)
+    fn peek2(&self) -> &Tok {
+        &self.tokens[(self.at + 1).min(self.tokens.len() - 1)].tok
     }
 
-    fn err_at(&self, (line, col): (u32, u32), msg: impl Into<String>) -> CompileError {
-        CompileError {
+    fn pos(&self) -> Pos {
+        let t = &self.tokens[self.at];
+        Pos {
             file: self.file.to_string(),
-            line,
-            col,
+            line: t.line,
+            col: t.col,
+        }
+    }
+
+    fn err_at(&self, at: &Pos, msg: impl Into<String>) -> CompileError {
+        CompileError {
+            file: at.file.clone(),
+            line: at.line,
+            col: at.col,
             msg: msg.into(),
         }
     }
 
     fn err(&self, msg: impl Into<String>) -> CompileError {
-        self.err_at(self.pos(), msg)
+        self.err_at(&self.pos(), msg)
     }
 
     fn describe(&self) -> String {
@@ -462,12 +568,12 @@ impl Parser<'_> {
     }
 
     /// An identifier that is not a keyword or a sense.
-    fn ident(&mut self, what: &str) -> Result<(String, u32, u32)> {
-        let (line, col) = self.pos();
+    fn ident(&mut self, what: &str) -> Result<(String, Pos)> {
+        let at = self.pos();
         match self.peek().clone() {
-            Tok::Name(n) if !KEYWORDS.contains(&n.as_str()) && sense_named(&n).is_none() => {
+            Tok::Name(n) if !is_reserved(&n) => {
                 self.bump();
-                Ok((n, line, col))
+                Ok((n, at))
             }
             Tok::Name(n) => Err(self.err(format!("`{n}` is a reserved word, not a {what}"))),
             _ => Err(self.err(format!("expected a {what}, found {}", self.describe()))),
@@ -494,26 +600,72 @@ impl Parser<'_> {
         }
     }
 
-    fn file(&mut self) -> Result<Vec<KindAst>> {
-        let mut kinds = Vec::new();
+    fn file(&mut self, kinds: &mut Vec<KindAst>, subs: &mut Vec<SubAst>) -> Result<()> {
         while *self.peek() != Tok::Eof {
-            if !self.is_kw("kind") {
-                return Err(self.err(format!("expected `kind`, found {}", self.describe())));
+            if self.is_kw("kind") {
+                kinds.push(self.kind()?);
+            } else if self.is_kw("sub") {
+                subs.push(self.sub()?);
+            } else {
+                return Err(self.err(format!(
+                    "expected `kind` or `sub`, found {}",
+                    self.describe()
+                )));
             }
-            kinds.push(self.kind()?);
         }
-        Ok(kinds)
+        Ok(())
+    }
+
+    fn sub(&mut self) -> Result<SubAst> {
+        self.expect_kw("sub")?;
+        let (name, at) = self.ident("sub name")?;
+        self.expect_sym("(")?;
+        let mut params = Vec::new();
+        if !self.is_sym(")") {
+            loop {
+                let (p, pat) = self.ident("parameter name")?;
+                let ty = if self.eat_sym(":") {
+                    match self.bump() {
+                        Tok::Name(t) if t == "target" => Ty::Target,
+                        Tok::Name(t) if t == "pred" => Ty::Pred,
+                        _ => {
+                            return Err(self.err_at(
+                                &pat,
+                                "a parameter type is `target` or `pred` (int needs none)",
+                            ));
+                        }
+                    }
+                } else {
+                    Ty::Int
+                };
+                if params.iter().any(|(q, _)| *q == p) {
+                    return Err(self.err_at(&pat, format!("parameter `{p}` declared twice")));
+                }
+                params.push((p, ty));
+                if !self.eat_sym(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_sym(")")?;
+        let body = self.block()?;
+        let returns = returns_value(&body);
+        Ok(SubAst {
+            at,
+            name,
+            params,
+            body,
+            returns,
+        })
     }
 
     fn kind(&mut self) -> Result<KindAst> {
         self.expect_kw("kind")?;
-        let (name, line, col) = self.ident("kind name")?;
+        let (name, at) = self.ident("kind name")?;
         self.expect_sym("{")?;
         let mut k = KindAst {
-            file: self.file.to_string(),
+            at,
             name,
-            line,
-            col,
             glyph: b'?',
             tags: Vec::new(),
             cadence_shift: 3,
@@ -534,11 +686,13 @@ impl Parser<'_> {
                     Tok::Str(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_graphic() => {
                         k.glyph = s.as_bytes()[0];
                     }
-                    _ => return Err(self.err_at(p, "glyph takes one printable ASCII character")),
+                    _ => {
+                        return Err(self.err_at(&p, "glyph takes one printable ASCII character"));
+                    }
                 }
             } else if self.eat_kw("tags") {
                 while let Tok::Name(n) = self.peek().clone() {
-                    if KEYWORDS.contains(&n.as_str()) {
+                    if is_reserved(&n) {
                         break;
                     }
                     self.bump();
@@ -547,19 +701,19 @@ impl Parser<'_> {
             } else if self.eat_kw("cadence") {
                 let c = self.int("a cadence")?;
                 if c < 1 || !(c as u32).is_power_of_two() {
-                    return Err(self.err_at(p, "cadence must be a power of two (1, 2, 4, ...)"));
+                    return Err(self.err_at(&p, "cadence must be a power of two (1, 2, 4, ...)"));
                 }
                 k.cadence_shift = c.trailing_zeros() as u8;
             } else if self.eat_kw("sight") {
                 let s = self.int("a sight radius")?;
                 if !(0..=16).contains(&s) {
-                    return Err(self.err_at(p, "sight is 0 to 16 cells"));
+                    return Err(self.err_at(&p, "sight is 0 to 16 cells"));
                 }
                 k.sight = s as u8;
             } else if self.eat_kw("fuel") {
                 let f = self.int("a fuel budget")?;
                 if !(1..=4096).contains(&f) {
-                    return Err(self.err_at(p, "fuel is 1 to 4096 ops per think"));
+                    return Err(self.err_at(&p, "fuel is 1 to 4096 ops per think"));
                 }
                 k.fuel = f as u32;
             } else if self.eat_kw("food") {
@@ -567,7 +721,7 @@ impl Parser<'_> {
             } else if self.eat_kw("bite") {
                 let b = self.int("a bite")?;
                 if !(0..=255).contains(&b) {
-                    return Err(self.err_at(p, "bite is 0 to 255"));
+                    return Err(self.err_at(&p, "bite is 0 to 255"));
                 }
                 k.bite = b as u8;
             } else if self.eat_kw("need") {
@@ -575,22 +729,22 @@ impl Parser<'_> {
                 self.expect_kw("max")?;
                 let max = self.int_or_time("the need's maximum")?;
                 if max < 1 {
-                    return Err(self.err_at(p, "a need's max is at least 1"));
+                    return Err(self.err_at(&p, "a need's max is at least 1"));
                 }
                 let mut decays = true;
                 if self.eat_kw("decay") {
                     match self.int("0 (points) or 1 (per tick)")? {
                         0 => decays = false,
                         1 => decays = true,
-                        _ => return Err(self.err_at(p, "decay is 0 (points) or 1 (per tick)")),
+                        _ => return Err(self.err_at(&p, "decay is 0 (points) or 1 (per tick)")),
                     }
                 }
                 let vital = self.eat_kw("vital");
                 if k.needs.iter().any(|n| n.name == name) {
-                    return Err(self.err_at(p, format!("need `{name}` declared twice")));
+                    return Err(self.err_at(&p, format!("need `{name}` declared twice")));
                 }
                 if k.needs.len() == NEED_SLOTS {
-                    return Err(self.err_at(p, format!("at most {NEED_SLOTS} needs per kind")));
+                    return Err(self.err_at(&p, format!("at most {NEED_SLOTS} needs per kind")));
                 }
                 k.needs.push(NeedDef {
                     name,
@@ -602,11 +756,11 @@ impl Parser<'_> {
                 loop {
                     let (name, ..) = self.ident("memory slot name")?;
                     if k.mems.contains(&name) || k.needs.iter().any(|n| n.name == name) {
-                        return Err(self.err_at(p, format!("`{name}` declared twice")));
+                        return Err(self.err_at(&p, format!("`{name}` declared twice")));
                     }
                     if k.mems.len() == MEM_SLOTS {
                         return Err(
-                            self.err_at(p, format!("at most {MEM_SLOTS} mem slots per kind"))
+                            self.err_at(&p, format!("at most {MEM_SLOTS} mem slots per kind"))
                         );
                     }
                     k.mems.push(name);
@@ -662,7 +816,7 @@ impl Parser<'_> {
     }
 
     fn stmt(&mut self) -> Result<Stmt> {
-        let (line, col) = self.pos();
+        let at = self.pos();
         if self.eat_kw("if") {
             let cond = self.cond()?;
             let then = self.block()?;
@@ -677,6 +831,30 @@ impl Parser<'_> {
             };
             return Ok(Stmt::If { cond, then, els });
         }
+        if self.eat_kw("while") {
+            let cond = self.cond()?;
+            let body = self.block()?;
+            return Ok(Stmt::While { cond, body });
+        }
+        if self.eat_kw("repeat") {
+            let count = self.expr()?;
+            let body = self.block()?;
+            return Ok(Stmt::Repeat { count, body });
+        }
+        if self.eat_kw("let") {
+            let (name, at) = self.ident("local name")?;
+            self.expect_sym("=")?;
+            let value = self.expr()?;
+            return Ok(Stmt::Let { name, at, value });
+        }
+        if self.eat_kw("return") {
+            let value = if self.is_sym("}") || self.is_sym(";") {
+                None
+            } else {
+                Some(self.expr()?)
+            };
+            return Ok(Stmt::Return { value, at });
+        }
         if self.eat_kw("choose") {
             self.expect_sym("{")?;
             let mut arms = Vec::new();
@@ -689,7 +867,7 @@ impl Parser<'_> {
             }
             self.expect_sym("}")?;
             if arms.is_empty() {
-                return Err(self.err_at((line, col), "choose needs at least one arm"));
+                return Err(self.err_at(&at, "choose needs at least one arm"));
             }
             return Ok(Stmt::Choose(arms));
         }
@@ -700,51 +878,113 @@ impl Parser<'_> {
             return Ok(Stmt::Die);
         }
         if self.eat_kw("become") {
-            let (kind, line, col) = self.ident("kind name")?;
-            return Ok(Stmt::Become { kind, line, col });
+            let (kind, at) = self.ident("kind name")?;
+            return Ok(Stmt::Become { kind, at });
         }
         if self.eat_kw("spawn") {
-            let (kind, line, col) = self.ident("kind name")?;
+            let (kind, pos) = self.ident("kind name")?;
             self.expect_kw("at")?;
-            let at = if self.eat_kw("here") {
-                None
-            } else {
-                Some(self.ident("a bound target")?.0)
-            };
-            return Ok(Stmt::Spawn {
-                kind,
-                at,
-                line,
-                col,
-            });
+            let at = self.target()?;
+            return Ok(Stmt::Spawn { kind, at, pos });
         }
-        // Assignment.
-        let (name, line, col) = self.ident("statement")?;
+        if self.eat_kw("move") {
+            return Ok(Stmt::Move(self.target()?));
+        }
+        if self.eat_kw("drink") {
+            return Ok(Stmt::Drink(self.target()?));
+        }
+        // A call or an assignment.
+        let (name, at) = self.ident("statement")?;
+        if self.is_sym("(") {
+            let args = self.args()?;
+            return Ok(Stmt::Call { name, args, at });
+        }
         if self.eat_sym("=") {
             let value = self.expr()?;
-            return Ok(Stmt::Set {
-                name,
-                line,
-                col,
-                value,
-            });
+            return Ok(Stmt::Set { name, at, value });
         }
         for (sym, op) in [("+=", OpCode::Add), ("-=", OpCode::Sub)] {
             if self.eat_sym(sym) {
                 let value = self.expr()?;
                 return Ok(Stmt::Assign {
                     name,
-                    line,
-                    col,
+                    at,
                     op,
                     value,
                 });
             }
         }
         Err(self.err(format!(
-            "expected `=`, `+=` or `-=` after `{name}`, found {}",
+            "expected `(`, `=`, `+=` or `-=` after `{name}`, found {}",
             self.describe()
         )))
+    }
+
+    /// `( arg, ... )`. A bare name is typed by the callee's parameter.
+    fn args(&mut self) -> Result<Vec<Arg>> {
+        self.expect_sym("(")?;
+        let mut args = Vec::new();
+        if !self.is_sym(")") {
+            loop {
+                let at = self.pos();
+                let arg = if self.starts_target() {
+                    Arg::Target(self.target()?)
+                } else if let Tok::Name(n) = self.peek().clone()
+                    && !is_reserved(&n)
+                    && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
+                {
+                    self.bump();
+                    Arg::Name(n, at)
+                } else {
+                    Arg::Expr(self.expr()?)
+                };
+                args.push(arg);
+                if !self.eat_sym(",") {
+                    break;
+                }
+            }
+        }
+        self.expect_sym(")")?;
+        Ok(args)
+    }
+
+    fn starts_target(&self) -> bool {
+        matches!(self.peek(), Tok::Name(n) if ["here", "toward", "away", "random", "north", "east", "south", "west"].contains(&n.as_str()))
+            || (self.is_kw("at") && matches!(self.peek2(), Tok::Sym("(")))
+    }
+
+    fn target(&mut self) -> Result<Target> {
+        let at = self.pos();
+        if self.eat_kw("here") {
+            return Ok(Target::Here);
+        }
+        if self.eat_kw("toward") {
+            return Ok(Target::Toward(Box::new(self.target()?)));
+        }
+        if self.eat_kw("away") {
+            return Ok(Target::Away(Box::new(self.target()?)));
+        }
+        if self.eat_kw("random") {
+            self.expect_kw("free")?;
+            return Ok(Target::RandomFree);
+        }
+        if self.eat_kw("at") {
+            self.expect_sym("(")?;
+            let x = self.expr()?;
+            self.expect_sym(",")?;
+            let y = self.expr()?;
+            self.expect_sym(")")?;
+            return Ok(Target::At(Box::new(x), Box::new(y)));
+        }
+        for (name, dx, dy) in DIRS {
+            if self.eat_kw(name) {
+                return Ok(Target::Dir(dx, dy));
+            }
+        }
+        let (name, _) = self.ident(
+            "target (a binding, here, north/east/south/west, toward, away, at(x, y) or random free)",
+        )?;
+        Ok(Target::Named(name, at))
     }
 
     // cond := and_cond ("or" and_cond)*
@@ -770,20 +1010,14 @@ impl Parser<'_> {
         if self.eat_kw("not") {
             return Ok(Cond::Not(Box::new(self.not_cond()?)));
         }
-        let (line, col) = self.pos();
+        let at = self.pos();
         if self.eat_kw("nearest") {
             let pred = self.pred()?;
             self.expect_kw("within")?;
             let r = self.additive()?; // a radius, never a comparison
             self.expect_kw("as")?;
             let (bind, ..) = self.ident("binding name")?;
-            return Ok(Cond::Nearest {
-                pred,
-                r,
-                bind,
-                line,
-                col,
-            });
+            return Ok(Cond::Nearest { pred, r, bind, at });
         }
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
@@ -807,7 +1041,7 @@ impl Parser<'_> {
     }
 
     fn pred(&mut self) -> Result<Pred> {
-        let (line, col) = self.pos();
+        let at = self.pos();
         if self.eat_kw("free") {
             return Ok(Pred::Free);
         }
@@ -821,7 +1055,7 @@ impl Parser<'_> {
             return Ok(Pred::Feature(Feature::Rock));
         }
         let (name, ..) = self.ident("predicate (a kind, water, soil, rock or free)")?;
-        Ok(Pred::Kind(name, line, col))
+        Ok(Pred::Kind(name, at))
     }
 
     // expr := cmp
@@ -883,7 +1117,7 @@ impl Parser<'_> {
     }
 
     fn primary(&mut self) -> Result<Expr> {
-        let (line, col) = self.pos();
+        let at = self.pos();
         match self.bump() {
             Tok::Int(v) | Tok::Time(v) => Ok(Expr::Int(v)),
             Tok::Sym("(") => {
@@ -914,6 +1148,26 @@ impl Parser<'_> {
                             Expr::Chance(Box::new(e))
                         })
                     }
+                    "dist" => {
+                        self.expect_sym("(")?;
+                        let t = self.target()?;
+                        self.expect_sym(")")?;
+                        Ok(Expr::Dist(t))
+                    }
+                    "free" => {
+                        self.expect_sym("(")?;
+                        let t = self.target()?;
+                        self.expect_sym(")")?;
+                        Ok(Expr::FreeAt(t))
+                    }
+                    "is" => {
+                        self.expect_sym("(")?;
+                        let t = self.target()?;
+                        self.expect_sym(",")?;
+                        let p = self.pred()?;
+                        self.expect_sym(")")?;
+                        Ok(Expr::IsAt(t, p))
+                    }
                     "min" | "max" | "abs" | "sign" | "clamp" => {
                         let (op, arity) = match n.as_str() {
                             "min" => (OpCode::Min, 2),
@@ -929,16 +1183,32 @@ impl Parser<'_> {
                         }
                         self.expect_sym(")")?;
                         if args.len() != arity {
-                            return Err(
-                                self.err_at((line, col), format!("`{n}` takes {arity} arguments"))
-                            );
+                            return Err(self.err_at(&at, format!("`{n}` takes {arity} arguments")));
                         }
                         Ok(Expr::Fn(op, args))
                     }
-                    _ if KEYWORDS.contains(&n.as_str()) => {
-                        Err(self.err_at((line, col), format!("unexpected `{n}` in an expression")))
+                    _ if is_reserved(&n) => {
+                        Err(self.err_at(&at, format!("unexpected `{n}` in an expression")))
                     }
-                    _ => Ok(Expr::Name(n, line, col)),
+                    _ => {
+                        if self.is_sym("(") {
+                            let args = self.args()?;
+                            return Ok(Expr::Call { name: n, args, at });
+                        }
+                        if self.eat_sym(".") {
+                            let field = match self.bump() {
+                                Tok::Name(f) if f == "dx" => 0,
+                                Tok::Name(f) if f == "dy" => 1,
+                                _ => {
+                                    return Err(
+                                        self.err_at(&at, format!("`{n}.` must be `.dx` or `.dy`"))
+                                    );
+                                }
+                            };
+                            return Ok(Expr::Field(n, field, at));
+                        }
+                        Ok(Expr::Name(n, at))
+                    }
                 }
             }
             _ => {
@@ -949,59 +1219,97 @@ impl Parser<'_> {
     }
 }
 
+/// Does any `return` in this body carry a value?
+fn returns_value(body: &[Stmt]) -> bool {
+    body.iter().any(|s| match s {
+        Stmt::Return { value, .. } => value.is_some(),
+        Stmt::If { then, els, .. } => returns_value(then) || returns_value(els),
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } => returns_value(body),
+        Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
+        _ => false,
+    })
+}
+
 // ---- code generation ------------------------------------------------------------------
 
+#[derive(Debug, Clone)]
+struct Local {
+    name: String,
+    slot: u8,
+    ty: Ty,
+}
+
 struct Gen<'a> {
-    asts: &'a [KindAst],
+    kinds: &'a [KindAst],
+    subs: &'a [SubAst],
     asm: Asm,
     consts: Vec<i32>,
-    /// Current kind, its bound locals (name, slot), next free local.
-    kind: usize,
-    locals: Vec<(String, u8)>,
+    /// Current kind (`None` inside a sub), the sub being compiled, locals.
+    kind: Option<usize>,
+    sub: Option<usize>,
+    locals: Vec<Local>,
     next_local: u8,
+    /// Position for errors without a better one.
+    here: Pos,
 }
 
 impl<'a> Gen<'a> {
-    fn new(asts: &'a [KindAst]) -> Self {
+    fn new(kinds: &'a [KindAst], subs: &'a [SubAst]) -> Self {
         Self {
-            asts,
+            kinds,
+            subs,
             asm: Asm::new(),
             consts: Vec::new(),
-            kind: 0,
+            kind: None,
+            sub: None,
             locals: Vec::new(),
             next_local: 0,
+            here: Pos {
+                file: String::new(),
+                line: 0,
+                col: 0,
+            },
         }
     }
 
-    fn err(&self, line: u32, col: u32, msg: impl Into<String>) -> CompileError {
+    fn err(&self, at: &Pos, msg: impl Into<String>) -> CompileError {
         CompileError {
-            file: self.asts[self.kind].file.clone(),
-            line,
-            col,
+            file: at.file.clone(),
+            line: at.line,
+            col: at.col,
             msg: msg.into(),
         }
     }
 
     fn kind_id(&self, name: &str) -> Option<u16> {
-        self.asts
+        self.kinds
             .iter()
             .position(|k| k.name == name)
             .map(|i| i as u16)
     }
 
     fn generate(mut self) -> Result<Kinds> {
-        // Duplicate kind names across files.
-        for (i, k) in self.asts.iter().enumerate() {
-            if self.asts[..i].iter().any(|o| o.name == k.name) {
-                self.kind = i;
-                return Err(self.err(k.line, k.col, format!("kind `{}` declared twice", k.name)));
+        for (i, k) in self.kinds.iter().enumerate() {
+            if self.kinds[..i].iter().any(|o| o.name == k.name) {
+                return Err(self.err(&k.at, format!("kind `{}` declared twice", k.name)));
             }
         }
-        let mut defs = Vec::with_capacity(self.asts.len());
-        for i in 0..self.asts.len() {
-            self.kind = i;
+        for (i, s) in self.subs.iter().enumerate() {
+            if self.subs[..i].iter().any(|o| o.name == s.name) {
+                return Err(self.err(&s.at, format!("sub `{}` declared twice", s.name)));
+            }
+            let width: u32 = s.params.iter().map(|(_, t)| u32::from(t.width())).sum();
+            if width > FRAME_LOCALS as u32 {
+                return Err(self.err(&s.at, format!("sub `{}` has too many parameters", s.name)));
+            }
+        }
+        let mut defs = Vec::with_capacity(self.kinds.len());
+        for i in 0..self.kinds.len() {
+            self.kind = Some(i);
+            self.sub = None;
             let entry = self.asm.here();
-            let k = &self.asts[i];
+            let k = &self.kinds[i];
+            self.here = k.at.clone();
             for rule in &k.rules {
                 self.locals.clear();
                 self.next_local = 0;
@@ -1027,8 +1335,33 @@ impl<'a> Gen<'a> {
                 entry,
             });
         }
+        let mut sub_entries = Vec::with_capacity(self.subs.len());
+        for i in 0..self.subs.len() {
+            self.kind = None;
+            self.sub = Some(i);
+            let s = &self.subs[i];
+            self.here = s.at.clone();
+            sub_entries.push(self.asm.here());
+            self.locals.clear();
+            self.next_local = 0;
+            for (name, ty) in &s.params {
+                let slot = self.alloc_local(&s.at, ty.width())?;
+                self.locals.push(Local {
+                    name: name.clone(),
+                    slot,
+                    ty: *ty,
+                });
+            }
+            self.stmts(&s.body)?;
+            // Falling off the end: a function returns 0, a procedure nothing.
+            if s.returns {
+                self.asm.push(0).ret(true);
+            } else {
+                self.asm.ret(false);
+            }
+        }
         let code = self.asm.finish();
-        Ok(Kinds::from_parts(defs, code, self.consts, Vec::new()))
+        Ok(Kinds::from_parts(defs, code, self.consts, sub_entries))
     }
 
     fn push_int(&mut self, v: i32) {
@@ -1047,17 +1380,46 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn alloc_local(&mut self, line: u32, col: u32, n: u8) -> Result<u8> {
+    fn alloc_local(&mut self, at: &Pos, n: u8) -> Result<u8> {
         let slot = self.next_local;
         if usize::from(slot) + usize::from(n) > FRAME_LOCALS {
             return Err(self.err(
-                line,
-                col,
-                format!("too many bindings in one rule (max {FRAME_LOCALS} locals)"),
+                at,
+                format!(
+                    "too many bindings and locals in one rule or sub (max {FRAME_LOCALS} slots)"
+                ),
             ));
         }
         self.next_local += n;
         Ok(slot)
+    }
+
+    fn local(&self, name: &str) -> Option<&Local> {
+        self.locals.iter().rev().find(|l| l.name == name)
+    }
+
+    fn need_slot(&self, n: &str) -> Option<u8> {
+        let k = &self.kinds[self.kind?];
+        k.needs.iter().position(|d| d.name == n).map(|i| i as u8)
+    }
+
+    fn mem_slot(&self, n: &str) -> Option<u8> {
+        let k = &self.kinds[self.kind?];
+        k.mems.iter().position(|m| m == n).map(|i| i as u8)
+    }
+
+    fn unknown_name(&self, at: &Pos, n: &str) -> CompileError {
+        if self.sub.is_some() {
+            self.err(
+                at,
+                format!("unknown name `{n}` (a sub sees only its parameters and locals)"),
+            )
+        } else {
+            self.err(
+                at,
+                format!("unknown name `{n}` (not a need, mem slot or binding of this kind)"),
+            )
+        }
     }
 
     /// Emit `cond`; on false, jump to `on_false`. `top` is true while the
@@ -1068,28 +1430,25 @@ impl<'a> Gen<'a> {
                 self.expr(e)?;
                 self.asm.jz(on_false);
             }
-            Cond::Nearest {
-                pred,
-                r,
-                bind,
-                line,
-                col,
-            } => {
+            Cond::Nearest { pred, r, bind, at } => {
                 if !top {
                     return Err(self.err(
-                        *line,
-                        *col,
+                        at,
                         "`nearest ... as` must be a top-level conjunct (not under `or` or `not`)",
                     ));
                 }
-                if self.locals.iter().any(|(n, _)| n == bind) {
-                    return Err(self.err(*line, *col, format!("`{bind}` is already bound")));
+                if self.local(bind).is_some() {
+                    return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
-                let slot = self.alloc_local(*line, *col, 2)?;
+                let slot = self.alloc_local(at, 2)?;
                 self.pred(pred)?;
                 self.expr(r)?;
                 self.asm.nearest(slot).jz(on_false);
-                self.locals.push((bind.clone(), slot));
+                self.locals.push(Local {
+                    name: bind.clone(),
+                    slot,
+                    ty: Ty::Target,
+                });
             }
             Cond::And(a, b) => {
                 self.cond(a, on_false, top)?;
@@ -1117,12 +1476,78 @@ impl<'a> Gen<'a> {
             Pred::Free => pred::FREE,
             Pred::Ground(g) => pred::ground(*g as u8),
             Pred::Feature(f) => pred::feature(*f as u8),
-            Pred::Kind(name, line, col) => i32::from(
-                self.kind_id(name)
-                    .ok_or_else(|| self.err(*line, *col, format!("unknown kind `{name}`")))?,
-            ),
+            Pred::Kind(name, at) => {
+                if let Some(l) = self.local(name) {
+                    if l.ty != Ty::Pred {
+                        return Err(self.err(at, format!("`{name}` is not a pred")));
+                    }
+                    let slot = l.slot;
+                    self.asm.load(slot);
+                    return Ok(());
+                }
+                i32::from(
+                    self.kind_id(name)
+                        .ok_or_else(|| self.err(at, format!("unknown kind `{name}`")))?,
+                )
+            }
         };
         self.push_int(v);
+        Ok(())
+    }
+
+    /// Emit a target: `dx dy` on the stack.
+    fn target(&mut self, t: &Target) -> Result<()> {
+        match t {
+            Target::Here => {
+                self.asm.push(0).push(0);
+            }
+            Target::Dir(dx, dy) => {
+                self.asm.push(*dx).push(*dy);
+            }
+            Target::Named(name, at) => {
+                let l = self
+                    .local(name)
+                    .ok_or_else(|| self.unknown_name(at, name))?;
+                if l.ty != Ty::Target {
+                    return Err(self.err(at, format!("`{name}` is not a target")));
+                }
+                let slot = l.slot;
+                self.asm.load(slot).load(slot + 1);
+            }
+            Target::Toward(inner) | Target::Away(inner) => {
+                // (sign dx, sign dy), negated for `away`.
+                let here = self.here.clone();
+                let tmp = self.alloc_local(&here, 2)?;
+                self.target(inner)?;
+                self.asm.store(tmp + 1).store(tmp);
+                self.asm.load(tmp).op(OpCode::Sign);
+                if matches!(t, Target::Away(_)) {
+                    self.asm.op(OpCode::Neg);
+                }
+                self.asm.load(tmp + 1).op(OpCode::Sign);
+                if matches!(t, Target::Away(_)) {
+                    self.asm.op(OpCode::Neg);
+                }
+                self.next_local = tmp;
+            }
+            Target::At(x, y) => {
+                self.expr(x)?;
+                self.asm.sense(Sense::X).op(OpCode::Sub);
+                self.expr(y)?;
+                self.asm.sense(Sense::Y).op(OpCode::Sub);
+            }
+            Target::RandomFree => {
+                // A free neighbour chosen by the ring's rotated start; (0, 0)
+                // when there is none (the move is then BLOCKED).
+                let here = self.here.clone();
+                let tmp = self.alloc_local(&here, 2)?;
+                self.asm.push(0).store(tmp).push(0).store(tmp + 1);
+                self.push_int(pred::FREE);
+                self.asm.push(1).nearest(tmp).op(OpCode::Pop);
+                self.asm.load(tmp).load(tmp + 1);
+                self.next_local = tmp;
+            }
+        }
         Ok(())
     }
 
@@ -1132,22 +1557,35 @@ impl<'a> Gen<'a> {
             Expr::Sense(s) => {
                 self.asm.sense(*s);
             }
-            Expr::Name(n, line, col) => {
-                if let Some(&(_, slot)) = self.locals.iter().rev().find(|(x, _)| x == n) {
-                    self.asm.load(slot);
+            Expr::Name(n, at) => {
+                if let Some(l) = self.local(n) {
+                    match l.ty {
+                        Ty::Int | Ty::Pred => {
+                            let slot = l.slot;
+                            self.asm.load(slot);
+                        }
+                        Ty::Target => {
+                            return Err(self.err(
+                                at,
+                                format!("`{n}` is a target: use `{n}.dx`, `{n}.dy` or `dist({n})`"),
+                            ));
+                        }
+                    }
                 } else if let Some(i) = self.need_slot(n) {
                     self.asm.need(i);
                 } else if let Some(i) = self.mem_slot(n) {
                     self.asm.mem(i);
                 } else {
-                    return Err(self.err(
-                        *line,
-                        *col,
-                        format!(
-                            "unknown name `{n}` (not a need, mem slot or binding of this kind)"
-                        ),
-                    ));
+                    return Err(self.unknown_name(at, n));
                 }
+            }
+            Expr::Field(n, field, at) => {
+                let l = self.local(n).ok_or_else(|| self.unknown_name(at, n))?;
+                if l.ty != Ty::Target {
+                    return Err(self.err(at, format!("`{n}` is not a target")));
+                }
+                let slot = l.slot + field;
+                self.asm.load(slot);
             }
             Expr::Bin(op, a, b) => {
                 self.expr(a)?;
@@ -1171,30 +1609,87 @@ impl<'a> Gen<'a> {
                 self.expr(r)?;
                 self.asm.op(OpCode::Count);
             }
+            Expr::Dist(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::Dist);
+            }
+            Expr::FreeAt(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::FreeAt);
+            }
+            Expr::IsAt(t, p) => {
+                self.target(t)?;
+                self.pred(p)?;
+                self.asm.op(OpCode::IsAt);
+            }
             Expr::Fn(op, args) => {
                 for a in args {
                     self.expr(a)?;
                 }
                 self.asm.op(*op);
             }
+            Expr::Call { name, args, at } => {
+                let returns = self.call(name, args, at)?;
+                if !returns {
+                    return Err(self.err(
+                        at,
+                        format!("sub `{name}` returns nothing; it cannot be used in an expression"),
+                    ));
+                }
+            }
         }
         Ok(())
     }
 
-    fn need_slot(&self, n: &str) -> Option<u8> {
-        self.asts[self.kind]
-            .needs
+    /// Emit a call; returns whether the sub leaves a value on the stack.
+    fn call(&mut self, name: &str, args: &[Arg], at: &Pos) -> Result<bool> {
+        let idx = self
+            .subs
             .iter()
-            .position(|d| d.name == n)
-            .map(|i| i as u8)
-    }
-
-    fn mem_slot(&self, n: &str) -> Option<u8> {
-        self.asts[self.kind]
-            .mems
-            .iter()
-            .position(|m| m == n)
-            .map(|i| i as u8)
+            .position(|s| s.name == name)
+            .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
+        let sub = &self.subs[idx];
+        if args.len() != sub.params.len() {
+            return Err(self.err(
+                at,
+                format!(
+                    "sub `{name}` takes {} arguments, {} given",
+                    sub.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let mut width = 0u8;
+        for (arg, (pname, ty)) in args.iter().zip(&sub.params) {
+            width += ty.width();
+            match (ty, arg) {
+                (Ty::Int, Arg::Expr(e)) => self.expr(e)?,
+                (Ty::Int, Arg::Name(n, p)) => self.expr(&Expr::Name(n.clone(), p.clone()))?,
+                (Ty::Target, Arg::Target(t)) => self.target(t)?,
+                (Ty::Target, Arg::Name(n, p)) => {
+                    self.target(&Target::Named(n.clone(), p.clone()))?;
+                }
+                (Ty::Pred, Arg::Name(n, p)) => self.pred(&Pred::Kind(n.clone(), p.clone()))?,
+                (Ty::Pred, Arg::Expr(Expr::Name(n, p))) => {
+                    self.pred(&Pred::Kind(n.clone(), p.clone()))?;
+                }
+                (ty, _) => {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "argument `{pname}` of `{name}` must be {}",
+                            match ty {
+                                Ty::Int => "an integer",
+                                Ty::Target => "a target",
+                                Ty::Pred => "a predicate (a kind or tag name)",
+                            }
+                        ),
+                    ));
+                }
+            }
+        }
+        self.asm.call(idx as u16, width);
+        Ok(sub.returns)
     }
 
     fn stmts(&mut self, body: &[Stmt]) -> Result<()> {
@@ -1204,8 +1699,12 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    fn store(&mut self, name: &str, line: u32, col: u32) -> Result<()> {
-        if let Some(&(_, slot)) = self.locals.iter().rev().find(|(x, _)| x == name) {
+    fn store(&mut self, name: &str, at: &Pos) -> Result<()> {
+        if let Some(l) = self.local(name) {
+            if l.ty != Ty::Int {
+                return Err(self.err(at, format!("`{name}` is not an integer local")));
+            }
+            let slot = l.slot;
             self.asm.store(slot);
         } else if let Some(i) = self.need_slot(name) {
             self.asm.set_need(i);
@@ -1213,95 +1712,144 @@ impl<'a> Gen<'a> {
             self.asm.set_mem(i);
         } else {
             return Err(self.err(
-                line,
-                col,
-                format!("cannot assign to `{name}`: not a need or mem slot of this kind"),
+                at,
+                format!("cannot assign to `{name}`: not a local, need or mem slot here"),
             ));
         }
         Ok(())
     }
 
+    /// Run `f` with a scope: locals and slots allocated inside are released.
+    fn scoped(&mut self, f: impl FnOnce(&mut Self) -> Result<()>) -> Result<()> {
+        let saved = (self.locals.len(), self.next_local);
+        let r = f(self);
+        self.locals.truncate(saved.0);
+        self.next_local = saved.1;
+        r
+    }
+
     fn stmt(&mut self, s: &Stmt) -> Result<()> {
         match s {
-            Stmt::Set {
-                name,
-                line,
-                col,
-                value,
-            } => {
+            Stmt::Set { name, at, value } => {
                 self.expr(value)?;
-                self.store(name, *line, *col)?;
+                self.store(name, at)?;
             }
             Stmt::Assign {
                 name,
-                line,
-                col,
+                at,
                 op,
                 value,
             } => {
-                self.expr(&Expr::Name(name.clone(), *line, *col))?;
+                self.expr(&Expr::Name(name.clone(), at.clone()))?;
                 self.expr(value)?;
                 self.asm.op(*op);
-                self.store(name, *line, *col)?;
+                self.store(name, at)?;
+            }
+            Stmt::Let { name, at, value } => {
+                if self.local(name).is_some() {
+                    return Err(self.err(at, format!("`{name}` is already bound")));
+                }
+                self.expr(value)?;
+                let slot = self.alloc_local(at, 1)?;
+                self.asm.store(slot);
+                self.locals.push(Local {
+                    name: name.clone(),
+                    slot,
+                    ty: Ty::Int,
+                });
             }
             Stmt::If { cond, then, els } => {
-                let saved = (self.locals.len(), self.next_local);
                 let no = self.asm.label();
                 let end = self.asm.label();
-                self.cond(cond, no, true)?;
-                self.stmts(then)?;
-                self.locals.truncate(saved.0);
-                self.next_local = saved.1;
+                self.scoped(|g| {
+                    g.cond(cond, no, true)?;
+                    g.stmts(then)
+                })?;
                 if els.is_empty() {
                     self.asm.bind(no);
                 } else {
                     self.asm.jmp(end).bind(no);
-                    self.stmts(els)?;
+                    self.scoped(|g| g.stmts(els))?;
                     self.asm.bind(end);
                 }
             }
+            Stmt::While { cond, body } => {
+                let top = self.asm.label();
+                let end = self.asm.label();
+                self.asm.bind(top);
+                self.scoped(|g| {
+                    g.cond(cond, end, true)?;
+                    g.stmts(body)
+                })?;
+                self.asm.jmp(top).bind(end);
+            }
+            Stmt::Repeat { count, body } => {
+                let top = self.asm.label();
+                let end = self.asm.label();
+                self.scoped(|g| {
+                    let here = g.here.clone();
+                    let n = g.alloc_local(&here, 1)?;
+                    g.expr(count)?;
+                    g.asm.store(n).bind(top);
+                    g.asm.load(n).push(0).op(OpCode::Gt).jz(end);
+                    g.stmts(body)?;
+                    g.asm.load(n).push(1).op(OpCode::Sub).store(n).jmp(top);
+                    Ok(())
+                })?;
+                self.asm.bind(end);
+            }
             Stmt::Choose(arms) => self.choose(arms)?,
+            Stmt::Call { name, args, at } => {
+                if self.call(name, args, at)? {
+                    self.asm.op(OpCode::Pop);
+                }
+            }
+            Stmt::Return { value, at } => {
+                let Some(i) = self.sub else {
+                    return Err(self.err(at, "`return` outside a sub"));
+                };
+                match (value, self.subs[i].returns) {
+                    (Some(e), true) => {
+                        self.expr(e)?;
+                        self.asm.ret(true);
+                    }
+                    (None, false) => {
+                        self.asm.ret(false);
+                    }
+                    (None, true) => {
+                        return Err(self.err(at, "this sub returns a value: `return <expr>`"));
+                    }
+                    (Some(_), false) => unreachable!("returns_value saw this return"),
+                }
+            }
             Stmt::Idle => {
                 self.asm.act(Action::Idle);
             }
             Stmt::Die => {
                 self.asm.act(Action::Die);
             }
-            Stmt::Become { kind, line, col } => {
+            Stmt::Become { kind, at } => {
                 let id = self
                     .kind_id(kind)
-                    .ok_or_else(|| self.err(*line, *col, format!("unknown kind `{kind}`")))?;
+                    .ok_or_else(|| self.err(at, format!("unknown kind `{kind}`")))?;
                 self.push_int(i32::from(id));
                 self.asm.act(Action::Become);
             }
-            Stmt::Spawn {
-                kind,
-                at,
-                line,
-                col,
-            } => {
+            Stmt::Spawn { kind, at, pos } => {
                 let id = self
                     .kind_id(kind)
-                    .ok_or_else(|| self.err(*line, *col, format!("unknown kind `{kind}`")))?;
+                    .ok_or_else(|| self.err(pos, format!("unknown kind `{kind}`")))?;
                 self.push_int(i32::from(id));
-                match at {
-                    None => {
-                        self.asm.push(0).push(0);
-                    }
-                    Some(name) => {
-                        let slot = self
-                            .locals
-                            .iter()
-                            .rev()
-                            .find(|(x, _)| x == name)
-                            .map(|&(_, s)| s)
-                            .ok_or_else(|| {
-                                self.err(*line, *col, format!("`{name}` is not a bound target"))
-                            })?;
-                        self.asm.load(slot).load(slot + 1);
-                    }
-                }
+                self.target(at)?;
                 self.asm.act(Action::Spawn);
+            }
+            Stmt::Move(t) => {
+                self.target(t)?;
+                self.asm.act(Action::Move);
+            }
+            Stmt::Drink(t) => {
+                self.target(t)?;
+                self.asm.act(Action::Drink);
             }
         }
         Ok(())
@@ -1311,41 +1859,39 @@ impl<'a> Gen<'a> {
     /// `0..total`, the first arm whose cumulative weight exceeds it runs.
     /// A total of zero runs nothing.
     fn choose(&mut self, arms: &[(Expr, Vec<Stmt>)]) -> Result<()> {
-        let saved = (self.locals.len(), self.next_local);
         let n = arms.len();
-        let base = self.alloc_local(0, 0, (n + 1) as u8)?;
-        let draw = base + n as u8;
-        // total = sum(max(w_i, 0)), each weight stored.
-        self.asm.push(0);
-        for (i, (w, _)) in arms.iter().enumerate() {
-            self.expr(w)?;
-            self.asm.push(0).op(OpCode::Max).store(base + i as u8);
-            self.asm.load(base + i as u8).op(OpCode::Add);
-        }
-        self.asm.op(OpCode::Rand).store(draw);
-        let end = self.asm.label();
-        for (i, (_, body)) in arms.iter().enumerate() {
-            let skip = self.asm.label();
-            // if draw < w_i { body; goto end } else { draw -= w_i }
-            self.asm
-                .load(draw)
-                .load(base + i as u8)
-                .op(OpCode::Lt)
-                .jz(skip);
-            self.stmts(body)?;
-            self.asm.jmp(end).bind(skip);
-            if i + 1 < n {
-                self.asm
+        let here = self.here.clone();
+        self.scoped(|g| {
+            let base = g.alloc_local(&here, (n + 1) as u8)?;
+            let draw = base + n as u8;
+            g.asm.push(0);
+            for (i, (w, _)) in arms.iter().enumerate() {
+                g.expr(w)?;
+                g.asm.push(0).op(OpCode::Max).store(base + i as u8);
+                g.asm.load(base + i as u8).op(OpCode::Add);
+            }
+            g.asm.op(OpCode::Rand).store(draw);
+            let end = g.asm.label();
+            for (i, (_, body)) in arms.iter().enumerate() {
+                let skip = g.asm.label();
+                g.asm
                     .load(draw)
                     .load(base + i as u8)
-                    .op(OpCode::Sub)
-                    .store(draw);
+                    .op(OpCode::Lt)
+                    .jz(skip);
+                g.scoped(|g| g.stmts(body))?;
+                g.asm.jmp(end).bind(skip);
+                if i + 1 < n {
+                    g.asm
+                        .load(draw)
+                        .load(base + i as u8)
+                        .op(OpCode::Sub)
+                        .store(draw);
+                }
             }
-        }
-        self.asm.bind(end);
-        self.locals.truncate(saved.0);
-        self.next_local = saved.1;
-        Ok(())
+            g.asm.bind(end);
+            Ok(())
+        })
     }
 }
 
@@ -1377,7 +1923,7 @@ mod tests {
         let ops = |k: &Kinds| {
             k.code
                 .iter()
-                .map(|o| format!("{:?}", o))
+                .map(|o| format!("{o:?}"))
                 .collect::<Vec<_>>()
                 .join("\n")
         };
@@ -1389,9 +1935,12 @@ mod tests {
 
     #[test]
     fn lexer_handles_times_strings_symbols_and_comments() {
-        let toks = Lexer::new("t", "kind x { # c\n glyph \"T\" 6h 30min 2d 7 => >= += }")
-            .lex()
-            .unwrap();
+        let toks = Lexer::new(
+            "t",
+            "kind x { # c\n glyph \"T\" 6h 30min 2d 7 => >= += c.dx }",
+        )
+        .lex()
+        .unwrap();
         let kinds: Vec<Tok> = toks.into_iter().map(|t| t.tok).collect();
         assert_eq!(
             kinds,
@@ -1408,6 +1957,9 @@ mod tests {
                 Tok::Sym("=>"),
                 Tok::Sym(">="),
                 Tok::Sym("+="),
+                Tok::Name("c".into()),
+                Tok::Sym("."),
+                Tok::Name("dx".into()),
                 Tok::Sym("}"),
                 Tok::Eof,
             ]
@@ -1430,7 +1982,7 @@ mod tests {
         assert!(compile_err("kind a { need w max 1h need w max 2h }").contains("declared twice"));
         assert!(compile_err("kind a { mem m, m }").contains("declared twice"));
         assert!(compile_err("kind a { when 1 => become b }").contains("unknown kind `b`"));
-        assert!(compile_err("kind a { when 1 => spawn a at c }").contains("not a bound target"));
+        assert!(compile_err("kind a { when 1 => spawn a at c }").contains("unknown name `c`"));
         assert!(compile_err("kind a { when 1 => light = 2 }").contains("reserved word"));
         assert!(
             compile_err("kind a { when nearest free within 1 as c or 1 => idle }")
@@ -1446,6 +1998,10 @@ mod tests {
                 .contains("expected `when` or `}`")
         );
         assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
+        assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
+        assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
+        let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
+        assert!(compile_err(&format!("kind a {{ {many} }}")).contains("at most 4 needs"));
         // The radius binds tighter than a comparison.
         let k = compile_ok("kind a { when count water within 2 > 0 => idle }");
         let ops: Vec<OpCode> = k.code.iter().map(|o| o.code).collect();
@@ -1459,10 +2015,42 @@ mod tests {
                 OpCode::Gt
             ]
         );
-        assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
-        assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
-        let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
-        assert!(compile_err(&format!("kind a {{ {many} }}")).contains("at most 4 needs"));
+        // Subs and targets.
+        assert!(compile_err("kind a { when 1 => f(1) }").contains("unknown sub `f`"));
+        assert!(
+            compile_err("sub f(n) { } kind a { when 1 => f(1, 2) }")
+                .contains("takes 1 arguments, 2 given")
+        );
+        assert!(
+            compile_err("sub f(t: target) { } kind a { when 1 => f(3) }")
+                .contains("must be a target")
+        );
+        assert!(
+            compile_err("sub f(n) { } kind a { when f(3) > 0 => idle }")
+                .contains("returns nothing")
+        );
+        assert!(compile_err("sub f(n) { return } sub f(m) { }").contains("sub `f` declared twice"));
+        assert!(compile_err("kind a { mem m when 1 => return 3 }").contains("outside a sub"));
+        assert!(
+            compile_err("sub f() { water = 1 } kind a { need water max 1h }")
+                .contains("cannot assign")
+        );
+        assert!(
+            compile_err("sub f() { let a = water } kind a { need water max 1h }")
+                .contains("sees only its parameters")
+        );
+        assert!(
+            compile_err("kind a { when nearest free within 1 as c => c = 2 }")
+                .contains("not an integer local")
+        );
+        assert!(
+            compile_err("kind a { when nearest free within 1 as c => let v = c }")
+                .contains("is a target")
+        );
+        assert!(compile_err("kind a { when 1 => move toward 3 }").contains("expected a target"));
+        assert!(
+            compile_err("kind a { when 1 => { let v = 1  let v = 2 } }").contains("already bound")
+        );
     }
 
     #[test]
@@ -1493,7 +2081,6 @@ mod tests {
         let k = compile_ok(
             "kind a { mem m\n when (m > 1 or m < -1) and not m == 0 => m = 0\n when nearest free within 1 as c and m > 0 => spawn a at c\n when 1 => if m > 5 { m = 5 } else if m < 0 { m = 0 } else { idle } }",
         );
-        // Rule 1: (m > 1 or m < -1) and not (m == 0)
         let c = &k.code;
         let ops: Vec<OpCode> = c.iter().map(|o| o.code).collect();
         let mut i = 0;
@@ -1510,8 +2097,8 @@ mod tests {
                 OpCode::Jz,
                 OpCode::Jmp,
             ],
-        ); // or: a false -> try b
-        expect(&mut i, &[OpCode::Mem, OpCode::Push, OpCode::Lt, OpCode::Jz]); // b false -> rule fails
+        );
+        expect(&mut i, &[OpCode::Mem, OpCode::Push, OpCode::Lt, OpCode::Jz]);
         expect(
             &mut i,
             &[
@@ -1521,9 +2108,8 @@ mod tests {
                 OpCode::Jz,
                 OpCode::Jmp,
             ],
-        ); // not
+        );
         expect(&mut i, &[OpCode::Push, OpCode::SetMem, OpCode::EndRule]);
-        // Rule 2.
         expect(
             &mut i,
             &[OpCode::Push, OpCode::Push, OpCode::Nearest, OpCode::Jz],
@@ -1541,7 +2127,6 @@ mod tests {
         );
         assert_eq!(c[i - 4], Op::new(OpCode::Load, 0, 0));
         assert_eq!(c[i - 3], Op::new(OpCode::Load, 1, 0));
-        // Rule 3: if / else if / else.
         expect(&mut i, &[OpCode::Push, OpCode::Jz]);
         expect(
             &mut i,
@@ -1572,6 +2157,60 @@ mod tests {
     }
 
     #[test]
+    fn subs_targets_and_loops_compile_and_run() {
+        use crate::actors::{ActorMind, ChunkActors};
+        use crate::rules::vm::{self, Ctx, Halo};
+        use crate::stage::{ChunkCells, Pos as WorldPos};
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "sub twice(n) { return n * 2 }
+             sub far(t: target) { return dist(t) > 3 }
+             sub count_free(r) { let n = 0  let i = 0  while i < r { n += count free within i  i += 1 }  return n }
+             sub go(t: target) { if free(toward t) { move toward t } else { move random free } }
+             kind a { mem a, b, c, d, e, f
+               when 1 => { a = twice(21)  b = far(at(x + 5, y))  c = count_free(2)  d = 0  repeat 4 { d += 3 } }
+               when nearest water within 8 as w => { e = w.dx * 100 + w.dy  f = is(w, water) + dist(w) * 10 }
+               when 1 => go(north) }",
+        );
+        assert_eq!(k.subs.len(), 4);
+        let mut cells = ChunkCells::default();
+        cells.ground[10 * 64 + 13] = Ground::Water; // 2 east of the actor at (11, 10)
+        let actors = ChunkActors::default();
+        let halo = Halo {
+            chunks: [
+                None,
+                None,
+                None,
+                None,
+                Some((&cells, &actors)),
+                None,
+                None,
+                None,
+                None,
+            ],
+        };
+        let mut mind = ActorMind::zeroed();
+        let ctx = Ctx {
+            halo: &halo,
+            kind: &k.defs[0],
+            cell: 10 * 64 + 11,
+            pos: WorldPos::new(11, 10),
+            tick: 5,
+            rng: vm::rng_base(1, 5, 9),
+            look: 0,
+            signal: 0,
+        };
+        // Rule 1 has no action: falls through; rule 2 neither; rule 3 moves.
+        let out = vm::think(&k, ctx, &mut mind);
+        assert_eq!(out.trap, None, "{out:?}");
+        assert_eq!(out.action, Action::Move);
+        assert_eq!((out.dx, out.dy), (0, -1));
+        // count_free(2): radius 0 is the 1x1 square (nobody stands in this
+        // bare test's occupant array, so 1), radius 1 the 3x3 (9). Total 10.
+        assert_eq!(&mind.mem[..6], &[42, 1, 10, 12, 200, 1 + 20]);
+    }
+
+    #[test]
     fn choose_draws_once_and_large_constants_use_the_pool() {
         let k = compile_ok(
             "kind a { mem m\n when 1 => choose { 3: m = 1  2: m = 2 }\n when m > 100000 => m = 3d }",
@@ -1579,11 +2218,9 @@ mod tests {
         assert_eq!(k.consts, vec![100_000, days(3) as i32]);
         let rand = k.code.iter().filter(|o| o.code == OpCode::Rand).count();
         assert_eq!(rand, 1);
-        // Run it a few hundred times on different uids: both arms get picked,
-        // about 3:2, and never anything else.
         use crate::actors::ChunkActors;
         use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos};
+        use crate::stage::{ChunkCells, Pos as WorldPos};
         use bytemuck::Zeroable;
         let cells = ChunkCells::default();
         let actors = ChunkActors::default();
@@ -1607,7 +2244,7 @@ mod tests {
                 halo: &halo,
                 kind: &k.defs[0],
                 cell: 100,
-                pos: Pos::new(36, 1),
+                pos: WorldPos::new(36, 1),
                 tick: 77,
                 rng: vm::rng_base(3, 77, uid),
                 look: 0,

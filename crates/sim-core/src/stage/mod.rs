@@ -15,7 +15,7 @@
 //! A loaded chunk is an entity with these components: [`ChunkCoord`] (where),
 //! [`ChunkCells`] (the layers; Bevy keeps all of them in one dense table
 //! column, i.e. a `Vec<ChunkCells>`), the actor rows, [`ChunkMeta`] (dirty
-//! flag, last tick), and per-tick scratch (`Intents`, `Scratch`).
+//! flag, last tick), and per-tick scratch (`Intents`, `Scratch`, `Outbox`).
 //! Entity ids and table order depend on load history, so **nothing observable
 //! may depend on them**: every sequential merge and the checksum walk
 //! [`Stage::active`], the loaded set sorted by chunk coordinate.
@@ -41,7 +41,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
 use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
 
-use crate::actors::{self, ChunkActors, ChunkMinds, Intents, Scratch};
+use crate::actors::{self, ChunkActors, ChunkMinds, Intents, Outbox, Scratch};
 use crate::par::par_map;
 use crate::rng::splitmix64;
 
@@ -382,6 +382,7 @@ pub fn insert(
             ChunkMeta { dirty, last_ticked },
             Intents::default(),
             Scratch::default(),
+            Outbox::default(),
         ))
         .id();
     world.resource_mut::<Stage>().add(coord, e);
