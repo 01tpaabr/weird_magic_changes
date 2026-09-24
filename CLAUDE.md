@@ -83,7 +83,8 @@ make fmt
   sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).
-- Git is local-only for now. Commit on `main` in small steps; no remote, no PRs yet.
+- Remote: `origin` = github.com/01tpaabr/weird_magic_changes. Commit on `main` in small steps
+  and push; no PRs yet.
 - Keep this file short. Design rationale goes in `docs/ARCHITECTURE.md`; deep how-to goes
   in the skills.
 
