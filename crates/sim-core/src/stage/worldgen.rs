@@ -7,7 +7,7 @@
 //! it can always be regenerated.
 
 use super::{CHUNK_CELLS, ChunkCells, ChunkCoord, Feature, Ground};
-use crate::par::par_map;
+use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
@@ -52,15 +52,21 @@ pub fn generate_chunk(seed: u64, params: &GenParams, coord: ChunkCoord, out: &mu
     out.occupant = [super::ActorId::NONE; CHUNK_CELLS];
 }
 
-/// Generate many chunks in parallel (one task per chunk on the compute
-/// pool), results in input order.
+/// Generate many chunks in parallel, results in input order. Each task
+/// writes its chunks straight into their final slots (disjoint slices of
+/// the output), so nothing is copied afterwards.
 pub fn generate_many(seed: u64, params: &GenParams, coords: &[ChunkCoord]) -> Vec<ChunkCells> {
-    par_map(coords, 1, |&c| {
-        let mut cells = ChunkCells::default();
-        generate_chunk(seed, params, c, &mut cells);
-        cells
-    })
+    let mut out = vec![ChunkCells::default(); coords.len()];
+    par_zip_mut(coords, &mut out, GEN_BATCH, |&c, cells| {
+        generate_chunk(seed, params, c, cells);
+    });
+    out
 }
+
+/// Chunks per generation task. Measured (`make bench`, `generate_many`):
+/// 1 and 4 within noise of each other at 32x32 chunks; 1 keeps the small
+/// streaming batches (5 chunks) fully parallel.
+const GEN_BATCH: usize = 1;
 
 /// The whole rule set for one cell. Pure.
 #[inline]

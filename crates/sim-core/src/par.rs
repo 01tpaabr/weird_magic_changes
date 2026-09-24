@@ -64,6 +64,35 @@ where
     per_batch.into_iter().flatten().collect()
 }
 
+/// `for (x, y) in items.zip(out) { f(x, y) }` in parallel, `batch` pairs per
+/// task. Every task owns a disjoint slice of `out`, so the writes need no
+/// coordination and no copy afterwards; the result is identical for any
+/// thread count or batch size.
+pub fn par_zip_mut<T, U>(items: &[T], out: &mut [U], batch: usize, f: impl Fn(&T, &mut U) + Sync)
+where
+    T: Sync,
+    U: Send,
+{
+    assert_eq!(items.len(), out.len(), "par_zip_mut: length mismatch");
+    let batch = batch.max(1);
+    if items.len() <= batch {
+        for (x, y) in items.iter().zip(out.iter_mut()) {
+            f(x, y);
+        }
+        return;
+    }
+    let f = &f;
+    ComputeTaskPool::get().scope(|s| {
+        for (xs, ys) in items.chunks(batch).zip(out.chunks_mut(batch)) {
+            s.spawn(async move {
+                for (x, y) in xs.iter().zip(ys.iter_mut()) {
+                    f(x, y);
+                }
+            });
+        }
+    });
+}
+
 /// Run `f` on `n` disjoint work indices `0..n` in parallel, `batch` indices
 /// per task. For phases that write through disjoint `&mut` slices the caller
 /// split beforehand (a frame's rows, a buffer's bands): `f(i)` must touch only
@@ -102,6 +131,21 @@ mod tests {
             assert_eq!(par_map(&items, batch, |x| x * x), want, "batch {batch}");
         }
         assert!(par_map(&[] as &[u64], 4, |x| *x).is_empty());
+    }
+
+    #[test]
+    fn par_zip_mut_writes_every_slot_in_place() {
+        init_task_pool();
+        let items: Vec<u32> = (0..1000).collect();
+        for batch in [1, 7, 256, 1000, 4000] {
+            let mut out = vec![0u64; 1000];
+            par_zip_mut(&items, &mut out, batch, |&x, y| *y = u64::from(x) * 3);
+            assert!(
+                out.iter().enumerate().all(|(i, &y)| y == i as u64 * 3),
+                "batch {batch}"
+            );
+        }
+        par_zip_mut(&[] as &[u32], &mut [] as &mut [u64], 1, |_, _| {});
     }
 
     #[test]
