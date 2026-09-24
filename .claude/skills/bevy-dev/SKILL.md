@@ -99,11 +99,34 @@ From `&mut World` (streaming, saves, tests): `stage::chunk`, `stage::chunk_mut` 
 
 `ComputeTaskPool::get().scope(|s| { for x in items { s.spawn(async move { f(x) }) } })`
 returns `Vec<T>` **in spawn order** (verified: FIFO queue) when spawned from the scope
-closure. `par::par_map(items, batch, f)` and `par::par_for(n, batch, f)` wrap this; disjoint
-`&mut` slices (frame rows, buffer bands) are split *before* the scope and moved into tasks
-(`render::cells`). `par_iter` and `scope` panic if the pool was never initialised: call
+closure. `par::par_zip_mut(items, out, batch, f)`, `par::par_map` and `par::par_for` wrap
+it. `par_iter` and `scope` panic if the pool was never initialised: call
 `sim_core::par::init_task_pool()` (tests, headless) or let `TaskPoolPlugin` do it (App).
 `WMC_THREADS=n` sizes both paths.
+
+Pool pitfalls, each one cost a bench cycle during the migration; check them before
+writing task-pool code:
+
+1. **`multi_threaded` is NOT a default feature of `bevy_tasks`/`bevy_ecs`.** Without it
+   the pool has one thread and `scope` runs every task on the caller; nothing warns.
+   The umbrella `bevy` enables it for `app`, but `sim-core` built or benched alone did
+   not (generation 94.8 ms instead of 19.8). Both crates now ask for it in `Cargo.toml`;
+   keep it that way and check `par::thread_count()` in any new bench.
+2. **Write in place; never collect a `Vec` per task.** A task that returns its result
+   allocates, and the merge copies (24 KiB per chunk here: 23.9 ms vs 19.8 ms for 4.2M
+   cells). Split the output into disjoint `&mut` slices *before* the scope
+   (`chunks_mut`), move one slice into each task, write through it. `par_zip_mut` and
+   `render::cells` are the pattern; `par_map` is for small results only.
+3. **Tasks are async-executor spawns, not fork-join splits.** Per-task cost is a few µs.
+   One task per 64x64 chunk is fine (~100 µs of work each); one task per cell or per row
+   of a small frame is not. Below ~8 items skip the pool (the helpers do).
+4. **A schedule run has a fixed cost (~9 µs on the multi-threaded executor).** That is
+   per tick, not per chunk, and buys system-level parallelism plus the ambiguity check.
+   Irrelevant at 8 TPS; if `max` speed ever needs more than ~100k ticks/s, switch
+   `SimTick` to `SingleThreadedExecutor` (par_iter inside systems stays parallel).
+5. **Compare against the rayon baselines in `docs/PERF.md`.** Same machine, same `n`:
+   `generate_many` 18.2 ms, `stage_checksum` 5.2 ms, `render_cells` 49 µs. A number worse
+   than those means the shape of the work is wrong, not that Bevy is slow.
 
 ## Adding a per-cell layer
 
