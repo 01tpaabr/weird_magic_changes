@@ -426,6 +426,16 @@ enum Stmt {
         kind: String,
         at: Target,
         pos: Pos,
+        /// `with (a, b)`: the child's first two `mem` values.
+        with: Option<(Expr, Expr)>,
+    },
+    /// `take t NEED amount` / `give t NEED amount`.
+    Transfer {
+        give: bool,
+        target: Target,
+        need: String,
+        amount: Expr,
+        at: Pos,
     },
     Move(Target),
     Drink(Target),
@@ -514,6 +524,7 @@ fn sense_named(name: &str) -> Option<Sense> {
         "result" => Sense::Result,
         "ground" => Sense::Ground,
         "feature" => Sense::Feature,
+        "taken" => Sense::Taken,
         _ => return None,
     })
 }
@@ -589,6 +600,9 @@ const KEYWORDS: &[&str] = &[
     "pack",
     "hi",
     "lo",
+    "take",
+    "give",
+    "with",
 ];
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
@@ -1066,7 +1080,36 @@ impl Parser<'_> {
             let (kind, pos) = self.ident("kind name")?;
             self.expect_kw("at")?;
             let at = self.target()?;
-            return Ok(Stmt::Spawn { kind, at, pos });
+            let with = if self.eat_kw("with") {
+                self.expect_sym("(")?;
+                let a = self.expr()?;
+                self.expect_sym(",")?;
+                let b = self.expr()?;
+                self.expect_sym(")")?;
+                Some((a, b))
+            } else {
+                None
+            };
+            return Ok(Stmt::Spawn {
+                kind,
+                at,
+                pos,
+                with,
+            });
+        }
+        if self.is_kw("take") || self.is_kw("give") {
+            let give = self.is_kw("give");
+            self.bump();
+            let target = self.target()?;
+            let (need, _) = self.ident("need name")?;
+            let amount = self.expr()?;
+            return Ok(Stmt::Transfer {
+                give,
+                target,
+                need,
+                amount,
+                at,
+            });
         }
         if self.eat_kw("move") {
             return Ok(Stmt::Move(self.target()?));
@@ -2268,13 +2311,45 @@ impl<'a> Gen<'a> {
                 self.push_int(i32::from(id));
                 self.asm.act(Action::Become);
             }
-            Stmt::Spawn { kind, at, pos } => {
+            Stmt::Spawn {
+                kind,
+                at,
+                pos,
+                with,
+            } => {
                 let id = self
                     .kind_id(kind)
                     .ok_or_else(|| self.err(pos, format!("unknown kind `{kind}`")))?;
                 self.push_int(i32::from(id));
                 self.target(at)?;
+                if let Some((a, b)) = with {
+                    self.expr(a)?;
+                    self.expr(b)?;
+                    self.asm.op(OpCode::SpawnWith);
+                }
                 self.asm.act(Action::Spawn);
+            }
+            Stmt::Transfer {
+                give,
+                target,
+                need,
+                amount,
+                at,
+            } => {
+                let verb = if *give { "give" } else { "take" };
+                if self.kind.is_none() {
+                    return Err(
+                        self.err(at, format!("`{verb}` inside a sub: needs belong to a kind"))
+                    );
+                }
+                let slot = self.need_slot(need).ok_or_else(|| {
+                    self.err(at, format!("`{verb}`: this kind has no need `{need}`"))
+                })?;
+                self.target(target)?;
+                self.push_int(i32::from(slot));
+                self.expr(amount)?;
+                self.asm
+                    .act(if *give { Action::Give } else { Action::Take });
             }
             Stmt::Move(t) => {
                 self.target(t)?;

@@ -46,7 +46,8 @@ pub struct Intent {
     /// Conflict key: `splitmix64(uid ^ splitmix64(tick))`. Lowest wins.
     pub key: u64,
     pub action: Action,
-    /// Operand kind of `Become` / `Spawn`; `1` for a validated `Drink`.
+    /// Operand kind of `Become` / `Spawn`; `1` for a validated `Drink`;
+    /// own need slot of `Take` / `Give`.
     pub kind: u16,
     /// Operand offset of `Spawn` / `Move` (a unit step) / `Drink` / `Eat` / `Hit`.
     pub dx: i8,
@@ -55,6 +56,10 @@ pub struct Intent {
     pub look: Option<u8>,
     /// `signal = v` effect, likewise.
     pub signal: Option<i16>,
+    /// Amount of `Take` / `Give`.
+    pub amount: i32,
+    /// A `Spawn`'s child's first two `mem` values.
+    pub with: [i32; 2],
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
 }
@@ -83,7 +88,19 @@ pub struct Effect {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EffectKind {
     Move,
-    Spawn(u16),
+    /// The child's kind and first two `mem` values.
+    Spawn {
+        kind: u16,
+        with: [i32; 2],
+    },
+    /// `take` (or `give`): up to `amount` of the mover's need `need` and
+    /// the target's need of the same name. In-chunk ones too: every
+    /// transfer is settled in Exchange, in key order.
+    Transfer {
+        need: u8,
+        amount: i32,
+        give: bool,
+    },
     /// `eat` (true) or `hit`, `bite` damage, `dir` from the victim toward
     /// the biter (a `hurt_dir` value).
     Bite {
@@ -332,6 +349,8 @@ fn think_one(
         dy: 0,
         look: None,
         signal: None,
+        amount: 0,
+        with: [0; 2],
         trapped: false,
     };
     if vm::decay(kind, mind, tick) {
@@ -364,6 +383,11 @@ fn think_one(
     intent.dy = out.dy;
     intent.look = out.look;
     intent.signal = out.signal;
+    intent.amount = out.amount;
+    intent.with = out.with;
+    if matches!(out.action, Action::Take | Action::Give) {
+        intent.kind = u16::from(out.need);
+    }
     intent.trapped = out.trap.is_some();
     let (lx, ly) = local_xy(cell);
     match out.action {
@@ -446,6 +470,36 @@ pub fn resolve(
                 let slot = usize::from(it.slot);
                 // The think consumed the wake-up; a bite this tick sets it again.
                 pubs.rows[slot].flags &= !flags::WAKE;
+                if matches!(it.action, Action::Take | Action::Give) {
+                    let (dx, dy) = (i32::from(it.dx), i32::from(it.dy));
+                    let res = if dx.abs() > 1 || dy.abs() > 1 || (dx, dy) == (0, 0) {
+                        result::REFUSED
+                    } else {
+                        let (to, cell) = match target_of(
+                            *coord,
+                            usize::from(pubs.rows[slot].cell),
+                            it.dx,
+                            it.dy,
+                        ) {
+                            Where::Here(cell) => (*coord, cell),
+                            Where::Elsewhere(to, cell) => (to, cell),
+                        };
+                        outbox.list.push(Effect {
+                            key: it.key,
+                            slot: it.slot,
+                            what: EffectKind::Transfer {
+                                need: it.kind as u8,
+                                amount: it.amount,
+                                give: it.action == Action::Give,
+                            },
+                            to,
+                            cell: cell as u16,
+                        });
+                        result::NONE // Exchange decides
+                    };
+                    set_result_in(&mut minds, slot, res);
+                    continue;
+                }
                 if !matches!(it.action, Action::Eat | Action::Hit | Action::Graze) {
                     continue;
                 }
@@ -673,6 +727,100 @@ pub fn exchange(
             m.needs[f] = m.needs[f].saturating_add(food).min(def.needs[f].max);
         }
     }
+
+    // Transfers last, in key order, after every death of the tick.
+    for &(src_e, fx) in &work.list {
+        let EffectKind::Transfer { need, amount, give } = fx.what else {
+            continue;
+        };
+        let slot = usize::from(fx.slot);
+        let t = Transfer {
+            need: usize::from(need),
+            amount,
+            give,
+        };
+        if let Some(res) = transfer(kinds, &stage, &mut chunks, src_e, slot, &fx, t) {
+            set_result(&mut chunks, src_e, slot, res);
+        }
+    }
+}
+
+/// One `take`/`give`, decoded.
+#[derive(Debug, Clone, Copy)]
+struct Transfer {
+    need: usize,
+    amount: i32,
+    give: bool,
+}
+
+/// Settle one transfer between the mover (`src_e`, `slot`) and whoever
+/// stands on the target cell at tick start. `take` moves up to `amount` of
+/// the target's same-named need into the mover's, `give` the reverse, never
+/// more than the source holds or past the receiver's max. The target of a
+/// `take` gets `TAKEN` and wakes. `None` if the mover died this tick (its
+/// intent is void); else the mover's result: MISSED (nobody there, or dead
+/// now), REFUSED (the target has no such need), OK.
+fn transfer(
+    kinds: &Kinds,
+    stage: &Stage,
+    chunks: &mut ChunkQuery,
+    src_e: Entity,
+    slot: usize,
+    fx: &Effect,
+    t: Transfer,
+) -> Option<u8> {
+    let Ok((_, src_pubs, src_minds, _, _)) = chunks.get(src_e) else {
+        return None;
+    };
+    let src = src_pubs.rows[slot];
+    if src.flags & flags::DEAD != 0 {
+        return None;
+    }
+    let sv = src_minds.rows[slot].needs[t.need];
+    let Some(dst_e) = stage.entity(fx.to) else {
+        return Some(result::MISSED);
+    };
+    let Ok((cells, dst_pubs, dst_minds, _, _)) = chunks.get(dst_e) else {
+        return Some(result::MISSED);
+    };
+    let Some((dk, ds)) = cells.occupant[usize::from(fx.cell)].unpack() else {
+        return Some(result::MISSED);
+    };
+    let ds = usize::from(ds);
+    if dst_pubs.rows[ds].flags & flags::DEAD != 0 {
+        return Some(result::MISSED);
+    }
+    let sdef = kinds.def(src.kind);
+    let ddef = kinds.def(dk);
+    let Some(dn) = ddef.need_named(&sdef.needs[t.need].name) else {
+        return Some(result::REFUSED);
+    };
+    let dv = dst_minds.rows[ds].needs[dn];
+    let (smax, dmax) = (sdef.needs[t.need].max, ddef.needs[dn].max);
+    let moved = if t.give {
+        t.amount.min(sv.max(0)).min((dmax - dv).max(0))
+    } else {
+        t.amount.min(dv.max(0)).min((smax - sv).max(0))
+    };
+    let (sv, dv) = if t.give {
+        (sv - moved, dv + moved)
+    } else {
+        (sv + moved, dv - moved)
+    };
+    if let Ok((_, _, mut minds, _, mut meta)) = chunks.get_mut(src_e) {
+        minds.rows[slot].needs[t.need] = sv;
+        meta.dirty = true;
+    }
+    if let Ok((_, mut pubs, mut minds, _, mut meta)) = chunks.get_mut(dst_e) {
+        let m = &mut minds.rows[ds];
+        m.needs[dn] = dv;
+        if !t.give {
+            m.events |= event::TAKEN;
+            pubs.rows[ds].flags |= flags::WAKE;
+        }
+        meta.dirty = true;
+    }
+    Some(result::OK)
 }
 
 // ---- Apply ------------------------------------------------------------------------------
@@ -737,7 +885,7 @@ pub fn apply(
                 let res = match it.action {
                     Action::Idle => Some(result::OK),
                     // Resolve and Exchange already wrote the result.
-                    Action::Eat | Action::Hit | Action::Graze => None,
+                    Action::Eat | Action::Hit | Action::Graze | Action::Take | Action::Give => None,
                     Action::Die => {
                         let kind = actors.pubs[slot].kind;
                         actors.kill(slot);
@@ -798,12 +946,13 @@ pub fn apply(
                                     && actors.cells.cover[cell].is_none() =>
                             {
                                 let pos = coord.cell(cell);
-                                let child = newborn(
+                                let mut child = newborn(
                                     kinds,
                                     it.kind,
                                     hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                                     tick,
                                 );
+                                child.mem[..2].copy_from_slice(&it.with);
                                 actors.push_cover(cell, it.kind, child);
                                 scratch.count(it.kind, life::BORN);
                                 result::OK
@@ -813,7 +962,10 @@ pub fn apply(
                                 outbox.list.push(Effect {
                                     key: it.key,
                                     slot: it.slot,
-                                    what: EffectKind::Spawn(it.kind),
+                                    what: EffectKind::Spawn {
+                                        kind: it.kind,
+                                        with: it.with,
+                                    },
                                     to,
                                     cell: cell as u16,
                                 });
@@ -824,12 +976,13 @@ pub fn apply(
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let pos = coord.cell(cell);
-                            let child = newborn(
+                            let mut child = newborn(
                                 kinds,
                                 it.kind,
                                 hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                                 tick,
                             );
+                            child.mem[..2].copy_from_slice(&it.with);
                             actors.push(cell, it.kind, child);
                             scratch.touch(cell);
                             scratch.count(it.kind, life::BORN);
@@ -840,7 +993,10 @@ pub fn apply(
                             outbox.list.push(Effect {
                                 key: it.key,
                                 slot: it.slot,
-                                what: EffectKind::Spawn(it.kind),
+                                what: EffectKind::Spawn {
+                                    kind: it.kind,
+                                    with: it.with,
+                                },
                                 to,
                                 cell: cell as u16,
                             });
@@ -982,7 +1138,10 @@ pub fn migrate(
     }
     work.list.sort_unstable_by_key(|(_, fx)| (fx.key, fx.slot));
     for &(src_e, fx) in &work.list {
-        if matches!(fx.what, EffectKind::Bite { .. }) {
+        if matches!(
+            fx.what,
+            EffectKind::Bite { .. } | EffectKind::Transfer { .. }
+        ) {
             continue; // Exchange's; never here
         }
         let slot = usize::from(fx.slot);
@@ -997,7 +1156,7 @@ pub fn migrate(
             continue;
         };
         let (dst_cells, dst_pubs, dst_minds, dst_scratch, dst_meta) = &mut dst;
-        let cover = matches!(fx.what, EffectKind::Spawn(k) if is_cover(&kinds, k));
+        let cover = matches!(fx.what, EffectKind::Spawn { kind, .. } if is_cover(&kinds, kind));
         let ok = dst_cells.walkable(cell)
             && if cover {
                 dst_cells.cover[cell].is_none()
@@ -1033,14 +1192,15 @@ pub fn migrate(
                 src_scratch.deaths += 1;
                 src_scratch.touch(usize::from(row.cell));
             }
-            EffectKind::Spawn(kind) => {
+            EffectKind::Spawn { kind, with } => {
                 let pos = fx.to.cell(cell);
-                let child = newborn(
+                let mut child = newborn(
                     &kinds,
                     kind,
                     hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                     tick,
                 );
+                child.mem[..2].copy_from_slice(&with);
                 if cover {
                     to.push_cover(cell, kind, child);
                 } else {
@@ -1049,7 +1209,9 @@ pub fn migrate(
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
-            EffectKind::Bite { .. } => unreachable!("skipped above"),
+            EffectKind::Bite { .. } | EffectKind::Transfer { .. } => {
+                unreachable!("skipped above")
+            }
         }
         if !cover {
             dst_scratch.touch(cell);

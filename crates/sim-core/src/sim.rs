@@ -927,7 +927,10 @@ mod tests {
         ob.list.push(Effect {
             key: key(300),
             slot: c_slot,
-            what: EffectKind::Spawn(CHICKEN),
+            what: EffectKind::Spawn {
+                kind: CHICKEN,
+                with: [0; 2],
+            },
             to: ChunkCoord::new(0, 1),
             cell: 0,
         });
@@ -1066,6 +1069,8 @@ mod tests {
             dy: 0,
             look: None,
             signal: None,
+            amount: 0,
+            with: [0; 2],
             trapped: false,
         };
         w.get_mut::<ChunkActors>(e0).unwrap().rows[1].flags |= flags::WAKE;
@@ -1184,6 +1189,96 @@ mod tests {
                 f.0,
                 f.3.needs[0]
             );
+        }
+    }
+
+    /// `take` and `give` move a need between neighbours by name, in key
+    /// order in Exchange, in a chunk and across a border; a taken-from
+    /// actor wakes and sees `taken`; a target without the need refuses;
+    /// `spawn ... with` seeds the child's first two mem slots.
+    #[test]
+    fn take_and_give_move_needs_between_neighbours() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::rules::vm::result;
+        use crate::time::hours;
+        let kinds = compile(
+            "t.rules",
+            "kind pot { glyph \"P\"  tags store  cadence 1024
+               need honey max 10h decay 0
+               mem seen
+               when taken => { seen += 1  idle } }
+             kind stone { glyph \"S\"  tags store  cadence 1024 }
+             kind bee { glyph \"b\"  cadence 1  sight 2
+               need honey max 3h decay 0
+               mem mode, got, r1, gave, r2
+               when mode == 0 and nearest store within 1 as p => { mode = 1  take p honey 2h }
+               when mode == 1 => { mode = 2  got = honey  r1 = result }
+               when mode == 2 and nearest store within 1 as p => { mode = 3  give p honey 5h }
+               when mode == 3 => { mode = 4  gave = honey  r2 = result }
+               when mode == 4 and nearest free within 1 as c => { mode = 5  spawn bee at c with (7, x) }
+               when true => idle }",
+        )
+        .unwrap();
+        let (pot, stone, bee) = (0, 1, 2);
+        let cfg = WorldConfig {
+            width: 128,
+            height: 64,
+            ..cfg(9)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut full = newborn(&kinds, pot, 0x90, now);
+        full.needs[0] = hours(5) as i32;
+        // In one chunk; across the border at x = 64; next to a stone.
+        for (store, sp, bp, uid) in [
+            (pot, Pos::new(10, 10), Pos::new(11, 10), 0xB1),
+            (pot, Pos::new(64, 20), Pos::new(63, 20), 0xB2),
+            (stone, Pos::new(30, 40), Pos::new(31, 40), 0xB3),
+        ] {
+            let m = ActorMind {
+                uid: uid + 0x100,
+                ..full
+            };
+            let m = if store == stone {
+                newborn(&kinds, stone, uid + 0x100, now)
+            } else {
+                m
+            };
+            assert!(place_actor(&mut w, sp, store, m));
+            let mut b = newborn(&kinds, bee, uid, now);
+            b.needs[0] = 0;
+            assert!(place_actor(&mut w, bp, bee, b));
+        }
+        for _ in 0..8 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let all = rows(&mut w);
+        let find = |uid: u64| all.iter().find(|r| r.0 == uid).unwrap().3;
+        for uid in [0xB1, 0xB2] {
+            let (b, p) = (find(uid), find(uid + 0x100));
+            // Took 2h of the pot's 5h, gave back all 2h it had (asked 5h).
+            assert_eq!(&b.mem[..5], &[5, hours(2) as i32, 1, 0, 1], "bee {uid:x}");
+            assert_eq!(b.needs[0], 0);
+            assert_eq!(p.needs[0], hours(5) as i32, "pot of {uid:x}");
+            assert_eq!(p.mem[0], 1, "the pot woke and saw `taken` once");
+        }
+        let b3 = find(0xB3);
+        assert_eq!(
+            b3.mem[2],
+            i32::from(result::REFUSED),
+            "a stone has no honey"
+        );
+        // Three children, each born with (7, parent's x).
+        let kids: Vec<_> = all
+            .iter()
+            .filter(|r| r.1 == bee && r.3.mem[0] == 7)
+            .collect();
+        assert_eq!(kids.len(), 3);
+        for k in kids {
+            assert!([11, 63, 31].contains(&k.3.mem[1]), "{:?}", k.3.mem);
         }
     }
 

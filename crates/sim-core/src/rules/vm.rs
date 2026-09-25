@@ -144,6 +144,9 @@ pub enum OpCode {
     Hi,
     /// `v -> v` sign-extended from its low byte: the second byte of a `pack`
     Lo,
+    /// `a b ->`: the next `spawn`'s child starts with `mem[0] = a`,
+    /// `mem[1] = b` (`spawn kind at t with (a, b)`)
+    SpawnWith,
     /// One step of `for each`. Locals `a..a+5` hold `dx, dy, cursor, pred,
     /// r`. `-> found`: the first matching cell at or after the cursor, in
     /// ring order (rings `1..=r`, each clockwise from its top-left corner),
@@ -180,10 +183,12 @@ pub enum Sense {
     Ground,
     /// Own cell's feature, as a predicate value
     Feature,
+    /// 1 if something was taken from this actor since its last think
+    Taken,
 }
 
 impl Sense {
-    pub const COUNT: u8 = 15;
+    pub const COUNT: u8 = 16;
 
     pub fn from_u8(a: u8) -> Option<Self> {
         (a < Self::COUNT).then(|| {
@@ -204,6 +209,7 @@ impl Sense {
                 Self::Result,
                 Self::Ground,
                 Self::Feature,
+                Self::Taken,
             ][usize::from(a)]
         })
     }
@@ -234,6 +240,12 @@ pub enum Action {
     /// `dx dy`: bite the ground cover there (adjacent or underfoot) and gain
     /// the share of its `food` taken, like `eat`
     Graze,
+    /// `dx dy need amount`: move up to `amount` of the adjacent actor's need
+    /// with the same name as own need `need` into it
+    Take,
+    /// `dx dy need amount`: move up to `amount` of own need `need` into the
+    /// adjacent actor's need of the same name
+    Give,
 }
 
 impl Action {
@@ -248,6 +260,8 @@ impl Action {
             6 => Some(Self::Eat),
             7 => Some(Self::Hit),
             8 => Some(Self::Graze),
+            9 => Some(Self::Take),
+            10 => Some(Self::Give),
             _ => None,
         }
     }
@@ -298,6 +312,12 @@ pub struct Outcome {
     /// Operand offset for `Spawn`.
     pub dx: i8,
     pub dy: i8,
+    /// Own need slot of `Take` / `Give`.
+    pub need: u8,
+    /// Amount of `Take` / `Give`.
+    pub amount: i32,
+    /// First two `mem` values of a `Spawn`'s child (`with (a, b)`).
+    pub with: [i32; 2],
     pub next: Option<u8>,
     /// `look = v` effect, if the think set one.
     pub look: Option<u8>,
@@ -552,6 +572,7 @@ impl Machine<'_> {
                 let (cells, _, i) = c.halo.at(lx(c.cell), ly(c.cell), 0, 0).expect("own chunk");
                 pred::feature(cells.feature[i] as u8)
             }
+            Sense::Taken => i32::from(self.mind.events & event::TAKEN != 0),
         }
     }
 
@@ -648,6 +669,20 @@ impl Machine<'_> {
                 self.out.kind = u16::try_from(kind).map_err(|_| Trap::BadAction)?;
                 self.out.dx = i8::try_from(dx).map_err(|_| Trap::BadAction)?;
                 self.out.dy = i8::try_from(dy).map_err(|_| Trap::BadAction)?;
+            }
+            Action::Take | Action::Give => {
+                let amount = self.pop()?;
+                let need = self.pop()?;
+                let dy = self.pop()?;
+                let dx = self.pop()?;
+                let need = usize::try_from(need).map_err(|_| Trap::BadNeed)?;
+                if need >= self.ctx.kind.needs.len() {
+                    return Err(Trap::BadNeed);
+                }
+                self.out.need = need as u8;
+                self.out.amount = amount.max(0);
+                self.out.dx = dx.clamp(-127, 127) as i8;
+                self.out.dy = dy.clamp(-127, 127) as i8;
             }
             Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze => {
                 let dy = self.pop()?;
@@ -952,6 +987,11 @@ impl Machine<'_> {
                 O::ForEach => {
                     let found = self.for_each(op.a)?;
                     self.push(i32::from(found))?;
+                }
+                O::SpawnWith => {
+                    let b = self.pop()?;
+                    let a = self.pop()?;
+                    self.out.with = [a, b];
                 }
             }
         }

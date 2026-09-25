@@ -116,7 +116,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 | group | senses | source |
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
-| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `event(TAKEN)`, `event(FUEL)` | latched bytes written by the resolve phases, cleared after the think that read them |
+| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `event(FUEL)` (step 7) | latched bytes written by the resolve phases, cleared after the think that read them |
 | here / at | `ground`, `feature`, `scent(ch)`; `ground_at(t)`, `feature_at(t)`, `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, row-major in a ring, ring start rotated by one RNG draw |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
@@ -289,7 +289,12 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    victim kind's `food` into its own `food` need, so a kill feeds every biter by its share
    and a grazed tuft feeds without dying. A `hit` never feeds. At `health <= 0` the row is
    DEAD; a standing victim's cell is cleared and touched, a cover victim's is not. No move
-   has been applied yet, so damage is symmetric across borders. (Damage is
+   has been applied yet, so damage is symmetric across borders. Last, every `take`/`give`
+   of the tick (Resolve sends them all here, in-chunk ones too), in key order: the target
+   is whoever stands on the adjacent cell and is still alive (else MISSED) and must have a
+   need of the same name (else REFUSED); `take` moves up to the amount from it, `give` to
+   it, never more than the source holds nor past the receiver's max. A taken-from actor
+   gets `taken` and wakes. A mover that died this tick moves nothing. (Damage is
    summed on one thread here rather than per chunk in Resolve: bites are rare next to
    thinks, and the sequential sum needs no cross-chunk credit pass; the per-chunk split is
    the hatch if Exchange ever shows in a profile.)
@@ -402,5 +407,6 @@ where it touches the tick.
 6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
    blocks, `for each`, `sniff`; the bee is the acceptance test. Done so far: `state`/`next`,
    `const`, `for each`, `signal =`, `look_of`/`signal_of`, `kind:look`, `pack`/`hi`/`lo`
-   (new opcodes appended, so the programs of the existing kinds and their hash are unchanged).
+   (new opcodes appended, so the programs of the existing kinds and their hash are unchanged);
+   `take`/`give` settled in Exchange, the `taken` sense, `spawn ... with (a, b)`.
 7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.
