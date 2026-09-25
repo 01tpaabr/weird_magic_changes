@@ -5,6 +5,9 @@
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
 //! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
 //! wmc lint <rules dir or file>                 compile a rule set and print what it holds
+//! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
+//!                                              step `ticks`, then explain the next think of
+//!                                              the actor at (x, y); `-v` lists every op
 //! ```
 //! `WMC_RULES=<dir>` makes `show`, `play` and `run` use that directory's
 //! rules instead of the built-in ones.
@@ -23,6 +26,8 @@ use sim_core::stage::worldgen::GenParams;
 use sim_core::time::Clock;
 use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
 use sim_core::{par, sim, stage};
+
+use bevy::prelude::World;
 
 use app::play;
 use app::render::ascii::render;
@@ -45,13 +50,38 @@ fn main() -> anyhow::Result<()> {
                 .context("bad tick count")?;
             run(dir, ticks, &config(&args[3..])?)
         }
+        Some("why") => {
+            let verbose = args.get(1).is_some_and(|a| a == "-v");
+            let a = &args[1 + usize::from(verbose)..];
+            let dir = a.first().context("why needs a save directory")?;
+            let coord = |i: usize, what: &str| -> anyhow::Result<i32> {
+                a.get(i)
+                    .with_context(|| format!("why needs {what}"))?
+                    .parse()
+                    .with_context(|| format!("bad {what}"))
+            };
+            let (x, y) = (coord(1, "x")?, coord(2, "y")?);
+            let ticks = a
+                .get(3)
+                .map_or(Ok(0), |t| t.parse())
+                .context("bad tick count")?;
+            why(
+                dir,
+                Pos::new(x, y),
+                ticks,
+                verbose,
+                &config(a.get(4..).unwrap_or(&[]))?,
+            )
+        }
         Some("lint") => lint(
             args.get(1)
                 .context("lint needs a rules directory or file")?,
         ),
-        Some(other) => bail!("unknown command {other:?}; use `show`, `play`, `run` or `lint`"),
+        Some(other) => {
+            bail!("unknown command {other:?}; use `show`, `play`, `run`, `why` or `lint`")
+        }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc lint <rules>"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint <rules>"
         ),
     }
 }
@@ -117,20 +147,69 @@ fn show(cfg: &WorldConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The world saved in `dir` with the chunks around its camera, else a new
+/// one of `cfg` (its initial region loaded). Never saved by the caller.
+fn open_or_new(dir: &str, cfg: &WorldConfig) -> anyhow::Result<World> {
+    let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
+    let kinds = app::rules()?;
+    Ok(
+        match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
+            Some(mut w) => {
+                let camera = play::camera_for(&w, &store);
+                sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
+                    .context("streaming chunks")?;
+                w
+            }
+            None => sim::new_world_with(cfg, kinds),
+        },
+    )
+}
+
+/// `wmc why`: step `ticks`, then wait (up to a day) for the actor at `p`
+/// to be due, explain that think, and run it to show where it went.
+fn why(dir: &str, p: Pos, ticks: u64, ops: bool, cfg: &WorldConfig) -> anyhow::Result<()> {
+    let mut world = open_or_new(dir, cfg)?;
+    for _ in 0..ticks {
+        sim::step(&mut world);
+    }
+    let Some(first) = sim::explain(&world, p) else {
+        bail!(
+            "nobody at ({}, {}) at tick {} (not loaded, or an empty cell)",
+            p.x,
+            p.y,
+            sim::tick(&world)
+        );
+    };
+    let uid = first.before.uid;
+    let mut at = p;
+    let mut waited = 0u64;
+    while !sim::explain(&world, at).is_some_and(|e| e.due) {
+        if waited == sim_core::TICKS_PER_DAY {
+            bail!("it did not think within a day");
+        }
+        sim::step(&mut world);
+        waited += 1;
+        at =
+            sim::find_uid(&mut world, uid).context("it died or was eaten before its next think")?;
+    }
+    let mut out = std::io::stdout().lock();
+    if waited > 0 {
+        writeln!(out, "(stepped {waited} ticks to its next think)")?;
+    }
+    write!(
+        out,
+        "{}",
+        app::why::report(&world, at, ops).expect("found it there")
+    )?;
+    sim::step(&mut world);
+    writeln!(out, "after   {}", app::why::after(&mut world, uid))?;
+    Ok(())
+}
+
 /// Headless: the determinism check and the tick benchmark. A saved world
 /// loads the chunks around its camera; a new one keeps its initial region.
 fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
-    let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let kinds = app::rules()?;
-    let mut world = match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
-        Some(mut w) => {
-            let camera = play::camera_for(&w, &store);
-            sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
-                .context("streaming chunks")?;
-            w
-        }
-        None => sim::new_world_with(cfg, kinds),
-    };
+    let mut world = open_or_new(dir, cfg)?;
     let from = sim::tick(&world);
     let t0 = Instant::now();
     for _ in 0..ticks {

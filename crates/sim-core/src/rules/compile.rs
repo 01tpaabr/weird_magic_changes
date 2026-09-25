@@ -17,7 +17,7 @@ use std::fmt;
 
 use super::asm::{Asm, Label};
 use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
-use super::{DEFAULT_COLOR, KindDef, Kinds, NeedDef, PLACE_ONE};
+use super::{DEFAULT_COLOR, DebugInfo, KindDef, Kinds, NeedDef, PLACE_ONE, RuleInfo};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
@@ -59,7 +59,7 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
         };
         p.file(&mut items)?;
     }
-    Gen::new(&items).generate()
+    Gen::new(&items, files).generate()
 }
 
 /// Compile every `*.rules` file in `dir`, in sorted file-name order.
@@ -331,6 +331,9 @@ struct SubAst {
 
 #[derive(Debug, Clone)]
 struct Rule {
+    /// Where its `when` is, and the line of its `=>`.
+    at: Pos,
+    arrow_line: u32,
     cond: Cond,
     body: Vec<Stmt>,
 }
@@ -994,11 +997,21 @@ impl Parser<'_> {
     /// `when cond => body`, as many as there are.
     fn rules(&mut self) -> Result<Vec<Rule>> {
         let mut rules = Vec::new();
-        while self.eat_kw("when") {
+        loop {
+            let at = self.pos();
+            if !self.eat_kw("when") {
+                break;
+            }
             let cond = self.cond()?;
+            let arrow_line = self.pos().line;
             self.expect_sym("=>")?;
             let body = self.body()?;
-            rules.push(Rule { cond, body });
+            rules.push(Rule {
+                at,
+                arrow_line,
+                cond,
+                body,
+            });
         }
         Ok(rules)
     }
@@ -1611,11 +1624,22 @@ struct Gen<'a> {
     tags: Vec<String>,
     /// Scent channel names, in first-appearance order in the code.
     scents: Vec<String>,
+    /// The source texts, for the rule table in [`DebugInfo`].
+    files: &'a [(&'a str, &'a str)],
+    debug: DebugInfo,
+    /// The state whose rules are being compiled (`None`: the reflexes).
+    state: Option<u8>,
 }
 
 impl<'a> Gen<'a> {
-    fn new(items: &'a Items) -> Self {
+    fn new(items: &'a Items, files: &'a [(&'a str, &'a str)]) -> Self {
         Self {
+            files,
+            debug: DebugInfo {
+                files: files.iter().map(|(n, _)| n.to_string()).collect(),
+                ..DebugInfo::default()
+            },
+            state: None,
             kinds: &items.kinds,
             subs: &items.subs,
             consts: &items.consts,
@@ -1709,11 +1733,16 @@ impl<'a> Gen<'a> {
             let entry = self.asm.here();
             let k = &self.kinds[i];
             self.here = k.at.clone();
+            self.state = None;
             self.rules(&k.rules)?;
             // States: the current one's rules after the reflexes. An actor
             // starts in the first; a state out of range runs no rules.
+            self.debug
+                .states
+                .push(k.states.iter().map(|s| s.name.clone()).collect());
             for (s, st) in k.states.iter().enumerate() {
                 self.here = st.at.clone();
+                self.state = Some(s as u8);
                 let skip = self.asm.label();
                 self.asm
                     .sense(Sense::State)
@@ -1777,7 +1806,10 @@ impl<'a> Gen<'a> {
             }
         }
         let code = self.asm.finish();
-        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries).with_scents(self.scents))
+        self.debug.subs = self.subs.iter().map(|s| s.name.clone()).collect();
+        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries)
+            .with_scents(self.scents)
+            .with_debug(self.debug))
     }
 
     fn rules(&mut self, rules: &[Rule]) -> Result<()> {
@@ -1785,9 +1817,34 @@ impl<'a> Gen<'a> {
             self.locals.clear();
             self.next_local = 0;
             let next = self.asm.label();
+            let cond_pc = self.asm.here();
             self.cond(&rule.cond, next, true)?;
+            let body_pc = self.asm.here();
             self.stmts(&rule.body)?;
             self.asm.end_rule().bind(next);
+            let file = self
+                .files
+                .iter()
+                .position(|(n, _)| *n == rule.at.file)
+                .unwrap_or(0);
+            // From `when` to the line of `=>`, comments dropped, one line.
+            let text = self.files.get(file).map_or(String::new(), |(_, t)| {
+                t.lines()
+                    .skip(rule.at.line.saturating_sub(1) as usize)
+                    .take((rule.arrow_line.max(rule.at.line) - rule.at.line + 1) as usize)
+                    .map(|l| l.split('#').next().unwrap_or("").trim())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            });
+            self.debug.rules.push(RuleInfo {
+                kind: self.kind.map_or(0, |k| k as u16),
+                state: self.state,
+                file: file as u16,
+                line: rule.at.line,
+                text,
+                cond_pc,
+                body_pc,
+            });
         }
         Ok(())
     }

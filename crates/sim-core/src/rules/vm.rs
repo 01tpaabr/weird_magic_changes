@@ -345,6 +345,17 @@ pub struct Outcome {
     pub used: u32,
 }
 
+/// One executed op of a traced think (`wmc why`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Step {
+    pub pc: u32,
+    pub op: Op,
+    /// Top of the stack after the op, if the stack is not empty.
+    pub top: Option<i32>,
+    /// Fuel left after it.
+    pub fuel: u32,
+}
+
 // ---- predicates ------------------------------------------------------------------------
 
 /// Predicate values, one `i32` at run time: a kind (`0..TAG_BASE`), a tag
@@ -751,333 +762,358 @@ impl Machine<'_> {
         Ok(())
     }
 
-    fn run(&mut self, code: &[Op], consts: &[i32], subs: &[u32]) -> Result<(), Trap> {
+    /// Execute from `self.pc` until a halt. With `TRACE`, every executed op
+    /// is appended to `trace` (`wmc why`); without it the pushes compile
+    /// away and `trace` is never touched.
+    fn run<const TRACE: bool>(
+        &mut self,
+        code: &[Op],
+        consts: &[i32],
+        subs: &[u32],
+        trace: &mut Vec<Step>,
+    ) -> Result<(), Trap> {
         use OpCode as O;
         loop {
+            let at = self.pc;
             let op = *code.get(self.pc).ok_or(Trap::BadPc)?;
             self.pc += 1;
             self.spend(1)?;
             self.out.used += 1;
-            match op.code {
-                O::Push => self.push(i32::from(op.imm))?,
-                O::PushK => {
-                    let v = *consts.get(op.imm as u16 as usize).ok_or(Trap::BadConst)?;
-                    self.push(v)?;
-                }
-                O::Pop => {
-                    self.pop()?;
-                }
-                O::Load => {
-                    let i = self.local(op.a)?;
-                    self.push(self.locals[i])?;
-                }
-                O::Store => {
-                    let i = self.local(op.a)?;
-                    self.locals[i] = self.pop()?;
-                }
-                O::Need => {
-                    let i = usize::from(op.a);
-                    if i >= self.ctx.kind.needs.len() {
-                        return Err(Trap::BadNeed);
-                    }
-                    self.push(self.mind.needs[i])?;
-                }
-                O::SetNeed => {
-                    let i = usize::from(op.a);
-                    let max = self.ctx.kind.needs.get(i).ok_or(Trap::BadNeed)?.max;
-                    let v = self.pop()?;
-                    self.mind.needs[i] = v.clamp(0, max);
-                }
-                O::Mem => {
-                    let i = usize::from(op.a);
-                    if i >= MEM_SLOTS {
-                        return Err(Trap::BadMem);
-                    }
-                    self.push(self.mind.mem[i])?;
-                }
-                O::SetMem => {
-                    let i = usize::from(op.a);
-                    if i >= MEM_SLOTS {
-                        return Err(Trap::BadMem);
-                    }
-                    self.mind.mem[i] = self.pop()?;
-                }
-                O::Sense => {
-                    let s = Sense::from_u8(op.a).ok_or(Trap::BadSense)?;
-                    let v = self.sense(s);
-                    self.push(v)?;
-                }
-                O::Add
-                | O::Sub
-                | O::Mul
-                | O::Div
-                | O::Mod
-                | O::Lt
-                | O::Le
-                | O::Eq
-                | O::Ne
-                | O::Ge
-                | O::Gt
-                | O::And
-                | O::Or
-                | O::Min
-                | O::Max => {
-                    let y = self.pop()?;
-                    let x = self.pop()?;
-                    let v = match op.code {
-                        O::Add => x.wrapping_add(y),
-                        O::Sub => x.wrapping_sub(y),
-                        O::Mul => x.wrapping_mul(y),
-                        O::Div => {
-                            if y == 0 {
-                                0
-                            } else {
-                                x.wrapping_div(y)
-                            }
-                        }
-                        O::Mod => {
-                            if y == 0 {
-                                0
-                            } else {
-                                x.wrapping_rem(y)
-                            }
-                        }
-                        O::Lt => i32::from(x < y),
-                        O::Le => i32::from(x <= y),
-                        O::Eq => i32::from(x == y),
-                        O::Ne => i32::from(x != y),
-                        O::Ge => i32::from(x >= y),
-                        O::Gt => i32::from(x > y),
-                        O::And => i32::from(x != 0 && y != 0),
-                        O::Or => i32::from(x != 0 || y != 0),
-                        O::Min => x.min(y),
-                        _ => x.max(y),
-                    };
-                    self.push(v)?;
-                }
-                O::Neg => {
-                    let x = self.pop()?;
-                    self.push(x.wrapping_neg())?;
-                }
-                O::Not => {
-                    let x = self.pop()?;
-                    self.push(i32::from(x == 0))?;
-                }
-                O::Abs => {
-                    let x = self.pop()?;
-                    self.push(x.wrapping_abs())?;
-                }
-                O::Sign => {
-                    let x = self.pop()?;
-                    self.push(x.signum())?;
-                }
-                O::Clamp => {
-                    let hi = self.pop()?;
-                    let lo = self.pop()?;
-                    let x = self.pop()?;
-                    self.push(if lo <= hi { x.clamp(lo, hi) } else { lo })?;
-                }
-                O::Jmp => self.pc = jump(self.pc, op.imm)?,
-                O::Jz => {
-                    if self.pop()? == 0 {
-                        self.pc = jump(self.pc, op.imm)?;
-                    }
-                }
-                O::Jnz => {
-                    if self.pop()? != 0 {
-                        self.pc = jump(self.pc, op.imm)?;
-                    }
-                }
-                O::Call => {
-                    if self.depth == FRAMES {
-                        return Err(Trap::CallDepth);
-                    }
-                    let target = *subs.get(op.imm as u16 as usize).ok_or(Trap::BadSub)? as usize;
-                    let args = usize::from(op.a);
-                    if args > FRAME_LOCALS || self.sp < args {
-                        return Err(Trap::StackUnderflow);
-                    }
-                    let new_base = self.base + FRAME_LOCALS;
-                    if new_base + FRAME_LOCALS > LOCALS {
-                        return Err(Trap::CallDepth);
-                    }
-                    self.frames[self.depth] = (self.pc, self.base);
-                    self.depth += 1;
-                    self.sp -= args;
-                    self.locals[new_base..new_base + args]
-                        .copy_from_slice(&self.stack[self.sp..self.sp + args]);
-                    for l in &mut self.locals[new_base + args..new_base + FRAME_LOCALS] {
-                        *l = 0;
-                    }
-                    self.base = new_base;
-                    self.pc = target;
-                }
-                O::Ret => {
-                    if self.depth == 0 {
-                        // Returning from the entry: the think is over.
-                        return Ok(());
-                    }
-                    let value = if op.a == 1 { Some(self.pop()?) } else { None };
-                    self.depth -= 1;
-                    let (pc, base) = self.frames[self.depth];
-                    self.pc = pc;
-                    self.base = base;
-                    if let Some(v) = value {
+            let halt = 'op: {
+                match op.code {
+                    O::Push => self.push(i32::from(op.imm))?,
+                    O::PushK => {
+                        let v = *consts.get(op.imm as u16 as usize).ok_or(Trap::BadConst)?;
                         self.push(v)?;
                     }
-                }
-                O::Rand => {
-                    let n = self.pop()?;
-                    let v = if n <= 0 {
-                        0
-                    } else {
-                        (self.draw() % n as u64) as i32
-                    };
-                    self.push(v)?;
-                }
-                O::Chance => {
-                    let p = self.pop()?;
-                    let v = i32::from((self.draw() % 100) < p.clamp(0, 100) as u64);
-                    self.push(v)?;
-                }
-                O::Count => {
-                    let r = self.pop()?;
-                    let pred = self.pop()?;
-                    let n = self.count(pred, r)?;
-                    self.push(n)?;
-                }
-                O::Nearest => {
-                    let r = self.pop()?;
-                    let pred = self.pop()?;
-                    let i = self.local(op.a)?;
-                    if usize::from(op.a) + 1 >= FRAME_LOCALS {
-                        return Err(Trap::BadLocal);
+                    O::Pop => {
+                        self.pop()?;
                     }
-                    match self.nearest(pred, r)? {
-                        Some((dx, dy)) => {
-                            self.locals[i] = dx;
-                            self.locals[i + 1] = dy;
-                            self.push(1)?;
+                    O::Load => {
+                        let i = self.local(op.a)?;
+                        self.push(self.locals[i])?;
+                    }
+                    O::Store => {
+                        let i = self.local(op.a)?;
+                        self.locals[i] = self.pop()?;
+                    }
+                    O::Need => {
+                        let i = usize::from(op.a);
+                        if i >= self.ctx.kind.needs.len() {
+                            return Err(Trap::BadNeed);
                         }
-                        None => self.push(0)?,
+                        self.push(self.mind.needs[i])?;
                     }
-                }
-                O::Dist => {
-                    let dy = self.pop()?;
-                    let dx = self.pop()?;
-                    self.push(dx.wrapping_abs().max(dy.wrapping_abs()))?;
-                }
-                O::FreeAt => {
-                    let dy = self.pop()?;
-                    let dx = self.pop()?;
-                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                    self.push(i32::from(self.ctx.halo.free(lx, ly, dx, dy)))?;
-                }
-                O::IsAt => {
-                    let pred = self.pop()?;
-                    let dy = self.pop()?;
-                    let dx = self.pop()?;
-                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                    self.push(i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred)))?;
-                }
-                O::DirOf => {
-                    let i = self.pop()?;
-                    let (dx, dy) = usize::try_from(i - 1)
-                        .ok()
-                        .and_then(|i| DIRS8.get(i))
-                        .copied()
-                        .unwrap_or((0, 0));
-                    self.push(dx)?;
-                    self.push(dy)?;
-                }
-                O::SetLook => {
-                    let v = self.pop()?;
-                    self.out.look = Some(v.clamp(0, 255) as u8);
-                }
-                O::Act => self.act(op.a)?,
-                O::Next => {
-                    if usize::from(op.a) >= self.ctx.kind.states.max(1) as usize {
-                        return Err(Trap::BadAction);
+                    O::SetNeed => {
+                        let i = usize::from(op.a);
+                        let max = self.ctx.kind.needs.get(i).ok_or(Trap::BadNeed)?.max;
+                        let v = self.pop()?;
+                        self.mind.needs[i] = v.clamp(0, max);
                     }
-                    self.out.next = Some(op.a);
-                }
-                O::EndRule => {
-                    if self.acted || self.out.next.is_some() {
-                        return Ok(());
-                    }
-                }
-                O::Halt => return Ok(()),
-                O::SetSignal => {
-                    let v = self.pop()?;
-                    self.out.signal =
-                        Some(v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
-                }
-                O::LookAt | O::SignalAt => {
-                    let dy = self.pop()?;
-                    let dx = self.pop()?;
-                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                    let v = match self.ctx.halo.row_at(lx, ly, dx, dy) {
-                        None => 0,
-                        Some(r) if op.code == O::LookAt => i32::from(r.look),
-                        Some(r) => i32::from(r.signal),
-                    };
-                    self.push(v)?;
-                }
-                O::Pack => {
-                    let lo = self.pop()?;
-                    let hi = self.pop()?;
-                    self.push(hi.wrapping_mul(256).wrapping_add(lo & 0xFF))?;
-                }
-                O::Hi => {
-                    let v = self.pop()?;
-                    self.push(v >> 8)?;
-                }
-                O::Lo => {
-                    let v = self.pop()?;
-                    self.push(i32::from(v as u8 as i8))?;
-                }
-                O::ForEach => {
-                    let found = self.for_each(op.a)?;
-                    self.push(i32::from(found))?;
-                }
-                O::SpawnWith => {
-                    let b = self.pop()?;
-                    let a = self.pop()?;
-                    self.out.with = [a, b];
-                }
-                O::Mark => {
-                    let v = self.pop()?;
-                    if usize::from(op.a) >= SCENT_CHANNELS {
-                        return Err(Trap::BadSense);
-                    }
-                    self.out.mark = Some((op.a, v.clamp(0, 255) as u8));
-                }
-                O::ScentAt => {
-                    let dy = self.pop()?;
-                    let dx = self.pop()?;
-                    if usize::from(op.a) >= SCENT_CHANNELS {
-                        return Err(Trap::BadSense);
-                    }
-                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                    let v = self.ctx.halo.scent(lx, ly, dx, dy, usize::from(op.a));
-                    self.push(i32::from(v))?;
-                }
-                O::Sniff => {
-                    let r = self.pop()?;
-                    let ch = self.pop()?;
-                    let i = self.local(op.a)?;
-                    if usize::from(op.a) + 1 >= FRAME_LOCALS {
-                        return Err(Trap::BadLocal);
-                    }
-                    match self.sniff(ch, r)? {
-                        Some((dx, dy)) => {
-                            self.locals[i] = dx;
-                            self.locals[i + 1] = dy;
-                            self.push(1)?;
+                    O::Mem => {
+                        let i = usize::from(op.a);
+                        if i >= MEM_SLOTS {
+                            return Err(Trap::BadMem);
                         }
-                        None => self.push(0)?,
+                        self.push(self.mind.mem[i])?;
+                    }
+                    O::SetMem => {
+                        let i = usize::from(op.a);
+                        if i >= MEM_SLOTS {
+                            return Err(Trap::BadMem);
+                        }
+                        self.mind.mem[i] = self.pop()?;
+                    }
+                    O::Sense => {
+                        let s = Sense::from_u8(op.a).ok_or(Trap::BadSense)?;
+                        let v = self.sense(s);
+                        self.push(v)?;
+                    }
+                    O::Add
+                    | O::Sub
+                    | O::Mul
+                    | O::Div
+                    | O::Mod
+                    | O::Lt
+                    | O::Le
+                    | O::Eq
+                    | O::Ne
+                    | O::Ge
+                    | O::Gt
+                    | O::And
+                    | O::Or
+                    | O::Min
+                    | O::Max => {
+                        let y = self.pop()?;
+                        let x = self.pop()?;
+                        let v = match op.code {
+                            O::Add => x.wrapping_add(y),
+                            O::Sub => x.wrapping_sub(y),
+                            O::Mul => x.wrapping_mul(y),
+                            O::Div => {
+                                if y == 0 {
+                                    0
+                                } else {
+                                    x.wrapping_div(y)
+                                }
+                            }
+                            O::Mod => {
+                                if y == 0 {
+                                    0
+                                } else {
+                                    x.wrapping_rem(y)
+                                }
+                            }
+                            O::Lt => i32::from(x < y),
+                            O::Le => i32::from(x <= y),
+                            O::Eq => i32::from(x == y),
+                            O::Ne => i32::from(x != y),
+                            O::Ge => i32::from(x >= y),
+                            O::Gt => i32::from(x > y),
+                            O::And => i32::from(x != 0 && y != 0),
+                            O::Or => i32::from(x != 0 || y != 0),
+                            O::Min => x.min(y),
+                            _ => x.max(y),
+                        };
+                        self.push(v)?;
+                    }
+                    O::Neg => {
+                        let x = self.pop()?;
+                        self.push(x.wrapping_neg())?;
+                    }
+                    O::Not => {
+                        let x = self.pop()?;
+                        self.push(i32::from(x == 0))?;
+                    }
+                    O::Abs => {
+                        let x = self.pop()?;
+                        self.push(x.wrapping_abs())?;
+                    }
+                    O::Sign => {
+                        let x = self.pop()?;
+                        self.push(x.signum())?;
+                    }
+                    O::Clamp => {
+                        let hi = self.pop()?;
+                        let lo = self.pop()?;
+                        let x = self.pop()?;
+                        self.push(if lo <= hi { x.clamp(lo, hi) } else { lo })?;
+                    }
+                    O::Jmp => self.pc = jump(self.pc, op.imm)?,
+                    O::Jz => {
+                        if self.pop()? == 0 {
+                            self.pc = jump(self.pc, op.imm)?;
+                        }
+                    }
+                    O::Jnz => {
+                        if self.pop()? != 0 {
+                            self.pc = jump(self.pc, op.imm)?;
+                        }
+                    }
+                    O::Call => {
+                        if self.depth == FRAMES {
+                            return Err(Trap::CallDepth);
+                        }
+                        let target =
+                            *subs.get(op.imm as u16 as usize).ok_or(Trap::BadSub)? as usize;
+                        let args = usize::from(op.a);
+                        if args > FRAME_LOCALS || self.sp < args {
+                            return Err(Trap::StackUnderflow);
+                        }
+                        let new_base = self.base + FRAME_LOCALS;
+                        if new_base + FRAME_LOCALS > LOCALS {
+                            return Err(Trap::CallDepth);
+                        }
+                        self.frames[self.depth] = (self.pc, self.base);
+                        self.depth += 1;
+                        self.sp -= args;
+                        self.locals[new_base..new_base + args]
+                            .copy_from_slice(&self.stack[self.sp..self.sp + args]);
+                        for l in &mut self.locals[new_base + args..new_base + FRAME_LOCALS] {
+                            *l = 0;
+                        }
+                        self.base = new_base;
+                        self.pc = target;
+                    }
+                    O::Ret => {
+                        if self.depth == 0 {
+                            // Returning from the entry: the think is over.
+                            break 'op true;
+                        }
+                        let value = if op.a == 1 { Some(self.pop()?) } else { None };
+                        self.depth -= 1;
+                        let (pc, base) = self.frames[self.depth];
+                        self.pc = pc;
+                        self.base = base;
+                        if let Some(v) = value {
+                            self.push(v)?;
+                        }
+                    }
+                    O::Rand => {
+                        let n = self.pop()?;
+                        let v = if n <= 0 {
+                            0
+                        } else {
+                            (self.draw() % n as u64) as i32
+                        };
+                        self.push(v)?;
+                    }
+                    O::Chance => {
+                        let p = self.pop()?;
+                        let v = i32::from((self.draw() % 100) < p.clamp(0, 100) as u64);
+                        self.push(v)?;
+                    }
+                    O::Count => {
+                        let r = self.pop()?;
+                        let pred = self.pop()?;
+                        let n = self.count(pred, r)?;
+                        self.push(n)?;
+                    }
+                    O::Nearest => {
+                        let r = self.pop()?;
+                        let pred = self.pop()?;
+                        let i = self.local(op.a)?;
+                        if usize::from(op.a) + 1 >= FRAME_LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        match self.nearest(pred, r)? {
+                            Some((dx, dy)) => {
+                                self.locals[i] = dx;
+                                self.locals[i + 1] = dy;
+                                self.push(1)?;
+                            }
+                            None => self.push(0)?,
+                        }
+                    }
+                    O::Dist => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        self.push(dx.wrapping_abs().max(dy.wrapping_abs()))?;
+                    }
+                    O::FreeAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        self.push(i32::from(self.ctx.halo.free(lx, ly, dx, dy)))?;
+                    }
+                    O::IsAt => {
+                        let pred = self.pop()?;
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        self.push(i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred)))?;
+                    }
+                    O::DirOf => {
+                        let i = self.pop()?;
+                        let (dx, dy) = usize::try_from(i - 1)
+                            .ok()
+                            .and_then(|i| DIRS8.get(i))
+                            .copied()
+                            .unwrap_or((0, 0));
+                        self.push(dx)?;
+                        self.push(dy)?;
+                    }
+                    O::SetLook => {
+                        let v = self.pop()?;
+                        self.out.look = Some(v.clamp(0, 255) as u8);
+                    }
+                    O::Act => self.act(op.a)?,
+                    O::Next => {
+                        if usize::from(op.a) >= self.ctx.kind.states.max(1) as usize {
+                            return Err(Trap::BadAction);
+                        }
+                        self.out.next = Some(op.a);
+                    }
+                    O::EndRule => {
+                        if self.acted || self.out.next.is_some() {
+                            break 'op true;
+                        }
+                    }
+                    O::Halt => break 'op true,
+                    O::SetSignal => {
+                        let v = self.pop()?;
+                        self.out.signal =
+                            Some(v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
+                    }
+                    O::LookAt | O::SignalAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        let v = match self.ctx.halo.row_at(lx, ly, dx, dy) {
+                            None => 0,
+                            Some(r) if op.code == O::LookAt => i32::from(r.look),
+                            Some(r) => i32::from(r.signal),
+                        };
+                        self.push(v)?;
+                    }
+                    O::Pack => {
+                        let lo = self.pop()?;
+                        let hi = self.pop()?;
+                        self.push(hi.wrapping_mul(256).wrapping_add(lo & 0xFF))?;
+                    }
+                    O::Hi => {
+                        let v = self.pop()?;
+                        self.push(v >> 8)?;
+                    }
+                    O::Lo => {
+                        let v = self.pop()?;
+                        self.push(i32::from(v as u8 as i8))?;
+                    }
+                    O::ForEach => {
+                        let found = self.for_each(op.a)?;
+                        self.push(i32::from(found))?;
+                    }
+                    O::SpawnWith => {
+                        let b = self.pop()?;
+                        let a = self.pop()?;
+                        self.out.with = [a, b];
+                    }
+                    O::Mark => {
+                        let v = self.pop()?;
+                        if usize::from(op.a) >= SCENT_CHANNELS {
+                            return Err(Trap::BadSense);
+                        }
+                        self.out.mark = Some((op.a, v.clamp(0, 255) as u8));
+                    }
+                    O::ScentAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        if usize::from(op.a) >= SCENT_CHANNELS {
+                            return Err(Trap::BadSense);
+                        }
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        let v = self.ctx.halo.scent(lx, ly, dx, dy, usize::from(op.a));
+                        self.push(i32::from(v))?;
+                    }
+                    O::Sniff => {
+                        let r = self.pop()?;
+                        let ch = self.pop()?;
+                        let i = self.local(op.a)?;
+                        if usize::from(op.a) + 1 >= FRAME_LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        match self.sniff(ch, r)? {
+                            Some((dx, dy)) => {
+                                self.locals[i] = dx;
+                                self.locals[i + 1] = dy;
+                                self.push(1)?;
+                            }
+                            None => self.push(0)?,
+                        }
                     }
                 }
+                false
+            };
+            if TRACE {
+                trace.push(Step {
+                    pc: at as u32,
+                    op,
+                    top: self.sp.checked_sub(1).map(|i| self.stack[i]),
+                    fuel: self.fuel,
+                });
+            }
+            if halt {
+                return Ok(());
             }
         }
     }
@@ -1147,6 +1183,27 @@ pub fn rng_base(seed: u64, tick: u64, uid: u64) -> u64 {
 /// mind's needs/mem/state are updated in place (a trap leaves what was
 /// written before it); the action comes back in the [`Outcome`].
 pub fn think(program: &super::Kinds, ctx: Ctx<'_>, mind: &mut ActorMind) -> Outcome {
+    think_with::<false>(program, ctx, mind, &mut Vec::new())
+}
+
+/// [`think`], with every executed op appended to `trace` (`wmc why`). Same
+/// outcome, same writes to `mind`.
+pub fn think_traced(
+    program: &super::Kinds,
+    ctx: Ctx<'_>,
+    mind: &mut ActorMind,
+    trace: &mut Vec<Step>,
+) -> Outcome {
+    think_with::<true>(program, ctx, mind, trace)
+}
+
+#[inline(always)]
+fn think_with<const TRACE: bool>(
+    program: &super::Kinds,
+    ctx: Ctx<'_>,
+    mind: &mut ActorMind,
+    trace: &mut Vec<Step>,
+) -> Outcome {
     let mut m = Machine {
         stack: [0; STACK],
         sp: 0,
@@ -1162,7 +1219,7 @@ pub fn think(program: &super::Kinds, ctx: Ctx<'_>, mind: &mut ActorMind) -> Outc
         ctx,
         mind,
     };
-    if let Err(trap) = m.run(&program.code, &program.consts, &program.subs) {
+    if let Err(trap) = m.run::<TRACE>(&program.code, &program.consts, &program.subs, trace) {
         m.out.trap = Some(trap);
         m.out.action = Action::Idle;
         m.out.next = None;

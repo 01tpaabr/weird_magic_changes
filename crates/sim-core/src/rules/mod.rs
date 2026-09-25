@@ -69,6 +69,37 @@ pub struct KindDef {
     pub cover: bool,
 }
 
+/// Where a rule's code sits, for `wmc why`: not part of the program, not
+/// hashed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleInfo {
+    pub kind: u16,
+    /// The `state` block it is in, `None` for a reflex.
+    pub state: Option<u8>,
+    /// Index into [`DebugInfo::files`], and the line of its `when`.
+    pub file: u16,
+    pub line: u32,
+    /// That source line, trimmed.
+    pub text: String,
+    /// First op of the condition, and of the body: a think that reaches
+    /// `body_pc` fired the rule.
+    pub cond_pc: u32,
+    pub body_pc: u32,
+}
+
+/// Names and positions the compiler knows and the programs do not need:
+/// what `wmc why` prints. Empty for hand-assembled kinds.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DebugInfo {
+    pub files: Vec<String>,
+    /// Every rule of every kind, in code order.
+    pub rules: Vec<RuleInfo>,
+    /// State names per kind, in state order.
+    pub states: Vec<Vec<String>>,
+    /// Sub names, indexed like [`Kinds::subs`].
+    pub subs: Vec<String>,
+}
+
 /// Colour of a kind that declares none: the palette's old actor yellow.
 pub const DEFAULT_COLOR: u32 = 0x00FF_F39C;
 
@@ -143,6 +174,8 @@ pub struct Kinds {
     pub subs: Vec<u32>,
     /// Scent channel names, in channel order (`mark`, `sniff`).
     pub scents: Vec<String>,
+    /// Source positions and names, for `wmc why`.
+    pub debug: DebugInfo,
     /// Hash of everything above: the rules as an input to the checksum.
     pub hash: u64,
     /// `remaps[from * defs.len() + to]`.
@@ -192,9 +225,16 @@ impl Kinds {
             consts,
             subs,
             scents: Vec::new(),
+            debug: DebugInfo::default(),
             hash,
             remaps,
         }
+    }
+
+    /// The same rules with source positions for `wmc why` (not hashed).
+    pub fn with_debug(mut self, debug: DebugInfo) -> Self {
+        self.debug = debug;
+        self
     }
 
     /// The same rules with these scent channel names (folded into the
@@ -225,7 +265,9 @@ impl Kinds {
             .into_iter()
             .map(|d| KindDef { place: 0, ..d })
             .collect();
-        Self::from_parts(defs, self.code, self.consts, self.subs).with_scents(self.scents)
+        Self::from_parts(defs, self.code, self.consts, self.subs)
+            .with_scents(self.scents)
+            .with_debug(self.debug)
     }
 
     /// The kind worldgen starts on a walkable cell whose placement hash is

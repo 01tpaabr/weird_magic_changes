@@ -57,6 +57,7 @@ make            build (dev: opt-level 1, deps opt-level 3, Bevy dynamic_linking)
 make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=pause, .=step, [ ]=speed, p=save, q=quit)
 make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (WMC_THREADS=1 must match)
 make run ARGS="lint rules/"        # compile a rules dir/file, print the kind table; WMC_RULES=<dir> makes show/play/run use it
+make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
 make ci         check + test  == "done"

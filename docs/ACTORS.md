@@ -239,8 +239,13 @@ TIME     := INT ("min" | "h" | "d")
   ground cover (§2), `dir(h)` is the step for heading `h` (1..8 clockwise from north, 0 =
   none). The files in `rules/` (animals, grass, plants) are built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
   prints the kind table. A radius after `within` is an additive expression, never a
-  comparison (`count water within 2 > 0` counts within 2). `wmc why <x> <y>` re-runs one
-  actor's think with per-op logging (step 7).
+  comparison (`count water within 2 > 0` counts within 2). `wmc why [-v] <dir> <x> <y>
+  [ticks [w h seed]]` steps `ticks`, waits for the actor at the cell to be due, re-runs its
+  think on a copy of its mind with a trace (`sim::explain`, the same code path as the Think
+  phase: the VM's `run::<TRACE>` compiles the trace away when off) and prints its needs and
+  memory, every rule it checked (fired / condition false / not reached, from the compiler's
+  rule table in `Kinds::debug`), the decision and effects, the writes, the ops spent, and
+  after one real step where it is and its result; `-v` lists every op.
 
 **Example** (abridged; `rules/animals.rules` has the full one).
 

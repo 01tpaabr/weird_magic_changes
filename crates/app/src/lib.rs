@@ -6,11 +6,13 @@
 //! - [`clock`]: real time -> number of sim ticks this frame (speed, pause, budget).
 //! - [`render`]: `Stage` -> `CellFrame` (glyph, fg, bg per cell) -> tilemap tiles.
 //! - [`play`]: the windowed game: `PlayPlugin`, its resources and systems.
-//! - [`rules`]: which rules the app runs (the built-in plants, or `WMC_RULES`).
+//! - [`rules`]: which rules the app runs (the built-in ones, or `WMC_RULES`).
+//! - [`why`]: `wmc why`, one actor's think explained.
 pub mod camera;
 pub mod clock;
 pub mod play;
 pub mod render;
+pub mod why;
 
 use anyhow::Context;
 use sim_core::Kinds;

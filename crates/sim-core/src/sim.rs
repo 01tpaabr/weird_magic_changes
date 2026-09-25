@@ -427,6 +427,53 @@ fn load_chunks(
 /// are the in-game ways). `false` if the chunk is not loaded or the cell is
 /// not walkable or its layer is taken. Marks the chunk dirty. Not for use
 /// inside a tick.
+/// Re-run the think of whoever is at `p` (standing, else ground cover)
+/// against the world as it is, with a trace: what the next step would have
+/// it decide (`wmc why`). Changes nothing. `None` if nobody is there or the
+/// chunk is not loaded.
+pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
+    let kinds = world.resource::<Kinds>();
+    let stage = world.resource::<Stage>();
+    let tick = world.resource::<Tick>().0;
+    let seed = world.resource::<SimConfig>().seed;
+    let (cc, i) = p.split();
+    let e = stage.entity(cc)?;
+    let cells = world.get::<ChunkCells>(e)?;
+    let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
+    let row = *world.get::<ChunkActors>(e)?.rows.get(usize::from(slot))?;
+    let mind = *world.get::<ChunkMinds>(e)?.rows.get(usize::from(slot))?;
+    let mut chunks = [None; 9];
+    for (k, s) in chunks.iter_mut().enumerate() {
+        let (ox, oy) = ((k % 3) as i32 - 1, (k / 3) as i32 - 1);
+        if let Some(e) = stage.entity(ChunkCoord::new(cc.x + ox, cc.y + oy))
+            && let (Some(c), Some(a)) = (world.get::<ChunkCells>(e), world.get::<ChunkActors>(e))
+        {
+            *s = Some((c, a));
+        }
+    }
+    let halo = crate::rules::vm::Halo {
+        chunks,
+        tags: &kinds.tag_bits,
+    };
+    Some(systems::explain(
+        kinds, tick, seed, &halo, cc, slot, &row, &mind,
+    ))
+}
+
+/// Where the actor with this `uid` is, if it is loaded. A scan of every
+/// row: for tools, not for the tick.
+pub fn find_uid(world: &mut World, uid: u64) -> Option<Pos> {
+    world
+        .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
+        .iter(world)
+        .find_map(|(c, a, m)| {
+            m.rows
+                .iter()
+                .position(|m| m.uid == uid)
+                .map(|i| c.cell(usize::from(a.rows[i].cell)))
+        })
+}
+
 pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> bool {
     let (cc, i) = p.split();
     let Some(e) = world.resource::<Stage>().entity(cc) else {
@@ -1503,6 +1550,63 @@ mod tests {
         assert_eq!(t.get(1, life::OPS), 5 * 4); // Push 1, Jz, Act, EndRule
         let spin = rows(&mut w).into_iter().find(|r| r.0 == 0x51).unwrap();
         assert_eq!(spin.3.mem[0], 5);
+    }
+
+    /// `explain` replays an actor's next think with a trace and changes
+    /// nothing; the step that follows does what it said.
+    #[test]
+    fn explain_replays_the_next_think_without_changing_the_world() {
+        use crate::actors::systems::newborn;
+        use crate::rules::CHICKEN;
+        use crate::rules::vm::{Action, result};
+        use crate::time::{hours, minutes};
+        let kinds = bare();
+        let cfg = WorldConfig {
+            width: 64,
+            height: 64,
+            ..cfg(8)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        {
+            let (cc, i) = Pos::new(20, 20).split();
+            stage::chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
+        }
+        let now = tick(&w);
+        let mut thirsty = newborn(&kinds, CHICKEN, 0xC1, now);
+        thirsty.needs[1] = minutes(20) as i32; // water
+        let at = Pos::new(21, 20);
+        assert!(place_actor(&mut w, at, CHICKEN, thirsty));
+        assert!(explain(&w, Pos::new(30, 30)).is_none(), "nobody there");
+        while !explain(&w, at).unwrap().due {
+            step(&mut w);
+        }
+        let sum = checksum(&mut w);
+        let e = explain(&w, at).unwrap();
+        assert_eq!(checksum(&mut w), sum, "explaining changes nothing");
+        assert_eq!(e.intent.action, Action::Drink);
+        assert_eq!((e.intent.dx, e.intent.dy, e.intent.kind), (-1, 0, 1));
+        let fired: Vec<_> = kinds
+            .debug
+            .rules
+            .iter()
+            .filter(|r| r.kind == CHICKEN && e.trace.iter().any(|s| s.pc == r.body_pc))
+            .collect();
+        assert_eq!(fired.len(), 1, "{fired:?}");
+        assert!(fired[0].text.contains("drink w"), "{}", fired[0].text);
+        assert_eq!(
+            kinds.debug.files[usize::from(fired[0].file)],
+            "animals.rules"
+        );
+        assert_eq!(
+            e.trace.last().unwrap().op.code,
+            crate::rules::vm::OpCode::EndRule
+        );
+        step(&mut w);
+        let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC1).unwrap();
+        assert_eq!(c.3.needs[1], hours(4) as i32, "it drank");
+        assert_eq!(c.3.events & result::MASK, result::OK);
+        assert_eq!(find_uid(&mut w, 0xC1), Some(at));
     }
 
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on

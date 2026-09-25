@@ -329,7 +329,17 @@ pub fn think(
                 let halo = halo
                     .get_or_insert_with(|| halo_of(stage, cells, pubs, &kinds.tag_bits, *coord));
                 let mind = &mut minds.rows[slot];
-                let intent = think_one(kinds, tick, seed, halo, *coord, slot as u16, row, mind);
+                let (intent, _) = think_one::<false>(
+                    kinds,
+                    tick,
+                    seed,
+                    halo,
+                    *coord,
+                    slot as u16,
+                    row,
+                    mind,
+                    &mut Vec::new(),
+                );
                 intents.list.push(intent);
             }
             if !intents.list.is_empty() {
@@ -338,10 +348,64 @@ pub fn think(
         });
 }
 
+/// What one actor's think would do, for `wmc why`: its row, its mind
+/// before (as stored) and after the think, the program's outcome, the
+/// intent the resolve phases would get, and every op it executed.
+#[derive(Debug, Clone)]
+pub struct Explained {
+    pub coord: ChunkCoord,
+    pub slot: u16,
+    pub row: ActorPub,
+    pub before: ActorMind,
+    pub after: ActorMind,
+    /// Thinks at this tick by cadence (or a wake-up).
+    pub due: bool,
+    /// A vital need was empty: the think was `die` without running rules.
+    pub starved: bool,
+    pub outcome: vm::Outcome,
+    pub intent: Intent,
+    pub trace: Vec<vm::Step>,
+}
+
+/// Run one actor's think on a copy of its mind, with a trace. Pure: the
+/// same function the Think phase runs, against the same tick-start state.
+#[allow(clippy::too_many_arguments)]
+pub fn explain(
+    kinds: &Kinds,
+    tick: u64,
+    seed: u64,
+    halo: &Halo<'_>,
+    coord: ChunkCoord,
+    slot: u16,
+    row: &ActorPub,
+    before: &ActorMind,
+) -> Explained {
+    let mut after = *before;
+    let mut trace = Vec::new();
+    let (intent, outcome) = think_one::<true>(
+        kinds, tick, seed, halo, coord, slot, row, &mut after, &mut trace,
+    );
+    Explained {
+        coord,
+        slot,
+        row: *row,
+        before: *before,
+        after,
+        due: due(tick, row, kinds.def(row.kind).cadence()),
+        starved: intent.action == Action::Die && trace.is_empty(),
+        outcome,
+        intent,
+        trace,
+    }
+}
+
 /// One actor's think: decay, die at zero, else run the program and turn
 /// its outcome into an intent. Events read by this think are cleared
-/// afterwards; a trap sets `FUEL` for the next.
-fn think_one(
+/// afterwards; a trap sets `FUEL` for the next. With `TRACE`, every op the
+/// program executes goes to `trace`.
+#[allow(clippy::too_many_arguments)]
+#[inline(always)]
+fn think_one<const TRACE: bool>(
     kinds: &Kinds,
     tick: u64,
     seed: u64,
@@ -350,7 +414,8 @@ fn think_one(
     slot: u16,
     row: &ActorPub,
     mind: &mut ActorMind,
-) -> Intent {
+    trace: &mut Vec<vm::Step>,
+) -> (Intent, vm::Outcome) {
     let kind = kinds.def(row.kind);
     let key = intent_key(mind.uid, tick);
     let mut intent = Intent {
@@ -371,7 +436,7 @@ fn think_one(
     if vm::decay(kind, mind, tick) {
         clear_events(mind);
         intent.action = Action::Die;
-        return intent;
+        return (intent, vm::Outcome::default());
     }
     let cell = usize::from(row.cell);
     let ctx = Ctx {
@@ -384,7 +449,11 @@ fn think_one(
         look: row.look,
         signal: row.signal,
     };
-    let out = vm::think(kinds, ctx, mind);
+    let out = if TRACE {
+        vm::think_traced(kinds, ctx, mind, trace)
+    } else {
+        vm::think(kinds, ctx, mind)
+    };
     clear_events(mind);
     if out.trap.is_some() {
         mind.events |= event::FUEL;
@@ -420,7 +489,7 @@ fn think_one(
         }
         _ => {}
     }
-    intent
+    (intent, out)
 }
 
 #[inline]
