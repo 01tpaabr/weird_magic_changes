@@ -18,7 +18,7 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use vm::Op;
 
-pub use builtin::{CHICK, CHICKEN, EGG, FOX, GRASS, SEED, TREE};
+pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
 pub use compile::{CompileError, compile, compile_dir, compile_files};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
@@ -319,16 +319,22 @@ mod tests {
     #[test]
     fn builtin_table_is_in_file_name_order_with_a_stable_hash() {
         let k = Kinds::builtin();
-        let names = ["chicken", "egg", "chick", "fox", "grass", "seed", "tree"];
+        let names = [
+            "chicken", "egg", "chick", "fox", "flower", "hive", "bee", "grass", "seed", "tree",
+        ];
         assert_eq!(k.names().collect::<Vec<_>>(), names);
-        for (id, kind) in [CHICKEN, EGG, CHICK, FOX, GRASS, SEED, TREE]
-            .into_iter()
-            .enumerate()
+        for (id, kind) in [
+            CHICKEN, EGG, CHICK, FOX, FLOWER, HIVE, BEE, GRASS, SEED, TREE,
+        ]
+        .into_iter()
+        .enumerate()
         {
             assert_eq!(usize::from(kind), id);
             assert_eq!(k.def(kind).name, names[id]);
         }
-        assert_eq!(k.glyphs, b"Coc\x46',T".to_vec());
+        assert_eq!(k.glyphs, b"Coc\x46*Hb',T".to_vec());
+        assert_eq!(k.scents, vec!["trail".to_string()]);
+        assert_eq!(k.def(BEE).states, 4);
         assert_eq!(k.colors[usize::from(FOX)], 0x00E8_792B);
         assert_eq!(k.hash, Kinds::builtin().hash);
         assert_eq!(k.def(CHICKEN).need_named("water"), Some(1));
@@ -336,7 +342,9 @@ mod tests {
         // Tags in first-appearance order: animal, meat, plant, feed.
         assert_eq!(
             k.tag_bits,
-            vec![0b0011, 0b0010, 0b0011, 0b0001, 0b1100, 0b1100, 0b0100]
+            vec![
+                0b0011, 0b0010, 0b0011, 0b0001, 0b0100, 0, 0b0001, 0b1100, 0b1100, 0b0100
+            ]
         );
         let mut other = Kinds::builtin();
         other.defs[0].color = 0;

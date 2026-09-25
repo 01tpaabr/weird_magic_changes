@@ -3,7 +3,7 @@
 Status: Stage (chunked, unbounded terrain grid), streaming, persistence, a windowed
 ASCII renderer with a WASD camera, and the time model (integer ticks, day/night, speed
 control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27). Actors are designed
-(`ACTORS.md`, decisions 28-33) and being built in its §11 order. This file records
+(`ACTORS.md`, decisions 28-33) and being built in its §11 order (steps 1-6 done: rows, VM, compiler, chickens, foxes and eggs, grass, the social primitives with bees; next is tooling). This file records
 decisions that are already made and the shape the design must fit into. Rows superseded by the Bevy move are struck through and kept for the record.
 
 ## Decisions

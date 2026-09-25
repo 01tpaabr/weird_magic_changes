@@ -22,11 +22,11 @@ pure function of (own row, tick-start world, tick, seed).
 
 ```
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
- Simulate  par   scent_decay (cadence 16)     W own ChunkCells.scent
+ Simulate  seq   scent_decay (cadence 16)     W ChunkCells.scent of due chunks (one thread: too little work to split)
  Think     par   actors::think                R Tick SimConfig Programs Stage, ANY ChunkCells + ChunkActors
                                               W own ChunkMinds Intents Outbox ChunkMeta.dirty
  Resolve   par   actors::resolve              sort own intents by key; WAKE consumed; in-chunk bites recorded on the victim chunk
- Exchange  seq   actors::exchange             cross-chunk bites recorded; per victim: bites in key order, hurt, WAKE, death; food by share
+ Exchange  seq   actors::exchange             cross-chunk bites recorded; per victim: bites in key order, hurt, WAKE, death; food by share; take/give
  Apply     par   actors::apply                claim winners move/spawn; become; die; signal/look/mark; result
  Migrate   seq   actors::migrate              stage.active() order: cross-chunk move/spawn
  Compact   par   actors::compact              swap-remove DEAD rows, repair occupant, reset claims
@@ -412,9 +412,19 @@ where it touches the tick.
    prey is plentiful; old age is a daily chance past an age, so cohorts do not die together.
    Tests: grazing onto walkable grass, bites by share, the hatch-to-chick path.
 6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
-   blocks, `for each`, `sniff`; the bee is the acceptance test. Done so far: `state`/`next`,
+   blocks, `for each`, `sniff`; the bee is the acceptance test. Done: `state`/`next`,
    `const`, `for each`, `signal =`, `look_of`/`signal_of`, `kind:look`, `pack`/`hi`/`lo`
    (new opcodes appended, so the programs of the existing kinds and their hash are unchanged);
    `take`/`give` settled in Exchange, the `taken` sense, `spawn ... with (a, b)`; scent:
-   `mark`, `scent(ch[, t])`, `sniff`, the fade system, store v8.
+   `mark`, `scent(ch[, t])`, `sniff`, the fade system, store v8. Content: `rules/bees.rules`
+   (flower, hive, bee; kinds now number chicken 0 ... fox 3, flower 4, hive 5, bee 6, grass 7,
+   seed 8, tree 9). A bee is four states: FORAGE (sip a `flower:1` with `take`, else follow a
+   dancer seen as `bee:2`, else climb the `trail` with `sniff`, else wander), GOTO (fly to a
+   flower it saw or a dance pointed at), HOME (laden: `mark trail` stronger near the flowers
+   and fly home; `give` the crop), DANCE (`look = 2`, the offset to the flowers `pack`ed in
+   `signal`). The hive (`with (x, y)` gives each bee its home) spends stores on bees and on
+   its brood; visited flowers set seed (`taken`), so bees spread them. Acceptance test: a
+   hive 25 cells from flowers it cannot see; its bees find them, dance, recruit, lay a
+   trail, bring home more than they cost, and the flowers spread. On the built-in 256x256
+   world two hives hold 20-60 bees through 16 days.
 7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.

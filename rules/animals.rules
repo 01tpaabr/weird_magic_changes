@@ -1,6 +1,7 @@
 # Animals. Shared subs first: a sub sees only its parameters and locals, so
-# any kind can call it. Files compile in name order (animals, grass, plants),
-# so the kinds number chicken 0, egg 1, chick 2, fox 3, grass 4, seed 5, tree 6.
+# any kind can call it (`turn` is the bees' too). Files compile in name order
+# (animals, bees, grass, plants), so the kinds number chicken 0, egg 1,
+# chick 2, fox 3, flower 4, hive 5, bee 6, grass 7, seed 8, tree 9.
 #
 # Headings are 1..8 clockwise from north (0 = none yet) and `dir(h)` is that
 # step. An animal keeps its heading for a while and turns now and then, so it

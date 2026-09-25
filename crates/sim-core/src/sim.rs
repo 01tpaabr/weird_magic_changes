@@ -73,7 +73,7 @@ pub enum Phase {
     Think,
     /// Own chunk: intents into key order, WAKE consumed, bites recorded.
     Resolve,
-    /// Damage, deaths and kill credit, sequentially in coordinate order.
+    /// Damage, deaths, food by share, then take/give, sequentially in coordinate order.
     Exchange,
     /// Own-chunk resolution: claims, die/become/drink/move/spawn, look, result codes.
     Apply,
@@ -1364,6 +1364,94 @@ mod tests {
         assert!(e.to_string().contains("at most 2 scents"), "{e}");
     }
 
+    /// The acceptance test of the social primitives (docs/ACTORS.md §11
+    /// step 6): a hive 25 cells from a flower patch it cannot see. Its bees
+    /// wander until one finds the flowers, sips them (`take`), flies home
+    /// marking a trail, gives its crop (`give`) and dances; others read
+    /// the dance (`look_of`/`signal_of` through `bee:2`) and fly to the
+    /// flowers; visited flowers set seed; bees bring home more than the
+    /// hive spent on them.
+    #[test]
+    fn bees_find_flowers_dance_and_fill_the_hive() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Tally, life};
+        use crate::rules::{BEE, FLOWER, HIVE};
+        use crate::time::hours;
+        let kinds = bare();
+        let cfg = WorldConfig {
+            width: 128,
+            height: 128,
+            ..cfg(21)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        // A pond at (86..90, 60..64) and flowers around it; the hive 25 west.
+        for y in 60..64 {
+            for x in 86..90 {
+                let (cc, i) = Pos::new(x, y).split();
+                stage::chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
+            }
+        }
+        let now = tick(&w);
+        let mut n = 0u64;
+        for y in 56..68 {
+            for x in 82..94 {
+                let edge = !(85..91).contains(&x) || !(59..65).contains(&y);
+                if edge && x % 3 == 0 && y % 3 == 0 {
+                    n += 1;
+                    assert!(place_actor(
+                        &mut w,
+                        Pos::new(x, y),
+                        FLOWER,
+                        newborn(&kinds, FLOWER, 0xF000 + n, now)
+                    ));
+                }
+            }
+        }
+        let hive_at = Pos::new(58, 62);
+        assert!(place_actor(
+            &mut w,
+            hive_at,
+            HIVE,
+            newborn(&kinds, HIVE, 0x41, now)
+        ));
+        let (mut danced, mut recruited, mut trail) = (false, false, false);
+        for t in 0..hours(12) {
+            step(&mut w);
+            if t % 64 != 0 {
+                continue;
+            }
+            check_invariants(&mut w);
+            for (_, kind, _, m) in rows(&mut w) {
+                match kind {
+                    BEE if m.state == 3 => danced = true,    // DANCE
+                    BEE if m.state == 1 => recruited = true, // GOTO
+                    _ => {}
+                }
+            }
+            trail |= (60..84).any(|x| get(&w, Pos::new(x, 62)).unwrap().scent[0] > 0);
+        }
+        let all = rows(&mut w);
+        let hive = all.iter().find(|r| r.1 == HIVE).unwrap().3;
+        let bees = all.iter().filter(|r| r.1 == BEE).count();
+        let tally = w.resource::<Tally>();
+        assert!(bees >= 5, "the hive spawned bees: {bees}");
+        assert!(danced, "a bee came home full and danced");
+        assert!(recruited, "a bee followed a dance");
+        assert!(trail, "the way home was marked");
+        assert!(
+            tally.get(FLOWER, life::BORN) >= 1,
+            "visited flowers set seed"
+        );
+        // Stores now + 2h per bee spent - the 2 days it started with.
+        let born = tally.get(BEE, life::BORN) as i32;
+        let brought = hive.needs[0] + born * hours(2) as i32 - hours(48) as i32;
+        assert!(
+            brought > hours(4) as i32,
+            "bees brought nectar home: {brought} ticks' worth, {born} bees"
+        );
+    }
+
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
     /// a tuft (both layers of one cell taken) and grazes it underfoot, a
     /// quarter tuft a bite, until the tuft is gone; the patch never blocks.
@@ -1516,7 +1604,7 @@ mod tests {
         save(&mut w, &store).unwrap();
         let c = ChunkCoord::new(0, 0);
         let mut saved = store.read_chunk(c).unwrap().unwrap();
-        saved.data.actors.rows[0].kind = 7;
+        saved.data.actors.rows[0].kind = 500; // past the kind table
         store
             .write_chunk(
                 c,

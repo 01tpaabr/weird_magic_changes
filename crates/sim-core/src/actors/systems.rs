@@ -6,8 +6,8 @@
 //! Resolve   par  own chunk: sort intents by key, clear WAKE of every thinker, record
 //!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites -> Outbox
 //! Exchange  seq  cross-chunk bites recorded on their victims; then, chunk by chunk in
-//!                stage.active() order: sum bites per victim, hurt + WAKE, deaths; then
-//!                food to the lowest-key eater of every victim that died
+//!                stage.active() order: bites per victim in key order, hurt + WAKE,
+//!                deaths; food by share to the eaters; last every take/give in key order
 //! Apply     par  own chunk: skip the dead, claim target cells (min key), apply die,
 //!                become, drink, in-chunk move/spawn winners, look; result codes;
 //!                cross-chunk move/spawn -> Outbox

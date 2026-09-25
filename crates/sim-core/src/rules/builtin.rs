@@ -1,5 +1,5 @@
-//! The built-in kinds: `rules/animals.rules`, `rules/grass.rules` and
-//! `rules/plants.rules`,
+//! The built-in kinds: `rules/animals.rules`, `rules/bees.rules`,
+//! `rules/grass.rules` and `rules/plants.rules`,
 //! compiled at first use in file-name order (the same order `compile_dir`
 //! uses, so `WMC_RULES=rules/` gives the same table). The hand-assembled
 //! version below is kept as the test oracle for the compiler: what it must
@@ -34,11 +34,12 @@
 use super::Kinds;
 
 /// The rules text every build carries, in file-name order.
-pub const FILES: [(&str, &str); 3] = [
+pub const FILES: [(&str, &str); 4] = [
     (
         "animals.rules",
         include_str!("../../../../rules/animals.rules"),
     ),
+    ("bees.rules", include_str!("../../../../rules/bees.rules")),
     ("grass.rules", include_str!("../../../../rules/grass.rules")),
     (
         "plants.rules",
@@ -50,9 +51,12 @@ pub const CHICKEN: u16 = 0;
 pub const EGG: u16 = 1;
 pub const CHICK: u16 = 2;
 pub const FOX: u16 = 3;
-pub const GRASS: u16 = 4;
-pub const SEED: u16 = 5;
-pub const TREE: u16 = 6;
+pub const FLOWER: u16 = 4;
+pub const HIVE: u16 = 5;
+pub const BEE: u16 = 6;
+pub const GRASS: u16 = 7;
+pub const SEED: u16 = 8;
+pub const TREE: u16 = 9;
 
 pub fn kinds() -> Kinds {
     super::compile::compile_files(&FILES).expect("the built-in rules compile")

@@ -1,0 +1,99 @@
+# Bees: flowers, a hive, and the bees between them (docs/ACTORS.md §11
+# step 6). A bee is a small plan in states:
+#
+#   FORAGE  find a flower showing nectar (`flower:1`), sip it with `take`;
+#           else follow a dance, else climb the trail, else wander
+#   HOME    fly back to the hive with a full crop, marking the way: the
+#           mark is strongest near the flowers, so the trail points at them
+#   DANCE   at the hive: `give` the crop, then show `look 2` for a while
+#           with the offset to the flowers packed in `signal`
+#   GOTO    fly to a flower it saw, or where a dance pointed
+#
+# Flowers make nectar by day and set seed after a few visits: bees are how
+# they spread. The hive turns stored nectar into bees.
+
+const LOAD = 30min                  # a full crop
+const RICH = 20min                  # a flower shows `look 1` from here
+
+kind flower {
+  glyph "*"
+  color "#e25fb4"
+  tags plant
+  cadence 64                        # ~337 thinks a day
+  sight 6                           # roots reach water 6 cells away
+  place 1 / 250
+  need water  max 1d vital
+  need nectar max 2h decay 0
+  need health max 4 decay 0 vital
+  mem visits
+
+  when true                     => look = nectar >= RICH                  # effect only: falls through
+  when count water within 6 > 0 => water = 1d                             # falls through
+  when taken                    => visits += 1                            # a bee sipped: pollen; falls through
+  when age > 4d and rand(1000) < 3 => die                                 # ~4 days, then ~a day more
+  when light > 0 and nectar < 2h => nectar = min(nectar + 3min, 2h)
+  when visits >= 6 and count flower within 2 < 5 and nearest free within 2 as c
+                                => { visits = 0  spawn flower at c }      # pollinated: a seedling, where there is room
+  when light > 0 and rand(1000) < 3 and count flower within 2 < 3 and nearest free within 2 as c
+                                => spawn flower at c                      # now and then on the wind, bees or not
+}
+
+kind hive {
+  glyph "H"
+  color "#c98a1b"
+  cadence 64
+  sight 8
+  place 1 / 20000
+  need nectar max 4d decay 0        # the stores; a new hive starts full
+  need health max 200 decay 0 vital
+
+  when true                     => { look = (nectar > 1h) + (nectar > 95h)  nectar -= 16 }   # 1: stores to eat from, 2: full; the brood eats ~6h a day; falls through
+  when nectar > 1d and chance(5) and count bee within 8 < 10 and nearest free within 1 as c
+                                => { nectar -= 3h  spawn bee at c with (x, y) }   # a bee costs 3h of stores
+}
+
+kind bee {
+  glyph "b"
+  color "#f4d03f"
+  tags animal
+  cadence 2
+  sight 8
+  need food   max 4h vital
+  need nectar max 1h decay 0        # the crop
+  need health max 2 decay 0 vital
+  mem home_x, home_y, tx, ty, dance, trip, heading, detour, rest   # home comes from the hive (`with`)
+
+  when age > 3d and rand(10000) < 4 => die                              # ~3 days, then ~6 hours more
+  when food < 2h and nectar > 0 => { nectar -= 2min  food += 30min }    # nectar is rich: a sip is half an hour; falls through
+  when blocked                  => { heading = rand(8) + 1  detour = 2 }  # falls through
+  when detour > 0               => { detour -= 1  move dir(heading) }
+
+  state FORAGE {
+    when nectar >= LOAD           => { tx = x  ty = y  trip = 0  next HOME }
+    when food < 1h                => { trip = 0  next HOME }                  # hungry, nothing carried: home to eat
+    when nearest flower:1 within 1 as f => take f nectar 10min
+    when rest > 0                 => { rest -= 1  heading = turn(heading)  move dir(heading) }   # between looks around
+    when nearest flower:1 within 8 as f => { tx = x + f.dx  ty = y + f.dy  next GOTO  move toward f }   # seen: fly there without looking again
+    when nearest bee:2 within 4 as d and chance(50)
+      => { tx = x + d.dx + hi(signal_of(d))  ty = y + d.dy + lo(signal_of(d))  next GOTO }
+    when sniff trail within 4 as v => { rest = 1  move toward v }
+    when true                     => { rest = 3  heading = turn(heading)  move dir(heading) }
+  }
+  state GOTO {
+    when dist(at(tx, ty)) <= 1    => next FORAGE
+    when true                     => move toward at(tx, ty)
+  }
+  state HOME {
+    when nearest hive within 1 as h and nectar >= LOAD and look_of(h) < 2 => { give h nectar 1h  dance = 6  next DANCE }
+    when nearest hive within 1 as h and nectar >= LOAD => { nectar = 0  next FORAGE }       # the hive is full: spilt
+    when nearest hive within 1 as h and food < 2h and look_of(h) >= 1 => take h nectar 4min    # a sip of the stores
+    when nearest hive within 1 as h => next FORAGE
+    when nectar >= LOAD => { trip += 1  mark trail 250 - trip * 8  move toward at(home_x, home_y) }   # laden: lay the trail
+    when true           => move toward at(home_x, home_y)
+  }
+  state DANCE {
+    when dance > 0 => { dance -= 1  look = 2                                # dances about near the hive
+                        signal = pack(clamp(tx - x, -127, 127), clamp(ty - y, -127, 127))  move random free }
+    when true      => { look = 0  signal = 0  next FORAGE }
+  }
+}
