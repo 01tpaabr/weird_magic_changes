@@ -4,7 +4,8 @@
 //!
 //! ```text
 //! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params, kind names, rules hash
-//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes,
+//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
+//!                              (ground, feature, occupant, cover),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
 //!
@@ -32,7 +33,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 6;
+pub const FORMAT_VERSION: u32 = 7;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -184,6 +185,7 @@ impl Store {
         let ground = r.bytes(CHUNK_CELLS)?;
         let feature = r.bytes(CHUNK_CELLS)?;
         let occupant = r.bytes(CHUNK_CELLS * 4)?;
+        let cover = r.bytes(CHUNK_CELLS * 4)?;
         cells.ground.copy_from_slice(
             bytemuck::checked::try_cast_slice(ground).map_err(|e| bad(e.to_string()))?,
         );
@@ -194,8 +196,11 @@ impl Store {
         for (o, b) in cells.occupant.iter_mut().zip(occupant.as_chunks::<4>().0) {
             o.0 = u32::from_le_bytes(*b);
         }
+        for (o, b) in cells.cover.iter_mut().zip(cover.as_chunks::<4>().0) {
+            o.0 = u32::from_le_bytes(*b);
+        }
         let n = r.u32()? as usize;
-        if n > CHUNK_CELLS {
+        if n > 2 * CHUNK_CELLS {
             return Err(bad(format!("{n} actor rows for {CHUNK_CELLS} cells")));
         }
         let actors = ChunkActors {
@@ -236,7 +241,7 @@ impl Store {
         w.buf.extend_from_slice(bytemuck::cast_slice(&cells.ground));
         w.buf
             .extend_from_slice(bytemuck::cast_slice(&cells.feature));
-        for o in &cells.occupant {
+        for o in cells.occupant.iter().chain(&cells.cover) {
             w.buf.extend_from_slice(&o.0.to_le_bytes());
         }
         w.u32(u32::try_from(actors.rows.len()).expect("row count fits u32"));
@@ -459,7 +464,7 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x06\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x07\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
@@ -473,7 +478,7 @@ mod tests {
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
         // Row count that the file does not hold.
-        let n_at = 28 + CHUNK_CELLS * 6;
+        let n_at = 28 + CHUNK_CELLS * 10;
         let mut bytes = good.clone();
         bytes[n_at..n_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
@@ -497,15 +502,15 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v5 file is refused by version.
+        // A v6 file is refused by version.
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 5;
+        bytes[4] = 6;
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(
             s.read_chunk(c)
                 .unwrap_err()
                 .to_string()
-                .contains("format 5")
+                .contains("format 6")
         );
         fs::remove_dir_all(s.dir()).unwrap();
     }

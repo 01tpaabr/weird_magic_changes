@@ -33,7 +33,10 @@ use bevy::render::view::Msaa;
 use bevy::sprite_render::{TilemapChunkTileData, update_tilemap_chunk_indices};
 use bevy::window::{PresentMode, PrimaryWindow, WindowCloseRequested, WindowResolution};
 use sim_core::Tick;
-use sim_core::{CHUNK_SIZE, Kinds, LoadPolicy, Pos, SimConfig, StageCells, Store, StreamStats};
+use sim_core::actors::{Tally, life};
+use sim_core::{
+    CHUNK_SIZE, ChunkActors, Kinds, LoadPolicy, Pos, SimConfig, StageCells, Store, StreamStats,
+};
 use sim_core::{WorldConfig, par, sim, time};
 
 use crate::camera::{Input, ViewCamera};
@@ -41,7 +44,7 @@ use crate::clock::SimClock;
 use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
-use crate::render::palette::{TEXT_BG, TEXT_FG, VOID_BG, brightness};
+use crate::render::palette::{Looks, TEXT_BG, TEXT_FG, VOID_BG, brightness};
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the tileset is built for.
@@ -50,7 +53,7 @@ const MIN_CELL_LOGICAL: u32 = 6;
 const MAX_CELL_LOGICAL: u32 = 64;
 const ZOOM_STEP: i32 = 2;
 /// Rows reserved under the map for status text.
-const STATUS_ROWS: usize = 2;
+const STATUS_ROWS: usize = 4;
 /// Longest frame time fed to the camera: a stall becomes a small step, not a leap.
 const MAX_DT: f64 = 0.1;
 /// Sim time per frame. The rest of a 60 Hz frame is for streaming and drawing;
@@ -454,6 +457,8 @@ fn save(world: &mut World) -> anyhow::Result<usize> {
 fn render_frame(
     stage: StageCells,
     kinds: Res<Kinds>,
+    tally: Res<Tally>,
+    rows: Query<&ChunkActors>,
     tick: Res<Tick>,
     layout: Res<Layout>,
     camera: Res<ViewCamera>,
@@ -474,7 +479,7 @@ fn render_frame(
     let light = brightness(time::daylight(tick.0));
     render_cells(
         |c| stage.chunk(c),
-        &kinds.glyphs,
+        Looks::of(&kinds),
         view,
         light,
         &mut frames.map,
@@ -506,7 +511,53 @@ fn render_frame(
         .status
         .resize(layout.status_cols as usize, STATUS_ROWS);
     frames.status.put_text(0, &status, TEXT_FG, TEXT_BG);
-    frames.status.put_text(1, HELP, TEXT_FG, TEXT_BG);
+    let (alive, events) = life_lines(&kinds, &tally, &rows);
+    frames.status.put_text(1, &alive, TEXT_FG, TEXT_BG);
+    frames.status.put_text(2, &events, TEXT_FG, TEXT_BG);
+    frames.status.put_text(3, HELP, TEXT_FG, TEXT_BG);
+}
+
+/// Two status rows: how many of each kind are loaded, and the life events
+/// since the world was opened, each kind by its glyph
+/// (`alive C97 o4 ...`, `born o12 | grew c4 | eaten C3 | died C5`).
+fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (String, String) {
+    let mut alive = vec![0usize; kinds.len()];
+    for a in rows {
+        for r in &a.rows {
+            if let Some(n) = alive.get_mut(usize::from(r.kind)) {
+                *n += 1;
+            }
+        }
+    }
+    let glyph = |k: usize| char::from(kinds.glyphs[k]);
+    let mut line = String::from("alive");
+    for (k, n) in alive.iter().enumerate() {
+        line.push_str(&format!(" {}{n}", glyph(k)));
+    }
+    let mut events = String::new();
+    for (label, event) in [
+        ("born", life::BORN),
+        ("grew", life::BECAME),
+        ("eaten", life::EATEN),
+        ("died", life::DIED),
+    ] {
+        let parts: Vec<String> = (0..kinds.len())
+            .filter_map(|k| {
+                let n = tally.get(k as u16, event);
+                (n > 0).then(|| format!("{}{n}", glyph(k)))
+            })
+            .collect();
+        if !parts.is_empty() {
+            if !events.is_empty() {
+                events.push_str(" | ");
+            }
+            events.push_str(&format!("{label} {}", parts.join(" ")));
+        }
+    }
+    if events.is_empty() {
+        events.push_str("no births or deaths yet");
+    }
+    (line, events)
 }
 
 /// Phase 2: cells -> tiles, and the layers into place.

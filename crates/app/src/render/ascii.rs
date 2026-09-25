@@ -14,7 +14,11 @@ pub fn render<'c>(
 ) -> String {
     let mut frame = CellFrame::new();
     frame.resize(view.width as usize, view.height as usize);
-    render_cells(chunk, glyphs, view, 255, &mut frame);
+    let looks = super::palette::Looks {
+        glyphs,
+        colors: &[],
+    };
+    render_cells(chunk, looks, view, 255, &mut frame);
     let mut out = String::with_capacity((frame.cols() + 1) * frame.rows());
     for row in frame.glyph.chunks_exact(frame.cols().max(1)) {
         out.extend(row.iter().map(|&b| char::from(b)));

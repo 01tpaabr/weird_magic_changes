@@ -4,6 +4,7 @@
 
 kind seed {
   glyph ","
+  color "#7a3b12"                   # chestnut: reads on the soil
   tags plant feed                   # chickens graze `feed`
   cadence 512                       # a think every ~34 game minutes, 42 a day
   sight 2
@@ -15,11 +16,13 @@ kind seed {
 
   when count water within 2 > 0 => water = min(water + 6h, 1d)
   when light > 0                => lit += 1                 # bookkeeping: falls through
-  when lit >= 20                => become tree              # ~20 lit thinks: about a day
+  when lit >= 20 and count tree within 2 < 3 and count water within 1 == 0
+                                => become tree              # ~20 lit thinks; not in thick woods, not on the shore
 }
 
 kind tree {
   glyph "T"
+  color "#3f9e4d"
   tags plant
   cadence 512
   sight 2

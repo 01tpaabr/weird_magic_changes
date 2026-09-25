@@ -16,8 +16,8 @@
 use std::fmt;
 
 use super::asm::{Asm, Label};
-use super::vm::{Action, FRAME_LOCALS, OpCode, Sense, pred};
-use super::{KindDef, Kinds, NeedDef, PLACE_ONE};
+use super::vm::{Action, FRAME_LOCALS, OpCode, Sense, pred, result};
+use super::{DEFAULT_COLOR, KindDef, Kinds, NeedDef, PLACE_ONE};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground};
 use crate::time::{days, hours, minutes};
@@ -284,6 +284,10 @@ struct KindAst {
     bite: u8,
     /// Worldgen share, out of `PLACE_ONE`.
     place: u32,
+    /// `0xRRGGBB`, opaque to the sim: the palette draws the glyph in it.
+    color: u32,
+    /// Ground cover (`cover` declaration).
+    cover: bool,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
     rules: Vec<Rule>,
@@ -325,6 +329,8 @@ enum Target {
     Here,
     /// The lowest-key actor that bit this one since its last think.
     Attacker,
+    /// `dir(h)`: the unit step of direction `h` (1..=8 clockwise from north).
+    Heading(Box<Expr>),
     Dir(i32, i32),
     Toward(Box<Target>),
     Away(Box<Target>),
@@ -397,6 +403,7 @@ enum Stmt {
     Drink(Target),
     Eat(Target),
     Hit(Target),
+    Graze(Target),
     /// `look = v`: an effect, not an action.
     Look(Expr),
 }
@@ -407,6 +414,7 @@ enum Pred {
     Ground(Ground),
     Feature(Feature),
     Free,
+    Bare,
 }
 
 #[derive(Debug, Clone)]
@@ -471,7 +479,8 @@ const KEYWORDS: &[&str] = &[
     "decay", "vital", "mem", "when", "if", "else", "while", "repeat", "let", "return", "choose",
     "and", "or", "not", "nearest", "count", "within", "as", "true", "false", "idle", "die",
     "become", "spawn", "move", "drink", "eat", "hit", "at", "here", "toward", "away", "random",
-    "attacker", "north", "east", "south", "west",
+    "attacker", "north", "east", "south", "west", "color", "dir", "blocked", "missed", "refused",
+    "cover", "graze",
 ];
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
@@ -683,6 +692,8 @@ impl Parser<'_> {
             food: 0,
             bite: 1,
             place: 0,
+            color: DEFAULT_COLOR,
+            cover: false,
             needs: Vec::new(),
             mems: Vec::new(),
             rules: Vec::new(),
@@ -728,6 +739,17 @@ impl Parser<'_> {
                 k.fuel = f as u32;
             } else if self.eat_kw("food") {
                 k.food = self.int_or_time("a food value")?;
+            } else if self.eat_kw("cover") {
+                k.cover = true;
+            } else if self.eat_kw("color") {
+                // `color "#rrggbb"`
+                let c = match self.bump() {
+                    Tok::Str(s) if s.len() == 7 && s.starts_with('#') => {
+                        u32::from_str_radix(&s[1..], 16).ok()
+                    }
+                    _ => None,
+                };
+                k.color = c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?;
             } else if self.eat_kw("place") {
                 // `place N / D`: this share of walkable cells starts as this kind.
                 let n = self.int("a numerator")?;
@@ -918,6 +940,9 @@ impl Parser<'_> {
         if self.eat_kw("hit") {
             return Ok(Stmt::Hit(self.target()?));
         }
+        if self.eat_kw("graze") {
+            return Ok(Stmt::Graze(self.target()?));
+        }
         if self.is_kw("look") && matches!(self.peek2(), Tok::Sym("=")) {
             self.bump();
             self.bump();
@@ -980,7 +1005,7 @@ impl Parser<'_> {
 
     fn starts_target(&self) -> bool {
         matches!(self.peek(), Tok::Name(n) if ["here", "attacker", "toward", "away", "random", "north", "east", "south", "west"].contains(&n.as_str()))
-            || (self.is_kw("at") && matches!(self.peek2(), Tok::Sym("(")))
+            || ((self.is_kw("at") || self.is_kw("dir")) && matches!(self.peek2(), Tok::Sym("(")))
     }
 
     fn target(&mut self) -> Result<Target> {
@@ -990,6 +1015,12 @@ impl Parser<'_> {
         }
         if self.eat_kw("attacker") {
             return Ok(Target::Attacker);
+        }
+        if self.eat_kw("dir") {
+            self.expect_sym("(")?;
+            let h = self.expr()?;
+            self.expect_sym(")")?;
+            return Ok(Target::Heading(Box::new(h)));
         }
         if self.eat_kw("toward") {
             return Ok(Target::Toward(Box::new(self.target()?)));
@@ -1015,7 +1046,7 @@ impl Parser<'_> {
             }
         }
         let (name, _) = self.ident(
-            "target (a binding, here, attacker, north/east/south/west, toward, away, at(x, y) or random free)",
+            "target (a binding, here, attacker, dir(h), north/east/south/west, toward, away, at(x, y) or random free)",
         )?;
         Ok(Target::Named(name, at))
     }
@@ -1078,6 +1109,9 @@ impl Parser<'_> {
         if self.eat_kw("free") {
             return Ok(Pred::Free);
         }
+        if self.eat_kw("bare") {
+            return Ok(Pred::Bare);
+        }
         if self.eat_kw("water") {
             return Ok(Pred::Ground(Ground::Water));
         }
@@ -1087,7 +1121,8 @@ impl Parser<'_> {
         if self.eat_kw("rock") {
             return Ok(Pred::Feature(Feature::Rock));
         }
-        let (name, ..) = self.ident("predicate (a kind, water, soil, rock or free)")?;
+        let (name, ..) =
+            self.ident("predicate (a kind, a tag, water, soil, rock, free or bare)")?;
         Ok(Pred::Kind(name, at))
     }
 
@@ -1165,6 +1200,19 @@ impl Parser<'_> {
                 match n.as_str() {
                     "true" => Ok(Expr::Int(1)),
                     "false" => Ok(Expr::Int(0)),
+                    // The last action's result, as conditions.
+                    "blocked" | "missed" | "refused" => {
+                        let code = match n.as_str() {
+                            "blocked" => result::BLOCKED,
+                            "missed" => result::MISSED,
+                            _ => result::REFUSED,
+                        };
+                        Ok(Expr::Bin(
+                            OpCode::Eq,
+                            Box::new(Expr::Sense(Sense::Result)),
+                            Box::new(Expr::Int(i32::from(code))),
+                        ))
+                    }
                     "count" => {
                         let pred = self.pred()?;
                         self.expect_kw("within")?;
@@ -1401,6 +1449,8 @@ impl<'a> Gen<'a> {
                 states: 1,
                 entry,
                 place: k.place,
+                color: k.color,
+                cover: k.cover,
             });
         }
         let mut sub_entries = Vec::with_capacity(self.subs.len());
@@ -1542,6 +1592,7 @@ impl<'a> Gen<'a> {
     fn pred(&mut self, p: &Pred) -> Result<()> {
         let v = match p {
             Pred::Free => pred::FREE,
+            Pred::Bare => pred::BARE,
             Pred::Ground(g) => pred::ground(*g as u8),
             Pred::Feature(f) => pred::feature(*f as u8),
             Pred::Kind(name, at) => {
@@ -1574,6 +1625,10 @@ impl<'a> Gen<'a> {
             }
             Target::Attacker => {
                 self.asm.sense(Sense::HurtDir).op(OpCode::DirOf);
+            }
+            Target::Heading(h) => {
+                self.expr(h)?;
+                self.asm.op(OpCode::DirOf);
             }
             Target::Dir(dx, dy) => {
                 self.asm.push(*dx).push(*dy);
@@ -1933,6 +1988,10 @@ impl<'a> Gen<'a> {
                 self.target(t)?;
                 self.asm.act(Action::Hit);
             }
+            Stmt::Graze(t) => {
+                self.target(t)?;
+                self.asm.act(Action::Graze);
+            }
             Stmt::Look(e) => {
                 self.expr(e)?;
                 self.asm.op(OpCode::SetLook);
@@ -1999,12 +2058,8 @@ mod tests {
 
     #[test]
     fn plants_file_compiles_to_the_hand_assembled_program() {
-        let text = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../rules/plants.rules"
-        ))
-        .unwrap();
-        let compiled = compile("plants.rules", &text).unwrap_or_else(|e| panic!("{e}"));
+        let text = crate::rules::builtin::ORACLE_PLANTS;
+        let compiled = compile("plants.rules", text).unwrap_or_else(|e| panic!("{e}"));
         let expected = crate::rules::builtin::hand_assembled();
         let ops = |k: &Kinds| {
             k.code

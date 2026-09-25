@@ -18,7 +18,7 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use vm::Op;
 
-pub use builtin::{CHICKEN, EGG, FOX, SEED, TREE};
+pub use builtin::{CHICK, CHICKEN, EGG, FOX, GRASS, SEED, TREE};
 pub use compile::{CompileError, compile, compile_dir, compile_files};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
@@ -62,7 +62,15 @@ pub struct KindDef {
     /// Share of walkable cells worldgen starts this kind on, out of
     /// [`PLACE_ONE`] (`place 1 / 100` = `PLACE_ONE / 100`). 0 = never.
     pub place: u32,
+    /// `0xRRGGBB`. Opaque to the sim, like `glyph`: only the palette reads it.
+    pub color: u32,
+    /// Ground cover: lives in the cell's `cover` layer, never blocks, lies
+    /// under whoever stands there; eaten with `graze`, not `eat`.
+    pub cover: bool,
 }
+
+/// Colour of a kind that declares none: the palette's old actor yellow.
+pub const DEFAULT_COLOR: u32 = 0x00FF_F39C;
 
 /// The whole of a cell's placement range: `place` values are out of this
 /// (the top 24 bits of a cell hash, exact in integers).
@@ -121,6 +129,8 @@ pub struct Kinds {
     pub defs: Vec<KindDef>,
     /// `defs[i].glyph`, for the renderer's per-cell lookup.
     pub glyphs: Vec<u8>,
+    /// `defs[i].color`, for the renderer.
+    pub colors: Vec<u32>,
     /// `defs[i].tags`, for tag predicates in the VM's halo.
     pub tag_bits: Vec<u64>,
     /// Worldgen placement: `(cumulative upper bound, kind)` in kind order,
@@ -154,6 +164,7 @@ impl Kinds {
         }
         let glyphs = defs.iter().map(|d| d.glyph).collect();
         let tag_bits = defs.iter().map(|d| d.tags).collect();
+        let colors = defs.iter().map(|d| d.color).collect();
         let mut placement = Vec::new();
         let mut upto = 0u64;
         for d in defs.iter().filter(|d| d.place > 0) {
@@ -172,6 +183,7 @@ impl Kinds {
         Self {
             defs,
             glyphs,
+            colors,
             tag_bits,
             placement,
             code,
@@ -254,6 +266,8 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.bite) << 24);
         mix(d.tags);
         mix(u64::from(d.place) | 1 << 42);
+        mix(u64::from(d.color) | 1 << 43);
+        mix(u64::from(d.cover) | 1 << 44);
         mix(u64::from(d.fuel) | u64::from(d.food as u32) << 32);
         mix(u64::from(d.entry) | u64::from(d.states) << 32);
         for n in &d.needs {
@@ -288,29 +302,27 @@ mod tests {
     #[test]
     fn builtin_table_is_in_file_name_order_with_a_stable_hash() {
         let k = Kinds::builtin();
-        assert_eq!(
-            k.names().collect::<Vec<_>>(),
-            vec!["chicken", "egg", "fox", "seed", "tree"]
-        );
-        for (id, name) in [
-            (CHICKEN, "chicken"),
-            (EGG, "egg"),
-            (FOX, "fox"),
-            (SEED, "seed"),
-            (TREE, "tree"),
-        ] {
-            assert_eq!(k.def(id).name, name);
-            assert_eq!(k.def(id).id, id);
+        let names = ["chicken", "egg", "chick", "fox", "grass", "seed", "tree"];
+        assert_eq!(k.names().collect::<Vec<_>>(), names);
+        for (id, kind) in [CHICKEN, EGG, CHICK, FOX, GRASS, SEED, TREE]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(usize::from(kind), id);
+            assert_eq!(k.def(kind).name, names[id]);
         }
-        assert_eq!(k.glyphs, vec![b'c', b'o', b'f', b',', b'T']);
+        assert_eq!(k.glyphs, b"Coc\x46',T".to_vec());
+        assert_eq!(k.colors[usize::from(FOX)], 0x00E8_792B);
         assert_eq!(k.hash, Kinds::builtin().hash);
-        assert!(!k.is_empty() && k.len() == 5);
         assert_eq!(k.def(CHICKEN).need_named("water"), Some(1));
         assert_eq!(k.def(TREE).need_named("food"), None);
         // Tags in first-appearance order: animal, meat, plant, feed.
-        assert_eq!(k.tag_bits, vec![0b0011, 0b0010, 0b0001, 0b1100, 0b0100]);
+        assert_eq!(
+            k.tag_bits,
+            vec![0b0011, 0b0010, 0b0011, 0b0001, 0b1100, 0b1100, 0b0100]
+        );
         let mut other = Kinds::builtin();
-        other.defs[0].glyph = b'x';
+        other.defs[0].color = 0;
         assert_ne!(
             hash_all(&other.defs, &other.code, &other.consts, &other.subs),
             k.hash

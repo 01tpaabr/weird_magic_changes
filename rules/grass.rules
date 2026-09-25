@@ -1,0 +1,26 @@
+# Grass: ground cover. It lies under whoever stands on its cell and never
+# blocks anyone (`cover`), lives wherever its roots reach water, much farther
+# than a seed's (8 cells against 2), and spreads onto bare ground around it.
+# Chickens graze it where they stand: each bite takes a quarter of a tuft and
+# a quarter of its food, and a tuft that is left alone grows back, so a
+# meadow feeds a flock unless it is grazed to the ground.
+
+kind grass {
+  glyph "'"
+  color "#6fbf3f"
+  cover                             # walkable: animals stand on it and graze it
+  tags plant feed
+  cadence 256                       # ~84 thinks a day
+  sight 8                           # roots reach water 8 cells away
+  food 2h                           # a whole tuft's worth: each bite gets its share
+  place 1 / 20
+  need water  max 2d vital          # a tuft out of reach of water dries up in two days
+  need health max 4 decay 0 vital   # four bites
+  mem growth
+
+  when water < 1d and count water within 8 > 0  => water = 2d   # deep roots
+  when health < 4 and hurt == 0 and chance(50)   => health += 1  # grows back while left alone; falls through
+  when light > 0                                 => growth += 1  # bookkeeping: falls through
+  when growth >= 12 and count grass within 2 < 8 and nearest bare within 1 as c
+                                                 => { growth = 0  spawn grass at c }
+}

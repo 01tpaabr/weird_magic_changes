@@ -21,9 +21,9 @@ pub mod systems;
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
-use crate::stage::{ActorId, CHUNK_CELLS};
+use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells};
 
-pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch};
+pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, Tally, life};
 
 /// Need counters per actor, named per kind by its rules file.
 pub const NEED_SLOTS: usize = 4;
@@ -40,6 +40,9 @@ pub mod flags {
     pub const DEAD: u8 = 1 << 0;
     /// Think next tick regardless of cadence (hurt, taken from).
     pub const WAKE: u8 = 1 << 1;
+    /// Lives in the `cover` layer: ground cover, walkable, under whoever
+    /// stands on the cell.
+    pub const COVER: u8 = 1 << 2;
 }
 
 /// The public record: what any chunk may read about an actor while thinking.
@@ -119,44 +122,65 @@ impl ChunkMinds {
     }
 }
 
-/// Mutable view of one chunk's actor storage. Keeps the three arrays in
-/// agreement: every row has `occupant[cell] == pack(kind, slot)` and no
-/// two rows share a cell.
+/// Mutable view of one chunk's actor storage. Keeps the arrays in
+/// agreement: every row sits in the layer its `COVER` flag says (`occupant`
+/// for those who stand, `cover` for ground cover), that layer's cell points
+/// back at it (`pack(kind, slot)`), and no two rows share a cell of a layer.
 #[derive(Debug)]
 pub struct ActorsMut<'a> {
     pub pubs: &'a mut Vec<ActorPub>,
     pub minds: &'a mut Vec<ActorMind>,
-    pub occupant: &'a mut [ActorId; CHUNK_CELLS],
+    pub cells: &'a mut ChunkCells,
 }
 
 impl ActorsMut<'_> {
-    /// Append a live row on a free cell and point the cell at it. Returns the
-    /// slot. Panics if the cell is taken: callers claim cells first.
+    /// Append a live row standing on a free cell and point the cell at it.
+    /// Returns the slot. Panics if the cell is taken: callers claim cells
+    /// first.
     pub fn push(&mut self, cell: usize, kind: u16, mind: ActorMind) -> u16 {
-        assert!(self.occupant[cell].is_none(), "cell {cell} is occupied");
+        self.push_in(cell, kind, mind, false)
+    }
+
+    /// Append a live ground-cover row on a cell with no cover yet.
+    pub fn push_cover(&mut self, cell: usize, kind: u16, mind: ActorMind) -> u16 {
+        self.push_in(cell, kind, mind, true)
+    }
+
+    fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
+        let layer = self.layer(cover);
+        assert!(layer[cell].is_none(), "cell {cell} is occupied");
         let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
+        self.layer(cover)[cell] = ActorId::pack(kind, slot);
         self.pubs.push(ActorPub {
             cell: cell as u16,
             kind,
             stagger: mind.uid as u16,
             signal: 0,
             look: 0,
-            flags: 0,
+            flags: if cover { flags::COVER } else { 0 },
             _pad: 0,
         });
         self.minds.push(mind);
-        self.occupant[cell] = ActorId::pack(kind, slot);
         slot
+    }
+
+    #[inline]
+    pub fn layer(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
+        if cover {
+            &mut self.cells.cover
+        } else {
+            &mut self.cells.occupant
+        }
     }
 
     /// Flag a row dead and free its cell. The row stays until [`compact`].
     ///
     /// [`compact`]: ActorsMut::compact
     pub fn kill(&mut self, slot: usize) {
-        let p = &mut self.pubs[slot];
+        let p = self.pubs[slot];
         if p.flags & flags::DEAD == 0 {
-            p.flags |= flags::DEAD;
-            self.occupant[usize::from(p.cell)] = ActorId::NONE;
+            self.pubs[slot].flags |= flags::DEAD;
+            self.layer(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
         }
     }
 
@@ -173,7 +197,8 @@ impl ActorsMut<'_> {
             self.minds.swap_remove(i);
             if i < self.pubs.len() {
                 let moved = self.pubs[i];
-                self.occupant[usize::from(moved.cell)] = ActorId::pack(moved.kind, i as u16);
+                self.layer(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
+                    ActorId::pack(moved.kind, i as u16);
             }
         }
     }
@@ -181,9 +206,10 @@ impl ActorsMut<'_> {
 
 /// Check the invariants a saved or generated chunk must satisfy before it
 /// enters the world: equal row counts, no dead rows, every kind known, every
-/// row on a cell that points back at it, and every occupied cell owning a row.
+/// row on a cell of its layer that points back at it, and every occupied
+/// cell of either layer owning a row.
 pub fn validate(
-    occupant: &[ActorId; CHUNK_CELLS],
+    cells: &ChunkCells,
     pubs: &[ActorPub],
     minds: &[ActorMind],
     kinds: usize,
@@ -195,7 +221,7 @@ pub fn validate(
             minds.len()
         ));
     }
-    if pubs.len() > CHUNK_CELLS {
+    if pubs.len() > 2 * CHUNK_CELLS {
         return Err(format!("{} rows for {CHUNK_CELLS} cells", pubs.len()));
     }
     for (slot, p) in pubs.iter().enumerate() {
@@ -209,15 +235,21 @@ pub fn validate(
         if cell >= CHUNK_CELLS {
             return Err(format!("row {slot} is on cell {cell}, outside the chunk"));
         }
+        let layer = if p.flags & flags::COVER != 0 {
+            &cells.cover
+        } else {
+            &cells.occupant
+        };
         let want = ActorId::pack(p.kind, slot as u16);
-        if occupant[cell] != want {
+        if layer[cell] != want {
             return Err(format!(
                 "cell {cell} holds {:?}, row {slot} expects {want:?}",
-                occupant[cell]
+                layer[cell]
             ));
         }
     }
-    let occupied = occupant.iter().filter(|o| !o.is_none()).count();
+    let occupied = cells.occupant.iter().filter(|o| !o.is_none()).count()
+        + cells.cover.iter().filter(|o| !o.is_none()).count();
     if occupied != pubs.len() {
         return Err(format!("{occupied} occupied cells but {} rows", pubs.len()));
     }
@@ -236,6 +268,9 @@ mod tests {
     use super::*;
     use crate::rules::SEED;
     use crate::stage::ChunkData;
+
+    /// Enough kinds for `SEED` to be a known one.
+    const KINDS: usize = SEED as usize + 1;
 
     fn mind(uid: u64) -> ActorMind {
         ActorMind {
@@ -266,7 +301,7 @@ mod tests {
         assert_eq!(d.actors.rows[0].stagger, 0x2345);
         assert_eq!(d.actors.rows[1].cell, 20);
         assert_eq!(d.actors.rows[1].flags, 0);
-        assert_eq!(d.validate(5), Ok(()));
+        assert_eq!(d.validate(KINDS), Ok(()));
         assert_eq!(ActorId::pack(3, 4).unpack(), Some((3, 4)));
         assert_eq!(ActorId::NONE.unpack(), None);
     }
@@ -307,7 +342,7 @@ mod tests {
             );
             assert_eq!(d.minds.rows[slot].uid, u64::from(row.cell - 100));
         }
-        assert_eq!(d.validate(5), Ok(()));
+        assert_eq!(d.validate(KINDS), Ok(()));
         // Compacting again is a no-op; killing everything empties it.
         d.actors_mut().compact();
         assert_eq!(d.actors.rows.len(), 3);
@@ -324,30 +359,62 @@ mod tests {
         let mut d = ChunkData::default();
         d.actors_mut().push(1, SEED, mind(1));
         d.actors_mut().push(2, SEED, mind(2));
-        let (o, p, m) = (&d.cells.occupant, &d.actors.rows, &d.minds.rows);
-        assert_eq!(validate(o, p, m, 5), Ok(()));
+        let (o, p, m) = (&d.cells, &d.actors.rows, &d.minds.rows);
+        assert_eq!(validate(o, p, m, KINDS), Ok(()));
         assert!(validate(o, p, m, 0).unwrap_err().contains("unknown kind"));
         assert!(
-            validate(o, p, &m[..1], 5)
+            validate(o, p, &m[..1], KINDS)
                 .unwrap_err()
                 .contains("private rows")
         );
         let mut bad = p.clone();
         bad[1].flags = flags::DEAD;
-        assert!(validate(o, &bad, m, 5).unwrap_err().contains("dead"));
+        assert!(validate(o, &bad, m, KINDS).unwrap_err().contains("dead"));
         let mut bad = p.clone();
         bad[1].cell = 3;
-        assert!(validate(o, &bad, m, 5).unwrap_err().contains("expects"));
+        assert!(validate(o, &bad, m, KINDS).unwrap_err().contains("expects"));
         let mut bad = p.clone();
         bad[1].cell = u16::MAX;
-        assert!(validate(o, &bad, m, 5).unwrap_err().contains("outside"));
-        let mut bad_o = *o;
-        bad_o[7] = ActorId::pack(SEED, 0);
+        assert!(validate(o, &bad, m, KINDS).unwrap_err().contains("outside"));
+        let mut bad = p.clone();
+        bad[1].flags = flags::COVER;
         assert!(
-            validate(&bad_o, p, m, 5)
+            validate(o, &bad, m, KINDS).unwrap_err().contains("expects"),
+            "a row must sit in its own layer"
+        );
+        let mut bad_c = o.clone();
+        bad_c.occupant[7] = ActorId::pack(SEED, 0);
+        assert!(
+            validate(&bad_c, p, m, KINDS)
                 .unwrap_err()
                 .contains("occupied cells")
         );
+    }
+
+    #[test]
+    fn cover_rows_live_under_standing_rows() {
+        let mut d = ChunkData::default();
+        let stand = d.actors_mut().push(10, SEED, mind(1));
+        let lie = d.actors_mut().push_cover(10, SEED, mind(2));
+        let other = d.actors_mut().push_cover(11, SEED, mind(3));
+        assert_eq!(d.cells.occupant[10], ActorId::pack(SEED, stand));
+        assert_eq!(d.cells.cover[10], ActorId::pack(SEED, lie));
+        assert_ne!(d.actors.rows[usize::from(lie)].flags & flags::COVER, 0);
+        assert_eq!(d.validate(KINDS), Ok(()));
+        // Killing the standing row leaves the cover; compaction re-points
+        // the row moved into a hole in its own layer.
+        d.actors_mut().kill(usize::from(stand));
+        assert!(d.cells.occupant[10].is_none());
+        assert_eq!(d.cells.cover[10], ActorId::pack(SEED, lie));
+        d.actors_mut().compact();
+        assert_eq!(d.actors.rows.len(), 2);
+        assert_eq!(
+            d.cells.cover[11],
+            ActorId::pack(SEED, 0),
+            "`other` moved into slot 0"
+        );
+        let _ = other;
+        assert_eq!(d.validate(KINDS), Ok(()));
     }
 
     #[test]

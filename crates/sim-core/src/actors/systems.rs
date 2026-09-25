@@ -88,6 +88,7 @@ pub enum EffectKind {
         bite: u8,
         eat: bool,
         dir: u8,
+        cover: bool,
     },
 }
 
@@ -111,6 +112,8 @@ pub struct Hit {
     pub bite: u8,
     pub eat: bool,
     pub dir: u8,
+    /// Bites the ground cover (`graze`) rather than who stands there.
+    pub cover: bool,
 }
 
 /// Working lists of the two sequential phases: every outbox of the tick,
@@ -124,13 +127,42 @@ pub struct CrossScratch {
 /// Per-chunk resolve scratch: the claim table (`UNCLAIMED` = nobody wants
 /// the cell and nothing changed there this tick, `TOUCHED` = its occupancy
 /// changed this tick, else the lowest key that claimed it), the cells to
-/// reset, the bites taken, and how many rows died.
+/// reset, the bites taken, how many rows died, and this tick's life events
+/// per kind (merged into [`Tally`] at the end of the tick).
 #[derive(Component, Debug)]
 pub struct Scratch {
     claim: Vec<u64>,
     touched: Vec<u16>,
     pub hits: Vec<Hit>,
     pub deaths: u32,
+    events: Vec<[u32; LIFE_EVENTS]>,
+}
+
+/// Life events counted per kind: `Tally::counts[kind][event]`.
+pub mod life {
+    /// A row created by `spawn`.
+    pub const BORN: usize = 0;
+    /// A row that became this kind (`become`: hatched, grown, sprouted).
+    pub const BECAME: usize = 1;
+    /// Killed by bites.
+    pub const EATEN: usize = 2;
+    /// Died of an empty vital need (or its own `die`).
+    pub const DIED: usize = 3;
+}
+const LIFE_EVENTS: usize = 4;
+
+/// Life events per kind since the world was loaded: births, `become`s,
+/// deaths by bites and by needs. Sums, so the order they are added in does
+/// not matter; not saved, not in the checksum.
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
+pub struct Tally {
+    pub counts: Vec<[u64; LIFE_EVENTS]>,
+}
+
+impl Tally {
+    pub fn get(&self, kind: u16, event: usize) -> u64 {
+        self.counts.get(usize::from(kind)).map_or(0, |c| c[event])
+    }
 }
 
 const UNCLAIMED: u64 = u64::MAX;
@@ -143,6 +175,7 @@ impl Default for Scratch {
             touched: Vec::new(),
             hits: Vec::new(),
             deaths: 0,
+            events: Vec::new(),
         }
     }
 }
@@ -167,6 +200,16 @@ impl Scratch {
             self.touched.push(cell as u16);
         }
         self.claim[cell] = TOUCHED;
+    }
+
+    /// Count a life event of `kind` this tick. The per-kind table grows on
+    /// first use of a kind: chunk-level, not per actor.
+    fn count(&mut self, kind: u16, event: usize) {
+        let k = usize::from(kind);
+        if self.events.len() <= k {
+            self.events.resize(k + 1, [0; LIFE_EVENTS]);
+        }
+        self.events[k][event] += 1;
     }
 
     /// Free at tick start and untouched since: a cross-chunk mover may enter.
@@ -399,19 +442,22 @@ pub fn resolve(
                 let slot = usize::from(it.slot);
                 // The think consumed the wake-up; a bite this tick sets it again.
                 pubs.rows[slot].flags &= !flags::WAKE;
-                if !matches!(it.action, Action::Eat | Action::Hit) {
+                if !matches!(it.action, Action::Eat | Action::Hit | Action::Graze) {
                     continue;
                 }
                 let (dx, dy) = (i32::from(it.dx), i32::from(it.dy));
-                let res = if dx.abs() > 1 || dy.abs() > 1 || (dx, dy) == (0, 0) {
+                // `eat`/`hit` bite a neighbour; `graze` the cover next to or
+                // under the grazer.
+                let cover = it.action == Action::Graze;
+                let res = if dx.abs() > 1 || dy.abs() > 1 || ((dx, dy) == (0, 0) && !cover) {
                     result::REFUSED
                 } else {
                     let row = pubs.rows[slot];
                     let bite = kinds.def(row.kind).bite;
-                    let eat = it.action == Action::Eat;
+                    let eat = it.action != Action::Hit;
                     let dir = vm::dir_index(-dx, -dy);
                     match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
-                        Where::Here(cell) => match cells.occupant[cell].unpack() {
+                        Where::Here(cell) => match layer_of(cells, cover)[cell].unpack() {
                             None => result::MISSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
@@ -423,6 +469,7 @@ pub fn resolve(
                                     bite,
                                     eat,
                                     dir,
+                                    cover,
                                 });
                                 result::OK
                             }
@@ -431,7 +478,12 @@ pub fn resolve(
                             outbox.list.push(Effect {
                                 key: it.key,
                                 slot: it.slot,
-                                what: EffectKind::Bite { bite, eat, dir },
+                                what: EffectKind::Bite {
+                                    bite,
+                                    eat,
+                                    dir,
+                                    cover,
+                                },
                                 to,
                                 cell: cell as u16,
                             });
@@ -450,6 +502,12 @@ fn has_health(kinds: &Kinds, kind: u16) -> bool {
     kinds.def(kind).need_named("health").is_some()
 }
 
+/// The occupant layer, or the cover layer.
+#[inline]
+fn layer_of(cells: &ChunkCells, cover: bool) -> &[ActorId; CHUNK_CELLS] {
+    if cover { &cells.cover } else { &cells.occupant }
+}
+
 // ---- Exchange ---------------------------------------------------------------------------
 
 type ChunkQuery<'w, 's> = Query<
@@ -464,13 +522,15 @@ type ChunkQuery<'w, 's> = Query<
     ),
 >;
 
-/// Damage, deaths and kill credit, one thread. First every cross-chunk bite
-/// is recorded on its victim (tick-start occupancy: nothing has died or
-/// moved yet). Then, chunk by chunk in `stage.active()` order, the bites on
-/// each victim are summed off its `health`, its `hurt` grows (saturating),
-/// `hurt_dir` points at the lowest-key biter and `WAKE` is set; at
-/// `health <= 0` it dies. Last, the lowest-key `eat` of every victim that
-/// died gains the victim kind's `food`, if the eater is alive itself.
+/// Damage, deaths and feeding, one thread. First every cross-chunk bite is
+/// recorded on its victim (tick-start occupancy: nothing has died or moved
+/// yet). Then, chunk by chunk in `stage.active()` order, the bites on each
+/// victim take its `health` in key order, each at most what is left; its
+/// `hurt` grows by what was taken (saturating), `hurt_dir` points at the
+/// lowest-key biter and `WAKE` is set; at `health <= 0` it dies. Every `eat`
+/// gains the share of the victim kind's `food` it took (`food * taken /
+/// max health`), if the eater is alive itself at the end: a fox eats a
+/// chicken over two bites, a chicken crops grass that grows back.
 pub fn exchange(
     kinds: Res<Kinds>,
     stage: Res<Stage>,
@@ -491,12 +551,18 @@ pub fn exchange(
     }
     work.list.sort_unstable_by_key(|(_, fx)| (fx.key, fx.slot));
     for &(src_e, fx) in &work.list {
-        let EffectKind::Bite { bite, eat, dir } = fx.what else {
+        let EffectKind::Bite {
+            bite,
+            eat,
+            dir,
+            cover,
+        } = fx.what
+        else {
             continue;
         };
         let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
-                match cells.occupant[usize::from(fx.cell)].unpack() {
+                match layer_of(&cells, cover)[usize::from(fx.cell)].unpack() {
                     None => result::MISSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
@@ -508,6 +574,7 @@ pub fn exchange(
                             bite,
                             eat,
                             dir,
+                            cover,
                         });
                         result::OK
                     }
@@ -529,24 +596,20 @@ pub fn exchange(
         let scratch = &mut *scratch;
         scratch
             .hits
-            .sort_unstable_by_key(|h| (h.cell, h.key, h.slot));
+            .sort_unstable_by_key(|h| (h.cover, h.cell, h.key, h.slot));
         let mut i = 0;
         while i < scratch.hits.len() {
             let first = scratch.hits[i];
             let mut j = i;
-            let mut damage = 0i32;
-            let mut eater = None;
-            while j < scratch.hits.len() && scratch.hits[j].cell == first.cell {
-                let h = scratch.hits[j];
-                damage += i32::from(h.bite);
-                if h.eat && eater.is_none() {
-                    eater = Some(h);
-                }
+            while j < scratch.hits.len()
+                && (scratch.hits[j].cell, scratch.hits[j].cover) == (first.cell, first.cover)
+            {
                 j += 1;
             }
+            let group = i..j;
             i = j;
             let cell = usize::from(first.cell);
-            let Some((vk, vslot)) = cells.occupant[cell].unpack() else {
+            let Some((vk, vslot)) = layer_of(&cells, first.cover)[cell].unpack() else {
                 continue;
             };
             let vslot = usize::from(vslot);
@@ -554,24 +617,39 @@ pub fn exchange(
             let Some(h) = def.need_named("health") else {
                 continue;
             };
+            // Bites in key order, each taking what is left of the victim's
+            // health; an `eat` feeds its biter the share of the victim's
+            // `food` it took (`food * taken / max health`), so overkill
+            // feeds nobody and a shared kill is shared.
+            let max = i64::from(def.needs[h].max.max(1));
             let m = &mut minds.rows[vslot];
-            m.needs[h] = m.needs[h].saturating_sub(damage);
-            m.hurt = m.hurt.saturating_add(damage.clamp(0, 255) as u8);
+            let mut left = m.needs[h].max(0);
+            for hit in &scratch.hits[group] {
+                let taken = i32::from(hit.bite).min(left);
+                left -= taken;
+                if hit.eat && taken > 0 && def.food > 0 {
+                    let food = i64::from(def.food) * i64::from(taken) / max;
+                    work.credits.push((hit.from, hit.slot, food as i32));
+                }
+            }
+            let taken = m.needs[h].max(0) - left;
+            m.needs[h] = left;
+            m.hurt = m.hurt.saturating_add(taken.clamp(0, 255) as u8);
             m.hurt_dir = first.dir;
-            let dead = m.needs[h] <= 0;
+            let dead = left <= 0;
             pubs.rows[vslot].flags |= flags::WAKE;
             if dead {
                 ActorsMut {
                     pubs: &mut pubs.rows,
                     minds: &mut minds.rows,
-                    occupant: &mut cells.occupant,
+                    cells: &mut cells,
                 }
                 .kill(vslot);
                 scratch.deaths += 1;
-                scratch.touch(cell);
-                if let Some(eater) = eater {
-                    work.credits.push((eater.from, eater.slot, def.food));
+                if !first.cover {
+                    scratch.touch(cell); // a grazed-out tuft frees no standing room
                 }
+                scratch.count(vk, life::EATEN);
             }
             meta.dirty = true;
         }
@@ -623,6 +701,9 @@ pub fn apply(
                 if !matches!(it.action, Action::Move | Action::Spawn) {
                     continue;
                 }
+                if it.action == Action::Spawn && is_cover(kinds, it.kind) {
+                    continue; // ground cover takes no standing room
+                }
                 let row = pubs.rows[usize::from(it.slot)];
                 if row.flags & flags::DEAD != 0 {
                     continue;
@@ -643,22 +724,33 @@ pub fn apply(
                     continue; // died in Exchange: its intent is void
                 }
                 let from = usize::from(pubs.rows[slot].cell);
+                let grounded = pubs.rows[slot].flags & flags::COVER != 0;
                 let mut actors = ActorsMut {
                     pubs: &mut pubs.rows,
                     minds: &mut minds.rows,
-                    occupant: &mut cells.occupant,
+                    cells: &mut cells,
                 };
                 let res = match it.action {
                     Action::Idle => Some(result::OK),
                     // Resolve and Exchange already wrote the result.
-                    Action::Eat | Action::Hit => None,
+                    Action::Eat | Action::Hit | Action::Graze => None,
                     Action::Die => {
+                        let kind = actors.pubs[slot].kind;
                         actors.kill(slot);
                         scratch.deaths += 1;
-                        scratch.touch(from);
+                        if !grounded {
+                            scratch.touch(from);
+                        }
+                        scratch.count(kind, life::DIED);
                         Some(result::OK)
                     }
-                    Action::Become => Some(change_kind(kinds, tick, &mut actors, slot, it.kind)),
+                    Action::Become => {
+                        let res = change_kind(kinds, tick, &mut actors, slot, it.kind);
+                        if res == result::OK {
+                            scratch.count(it.kind, life::BECAME);
+                        }
+                        Some(res)
+                    }
                     Action::Drink => {
                         let kind = kinds.def(actors.pubs[slot].kind);
                         Some(match (it.kind, kind.need_named("water")) {
@@ -669,12 +761,14 @@ pub fn apply(
                             _ => result::REFUSED,
                         })
                     }
+                    // Ground cover is rooted.
+                    Action::Move if grounded => Some(result::REFUSED),
                     Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let kind = actors.pubs[slot].kind;
-                            actors.occupant[from] = ActorId::NONE;
+                            actors.cells.occupant[from] = ActorId::NONE;
                             scratch.touch(from);
-                            actors.occupant[cell] = ActorId::pack(kind, it.slot);
+                            actors.cells.occupant[cell] = ActorId::pack(kind, it.slot);
                             actors.pubs[slot].cell = cell as u16;
                             result::OK
                         }
@@ -690,11 +784,41 @@ pub fn apply(
                             result::NONE // Migrate decides
                         }
                     }),
+                    Action::Spawn if usize::from(it.kind) >= kinds.len() => Some(result::REFUSED),
+                    // Ground cover: the first spawn in key order onto a
+                    // walkable cell with no cover gets it.
+                    Action::Spawn if is_cover(kinds, it.kind) => {
+                        Some(match target_of(*coord, from, it.dx, it.dy) {
+                            Where::Here(cell)
+                                if actors.cells.walkable(cell)
+                                    && actors.cells.cover[cell].is_none() =>
+                            {
+                                let pos = coord.cell(cell);
+                                let child = newborn(
+                                    kinds,
+                                    it.kind,
+                                    hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
+                                    tick,
+                                );
+                                actors.push_cover(cell, it.kind, child);
+                                scratch.count(it.kind, life::BORN);
+                                result::OK
+                            }
+                            Where::Here(_) => result::BLOCKED,
+                            Where::Elsewhere(to, cell) => {
+                                outbox.list.push(Effect {
+                                    key: it.key,
+                                    slot: it.slot,
+                                    what: EffectKind::Spawn(it.kind),
+                                    to,
+                                    cell: cell as u16,
+                                });
+                                result::NONE
+                            }
+                        })
+                    }
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
-                        Where::Here(cell)
-                            if usize::from(it.kind) < kinds.len()
-                                && scratch.claim[cell] == it.key =>
-                        {
+                        Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let pos = coord.cell(cell);
                             let child = newborn(
                                 kinds,
@@ -704,10 +828,11 @@ pub fn apply(
                             );
                             actors.push(cell, it.kind, child);
                             scratch.touch(cell);
+                            scratch.count(it.kind, life::BORN);
                             result::OK
                         }
                         Where::Here(_) => result::BLOCKED,
-                        Where::Elsewhere(to, cell) if usize::from(it.kind) < kinds.len() => {
+                        Where::Elsewhere(to, cell) => {
                             outbox.list.push(Effect {
                                 key: it.key,
                                 slot: it.slot,
@@ -717,7 +842,6 @@ pub fn apply(
                             });
                             result::NONE
                         }
-                        Where::Elsewhere(..) => result::REFUSED,
                     }),
                 };
                 if let Some(res) = res {
@@ -730,6 +854,11 @@ pub fn apply(
             intents.traps += traps;
         },
     );
+}
+
+#[inline]
+fn is_cover(kinds: &Kinds, kind: u16) -> bool {
+    kinds.def(kind).cover
 }
 
 /// Where `(dx, dy)` from `cell` lands.
@@ -784,6 +913,10 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if usize::from(to) >= kinds.len() {
         return result::REFUSED;
     }
+    let grounded = actors.pubs[slot].flags & flags::COVER != 0;
+    if kinds.def(to).cover != grounded {
+        return result::REFUSED; // a row cannot change layers
+    }
     let from = actors.pubs[slot].kind;
     let remap = kinds.remap(from, to);
     let def = kinds.def(to);
@@ -807,9 +940,9 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     }
     m.state = 0;
     m.born = tick as u32;
-    let row = &mut actors.pubs[slot];
-    row.kind = to;
-    actors.occupant[usize::from(row.cell)] = ActorId::pack(to, slot as u16);
+    actors.pubs[slot].kind = to;
+    let cell = usize::from(actors.pubs[slot].cell);
+    actors.layer(grounded)[cell] = ActorId::pack(to, slot as u16);
     result::OK
 }
 
@@ -857,9 +990,13 @@ pub fn migrate(
             continue;
         };
         let (dst_cells, dst_pubs, dst_minds, dst_scratch, dst_meta) = &mut dst;
+        let cover = matches!(fx.what, EffectKind::Spawn(k) if is_cover(&kinds, k));
         let ok = dst_cells.walkable(cell)
-            && dst_cells.occupant[cell].is_none()
-            && dst_scratch.enterable(cell);
+            && if cover {
+                dst_cells.cover[cell].is_none()
+            } else {
+                dst_cells.occupant[cell].is_none() && dst_scratch.enterable(cell)
+            };
         if !ok {
             set_result_in(&mut src.2, slot, result::BLOCKED);
             continue;
@@ -868,7 +1005,7 @@ pub fn migrate(
         let mut to = ActorsMut {
             pubs: &mut dst_pubs.rows,
             minds: &mut dst_minds.rows,
-            occupant: &mut dst_cells.occupant,
+            cells: dst_cells,
         };
         match fx.what {
             EffectKind::Move => {
@@ -883,7 +1020,7 @@ pub fn migrate(
                 let mut from = ActorsMut {
                     pubs: &mut src_pubs.rows,
                     minds: &mut src_minds.rows,
-                    occupant: &mut src_cells.occupant,
+                    cells: src_cells,
                 };
                 from.kill(slot);
                 src_scratch.deaths += 1;
@@ -897,12 +1034,19 @@ pub fn migrate(
                     hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                     tick,
                 );
-                to.push(cell, kind, child);
+                if cover {
+                    to.push_cover(cell, kind, child);
+                } else {
+                    to.push(cell, kind, child);
+                }
+                dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
             EffectKind::Bite { .. } => unreachable!("skipped above"),
         }
-        dst_scratch.touch(cell);
+        if !cover {
+            dst_scratch.touch(cell);
+        }
         dst_meta.dirty = true;
         src_meta.dirty = true;
     }
@@ -918,6 +1062,28 @@ fn set_result(chunks: &mut ChunkQuery, e: Entity, slot: usize, res: u8) {
 fn set_result_in(minds: &mut ChunkMinds, slot: usize, res: u8) {
     let m = &mut minds.rows[slot];
     m.events = (m.events & !result::MASK) | res;
+}
+
+// ---- Tally ------------------------------------------------------------------------------
+
+/// Fold every chunk's life events of the tick into [`Tally`]. Sums commute,
+/// so chunk order does not matter.
+pub fn tally(mut total: ResMut<Tally>, mut q: Query<&mut Scratch>) {
+    for mut s in &mut q {
+        if s.events.iter().all(|e| e.iter().all(|&n| n == 0)) {
+            continue;
+        }
+        let s = &mut *s;
+        if total.counts.len() < s.events.len() {
+            total.counts.resize(s.events.len(), [0; LIFE_EVENTS]);
+        }
+        for (t, e) in total.counts.iter_mut().zip(s.events.iter_mut()) {
+            for (a, b) in t.iter_mut().zip(e.iter_mut()) {
+                *a += u64::from(*b);
+                *b = 0;
+            }
+        }
+    }
 }
 
 // ---- Compact ----------------------------------------------------------------------------
@@ -943,7 +1109,7 @@ pub fn compact(
             ActorsMut {
                 pubs: &mut pubs.rows,
                 minds: &mut minds.rows,
-                occupant: &mut cells.occupant,
+                cells: &mut cells,
             }
             .compact();
             scratch.deaths = 0;
@@ -1007,6 +1173,7 @@ mod tests {
             bite: 1,
             eat: false,
             dir: 0,
+            cover: false,
         });
         s.reset();
         assert!(s.enterable(5) && s.enterable(6) && s.hits.is_empty());
@@ -1026,7 +1193,7 @@ mod tests {
         let mut a = d.actors_mut();
         assert_eq!(change_kind(&kinds, 2000, &mut a, 0, TREE), result::OK);
         assert_eq!(a.pubs[0].kind, TREE);
-        assert_eq!(a.occupant[5], ActorId::pack(TREE, 0));
+        assert_eq!(a.cells.occupant[5], ActorId::pack(TREE, 0));
         let m = a.minds[0];
         assert_eq!(m.needs[0], 100, "water carries over by name");
         assert_eq!(m.needs[1], 100, "health is points: reset to the tree's max");

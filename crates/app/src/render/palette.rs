@@ -1,7 +1,8 @@
 //! What each tile looks like: the only place glyphs and colours are chosen.
-//! The ground picks the cell background; the thing on it picks glyph +
-//! foreground. An actor's glyph comes from its kind (`Kinds::glyphs`, a byte
-//! the sim carries but never reads).
+//! The ground picks the cell background, tinted by the ground cover (grass)
+//! if there is one; the thing on it picks glyph + foreground. An actor's glyph and colour come from its kind
+//! (`Kinds::glyphs`, `Kinds::colors`: declared in its rules file, carried
+//! by the sim, never read by it).
 
 use sim_core::{Feature, Ground};
 
@@ -42,6 +43,13 @@ impl Color {
         bevy::color::Color::srgb(linear(r), linear(g), linear(b))
     }
 
+    /// `t / 255` of the way from this colour to `to`, per channel, rounded.
+    pub const fn mix(self, to: Color, t: u8) -> Color {
+        let (r, g, b) = self.channels();
+        let (r2, g2, b2) = to.channels();
+        Color::rgb(lerp(r, r2, t), lerp(g, g2, t), lerp(b, b2, t))
+    }
+
     /// Scaled towards black: `light` 255 is the colour itself, 0 is black.
     /// Per channel `(c * light + 127) / 255`, exact at both ends.
     pub const fn scaled(self, light: u8) -> Color {
@@ -58,6 +66,10 @@ fn linear(c: u8) -> f32 {
     } else {
         ((c + 0.055) / 1.055).powf(2.4)
     }
+}
+
+const fn lerp(a: u8, b: u8, t: u8) -> u8 {
+    ((a as u32 * (255 - t as u32) + b as u32 * t as u32 + 127) / 255) as u8
 }
 
 const fn scale(c: u8, light: u8) -> u8 {
@@ -83,6 +95,9 @@ pub const ACTOR_FG: Color = Color::rgb(0xff, 0xf3, 0x9c);
 pub const VOID_BG: Color = Color::rgb(0x10, 0x10, 0x12); // chunk not loaded
 pub const TEXT_FG: Color = Color::rgb(0xe6, 0xe6, 0xe6);
 pub const TEXT_BG: Color = Color::rgb(0x1b, 0x1b, 0x20);
+/// How far a cell with ground cover is tinted toward the cover's colour: a
+/// meadow reads as a green patch, and whoever stands in it stays drawn.
+pub const COVER_TINT: u8 = 0x70;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
@@ -102,15 +117,25 @@ pub const VOID: Style = Style {
 /// Glyph drawn for a kind the table does not know (a save from a newer build).
 pub const UNKNOWN_ACTOR: u8 = b'?';
 
-/// `actor` is the glyph of the kind standing here, if any: look it up with
-/// [`actor_glyph`] from the occupant id.
-pub fn style(ground: Ground, feature: Feature, actor: Option<u8>) -> Style {
+/// `actor` is the glyph and colour of the kind standing here, `cover` of the
+/// ground cover under it, if any: look both up with [`Looks::actor`]. The
+/// cover tints the background and shows its glyph when nobody stands on it.
+pub fn style(
+    ground: Ground,
+    feature: Feature,
+    actor: Option<(u8, Color)>,
+    cover: Option<(u8, Color)>,
+) -> Style {
     let bg = match ground {
         Ground::Soil => SOIL_BG,
         Ground::Water => WATER_BG,
     };
-    let (glyph, fg) = match (actor, feature, ground) {
-        (Some(glyph), _, _) => (glyph, ACTOR_FG),
+    let bg = match cover {
+        Some((_, c)) => bg.mix(c, COVER_TINT),
+        None => bg,
+    };
+    let (glyph, fg) = match (actor.or(cover), feature, ground) {
+        (Some(look), _, _) => look,
         (None, Feature::Rock, _) => (b'#', ROCK_FG),
         (None, Feature::None, Ground::Soil) => (b'.', SOIL_FG),
         (None, Feature::None, Ground::Water) => (b'~', WATER_FG),
@@ -118,16 +143,34 @@ pub fn style(ground: Ground, feature: Feature, actor: Option<u8>) -> Style {
     Style { glyph, fg, bg }
 }
 
-/// The glyph for whoever stands on a cell: `None` for nobody, the kind's
-/// glyph from `glyphs` (indexed by kind), [`UNKNOWN_ACTOR`] past its end.
-#[inline]
-pub fn actor_glyph(occupant: sim_core::ActorId, glyphs: &[u8]) -> Option<u8> {
-    occupant.unpack().map(|(kind, _)| {
-        glyphs
-            .get(usize::from(kind))
-            .copied()
-            .unwrap_or(UNKNOWN_ACTOR)
-    })
+/// How each kind is drawn: its glyph and `0xRRGGBB` colour, indexed by kind
+/// (the kind table's `glyphs` and `colors`).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Looks<'a> {
+    pub glyphs: &'a [u8],
+    pub colors: &'a [u32],
+}
+
+impl<'a> Looks<'a> {
+    pub fn of(kinds: &'a sim_core::Kinds) -> Self {
+        Self {
+            glyphs: &kinds.glyphs,
+            colors: &kinds.colors,
+        }
+    }
+
+    /// Glyph and colour of whoever stands on a cell: `None` for nobody;
+    /// [`UNKNOWN_ACTOR`] past the end of the table, [`ACTOR_FG`] without a
+    /// colour.
+    #[inline]
+    pub fn actor(&self, occupant: sim_core::ActorId) -> Option<(u8, Color)> {
+        occupant.unpack().map(|(kind, _)| {
+            let k = usize::from(kind);
+            let glyph = self.glyphs.get(k).copied().unwrap_or(UNKNOWN_ACTOR);
+            let color = self.colors.get(k).map_or(ACTOR_FG, |&c| Color(c));
+            (glyph, color)
+        })
+    }
 }
 
 #[cfg(test)]
@@ -164,17 +207,49 @@ mod tests {
 
     #[test]
     fn ground_picks_background_and_the_kind_picks_the_glyph() {
-        assert_eq!(style(Ground::Water, Feature::Rock, None).bg, WATER_BG);
-        assert_eq!(style(Ground::Soil, Feature::Rock, None).bg, SOIL_BG);
-        assert_eq!(style(Ground::Water, Feature::None, Some(b'c')).glyph, b'c');
-        assert_eq!(style(Ground::Soil, Feature::Rock, Some(b'c')).glyph, b'c');
-        let glyphs = *b",T";
-        use sim_core::ActorId;
-        assert_eq!(actor_glyph(ActorId::NONE, &glyphs), None);
-        assert_eq!(actor_glyph(ActorId::pack(1, 40), &glyphs), Some(b'T'));
+        assert_eq!(style(Ground::Water, Feature::Rock, None, None).bg, WATER_BG);
+        assert_eq!(style(Ground::Soil, Feature::Rock, None, None).bg, SOIL_BG);
+        let red = Color::rgb(255, 0, 0);
+        let s = style(Ground::Water, Feature::None, Some((b'c', red)), None);
+        assert_eq!((s.glyph, s.fg, s.bg), (b'c', red, WATER_BG));
+        // Ground cover: tints the background, shows only when nobody stands on it.
+        let green = Color::rgb(0, 255, 0);
+        let s = style(Ground::Soil, Feature::None, None, Some((b'\'', green)));
         assert_eq!(
-            actor_glyph(ActorId::pack(2, 0), &glyphs),
-            Some(UNKNOWN_ACTOR)
+            (s.glyph, s.fg, s.bg),
+            (b'\'', green, SOIL_BG.mix(green, COVER_TINT))
+        );
+        let s = style(
+            Ground::Soil,
+            Feature::None,
+            Some((b'c', red)),
+            Some((b'\'', green)),
+        );
+        assert_eq!(
+            (s.glyph, s.fg, s.bg),
+            (b'c', red, SOIL_BG.mix(green, COVER_TINT))
+        );
+        assert_eq!(red.mix(green, 0), red);
+        assert_eq!(red.mix(green, 255), green);
+        assert_eq!(red.mix(green, 128), Color::rgb(127, 128, 0));
+        assert_eq!(
+            style(Ground::Soil, Feature::Rock, Some((b'c', red)), None).glyph,
+            b'c'
+        );
+        let looks = Looks {
+            glyphs: b",T",
+            colors: &[0x00_11_22_33],
+        };
+        use sim_core::ActorId;
+        assert_eq!(looks.actor(ActorId::NONE), None);
+        assert_eq!(
+            looks.actor(ActorId::pack(0, 3)),
+            Some((b',', Color(0x112233)))
+        );
+        assert_eq!(looks.actor(ActorId::pack(1, 40)), Some((b'T', ACTOR_FG)));
+        assert_eq!(
+            looks.actor(ActorId::pack(2, 0)),
+            Some((UNKNOWN_ACTOR, ACTOR_FG))
         );
     }
 }

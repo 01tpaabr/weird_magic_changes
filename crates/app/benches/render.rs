@@ -7,6 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use app::render::cells::{CellFrame, Viewport, render_cells};
 use app::render::grid;
+use app::render::palette::Looks;
 use sim_core::stage::worldgen::GenParams;
 use sim_core::{Kinds, Pos, WorldConfig, par, sim, stage};
 
@@ -28,14 +29,14 @@ fn bench_cells(c: &mut Criterion) {
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
-    let glyphs = world.resource::<Kinds>().glyphs.clone();
+    let kinds = world.resource::<Kinds>().clone();
     let mut g = c.benchmark_group("render_cells");
     g.throughput(Throughput::Elements(u64::from(COLS * ROWS)));
     g.bench_with_input(BenchmarkId::new("160x90", threads), &threads, |b, _| {
         b.iter(|| {
             render_cells(
                 |cc| stage::chunk(&world, cc),
-                &glyphs,
+                Looks::of(&kinds),
                 view,
                 200,
                 &mut frame,
@@ -50,10 +51,10 @@ fn bench_upload(c: &mut Criterion) {
     let view = Viewport::centered(Pos::new(200, 100), COLS, ROWS);
     let mut frame = CellFrame::new();
     frame.resize(COLS as usize, ROWS as usize);
-    let glyphs = world.resource::<Kinds>().glyphs.clone();
+    let kinds = world.resource::<Kinds>().clone();
     render_cells(
         |cc| stage::chunk(&world, cc),
-        &glyphs,
+        Looks::of(&kinds),
         view,
         255,
         &mut frame,

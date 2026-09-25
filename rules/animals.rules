@@ -1,72 +1,137 @@
 # Animals. Shared subs first: a sub sees only its parameters and locals, so
-# any kind can call it. Files compile in name order (animals.rules before
-# plants.rules), so the kinds number chicken 0, egg 1, fox 2, seed 3, tree 4.
+# any kind can call it. Files compile in name order (animals, grass, plants),
+# so the kinds number chicken 0, egg 1, chick 2, fox 3, grass 4, seed 5, tree 6.
+#
+# Headings are 1..8 clockwise from north (0 = none yet) and `dir(h)` is that
+# step. An animal keeps its heading for a while and turns now and then, so it
+# walks instead of jittering. When a step comes back `blocked` it picks a new
+# heading and walks that for a few steps (a detour) before going back to what
+# it wanted, which gets it round lakes and rocks.
 
 sub flee(t: target) {
   if free(away t) { move away t } else { move random free }
 }
 
-sub graze(what: pred, r) {          # eat the nearest `what`, walking to it first
+sub peck(what: pred, r) {           # eat the nearest `what` that stands (a seed), walking up to it
   if nearest what within r as s {
     if dist(s) == 1 { eat s } else { move toward s }
   }
 }
 
-sub wander() { choose { 3: move random free   2: idle } }
+sub forage(what: pred, r) {         # graze ground cover `what`: underfoot if there is some, else walk onto the nearest
+  if is(here, what) { graze here }
+  else if nearest what within r as s { move toward s }
+}
+
+sub turn(h) {                       # the heading for the next step: mostly straight on
+  if h == 0 { return rand(8) + 1 }
+  choose {
+    80: return h
+     8: return h % 8 + 1            # veer right
+     8: return (h + 6) % 8 + 1      # veer left
+     4: return rand(8) + 1          # something new
+  }
+}
 
 kind chicken {
-  glyph "c"
+  glyph "C"
+  color "#f2ead8"                   # a white hen
   tags animal meat
   cadence 4                         # thinks every 4 ticks (16 game seconds)
   sight 6
-  food 12h                          # what an eater gains
-  place 1 / 500                     # worldgen starts 1 walkable cell in 500 as a chicken
+  food 1d                           # what an eater gains: a fox's day
+  place 1 / 400                     # worldgen starts 1 walkable cell in 400 as a chicken
   need food   max 1d vital
-  need water  max 2h vital
+  need water  max 4h vital
   need health max 20 decay 0 vital
-  mem knows_water, water_x, water_y, last_egg
+  mem knows_water, water_x, water_y, heading, detour, last_egg
 
-  when hurt > 0                    => flee(attacker)
+  when age > 5d and rand(100000) < 6 => die                                                         # old age: ~5 days as a hen, then ~3 more on average
+  when hurt > 0                    => { detour = 0  flee(attacker) }
+  when water < 30min and nearest water within 1 as w => drink w                                     # desperate: drinks, fox or not
   when nearest fox within 5 as f   => flee(f)
   when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }   # remember it; falls through
-  when water < 40min and nearest water within 1 as w => drink w
-  when water < 40min and knows_water == 1 => move toward at(water_x, water_y)
-  when food < 20h                  => graze(feed, 6)
-  when age > 1d and food > 16h and water > 1h and day > last_egg and chance(10)
-       and nearest free within 1 as c => { last_egg = day  spawn egg at c }
-  when hour >= 20 or hour < 5      => { look = 1  idle }             # roosts at night
-  when true                        => { look = 0  wander() }
+  when blocked                     => { heading = rand(8) + 1  detour = 3 }                         # walk round it; falls through
+  when detour > 0                  => { detour -= 1  move dir(heading) }
+  when water < 90min and nearest water within 1 as w => drink w
+  when water < 90min and knows_water == 1 => move toward at(water_x, water_y)
+  when food < 20h and nearest seed within 1 as s => eat s                                         # a seed at its feet
+  when food < 20h                  => forage(grass, 6)                   # falls through when there is none
+  when food < 20h                  => peck(seed, 6)
+  when hour >= 6 and hour < 18 and food > 20h and water > 1h and day + 1 > last_egg and rand(1000) < 2
+       and count feed within 5 >= 6 and count meat within 6 < 3
+       and nearest free within 1 as c => { last_egg = day + 3  spawn egg at c }   # an egg every 3 days at most: by day, fed, food around, room to nest; ~2h in
+  when hour >= 20 or hour < 5      => { look = 1  idle }                                            # roosts at night
+  when chance(10) and nearest chicken within 6 as m and dist(m) > 5 => { look = 0  move toward m }  # drifts toward others, loosely
+  when true                        => { look = 0  heading = turn(heading)  move dir(heading) }
 }
 
 kind egg {
   glyph "o"
+  color "#fff8e7"
   tags meat
   cadence 64
-  food 3h
+  food 4h
   need health max 3 decay 0 vital
-  when age > 6h => become chicken
+  when age > 8h => become chick
+}
+
+kind chick {
+  glyph "c"
+  color "#f5d547"                   # yellow
+  tags animal meat
+  cadence 4
+  sight 6
+  food 8h
+  need food   max 1d vital
+  need water  max 4h vital
+  need health max 6 decay 0 vital
+  mem knows_water, water_x, water_y, heading, detour   # a chicken's names: kept when it grows up
+
+  when age > 2d                    => become chicken
+  when hurt > 0                    => flee(attacker)
+  when water < 30min and nearest water within 1 as w => drink w
+  when nearest fox within 5 as f   => flee(f)
+  when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
+  when blocked                     => { heading = rand(8) + 1  detour = 2 }
+  when detour > 0                  => { detour -= 1  move dir(heading) }
+  when water < 90min and nearest water within 1 as w => drink w
+  when water < 90min and knows_water == 1 => move toward at(water_x, water_y)
+  when food < 20h and nearest seed within 1 as s => eat s
+  when food < 20h                  => forage(grass, 6)                   # falls through when there is none
+  when food < 20h                  => peck(seed, 6)
+  when nearest chicken within 6 as m and dist(m) > 1 => move toward m          # follows a hen
+  when true                        => { heading = turn(heading)  if chance(50) { move dir(heading) } else { idle } }
 }
 
 kind fox {
-  glyph "f"
+  glyph "F"
+  color "#e8792b"                   # orange
   tags animal
-  cadence 4
-  sight 8
+  cadence 2                         # twice a chicken's pace: a chase can end
+  sight 16                          # knows its whole territory
   bite 10                           # two bites kill a chicken
   food 1d
-  place 1 / 10000
-  need food   max 2d vital
+  place 1 / 5000
+  need food   max 1d vital
   need water  max 1d vital
   need health max 40 decay 0 vital
-  mem knows_water, water_x, water_y, last_litter
+  mem knows_water, water_x, water_y, heading, detour, prey_x, prey_y, chase, last_litter
 
+  when age > 6d and rand(100000) < 3 => die                                       # old age: ~6 days, then ~3 more on average
   when nearest water within 8 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
+  when blocked                     => { heading = rand(8) + 1  detour = 2 }
+  when detour > 0                  => { detour -= 1  look = 0  move dir(heading) }
   when water < 6h and nearest water within 1 as w => { look = 0  drink w }
   when water < 6h and knows_water == 1 => { look = 0  move toward at(water_x, water_y) }
-  when light > 100 and food > 1d   => { look = 1  idle }             # sleeps by day when fed
-  when food < 36h and nearest meat within 1 as m => { look = 0  eat m }
-  when food < 36h and nearest meat within 8 as m => { look = 0  move toward m }
-  when age > 3d and food > 1d and day > last_litter and chance(5)
-       and nearest free within 1 as c => { last_litter = day  spawn fox at c }
-  when true                        => { look = 0  wander() }
+  when food < 20h and nearest meat within 1 as m => { look = 0  chase = 0  eat m }
+  when food < 20h and nearest meat within 8 as m
+       => { look = 0  prey_x = x + m.dx  prey_y = y + m.dy  chase = 30  move toward m }
+  when food < 20h and chase > 0 and dist(at(prey_x, prey_y)) > 0
+       => { look = 0  chase -= 1  move toward at(prey_x, prey_y) }                 # to where it last saw prey
+  when hour >= 9 and hour < 17 and food >= 12h => { look = 1  idle }             # sleeps through the day when fed
+  when age > 2d and food > 20h and day + 1 > last_litter and chance(2)
+       and count fox within 16 < 2 and count chicken within 16 >= 15
+       and nearest free within 1 as c => { last_litter = day + 5  spawn fox at c }  # a kit every 5 days: fed, its own ground, prey on it
+  when true                        => { look = 0  heading = turn(heading)  move dir(heading) }   # patrols
 }

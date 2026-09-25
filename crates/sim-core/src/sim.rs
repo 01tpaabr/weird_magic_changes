@@ -123,6 +123,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<Stage>();
     world.init_resource::<Tick>();
     world.init_resource::<CrossScratch>();
+    world.init_resource::<crate::actors::Tally>();
     world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
@@ -151,6 +152,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
         systems::apply.in_set(Phase::Apply),
         systems::migrate.in_set(Phase::Migrate),
         systems::compact.in_set(Phase::Compact),
+        systems::tally.in_set(Phase::Advance),
         advance_tick.in_set(Phase::Advance),
     ));
     world.add_schedule(schedule);
@@ -419,15 +421,17 @@ fn load_chunks(
     Ok((to_gen.len(), read))
 }
 
-/// Put an actor of `kind` with `mind` on the cell at `p`, for scenarios and
-/// tests (worldgen and `spawn` are the in-game ways). `false` if the chunk
-/// is not loaded or the cell is not walkable or not empty. Marks the chunk
-/// dirty. Not for use inside a tick.
+/// Put an actor of `kind` with `mind` on the cell at `p` (in the cover
+/// layer for a `cover` kind), for scenarios and tests (worldgen and `spawn`
+/// are the in-game ways). `false` if the chunk is not loaded or the cell is
+/// not walkable or its layer is taken. Marks the chunk dirty. Not for use
+/// inside a tick.
 pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> bool {
     let (cc, i) = p.split();
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
     };
+    let cover = world.resource::<Kinds>().def(kind).cover;
     let mut q = world.query::<(
         &mut ChunkCells,
         &mut ChunkActors,
@@ -437,15 +441,20 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
         return false;
     };
-    if !cells.walkable(i) || !cells.occupant[i].is_none() {
+    let layer = if cover { &cells.cover } else { &cells.occupant };
+    if !cells.walkable(i) || !layer[i].is_none() {
         return false;
     }
-    ActorsMut {
+    let mut actors = ActorsMut {
         pubs: &mut pubs.rows,
         minds: &mut minds.rows,
-        occupant: &mut cells.occupant,
+        cells: &mut cells,
+    };
+    if cover {
+        actors.push_cover(i, kind, mind);
+    } else {
+        actors.push(i, kind, mind);
     }
-    .push(i, kind, mind);
     meta.dirty = true;
     true
 }
@@ -499,6 +508,7 @@ mod tests {
             ground: c.ground[i],
             feature: c.feature[i],
             occupant: c.occupant[i],
+            cover: c.cover[i],
         })
     }
 
@@ -661,8 +671,17 @@ mod tests {
     /// only onto free walkable cells, with every row invariant intact.
     #[test]
     fn a_forest_grows_and_spreads() {
-        let plants =
-            || crate::rules::compile("plants.rules", crate::rules::builtin::FILES[1].1).unwrap();
+        let plants = || {
+            crate::rules::compile(
+                "plants.rules",
+                crate::rules::builtin::FILES
+                    .iter()
+                    .find(|f| f.0 == "plants.rules")
+                    .unwrap()
+                    .1,
+            )
+            .unwrap()
+        };
         let (seed_kind, tree_kind) = (
             plants().by_name("seed").unwrap().id,
             plants().by_name("tree").unwrap().id,
@@ -695,7 +714,7 @@ mod tests {
             .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
             .iter(&w)
         {
-            crate::actors::validate(&cells.occupant, &a.rows, &m.rows, kinds).unwrap();
+            crate::actors::validate(cells, &a.rows, &m.rows, kinds).unwrap();
             for r in &a.rows {
                 assert!(cells.walkable(usize::from(r.cell)));
             }
@@ -762,7 +781,7 @@ mod tests {
             .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
             .iter(w)
         {
-            crate::actors::validate(&cells.occupant, &a.rows, &m.rows, kinds).unwrap();
+            crate::actors::validate(cells, &a.rows, &m.rows, kinds).unwrap();
             for r in &a.rows {
                 assert!(cells.walkable(usize::from(r.cell)));
             }
@@ -991,12 +1010,12 @@ mod tests {
     }
 
     /// Resolve + Exchange on hand-made intents: two eaters on one victim
-    /// (one across a chunk border) kill it and the lower key gets the food;
-    /// a hit wounds, wakes and points `hurt_dir` at the biter; a bite on an
-    /// empty cell misses; a far bite, or one on a kind without health, is
-    /// refused.
+    /// (one across a chunk border) kill it, each fed the share it took, in
+    /// key order, overkill feeding nobody; a hit wounds, wakes and points
+    /// `hurt_dir` at the biter; a bite on an empty cell misses; a far bite,
+    /// or one on a kind without health, is refused.
     #[test]
-    fn bites_sum_kill_and_credit_the_lowest_key_eater() {
+    fn bites_take_health_in_key_order_and_feed_by_share() {
         use crate::actors::flags;
         use crate::actors::systems::{Intent, Intents, Scratch, exchange, newborn, resolve};
         use crate::rules::vm::{Action, dir_index, result};
@@ -1070,12 +1089,18 @@ mod tests {
         assert!(pubs0[0].flags & flags::DEAD != 0, "S took 20 of 15");
         assert!(w.get::<ChunkCells>(e0).unwrap().occupant[10 * 64 + 63].is_none());
         assert_eq!(w.get::<Scratch>(e0).unwrap().deaths, 1);
+        // B (key 3) bites first: 10 of 15 health, 10/15 of 12h = 8h. A (key
+        // 5) takes the 5 left: 5/15 of 12h = 4h. Their other 5 is overkill.
         assert_eq!(
             minds1[0].needs[0],
-            (hours(6) + hours(12)) as i32,
-            "B, the lower key, ate S"
+            (hours(6) + hours(8)) as i32,
+            "B, the lower key, took 10 of 15"
         );
-        assert_eq!(minds0[1].needs[0], hours(6) as i32, "A bit but ate nothing");
+        assert_eq!(
+            minds0[1].needs[0],
+            (hours(6) + hours(4)) as i32,
+            "A took the 5 left"
+        );
         assert_eq!((res(&minds0[1]), res(&minds1[0])), (result::OK, result::OK));
         assert_eq!(
             pubs0[1].flags & flags::WAKE,
@@ -1129,8 +1154,10 @@ mod tests {
                 CHICKEN,
                 newborn(&kinds, CHICKEN, cuid, now)
             ));
+            // Starving: a chicken is a day's food (12h a bite), so it takes
+            // both bites before the fox is fed.
             let mut hungry = newborn(&kinds, FOX, fuid, now);
-            hungry.needs[0] = hours(12) as i32;
+            hungry.needs[0] = hours(2) as i32;
             assert!(place_actor(&mut w, fox, FOX, hungry));
         }
         let mut wounded = false;
@@ -1152,19 +1179,72 @@ mod tests {
         for f in foxes {
             assert!(
                 f.3.needs[0] > hours(23) as i32,
-                "fox {:x} gained a chicken's 12h of food: {}",
+                "fox {:x} ate a whole chicken: {}",
                 f.0,
                 f.3.needs[0]
             );
         }
     }
 
+    /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
+    /// a tuft (both layers of one cell taken) and grazes it underfoot, a
+    /// quarter tuft a bite, until the tuft is gone; the patch never blocks.
+    #[test]
+    fn chickens_walk_onto_grass_and_graze_it() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Tally, life};
+        use crate::rules::{CHICKEN, GRASS};
+        use crate::time::hours;
+        let kinds = bare();
+        let cfg = WorldConfig {
+            width: 64,
+            height: 64,
+            ..cfg(6)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        for y in 20..25 {
+            for x in 20..25 {
+                let mut tuft = newborn(&kinds, GRASS, (x * 100 + y) as u64, now);
+                tuft.needs[0] = hours(40) as i32; // no water here: keep it alive for the test
+                assert!(place_actor(&mut w, Pos::new(x, y), GRASS, tuft));
+            }
+        }
+        let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
+        hungry.needs[0] = hours(6) as i32;
+        assert!(place_actor(&mut w, Pos::new(17, 22), CHICKEN, hungry));
+        check_invariants(&mut w);
+        let mut stood_on_grass = false;
+        for _ in 0..200 {
+            step(&mut w);
+            check_invariants(&mut w);
+            let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC0).unwrap();
+            let (cc, i) = c.2.split();
+            let cell = &stage::chunk(&w, cc).unwrap();
+            stood_on_grass |= cell.cover[i].unpack().map(|(k, _)| k) == Some(GRASS);
+        }
+        assert!(stood_on_grass, "the chicken walked onto the patch");
+        let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC0).unwrap();
+        assert!(
+            c.3.needs[0] > hours(7) as i32,
+            "grazing fed it: {}",
+            c.3.needs[0]
+        );
+        let tally = w.resource::<Tally>();
+        assert!(
+            tally.get(GRASS, life::EATEN) >= 1,
+            "a tuft was grazed to the ground"
+        );
+        assert_eq!(tally.get(CHICKEN, life::EATEN), 0);
+    }
+
     /// A hungry chicken eats the seeds around it; an egg hatches into a
-    /// chicken after six hours, keeping its uid, with its needs full.
+    /// chick after eight hours, keeping its uid, with its needs full.
     #[test]
     fn chickens_graze_seeds_and_eggs_hatch() {
         use crate::actors::systems::newborn;
-        use crate::rules::{CHICKEN, EGG, SEED};
+        use crate::rules::{CHICK, CHICKEN, EGG, SEED};
         use crate::time::{hours, minutes};
         let kinds = bare();
         let cfg = WorldConfig {
@@ -1204,22 +1284,22 @@ mod tests {
             grazer.3.needs[0]
         );
         let mut hatched_at = None;
-        while tick(&w) < now + hours(7) {
+        while tick(&w) < now + hours(9) {
             for _ in 0..16 {
                 step(&mut w);
             }
             let egg = rows(&mut w).into_iter().find(|r| r.0 == 0xE0).unwrap();
-            if egg.1 == CHICKEN && hatched_at.is_none() {
+            if egg.1 == CHICK && hatched_at.is_none() {
                 hatched_at = Some(tick(&w));
-                let chicken = kinds.def(CHICKEN);
-                for (i, need) in chicken.needs.iter().enumerate() {
+                let chick = kinds.def(CHICK);
+                for (i, need) in chick.needs.iter().enumerate() {
                     assert!(egg.3.needs[i] > need.max - 100, "{} starts full", need.name);
                 }
             }
         }
         let at = hatched_at.expect("the egg hatched");
         assert!(
-            at > now + hours(6) && at <= now + hours(6) + 64 + 16,
+            at > now + hours(8) && at <= now + hours(8) + 64 + 16,
             "{}",
             at - now
         );

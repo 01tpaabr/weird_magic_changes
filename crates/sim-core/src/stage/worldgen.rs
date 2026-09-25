@@ -72,6 +72,7 @@ pub fn generate_chunk(
         (*g, *f) = gen_cell(seed, params, p.x, p.y);
     }
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
+    cells.cover = [super::ActorId::NONE; CHUNK_CELLS];
     out.actors.rows.clear();
     out.minds.rows.clear();
     if !kinds.places_any() {
@@ -87,7 +88,11 @@ pub fn generate_chunk(
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
             };
-            out.actors_mut().push(i, kind, mind);
+            if kinds.def(kind).cover {
+                out.actors_mut().push_cover(i, kind, mind);
+            } else {
+                out.actors_mut().push(i, kind, mind);
+            }
         }
     }
 }
@@ -237,8 +242,13 @@ mod tests {
             } else {
                 None
             };
-            assert_eq!(cells.occupant[i].unpack().map(|(k, _)| k), want, "{x},{y}");
-            if let Some((kind, slot)) = cells.occupant[i].unpack() {
+            let here = if cells.cover[i].is_none() {
+                cells.occupant[i]
+            } else {
+                cells.cover[i]
+            };
+            assert_eq!(here.unpack().map(|(k, _)| k), want, "{x},{y}");
+            if let Some((kind, slot)) = here.unpack() {
                 per_kind[usize::from(kind)] += 1;
                 assert_eq!(usize::from(slot), rows, "rows are in cell order");
                 let mind = data.minds.rows[rows];

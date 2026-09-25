@@ -209,6 +209,9 @@ pub enum Action {
     Eat,
     /// `dx dy`: bite the adjacent actor there, no food
     Hit,
+    /// `dx dy`: bite the ground cover there (adjacent or underfoot) and gain
+    /// the share of its `food` taken, like `eat`
+    Graze,
 }
 
 impl Action {
@@ -222,6 +225,7 @@ impl Action {
             5 => Some(Self::Drink),
             6 => Some(Self::Eat),
             7 => Some(Self::Hit),
+            8 => Some(Self::Graze),
             _ => None,
         }
     }
@@ -286,7 +290,10 @@ pub struct Outcome {
 /// (`TAG_BASE + tag index`, matched against the occupant kind's tag bits),
 /// or one of these.
 pub mod pred {
+    /// Walkable, nobody standing there.
     pub const FREE: i32 = -1;
+    /// Walkable, no ground cover there.
+    pub const BARE: i32 = -2;
     pub const GROUND_BASE: i32 = -0x100;
     pub const FEATURE_BASE: i32 = -0x200;
     pub const TAG_BASE: i32 = 0x1_0000;
@@ -303,26 +310,26 @@ pub mod pred {
 /// per kind (`Kinds::tag_bits`).
 #[inline]
 fn matches(pred: i32, cells: &ChunkCells, i: usize, tags: &[u64]) -> bool {
-    if pred >= pred::TAG_BASE {
-        let bit = (pred - pred::TAG_BASE) as u32;
-        return match cells.occupant[i].unpack() {
-            Some((kind, _)) => {
-                bit < 64
-                    && tags
-                        .get(usize::from(kind))
-                        .is_some_and(|t| t >> bit & 1 == 1)
-            }
-            None => false,
-        };
-    }
+    // A kind or a tag matches whoever stands on the cell or covers it.
+    let is = |id: ActorId| match id.unpack() {
+        None => false,
+        Some((kind, _)) if pred >= pred::TAG_BASE => {
+            let bit = (pred - pred::TAG_BASE) as u32;
+            bit < 64
+                && tags
+                    .get(usize::from(kind))
+                    .is_some_and(|t| t >> bit & 1 == 1)
+        }
+        Some((kind, _)) => i32::from(kind) == pred,
+    };
     if pred >= 0 {
-        return match cells.occupant[i].unpack() {
-            Some((kind, _)) => i32::from(kind) == pred,
-            None => false,
-        };
+        return is(cells.occupant[i]) || is(cells.cover[i]);
     }
     if pred == pred::FREE {
         return cells.walkable(i) && cells.occupant[i].is_none();
+    }
+    if pred == pred::BARE {
+        return cells.walkable(i) && cells.cover[i].is_none();
     }
     if pred > pred::FEATURE_BASE {
         return cells.ground[i] as i32 == pred::GROUND_BASE - pred;
@@ -555,7 +562,7 @@ impl Machine<'_> {
                 self.out.dx = i8::try_from(dx).map_err(|_| Trap::BadAction)?;
                 self.out.dy = i8::try_from(dy).map_err(|_| Trap::BadAction)?;
             }
-            Action::Move | Action::Drink | Action::Eat | Action::Hit => {
+            Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
                 // Far targets are fine: Think reduces a move to one step,
@@ -978,6 +985,8 @@ mod tests {
             states: 1,
             entry,
             place: 0,
+            color: 0,
+            cover: false,
         }
     }
 

@@ -217,7 +217,11 @@ impl ChunkCoord {
 pub struct ChunkCells {
     pub ground: [Ground; CHUNK_CELLS],
     pub feature: [Feature; CHUNK_CELLS],
+    /// Who stands here, at most one (blocks movement).
     pub occupant: [ActorId; CHUNK_CELLS],
+    /// What grows on the ground here, at most one (a `cover` kind: never
+    /// blocks, lies under whoever stands on the cell).
+    pub cover: [ActorId; CHUNK_CELLS],
 }
 
 impl Default for ChunkCells {
@@ -226,6 +230,7 @@ impl Default for ChunkCells {
             ground: [Ground::Soil; CHUNK_CELLS],
             feature: [Feature::None; CHUNK_CELLS],
             occupant: [ActorId::NONE; CHUNK_CELLS],
+            cover: [ActorId::NONE; CHUNK_CELLS],
         }
     }
 }
@@ -241,7 +246,8 @@ impl ChunkCells {
     pub fn hash(&self) -> u64 {
         let h = fnv1a(0xCBF2_9CE4_8422_2325, bytemuck::cast_slice(&self.ground));
         let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
-        fnv1a(h, bytemuck::cast_slice(&self.occupant))
+        let h = fnv1a(h, bytemuck::cast_slice(&self.occupant));
+        fnv1a(h, bytemuck::cast_slice(&self.cover))
     }
 }
 
@@ -255,23 +261,18 @@ pub struct ChunkData {
 }
 
 impl ChunkData {
-    /// Cells, actors and occupant layer as one mutable view.
+    /// Cells and actor rows as one mutable view.
     pub fn actors_mut(&mut self) -> actors::ActorsMut<'_> {
         actors::ActorsMut {
             pubs: &mut self.actors.rows,
             minds: &mut self.minds.rows,
-            occupant: &mut self.cells.occupant,
+            cells: &mut self.cells,
         }
     }
 
     /// Row invariants hold against a kind table of `kinds` entries.
     pub fn validate(&self, kinds: usize) -> Result<(), String> {
-        actors::validate(
-            &self.cells.occupant,
-            &self.actors.rows,
-            &self.minds.rows,
-            kinds,
-        )
+        actors::validate(&self.cells, &self.actors.rows, &self.minds.rows, kinds)
     }
 
     /// Content hash: cells then rows.
@@ -299,6 +300,7 @@ pub struct Cell {
     pub ground: Ground,
     pub feature: Feature,
     pub occupant: ActorId,
+    pub cover: ActorId,
 }
 
 /// The set of loaded chunks: coordinate -> entity, plus the canonical order.
@@ -480,6 +482,7 @@ impl StageCells<'_, '_> {
             ground: c.ground[i],
             feature: c.feature[i],
             occupant: c.occupant[i],
+            cover: c.cover[i],
         })
     }
 

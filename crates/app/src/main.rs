@@ -18,6 +18,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use sim_core::WorldConfig;
+use sim_core::actors::{Tally, life};
 use sim_core::stage::worldgen::GenParams;
 use sim_core::time::Clock;
 use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
@@ -172,6 +173,24 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         par::thread_count()
     )?;
     writeln!(out, "checksum:  {checksum:016x}")?;
+    let tally = world.resource::<Tally>();
+    writeln!(
+        out,
+        "life:      {:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "kind", "alive", "born", "became", "eaten", "died"
+    )?;
+    for (i, name) in kinds.names().enumerate() {
+        let k = i as u16;
+        writeln!(
+            out,
+            "           {name:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            per_kind[i],
+            tally.get(k, life::BORN),
+            tally.get(k, life::BECAME),
+            tally.get(k, life::EATEN),
+            tally.get(k, life::DIED),
+        )?;
+    }
     Ok(())
 }
 

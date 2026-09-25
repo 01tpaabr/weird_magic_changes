@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, VOID, actor_glyph, style};
+use super::palette::{Color, Looks, VOID, style};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -102,12 +102,12 @@ impl CellFrame {
 /// Fill the first `view.height` rows of `frame` from the chunks `chunk`
 /// returns (`None` = not loaded, drawn as void), with every colour scaled by
 /// `light` (255 = the palette as is, see [`super::palette::brightness`]).
-/// `glyphs` is the kind table's glyph per kind (`Kinds::glyphs`). `frame`
+/// `looks` is how each kind is drawn (`Looks::of(&kinds)`). `frame`
 /// must already be `view.width` columns wide and at least `view.height` rows
 /// tall (extra rows are left for the caller: status text).
 pub fn render_cells<'c>(
     chunk: impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync,
-    glyphs: &[u8],
+    looks: Looks<'_>,
     view: Viewport,
     light: u8,
     frame: &mut CellFrame,
@@ -133,7 +133,7 @@ pub fn render_cells<'c>(
             .zip(fg.chunks_mut(cols))
             .zip(bg.chunks_mut(cols));
         for (i, ((g, f), bg)) in rows.enumerate() {
-            render_row(chunk, glyphs, view, light, b * ROW_BAND + i, g, f, bg);
+            render_row(chunk, looks, view, light, b * ROW_BAND + i, g, f, bg);
         }
     };
     if rows <= ROW_BAND {
@@ -151,7 +151,7 @@ pub fn render_cells<'c>(
 
 fn render_row<'c>(
     chunk: &(impl Fn(ChunkCoord) -> Option<&'c ChunkCells> + Sync),
-    glyphs: &[u8],
+    looks: Looks<'_>,
     view: Viewport,
     light: u8,
     row: usize,
@@ -177,10 +177,15 @@ fn render_row<'c>(
                 let cells = c.ground[local..local + n]
                     .iter()
                     .zip(&c.feature[local..local + n])
-                    .zip(&c.occupant[local..local + n]);
+                    .zip(
+                        c.occupant[local..local + n]
+                            .iter()
+                            .zip(&c.cover[local..local + n]),
+                    );
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
-                for (((&g, &f), &o), (go, (fo, bo))) in cells.zip(outs) {
-                    let s = style(g, f, actor_glyph(o, glyphs));
+                for (((&g, &f), (&o, &cover)), (go, (fo, bo))) in cells.zip(outs) {
+                    // Who stands here, on what grows here.
+                    let s = style(g, f, looks.actor(o), looks.actor(cover));
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = s.bg.scaled(light).0;
@@ -216,8 +221,14 @@ mod tests {
     fn frame_with(world: &World, view: Viewport, light: u8) -> CellFrame {
         let mut f = CellFrame::new();
         f.resize(view.width as usize, view.height as usize + 2);
-        let glyphs = &world.resource::<Kinds>().glyphs;
-        render_cells(|c| stage::chunk(world, c), glyphs, view, light, &mut f);
+        let kinds = world.resource::<Kinds>();
+        render_cells(
+            |c| stage::chunk(world, c),
+            Looks::of(kinds),
+            view,
+            light,
+            &mut f,
+        );
         f
     }
 
@@ -228,7 +239,9 @@ mod tests {
         // is many bands with a ragged last one.
         let view = Viewport::centered(Pos::new(30, 40), 173, 97);
         let a = frame_with(&world, view, 200);
-        let glyphs = world.resource::<Kinds>().glyphs.clone();
+        let kinds = world.resource::<Kinds>().clone();
+        let looks = Looks::of(&kinds);
+        let glyphs = kinds.glyphs.clone();
         let n = 173 * 97;
         let mut actors = 0;
         for r in 0..97usize {
@@ -237,11 +250,12 @@ mod tests {
                 let (cc, i) = p.split();
                 let want = match stage::chunk(&world, cc) {
                     Some(ch) => {
-                        actors += usize::from(!ch.occupant[i].is_none());
+                        actors += usize::from(!ch.occupant[i].is_none() || !ch.cover[i].is_none());
                         style(
                             ch.ground[i],
                             ch.feature[i],
-                            actor_glyph(ch.occupant[i], &glyphs),
+                            looks.actor(ch.occupant[i]),
+                            looks.actor(ch.cover[i]),
                         )
                     }
                     None => VOID,
@@ -265,7 +279,7 @@ mod tests {
             .run_system_once(move |s: StageCells, k: Res<Kinds>| {
                 let mut f = CellFrame::new();
                 f.resize(173, 99);
-                render_cells(|c| s.chunk(c), &k.glyphs, view, 200, &mut f);
+                render_cells(|c| s.chunk(c), Looks::of(&k), view, 200, &mut f);
                 f
             })
             .unwrap();

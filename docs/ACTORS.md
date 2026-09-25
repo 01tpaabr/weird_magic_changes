@@ -13,8 +13,9 @@ compiled once, run by every individual of that kind against its own state).
 
 An actor is a **row in the chunk it stands on**: a 12-byte public record (`ActorPub`) that
 any chunk may read while thinking, an 88-byte private record (`ActorMind`) that only its
-own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. There
-is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
+own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. A
+**cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
+lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
 state is exactly needs + memory + a state byte: no saved program counter, so a think is a
 pure function of (own row, tick-start world, tick, seed).
@@ -25,7 +26,7 @@ SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
  Think     par   actors::think                R Tick SimConfig Programs Stage, ANY ChunkCells + ChunkActors
                                               W own ChunkMinds Intents Outbox ChunkMeta.dirty
  Resolve   par   actors::resolve              sort own intents by key; WAKE consumed; in-chunk bites recorded on the victim chunk
- Exchange  seq   actors::exchange             cross-chunk bites recorded; per victim: damage summed, hurt, WAKE, death; food credit
+ Exchange  seq   actors::exchange             cross-chunk bites recorded; per victim: bites in key order, hurt, WAKE, death; food by share
  Apply     par   actors::apply                claim winners move/spawn; become; die; signal/look/mark; result
  Migrate   seq   actors::migrate              stage.active() order: cross-chunk move/spawn
  Compact   par   actors::compact              swap-remove DEAD rows, repair occupant, reset claims
@@ -65,7 +66,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   due-check, dead-check) stream only the 12-byte rows.
 - **`ActorId` keeps its `u32`**; a live value is `kind << 16 | slot`. A vision scan learns
   what stands on a cell from the occupant array alone. Slots are chunk-local and valid only
-  within a tick; identity across ticks is `uid` or a position (unique: one actor per cell).
+  within a tick; identity across ticks is `uid` or a position (unique: one standing and one cover actor
+  per cell).
 - **Worldgen rows** get a tick-free `uid`, so regenerating a chunk equals reloading it.
   Run-time spawns fold in the tick.
 - **Migration**: a move into another chunk goes to the source `Outbox`; `Migrate` walks
@@ -78,8 +80,16 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   `Compact`, so a slot in this tick's intents can never mean a reused row. A chunk's row
   `Vec` may grow past its reserve (chunk-level, amortised, counted in the bench); a
   per-actor allocation never happens.
-- **Save**: chunk file v3 = cell layers, `n`, `ActorPub[n]`, `ActorMind[n]` as raw LE bytes;
-  every row validated on load (`kind` in range, `cell` in range, occupant agrees). A chunk
+- **Cover**: a kind declared `cover` lives in `ChunkCells.cover` and carries `flags::COVER`
+  in its row; at most one per cell, so a chunk holds up to 2 x 4096 rows. It can be eaten
+  (`graze`), spawned onto a walkable cell without cover and killed, but never moves and
+  never `become`s a standing kind. Searches see both layers: a kind or tag pred matches the
+  occupant or the cover, `free` asks only about the occupant, `bare` means walkable with no
+  cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
+  else the cover's glyph.
+- **Save**: chunk file v7 = cell layers (`occupant`, then `cover`), `n`, `ActorPub[n]`,
+  `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
+  range, the row's layer agrees). A chunk
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
   `world.wmc` carries the kind name table; rows are remapped by name on load.
 - **Cadence**: `cadence 2^k` per kind; an actor is due when `(tick + stagger) & (2^k - 1) ==
@@ -106,13 +116,14 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 | group | senses | source |
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
-| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE), `event(TAKEN)`, `event(FUEL)` | latched bytes written by the resolve phases, cleared after the think that read them |
+| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `event(TAKEN)`, `event(FUEL)` | latched bytes written by the resolve phases, cleared after the think that read them |
 | here / at | `ground`, `feature`, `scent(ch)`; `ground_at(t)`, `feature_at(t)`, `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, row-major in a ring, ring start rotated by one RNG draw |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
 
-A *pred* is one integer at run time: a kind, `kind:look`, a tag, a ground, a feature or
-`free`; kinds and tags share one namespace so `sub graze(what, r)` works for every herbivore.
+A *pred* is one integer at run time: a kind, `kind:look`, a tag, a ground, a feature,
+`free` or `bare`; kinds and tags share one namespace so `sub forage(what, r)` works for every
+herbivore, and a kind or tag matches the cell's occupant or its cover.
 **The message system is the latched byte set**: bounded, Pod, delivered to exactly the next
 think. Hits in one tick sum into `hurt` (saturating); `hurt_dir` is the lowest-key attacker.
 No per-actor queues. Broadcast goes through `signal`, `look` and per-cell scent layers.
@@ -137,7 +148,8 @@ exactly one action). Compiled at load to bytecode for a fuel-bounded integer sta
 file     := item*
 item     := "include" STRING | "const" NAME "=" expr | sub | kind
 kind     := "kind" NAME [ "extends" NAME ] "{" decl* rule* state* "}"
-decl     := "glyph" STRING | "tags" NAME+ | "cadence" INT | "sight" INT | "fuel" INT | "bite" INT
+decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+
+          | "cadence" INT | "sight" INT | "fuel" INT | "bite" INT
           | "food" TIME | "place" INT "/" INT                 # worldgen share of walkable cells
           | "need" NAME "max" (INT | TIME) [ "decay" INT ] [ "vital" ]
           | "mem" NAME ("," NAME)*
@@ -156,16 +168,16 @@ stmt     := action | effect
           | "choose" "{" (expr ":" body)+ "}"
           | "next" NAME | "return" [ expr ]
 action   := "idle" | "die" | "become" NAME
-          | "move" target | "eat" target | "hit" target | "drink" target
+          | "move" target | "eat" target | "hit" target | "graze" target | "drink" target
           | "take" target NAME expr | "give" target NAME expr
           | "spawn" NAME "at" target [ "with" "(" expr "," expr ")" ]
 effect   := "signal" "=" expr | "look" "=" expr | "mark" NAME expr
 cond     := expr | "nearest" pred "within" expr "as" NAME | "sniff" NAME "within" expr "as" NAME
           | cond "and" cond | cond "or" cond | "not" cond | "(" cond ")"
 target   := NAME | "here" | "attacker" | "toward" target | "away" target | "at" "(" expr "," expr ")"
-          | "north" | "east" | "south" | "west" | "random" "free"
-pred     := NAME [ ":" INT ] | "water" | "soil" | "rock" | "free"
-expr     := INT | TIME | NAME | sense | "(" expr ")"
+          | "north" | "east" | "south" | "west" | "dir" "(" expr ")" | "random" "free"
+pred     := NAME [ ":" INT ] | "water" | "soil" | "rock" | "free" | "bare"
+expr     := INT | TIME | NAME | sense | "blocked" | "missed" | "refused" | "(" expr ")"
           | expr ("+"|"-"|"*"|"/"|"%"|"<"|"<="|"=="|"!="|">="|">"|"and"|"or") expr | "not" expr
           | "rand" "(" expr ")" | "chance" "(" expr ")" | "count" pred "within" expr | "dist" "(" target ")"
           | ("min"|"max"|"abs"|"sign"|"clamp"|"pack"|"hi"|"lo") "(" expr ("," expr)* ")"
@@ -192,8 +204,8 @@ TIME     := INT ("min" | "h" | "d")
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
   64 800 goes to the pool), kind ids in **sorted file name then declaration order**, the
-  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`
-  and `free` are contextual words: predicates after `count`/`nearest`/`is`/`random`, plain
+  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`,
+  `free` and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random`, plain
   names elsewhere, so `need water` and `water < 40min` read as intended; `food` likewise is a
   declaration only where a declaration starts (`need food`, `food < 20h` work). `x` and `y`
   are senses, so they cannot name a parameter or local. A pred name is a sub's `pred`
@@ -201,40 +213,48 @@ TIME     := INT ("min" | "h" | "d")
   order (64 at most, never a kind's name), a kind's tags a bitset the VM checks against the
   occupant (`nearest meat within 8`). `place N / D` gives a kind a share of walkable cells at
   worldgen: one placement hash per cell, the shares cut `0..2^24` into intervals in kind
-  order, so the terrain parameters in the save header are terrain only (decision 31). `rules/plants.rules` is
-  built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
+  order, so the terrain parameters in the save header are terrain only (decision 31).
+  `color "#rrggbb"` is the glyph's colour (default a pale yellow), `cover` makes the kind
+  ground cover (§2), `dir(h)` is the step for heading `h` (1..8 clockwise from north, 0 =
+  none). The files in `rules/` (animals, grass, plants) are built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
   prints the kind table. A radius after `within` is an additive expression, never a
   comparison (`count water within 2 > 0` counts within 2). `wmc why <x> <y>` re-runs one
   actor's think with per-op logging (step 7).
 
-**Example.**
+**Example** (abridged; `rules/animals.rules` has the full one).
 
 ```
-sub graze(what, r) {                       # shared by every herbivore
-  if nearest what within r as s {
-    if dist(s) == 1 { eat s } else { move toward s }
-  }
+sub flee(t: target) { if free(away t) { move away t } else { move random free } }
+sub forage(what: pred, r) {                # graze cover `what` underfoot, else walk onto the nearest
+  if is(here, what) { graze here }
+  else if nearest what within r as s { move toward s }
 }
-sub wander() { choose { 3: move random free   2: idle } }
+sub turn(h) {                              # mostly straight on
+  if h == 0 { return rand(8) + 1 }
+  choose { 80: return h   8: return h % 8 + 1   8: return (h + 6) % 8 + 1   4: return rand(8) + 1 }
+}
 
-kind chicken {                             # rules/animals.rules has the full one
-  glyph "c"
+kind chicken {
+  glyph "C"   color "#f2ead8"
   tags animal meat
-  cadence 4   sight 6   food 12h   place 1 / 500
+  cadence 4   sight 6   food 1d   place 1 / 400
   need food   max 1d vital
-  need water  max 2h vital
+  need water  max 4h vital
   need health max 20 decay 0 vital
-  mem knows_water, water_x, water_y, last_egg
-  when hurt > 0                   => flee(attacker)
-  when nearest fox within 5 as f  => flee(f)
+  mem knows_water, water_x, water_y, heading, detour, last_egg
+  when hurt > 0                    => { detour = 0  flee(attacker) }
+  when nearest fox within 5 as f   => flee(f)
   when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
-  when water < 40min and nearest water within 1 as w => drink w
-  when water < 40min and knows_water == 1 => move toward at(water_x, water_y)
-  when food < 20h                 => graze(feed, 6)
-  when age > 1d and food > 16h and day > last_egg and chance(10)
-       and nearest free within 1 as c => { last_egg = day  spawn egg at c }
-  when hour >= 20 or hour < 5     => { look = 1  idle }
-  when true                       => { look = 0  wander() }
+  when blocked                     => { heading = rand(8) + 1  detour = 3 }   # walk round it
+  when detour > 0                  => { detour -= 1  move dir(heading) }
+  when water < 90min and nearest water within 1 as w => drink w
+  when water < 90min and knows_water == 1 => move toward at(water_x, water_y)
+  when food < 20h                  => forage(grass, 6)
+  when hour >= 6 and hour < 18 and food > 20h and day + 1 > last_egg and rand(1000) < 2
+       and count meat within 6 < 3 and nearest free within 1 as c
+       => { last_egg = day + 3  spawn egg at c }       # dice before the count: it short-circuits
+  when hour >= 20 or hour < 5      => { look = 1  idle }
+  when true                        => { look = 0  heading = turn(heading)  move dir(heading) }
 }
 ```
 
@@ -244,22 +264,29 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
 `(sign dx, sign dy)` and slides around a blocked cell via the two 45-degree neighbours.
 
 1. **Resolve** (parallel, own chunk): sort intents by `key`; clear `WAKE` of every actor
-   that thought; an `eat`/`hit` must be adjacent (else REFUSED) and find an actor with a
-   `health` need (empty cell: MISSED; no health: REFUSED); an in-chunk bite is recorded as a
-   `Hit` on the chunk's scratch, a cross-chunk one goes to the `Outbox`.
+   that thought; an `eat`/`hit` must be adjacent (else REFUSED) and find a standing actor
+   with a `health` need (empty cell: MISSED; no health: REFUSED); a `graze` bites the cell's
+   cover instead and may target its own cell (`graze here`); an in-chunk bite is recorded as
+   a `Hit` on the chunk's scratch, a cross-chunk one goes to the `Outbox`.
 2. **Exchange** (sequential): cross-chunk bites recorded on their victims against tick-start
-   occupancy; then chunk by chunk in `stage.active()` order, bites grouped per victim: their
-   `bite`s summed off `health`, `hurt` grows (saturating), `hurt_dir` points at the
-   lowest-key biter (the `attacker` target reads it), `WAKE` set; at `health <= 0` the row
-   is DEAD, its cell cleared and touched; last, the lowest-key **`eat`** of each victim that
-   died, if alive itself, gains the victim kind's `food` into its `food` need. A `hit` never
-   feeds. No move has been applied yet, so damage is symmetric across borders. (Damage is
+   occupancy; then chunk by chunk in `stage.active()` order, bites grouped per victim (and
+   layer): in key order each takes up to its `bite` from the health left, `hurt` grows
+   (saturating), `hurt_dir` points at the lowest-key biter (the `attacker` target reads it),
+   `WAKE` set. An `eat` or `graze` that took `t` points gains `food * t / max_health` of the
+   victim kind's `food` into its own `food` need, so a kill feeds every biter by its share
+   and a grazed tuft feeds without dying. A `hit` never feeds. At `health <= 0` the row is
+   DEAD; a standing victim's cell is cleared and touched, a cover victim's is not. No move
+   has been applied yet, so damage is symmetric across borders. (Damage is
    summed on one thread here rather than per chunk in Resolve: bites are rare next to
    thinks, and the sequential sum needs no cross-chunk credit pass; the per-chunk split is
    the hatch if Exchange ever shows in a profile.)
 3. **Apply** (parallel): intents of DEAD actors dropped; claims skip touched cells; `key ==
-   claim[target]` wins the cell; losers get `BLOCKED`; `become`, self-`die` (touches its
-   cell), `drink`, `look`, `result` written.
+   claim[target]` wins the cell; losers get `BLOCKED`; a cover spawn claims nothing and takes
+   its cell in key order if it is walkable and has no cover yet; a cover row's `move` and a
+   `become` across layers are REFUSED; `become`, self-`die` (a standing actor touches its
+   cell), `drink`, `look`, `result` written. Births, `become`s, bites that fed and deaths are
+   counted per kind (`Tally`: not saved, not hashed; the status rows of `wmc play` and the
+   table after `wmc run` print it).
 4. **Migrate** (sequential): cross-chunk `move`/`spawn` into cells free now and not touched
    this tick; contenders settled by key. An in-chunk winner beats a cross-chunk one (**home
    advantage**, deterministic, documented; decision 30).
@@ -341,7 +368,8 @@ where it touches the tick.
    its own; 1/8-thread checksums equal with 21k chickens on 4096 chunks. `eat`/`graze` wait
    for step 5 (they need damage resolution).
 5. **Fox and eggs.** Done: `eat`/`hit`/`bite`, the Resolve and Exchange phases (damage,
-   `hurt`/`hurt_dir`/`WAKE`, death, kill credit to the lowest-key eater), the `attacker`
+   `hurt`/`hurt_dir`/`WAKE`, death, kill credit to the lowest-key eater, since replaced
+   by food by share in 5b), the `attacker`
    target, the `look =` effect, tags as predicates, `place N / D` (placement moved from
    `GenParams` into the rules, store v6). Content: chickens graze `feed`, remember water,
    flee foxes and lay eggs; eggs hatch; foxes drink, sleep by day, hunt `meat` and breed;
@@ -349,6 +377,15 @@ where it touches the tick.
    (in-chunk + cross-border eaters, credit by key, hit, miss, refuse), a fox eating penned
    chickens on both sides of a border with the real rules, grazing and hatching, two days of
    the built-in world; the cross-process gate now runs 36 game hours of it.
-6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v4), `state`
+5b. **Behaviour pass: walkable grass.** Done: the `cover` layer (store v7), `graze`, `bare`,
+   `color`, `dir(h)`, `blocked`/`missed`/`refused`, bites in key order with food by share,
+   the per-kind `Tally`. Content: `rules/grass.rules` (roots reach water 8 cells away,
+   spreads onto bare ground, grows back when left alone); chickens keep a heading and walk
+   round what blocks them, lay by day from day 0 (at most one egg in 3 days, where there is
+   feed and few others), eggs hatch into chicks that grow into hens; foxes hunt `meat` within
+   8 and follow the last place they saw it, hold a territory and have a litter only where
+   prey is plentiful; old age is a daily chance past an age, so cohorts do not die together.
+   Tests: grazing onto walkable grass, bites by share, the hatch-to-chick path.
+6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
    blocks, `for each`, `sniff`; the bee is the acceptance test.
 7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.
