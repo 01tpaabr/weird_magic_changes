@@ -23,6 +23,7 @@
 
 pub mod actors;
 pub mod par;
+pub mod reload;
 pub mod rng;
 pub mod rules;
 pub mod sim;

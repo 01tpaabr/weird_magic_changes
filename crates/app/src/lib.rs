@@ -17,6 +17,18 @@ pub mod why;
 use anyhow::Context;
 use sim_core::Kinds;
 
+/// Where `r` (hot reload) reads rules from: `WMC_RULES`, else `./rules`
+/// when the game runs from the repository. `None`: nothing to reload.
+pub fn rules_dir() -> Option<std::path::PathBuf> {
+    match std::env::var_os("WMC_RULES") {
+        Some(dir) => Some(dir.into()),
+        None => {
+            let here = std::path::PathBuf::from("rules");
+            here.is_dir().then_some(here)
+        }
+    }
+}
+
 /// The rule set for this session: every `*.rules` file in the directory
 /// named by `WMC_RULES`, else the rules built into the binary.
 pub fn rules() -> anyhow::Result<Kinds> {

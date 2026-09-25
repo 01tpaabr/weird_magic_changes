@@ -1,7 +1,7 @@
 //! The windowed game: a Bevy `App` around the sim.
 //!
 //! A frame (`Update`, one chain, in this order):
-//! 1. `handle_input`: keys -> camera direction, clock/zoom toggles, pending save/step/quit.
+//! 1. `handle_input`: keys -> camera direction, clock/zoom toggles, pending save/step/reload/quit.
 //! 2. `advance_camera`: glide the camera by the frame's real `dt`.
 //! 3. `layout`: window size and DPI -> cell size, map/status grids; rebuild the
 //!    glyph tileset and the tile layers when their shape changes.
@@ -19,10 +19,11 @@
 //!
 //! Keys: hold `w a s d` / arrows to glide (two keys = diagonal), Shift for
 //! x4 speed; `space` pauses/resumes the sim; `.` runs one tick and pauses;
-//! `[` / `]` slow down / speed up (1x .. 16x, max); `p` saves; `+`/`-` zoom;
-//! `q` / `Esc` / close saves and quits.
+//! `[` / `]` slow down / speed up (1x .. 16x, max); `p` saves; `r` reloads the
+//! rules (`WMC_RULES`, else `./rules`), the status bar says what changed;
+//! `+`/`-` zoom; `q` / `Esc` / close saves and quits.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
 use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
@@ -59,8 +60,7 @@ const MAX_DT: f64 = 0.1;
 /// Sim time per frame. The rest of a 60 Hz frame is for streaming and drawing;
 /// at max speed this is how long each frame ticks for.
 pub const TICK_BUDGET: Duration = Duration::from_millis(10);
-const HELP: &str =
-    "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | +/- zoom | q quit";
+const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | r reload rules | +/- zoom | q quit";
 
 /// Open (or create) the world in `dir` and run the window until quit.
 pub fn run(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
@@ -131,6 +131,7 @@ impl Plugin for PlayPlugin {
             .init_resource::<Zoom>()
             .init_resource::<MoveInput>()
             .init_resource::<Pending>()
+            .init_resource::<Notice>()
             .init_resource::<Layout>()
             .init_resource::<Frames>()
             .init_resource::<StreamInfo>()
@@ -188,7 +189,31 @@ struct MoveInput(Input);
 struct Pending {
     save: bool,
     step: bool,
+    reload: bool,
     quit: bool,
+}
+
+/// A message for the help row, shown until `until` (wall clock: the app's,
+/// never the sim's).
+#[derive(Resource, Debug, Default, Clone)]
+struct Notice {
+    text: String,
+    until: Option<Instant>,
+}
+
+impl Notice {
+    const FOR: Duration = Duration::from_secs(8);
+
+    fn show(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.until = Some(Instant::now() + Self::FOR);
+    }
+
+    fn current(&self) -> Option<&str> {
+        self.until
+            .is_some_and(|t| Instant::now() < t)
+            .then_some(self.text.as_str())
+    }
 }
 
 /// Last streaming call that did something, for the status line.
@@ -319,6 +344,9 @@ fn handle_input(
     if keys.just_pressed(KeyCode::KeyP) {
         pending.save = true;
     }
+    if keys.just_pressed(KeyCode::KeyR) {
+        pending.reload = true;
+    }
     if keys.any_just_pressed([KeyCode::Equal, KeyCode::NumpadAdd]) {
         zoom.change(ZOOM_STEP);
     }
@@ -417,6 +445,11 @@ fn stream_and_tick(world: &mut World) {
         Err(e) => error!("streaming chunks: {e}"),
     }
 
+    if pending.reload {
+        let text = reload(world);
+        info!("{text}");
+        world.resource_mut::<Notice>().show(text);
+    }
     if pending.step {
         sim::step(world);
     }
@@ -438,6 +471,41 @@ fn stream_and_tick(world: &mut World) {
     }
     if pending.quit {
         world.write_message(AppExit::Success);
+    }
+}
+
+/// `r`: recompile the rules directory and swap the rules in, rows and saved
+/// chunks remapped by name (`sim_core::reload`). Returns the line for the
+/// status bar: what changed, or why nothing did.
+fn reload(world: &mut World) -> String {
+    let Some(dir) = crate::rules_dir() else {
+        return "reload: no rules directory (run from the repository, or set WMC_RULES)".into();
+    };
+    let kinds = match sim_core::rules::compile_dir(&dir) {
+        Ok(k) => k,
+        Err(e) => return format!("reload: {e}"),
+    };
+    if kinds.hash == world.resource::<Kinds>().hash {
+        return format!("reload: {} unchanged", dir.display());
+    }
+    let r = world.resource_scope(|world, store: Mut<Store>| {
+        sim_core::reload::reload_rules(world, Some(&store), kinds)
+    });
+    match r {
+        Err(e) => format!("reload refused: {e}"),
+        Ok(r) => {
+            let mut text = format!("reloaded {} (rules {:016x})", dir.display(), r.hash);
+            if !r.added.is_empty() {
+                text.push_str(&format!(" | new {}", r.added.join(", ")));
+            }
+            for (name, rows) in &r.removed {
+                text.push_str(&format!(" | {name} gone ({rows} dropped)"));
+            }
+            if r.rewritten > 0 {
+                text.push_str(&format!(" | {} saved chunks rewritten", r.rewritten));
+            }
+            text
+        }
     }
 }
 
@@ -464,6 +532,7 @@ fn render_frame(
     camera: Res<ViewCamera>,
     clock: Res<SimClock>,
     info: Res<StreamInfo>,
+    notice: Res<Notice>,
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -514,7 +583,9 @@ fn render_frame(
     let (alive, events) = life_lines(&kinds, &tally, &rows);
     frames.status.put_text(1, &alive, TEXT_FG, TEXT_BG);
     frames.status.put_text(2, &events, TEXT_FG, TEXT_BG);
-    frames.status.put_text(3, HELP, TEXT_FG, TEXT_BG);
+    frames
+        .status
+        .put_text(3, notice.current().unwrap_or(HELP), TEXT_FG, TEXT_BG);
 }
 
 /// Two status rows: how many of each kind are loaded, and the life events
@@ -664,5 +735,15 @@ mod tests {
             z.change(ZOOM_STEP);
         }
         assert_eq!(z.cell_logical, MAX_CELL_LOGICAL);
+    }
+
+    #[test]
+    fn a_notice_shows_until_it_expires() {
+        let mut n = Notice::default();
+        assert_eq!(n.current(), None);
+        n.show("reloaded rules/");
+        assert_eq!(n.current(), Some("reloaded rules/"));
+        n.until = Some(Instant::now() - Duration::from_millis(1));
+        assert_eq!(n.current(), None);
     }
 }

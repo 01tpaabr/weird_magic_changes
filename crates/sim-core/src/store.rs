@@ -87,6 +87,25 @@ impl Store {
         self.dir.join("world.wmc")
     }
 
+    /// Every chunk with a file in this store, in coordinate order (`y`, then
+    /// `x`). Files that are not `<x>_<y>.wmcc` are ignored.
+    pub fn saved_chunks(&self) -> io::Result<Vec<ChunkCoord>> {
+        let mut out = Vec::new();
+        for entry in fs::read_dir(self.dir.join("chunks"))? {
+            let name = entry?.file_name();
+            let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".wmcc")) else {
+                continue;
+            };
+            if let Some((x, y)) = stem.split_once('_')
+                && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
+            {
+                out.push(ChunkCoord::new(x, y));
+            }
+        }
+        out.sort_unstable_by_key(|c| (c.y, c.x));
+        Ok(out)
+    }
+
     fn chunk_path(&self, c: ChunkCoord) -> PathBuf {
         self.dir
             .join("chunks")

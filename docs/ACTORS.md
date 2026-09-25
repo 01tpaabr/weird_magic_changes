@@ -107,6 +107,15 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).
+- **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the rules directory (`WMC_RULES`,
+  else `./rules`) is recompiled and swapped in between two ticks. Rows are remapped by
+  name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
+  the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
+  channel by its name. Saved chunks that are not loaded are rewritten the same way and
+  `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
+  with the old). Moving a kind between standing and ground cover is refused. A compile error
+  changes nothing and shows on the status bar. A reload is not a recorded input: a reloaded
+  world does not replay from its seed.
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.

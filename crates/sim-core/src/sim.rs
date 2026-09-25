@@ -1609,6 +1609,124 @@ mod tests {
         assert_eq!(find_uid(&mut w, 0xC1), Some(at));
     }
 
+    /// Hot reload maps rows by name: kinds renumbered, a kind gone (its rows
+    /// dropped), needs and mems moved, added and removed, a scent channel
+    /// gone; a saved chunk that is not loaded is rewritten, so it loads
+    /// under the new rules and the save reopens with them.
+    #[test]
+    fn reload_remaps_rows_by_name_in_memory_and_on_disk() {
+        use crate::actors::systems::newborn;
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let a = compile(
+            "a.rules",
+            "kind a { glyph \"a\"  need p max 100 decay 0  need q max 50 decay 0  mem m1, m2
+               when true => { mark s1 10  idle } }
+             kind b { glyph \"b\"  when true => idle }
+             kind c { glyph \"c\"  cover  need health max 4 decay 0 vital }",
+        )
+        .unwrap();
+        let b = compile(
+            "b.rules",
+            "kind d { glyph \"d\"  when true => idle }
+             kind a { glyph \"A\"  need q max 40 decay 0  need r max 7 decay 0  mem m2, m3
+               when true => idle }
+             kind c { glyph \"c\"  cover  need health max 4 decay 0 vital }",
+        )
+        .unwrap();
+        let cfg = WorldConfig {
+            width: 128,
+            height: 64,
+            ..cfg(2)
+        };
+        let store = tmp_store("reload");
+        let mut w = new_world_with(&cfg, a.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut m = newborn(&a, 0, 0xA1, now);
+        (m.needs[0], m.needs[1], m.mem[0], m.mem[1]) = (90, 45, 11, 22);
+        assert!(place_actor(&mut w, Pos::new(5, 5), 0, m));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(6, 5),
+            1,
+            newborn(&a, 1, 0xB1, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(7, 5),
+            2,
+            newborn(&a, 2, 0xC1, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(70, 5),
+            0,
+            ActorMind { uid: 0xA2, ..m }
+        ));
+        for _ in 0..8 {
+            step(&mut w); // kind a thinks every 8 ticks
+        }
+        assert!(get(&w, Pos::new(5, 5)).unwrap().scent[0] > 0);
+        save(&mut w, &store).unwrap();
+        // Chunk (1, 0) goes to disk and out of memory.
+        ensure_loaded(
+            &mut w,
+            Pos::new(5, 5),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap();
+        assert!(
+            w.resource::<Stage>()
+                .entity(ChunkCoord::new(1, 0))
+                .is_none()
+        );
+
+        let bad = compile("c.rules", "kind c { glyph \"c\" }").unwrap();
+        let e = reload_rules(&mut w, Some(&store), bad).unwrap_err();
+        assert!(e.contains("ground cover"), "{e}");
+
+        let r = reload_rules(&mut w, Some(&store), b.clone()).unwrap();
+        assert_eq!(r.added, vec!["d".to_string()]);
+        assert_eq!(r.removed, vec![("b".to_string(), 1)]);
+        assert_eq!(r.rewritten, 1);
+        assert_eq!(r.hash, b.hash);
+        check_invariants(&mut w);
+        let all = rows(&mut w);
+        assert_eq!(all.len(), 2, "b's row was dropped");
+        let a1 = all.iter().find(|r| r.0 == 0xA1).unwrap();
+        assert_eq!(a1.1, 1, "a is kind 1 now");
+        assert_eq!(
+            &a1.3.needs[..2],
+            &[40, 7],
+            "q clamped to its new max, r new"
+        );
+        assert_eq!(&a1.3.mem[..2], &[22, 0], "m2 kept, m3 new");
+        let c1 = all.iter().find(|r| r.0 == 0xC1).unwrap();
+        assert_eq!(c1.1, 2);
+        let cell = get(&w, Pos::new(7, 5)).unwrap();
+        assert_eq!(cell.cover.unpack().map(|(k, _)| k), Some(2));
+        assert_eq!(cell.scent, [0, 0]);
+        assert_eq!(get(&w, Pos::new(5, 5)).unwrap().scent, [0, 0], "s1 is gone");
+        // The chunk on disk loads under the new rules.
+        ensure_loaded(
+            &mut w,
+            Pos::new(70, 5),
+            LoadPolicy { load: 1, unload: 3 },
+            Some(&store),
+        )
+        .unwrap();
+        check_invariants(&mut w);
+        let a2 = rows(&mut w).into_iter().find(|r| r.0 == 0xA2).unwrap();
+        assert_eq!((a2.1, &a2.3.needs[..2]), (1, &[40, 7][..]));
+        // And the save reopens with them.
+        save(&mut w, &store).unwrap();
+        assert!(open_world_with(&store, b).unwrap().is_some());
+        assert!(open_world_with(&store, a).is_err());
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
     /// a tuft (both layers of one cell taken) and grazes it underfoot, a
     /// quarter tuft a bite, until the tuft is gone; the patch never blocks.
