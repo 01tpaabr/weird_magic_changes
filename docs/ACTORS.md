@@ -196,6 +196,19 @@ TIME     := INT ("min" | "h" | "d")
   emits; a `move` with no free cell is simply `BLOCKED` in `result`.
 - `as v` bindings are visible in the body only when the search is a top-level conjunct.
 - `choose` evaluates all weights (clamped >= 0), draws once, runs that arm.
+- `state` blocks follow the reflex rules; an actor starts in the first one, `next NAME`
+  switches for the following think and ends this one like an action, `become` resets to
+  the first. `next` inside a sub is a compile error (states belong to a kind).
+- `for each pred within r as v { }` visits the matching cells of rings `1..=r` in a fixed
+  order (each ring clockwise from its top-left corner, no rotation: it visits them all),
+  pays the search's fuel once, and binds `v` per cell. There is no `break`: an action in
+  the body that runs twice traps; collect into locals and act after the loop.
+- `const NAME = expr` is folded at compile time (numbers, earlier constants, arithmetic,
+  comparisons, `min`/`max`/`abs`/`sign`/`clamp`/`pack`/`hi`/`lo`); a need, mem or local of
+  the same name shadows it. `kind:look` (`flower:1`) matches that kind showing that `look`
+  byte; `look_of(t)` and `signal_of(t)` read the public bytes of whoever stands at `t`
+  (else its cover; 0 for nobody). `pack(a, b)` is `a * 256 + (b & 255)`, `hi`/`lo` take it
+  apart as signed bytes, so a direction fits one `signal`.
 - Subs are file-scope, shared by every kind; may act (the think still ends when the rule
   body that called them finishes); recursion depth 8. Locals never persist.
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
@@ -387,5 +400,7 @@ where it touches the tick.
    prey is plentiful; old age is a daily chance past an age, so cohorts do not die together.
    Tests: grazing onto walkable grass, bites by share, the hatch-to-chick path.
 6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
-   blocks, `for each`, `sniff`; the bee is the acceptance test.
+   blocks, `for each`, `sniff`; the bee is the acceptance test. Done so far: `state`/`next`,
+   `const`, `for each`, `signal =`, `look_of`/`signal_of`, `kind:look`, `pack`/`hi`/`lo`
+   (new opcodes appended, so the programs of the existing kinds and their hash are unchanged).
 7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.

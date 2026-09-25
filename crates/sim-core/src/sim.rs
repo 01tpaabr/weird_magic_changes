@@ -1065,6 +1065,7 @@ mod tests {
             dx,
             dy: 0,
             look: None,
+            signal: None,
             trapped: false,
         };
         w.get_mut::<ChunkActors>(e0).unwrap().rows[1].flags |= flags::WAKE;

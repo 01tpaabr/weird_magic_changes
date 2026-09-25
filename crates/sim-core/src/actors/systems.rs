@@ -53,6 +53,8 @@ pub struct Intent {
     pub dy: i8,
     /// `look = v` effect, applied whatever the action's result.
     pub look: Option<u8>,
+    /// `signal = v` effect, likewise.
+    pub signal: Option<i16>,
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
 }
@@ -329,6 +331,7 @@ fn think_one(
         dx: 0,
         dy: 0,
         look: None,
+        signal: None,
         trapped: false,
     };
     if vm::decay(kind, mind, tick) {
@@ -360,6 +363,7 @@ fn think_one(
     intent.dx = out.dx;
     intent.dy = out.dy;
     intent.look = out.look;
+    intent.signal = out.signal;
     intent.trapped = out.trap.is_some();
     let (lx, ly) = local_xy(cell);
     match out.action {
@@ -849,6 +853,9 @@ pub fn apply(
                 }
                 if let Some(look) = it.look {
                     pubs.rows[slot].look = look;
+                }
+                if let Some(signal) = it.signal {
+                    pubs.rows[slot].signal = signal;
                 }
             }
             intents.traps += traps;

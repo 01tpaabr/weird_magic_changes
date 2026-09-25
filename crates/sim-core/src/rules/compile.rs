@@ -16,7 +16,7 @@
 use std::fmt;
 
 use super::asm::{Asm, Label};
-use super::vm::{Action, FRAME_LOCALS, OpCode, Sense, pred, result};
+use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
 use super::{DEFAULT_COLOR, KindDef, Kinds, NeedDef, PLACE_ONE};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground};
@@ -49,8 +49,7 @@ pub fn compile(file: &str, text: &str) -> Result<Kinds> {
 /// Compile several files as one rule set, in the order given (callers sort
 /// by name). Kind and sub names are global across files.
 pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
-    let mut kinds = Vec::new();
-    let mut subs = Vec::new();
+    let mut items = Items::default();
     for (name, text) in files {
         let tokens = Lexer::new(name, text).lex()?;
         let mut p = Parser {
@@ -58,9 +57,9 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
             tokens,
             at: 0,
         };
-        p.file(&mut kinds, &mut subs)?;
+        p.file(&mut items)?;
     }
-    Gen::new(&kinds, &subs).generate()
+    Gen::new(&items).generate()
 }
 
 /// Compile every `*.rules` file in `dir`, in sorted file-name order.
@@ -290,6 +289,33 @@ struct KindAst {
     cover: bool,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
+    /// Reflexes: scanned first on every think, whatever the state.
+    rules: Vec<Rule>,
+    states: Vec<StateAst>,
+}
+
+/// Everything the files declare, in file order then declaration order.
+#[derive(Debug, Default)]
+struct Items {
+    kinds: Vec<KindAst>,
+    subs: Vec<SubAst>,
+    consts: Vec<ConstAst>,
+}
+
+/// `const NAME = expr`: a file-scope integer, folded at compile time.
+#[derive(Debug, Clone)]
+struct ConstAst {
+    at: Pos,
+    name: String,
+    value: Expr,
+}
+
+/// `state NAME { rule* }`: the rules scanned after the reflexes while the
+/// actor is in this state.
+#[derive(Debug, Clone)]
+struct StateAst {
+    at: Pos,
+    name: String,
     rules: Vec<Rule>,
 }
 
@@ -343,6 +369,8 @@ enum Target {
 enum Arg {
     Expr(Expr),
     Target(Target),
+    /// `kind:look`, only a pred.
+    Pred(Pred),
     /// A bare name: an int, a target or a pred, whatever the parameter says.
     Name(String, Pos),
 }
@@ -406,11 +434,27 @@ enum Stmt {
     Graze(Target),
     /// `look = v`: an effect, not an action.
     Look(Expr),
+    /// `signal = v`: an effect, not an action.
+    Signal(Expr),
+    /// `next NAME`: this state for the following think; ends the think
+    /// like an action.
+    Next(String, Pos),
+    /// `for each pred within r as v { body }`: `body` once per matching cell,
+    /// in ring order, with `v` bound to it.
+    ForEach {
+        pred: Pred,
+        r: Expr,
+        bind: String,
+        body: Vec<Stmt>,
+        at: Pos,
+    },
 }
 
 #[derive(Debug, Clone)]
 enum Pred {
     Kind(String, Pos),
+    /// `kind:look`: that kind showing that look byte.
+    KindLook(String, u8, Pos),
     Ground(Ground),
     Feature(Feature),
     Free,
@@ -432,7 +476,11 @@ enum Expr {
     Dist(Target),
     FreeAt(Target),
     IsAt(Target, Pred),
-    /// `min`, `max`, `abs`, `sign`, `clamp`: the opcode and its arguments.
+    /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
+    LookOf(Target),
+    SignalOf(Target),
+    /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
+    /// and its arguments.
     Fn(OpCode, Vec<Expr>),
     Call {
         name: String,
@@ -475,12 +523,72 @@ fn sense_named(name: &str) -> Option<Sense> {
 // declare `need water`). `food` likewise: a declaration where a declaration
 // starts, a need name everywhere else (`need food`, `food < 12h`).
 const KEYWORDS: &[&str] = &[
-    "kind", "sub", "glyph", "tags", "cadence", "sight", "fuel", "bite", "place", "need", "max",
-    "decay", "vital", "mem", "when", "if", "else", "while", "repeat", "let", "return", "choose",
-    "and", "or", "not", "nearest", "count", "within", "as", "true", "false", "idle", "die",
-    "become", "spawn", "move", "drink", "eat", "hit", "at", "here", "toward", "away", "random",
-    "attacker", "north", "east", "south", "west", "color", "dir", "blocked", "missed", "refused",
-    "cover", "graze",
+    "kind",
+    "sub",
+    "glyph",
+    "tags",
+    "cadence",
+    "sight",
+    "fuel",
+    "bite",
+    "place",
+    "need",
+    "max",
+    "decay",
+    "vital",
+    "mem",
+    "when",
+    "if",
+    "else",
+    "while",
+    "repeat",
+    "let",
+    "return",
+    "choose",
+    "and",
+    "or",
+    "not",
+    "nearest",
+    "count",
+    "within",
+    "as",
+    "true",
+    "false",
+    "idle",
+    "die",
+    "become",
+    "spawn",
+    "move",
+    "drink",
+    "eat",
+    "hit",
+    "at",
+    "here",
+    "toward",
+    "away",
+    "random",
+    "attacker",
+    "north",
+    "east",
+    "south",
+    "west",
+    "color",
+    "dir",
+    "blocked",
+    "missed",
+    "refused",
+    "cover",
+    "graze",
+    "state",
+    "next",
+    "const",
+    "for",
+    "each",
+    "look_of",
+    "signal_of",
+    "pack",
+    "hi",
+    "lo",
 ];
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
@@ -618,15 +726,20 @@ impl Parser<'_> {
         }
     }
 
-    fn file(&mut self, kinds: &mut Vec<KindAst>, subs: &mut Vec<SubAst>) -> Result<()> {
+    fn file(&mut self, items: &mut Items) -> Result<()> {
         while *self.peek() != Tok::Eof {
             if self.is_kw("kind") {
-                kinds.push(self.kind()?);
+                items.kinds.push(self.kind()?);
             } else if self.is_kw("sub") {
-                subs.push(self.sub()?);
+                items.subs.push(self.sub()?);
+            } else if self.eat_kw("const") {
+                let (name, at) = self.ident("constant name")?;
+                self.expect_sym("=")?;
+                let value = self.expr()?;
+                items.consts.push(ConstAst { at, name, value });
             } else {
                 return Err(self.err(format!(
-                    "expected `kind` or `sub`, found {}",
+                    "expected `kind`, `sub` or `const`, found {}",
                     self.describe()
                 )));
             }
@@ -697,6 +810,7 @@ impl Parser<'_> {
             needs: Vec::new(),
             mems: Vec::new(),
             rules: Vec::new(),
+            states: Vec::new(),
         };
         // Declarations, then rules; a declaration after a rule is an error
         // so a file reads top-down.
@@ -809,29 +923,55 @@ impl Parser<'_> {
                         break;
                     }
                 }
-            } else if self.is_kw("when") {
+            } else if self.is_kw("when") || self.is_kw("state") {
                 break;
             } else {
                 return Err(self.err(format!(
-                    "expected a declaration or `when`, found {}",
+                    "expected a declaration, `when` or `state`, found {}",
                     self.describe()
                 )));
             }
         }
-        while self.eat_kw("when") {
-            let cond = self.cond()?;
-            self.expect_sym("=>")?;
-            let body = self.body()?;
-            k.rules.push(Rule { cond, body });
+        k.rules = self.rules()?;
+        while self.eat_kw("state") {
+            let (name, at) = self.ident("state name")?;
+            if k.states.iter().any(|s| s.name == name) {
+                return Err(self.err_at(&at, format!("state `{name}` declared twice")));
+            }
+            if k.states.len() == 64 {
+                return Err(self.err_at(&at, "at most 64 states per kind"));
+            }
+            self.expect_sym("{")?;
+            let rules = self.rules()?;
+            if !self.is_sym("}") {
+                return Err(self.err(format!(
+                    "expected `when` or `}}` in state `{name}`, found {}",
+                    self.describe()
+                )));
+            }
+            self.expect_sym("}")?;
+            k.states.push(StateAst { at, name, rules });
         }
         if !self.is_sym("}") {
             return Err(self.err(format!(
-                "expected `when` or `}}`, found {}",
+                "expected `when`, `state` or `}}`, found {}",
                 self.describe()
             )));
         }
         self.expect_sym("}")?;
         Ok(k)
+    }
+
+    /// `when cond => body`, as many as there are.
+    fn rules(&mut self) -> Result<Vec<Rule>> {
+        let mut rules = Vec::new();
+        while self.eat_kw("when") {
+            let cond = self.cond()?;
+            self.expect_sym("=>")?;
+            let body = self.body()?;
+            rules.push(Rule { cond, body });
+        }
+        Ok(rules)
     }
 
     fn body(&mut self) -> Result<Vec<Stmt>> {
@@ -948,6 +1088,31 @@ impl Parser<'_> {
             self.bump();
             return Ok(Stmt::Look(self.expr()?));
         }
+        if self.is_kw("signal") && matches!(self.peek2(), Tok::Sym("=")) {
+            self.bump();
+            self.bump();
+            return Ok(Stmt::Signal(self.expr()?));
+        }
+        if self.eat_kw("next") {
+            let (name, at) = self.ident("state name")?;
+            return Ok(Stmt::Next(name, at));
+        }
+        if self.eat_kw("for") {
+            self.expect_kw("each")?;
+            let pred = self.pred()?;
+            self.expect_kw("within")?;
+            let r = self.additive()?; // a radius, never a comparison
+            self.expect_kw("as")?;
+            let (bind, ..) = self.ident("binding name")?;
+            let body = self.block()?;
+            return Ok(Stmt::ForEach {
+                pred,
+                r,
+                bind,
+                body,
+                at,
+            });
+        }
         // A call or an assignment.
         let (name, at) = self.ident("statement")?;
         if self.is_sym("(") {
@@ -984,6 +1149,10 @@ impl Parser<'_> {
                 let at = self.pos();
                 let arg = if self.starts_target() {
                     Arg::Target(self.target()?)
+                } else if matches!(self.peek(), Tok::Name(n) if !is_reserved(n))
+                    && matches!(self.peek2(), Tok::Sym(":"))
+                {
+                    Arg::Pred(self.pred()?)
                 } else if let Tok::Name(n) = self.peek().clone()
                     && !is_reserved(&n)
                     && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
@@ -1123,6 +1292,12 @@ impl Parser<'_> {
         }
         let (name, ..) =
             self.ident("predicate (a kind, a tag, water, soil, rock, free or bare)")?;
+        if self.eat_sym(":") {
+            let look = self.int("a look value (0 to 255)")?;
+            let look =
+                u8::try_from(look).map_err(|_| self.err_at(&at, "a look value is 0 to 255"))?;
+            return Ok(Pred::KindLook(name, look, at));
+        }
         Ok(Pred::Kind(name, at))
     }
 
@@ -1249,12 +1424,25 @@ impl Parser<'_> {
                         self.expect_sym(")")?;
                         Ok(Expr::IsAt(t, p))
                     }
-                    "min" | "max" | "abs" | "sign" | "clamp" => {
+                    "look_of" | "signal_of" => {
+                        self.expect_sym("(")?;
+                        let t = self.target()?;
+                        self.expect_sym(")")?;
+                        Ok(if n == "look_of" {
+                            Expr::LookOf(t)
+                        } else {
+                            Expr::SignalOf(t)
+                        })
+                    }
+                    "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" => {
                         let (op, arity) = match n.as_str() {
                             "min" => (OpCode::Min, 2),
                             "max" => (OpCode::Max, 2),
                             "abs" => (OpCode::Abs, 1),
                             "sign" => (OpCode::Sign, 1),
+                            "pack" => (OpCode::Pack, 2),
+                            "hi" => (OpCode::Hi, 1),
+                            "lo" => (OpCode::Lo, 1),
                             _ => (OpCode::Clamp, 3),
                         };
                         self.expect_sym("(")?;
@@ -1305,7 +1493,9 @@ fn returns_value(body: &[Stmt]) -> bool {
     body.iter().any(|s| match s {
         Stmt::Return { value, .. } => value.is_some(),
         Stmt::If { then, els, .. } => returns_value(then) || returns_value(els),
-        Stmt::While { body, .. } | Stmt::Repeat { body, .. } => returns_value(body),
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
+            returns_value(body)
+        }
         Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
         _ => false,
     })
@@ -1323,8 +1513,11 @@ struct Local {
 struct Gen<'a> {
     kinds: &'a [KindAst],
     subs: &'a [SubAst],
+    consts: &'a [ConstAst],
+    /// Folded `const` values, in declaration order.
+    const_vals: Vec<(String, i32)>,
     asm: Asm,
-    consts: Vec<i32>,
+    pool: Vec<i32>,
     /// Current kind (`None` inside a sub), the sub being compiled, locals.
     kind: Option<usize>,
     sub: Option<usize>,
@@ -1338,13 +1531,15 @@ struct Gen<'a> {
 }
 
 impl<'a> Gen<'a> {
-    fn new(kinds: &'a [KindAst], subs: &'a [SubAst]) -> Self {
+    fn new(items: &'a Items) -> Self {
         Self {
-            kinds,
-            subs,
+            kinds: &items.kinds,
+            subs: &items.subs,
+            consts: &items.consts,
+            const_vals: Vec::new(),
             tags: Vec::new(),
             asm: Asm::new(),
-            consts: Vec::new(),
+            pool: Vec::new(),
             kind: None,
             sub: None,
             locals: Vec::new(),
@@ -1410,6 +1605,19 @@ impl<'a> Gen<'a> {
                 ));
             }
         }
+        // Constants: global names, folded in declaration order (a constant
+        // may use the ones above it).
+        for c in self.consts {
+            let taken = self.const_vals.iter().any(|(n, _)| *n == c.name)
+                || self.kind_id(&c.name).is_some()
+                || self.tags.contains(&c.name)
+                || self.subs.iter().any(|s| s.name == c.name);
+            if taken {
+                return Err(self.err(&c.at, format!("`{}` is already a name", c.name)));
+            }
+            let v = self.fold(&c.value)?;
+            self.const_vals.push((c.name.clone(), v));
+        }
         let mut defs = Vec::with_capacity(self.kinds.len());
         for i in 0..self.kinds.len() {
             self.kind = Some(i);
@@ -1417,13 +1625,19 @@ impl<'a> Gen<'a> {
             let entry = self.asm.here();
             let k = &self.kinds[i];
             self.here = k.at.clone();
-            for rule in &k.rules {
-                self.locals.clear();
-                self.next_local = 0;
-                let next = self.asm.label();
-                self.cond(&rule.cond, next, true)?;
-                self.stmts(&rule.body)?;
-                self.asm.end_rule().bind(next);
+            self.rules(&k.rules)?;
+            // States: the current one's rules after the reflexes. An actor
+            // starts in the first; a state out of range runs no rules.
+            for (s, st) in k.states.iter().enumerate() {
+                self.here = st.at.clone();
+                let skip = self.asm.label();
+                self.asm
+                    .sense(Sense::State)
+                    .push(s as i32)
+                    .op(OpCode::Eq)
+                    .jz(skip);
+                self.rules(&st.rules)?;
+                self.asm.halt().bind(skip);
             }
             self.asm.halt();
             let tags = k.tags.iter().fold(0u64, |bits, t| {
@@ -1446,7 +1660,7 @@ impl<'a> Gen<'a> {
                 bite: k.bite,
                 needs: k.needs.clone(),
                 mems: k.mems.clone(),
-                states: 1,
+                states: k.states.len().max(1) as u8,
                 entry,
                 place: k.place,
                 color: k.color,
@@ -1479,18 +1693,91 @@ impl<'a> Gen<'a> {
             }
         }
         let code = self.asm.finish();
-        Ok(Kinds::from_parts(defs, code, self.consts, sub_entries))
+        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries))
+    }
+
+    fn rules(&mut self, rules: &[Rule]) -> Result<()> {
+        for rule in rules {
+            self.locals.clear();
+            self.next_local = 0;
+            let next = self.asm.label();
+            self.cond(&rule.cond, next, true)?;
+            self.stmts(&rule.body)?;
+            self.asm.end_rule().bind(next);
+        }
+        Ok(())
+    }
+
+    fn const_value(&self, n: &str) -> Option<i32> {
+        self.const_vals
+            .iter()
+            .find(|(c, _)| c == n)
+            .map(|&(_, v)| v)
+    }
+
+    /// Fold a `const` expression: numbers, other constants, arithmetic,
+    /// comparisons and the pure functions. Same results as the VM.
+    fn fold(&self, e: &Expr) -> Result<i32> {
+        Ok(match e {
+            Expr::Int(v) => *v,
+            Expr::Name(n, at) => self
+                .const_value(n)
+                .ok_or_else(|| self.err(at, format!("`{n}` is not a constant declared above")))?,
+            Expr::Neg(a) => self.fold(a)?.wrapping_neg(),
+            Expr::Bin(op, a, b) => {
+                let (x, y) = (self.fold(a)?, self.fold(b)?);
+                match op {
+                    OpCode::Add => x.wrapping_add(y),
+                    OpCode::Sub => x.wrapping_sub(y),
+                    OpCode::Mul => x.wrapping_mul(y),
+                    OpCode::Div if y == 0 => 0,
+                    OpCode::Div => x.wrapping_div(y),
+                    OpCode::Mod if y == 0 => 0,
+                    OpCode::Mod => x.wrapping_rem(y),
+                    OpCode::Lt => i32::from(x < y),
+                    OpCode::Le => i32::from(x <= y),
+                    OpCode::Eq => i32::from(x == y),
+                    OpCode::Ne => i32::from(x != y),
+                    OpCode::Ge => i32::from(x >= y),
+                    _ => i32::from(x > y),
+                }
+            }
+            Expr::Fn(op, args) => {
+                let v = args
+                    .iter()
+                    .map(|a| self.fold(a))
+                    .collect::<Result<Vec<_>>>()?;
+                match op {
+                    OpCode::Min => v[0].min(v[1]),
+                    OpCode::Max => v[0].max(v[1]),
+                    OpCode::Abs => v[0].wrapping_abs(),
+                    OpCode::Sign => v[0].signum(),
+                    OpCode::Clamp if v[1] <= v[2] => v[0].clamp(v[1], v[2]),
+                    OpCode::Clamp => v[1],
+                    OpCode::Pack => v[0].wrapping_mul(256).wrapping_add(v[1] & 0xFF),
+                    OpCode::Hi => v[0] >> 8,
+                    _ => i32::from(v[0] as u8 as i8),
+                }
+            }
+            _ => {
+                let at = self.here.clone();
+                return Err(self.err(
+                    &at,
+                    "a constant must be a number, other constants and arithmetic",
+                ));
+            }
+        })
     }
 
     fn push_int(&mut self, v: i32) {
         if let Ok(imm) = i16::try_from(v) {
             self.asm.push(i32::from(imm));
         } else {
-            let idx = match self.consts.iter().position(|&c| c == v) {
+            let idx = match self.pool.iter().position(|&c| c == v) {
                 Some(i) => i,
                 None => {
-                    self.consts.push(v);
-                    self.consts.len() - 1
+                    self.pool.push(v);
+                    self.pool.len() - 1
                 }
             };
             self.asm
@@ -1612,6 +1899,12 @@ impl<'a> Gen<'a> {
                     return Err(self.err(at, format!("unknown kind or tag `{name}`")));
                 }
             }
+            Pred::KindLook(name, look, at) => match self.kind_id(name) {
+                Some(id) => pred::kind_look(id, *look),
+                None => {
+                    return Err(self.err(at, format!("`{name}:{look}`: `{name}` is not a kind")));
+                }
+            },
         };
         self.push_int(v);
         Ok(())
@@ -1704,6 +1997,8 @@ impl<'a> Gen<'a> {
                     self.asm.need(i);
                 } else if let Some(i) = self.mem_slot(n) {
                     self.asm.mem(i);
+                } else if let Some(v) = self.const_value(n) {
+                    self.push_int(v);
                 } else {
                     return Err(self.unknown_name(at, n));
                 }
@@ -1750,6 +2045,14 @@ impl<'a> Gen<'a> {
                 self.target(t)?;
                 self.pred(p)?;
                 self.asm.op(OpCode::IsAt);
+            }
+            Expr::LookOf(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::LookAt);
+            }
+            Expr::SignalOf(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::SignalAt);
             }
             Expr::Fn(op, args) => {
                 for a in args {
@@ -1799,6 +2102,7 @@ impl<'a> Gen<'a> {
                     self.target(&Target::Named(n.clone(), p.clone()))?;
                 }
                 (Ty::Pred, Arg::Name(n, p)) => self.pred(&Pred::Kind(n.clone(), p.clone()))?,
+                (Ty::Pred, Arg::Pred(pr)) => self.pred(pr)?,
                 (Ty::Pred, Arg::Expr(Expr::Name(n, p))) => {
                     self.pred(&Pred::Kind(n.clone(), p.clone()))?;
                 }
@@ -1996,6 +2300,55 @@ impl<'a> Gen<'a> {
                 self.expr(e)?;
                 self.asm.op(OpCode::SetLook);
             }
+            Stmt::Signal(e) => {
+                self.expr(e)?;
+                self.asm.op(OpCode::SetSignal);
+            }
+            Stmt::Next(name, at) => {
+                let Some(k) = self.kind else {
+                    return Err(self.err(at, "`next` inside a sub: states belong to a kind"));
+                };
+                let s = self.kinds[k]
+                    .states
+                    .iter()
+                    .position(|st| st.name == *name)
+                    .ok_or_else(|| {
+                        self.err(
+                            at,
+                            format!("kind `{}` has no state `{name}`", self.kinds[k].name),
+                        )
+                    })?;
+                self.asm.next(s as u8);
+            }
+            Stmt::ForEach {
+                pred,
+                r,
+                bind,
+                body,
+                at,
+            } => {
+                if self.local(bind).is_some() {
+                    return Err(self.err(at, format!("`{bind}` is already bound")));
+                }
+                self.scoped(|g| {
+                    let base = g.alloc_local(at, FOR_EACH_LOCALS)?;
+                    g.pred(pred)?;
+                    g.asm.store(base + 3);
+                    g.expr(r)?;
+                    g.asm.store(base + 4).push(0).store(base + 2);
+                    let top = g.asm.label();
+                    let end = g.asm.label();
+                    g.asm.bind(top).for_each(base).jz(end);
+                    g.locals.push(Local {
+                        name: bind.clone(),
+                        slot: base,
+                        ty: Ty::Target,
+                    });
+                    g.scoped(|g| g.stmts(body))?;
+                    g.asm.jmp(top).bind(end);
+                    Ok(())
+                })?;
+            }
         }
         Ok(())
     }
@@ -2136,7 +2489,7 @@ mod tests {
         assert!(compile_err("kind a { when 1 => idle } kind a { }").contains("declared twice"));
         assert!(
             compile_err("kind a { when 1 => idle\n glyph \"x\" }")
-                .contains("expected `when` or `}`")
+                .contains("expected `when`, `state` or `}`")
         );
         assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
         assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
@@ -2350,6 +2703,142 @@ mod tests {
         // count_free(2): radius 0 is the 1x1 square (nobody stands in this
         // bare test's occupant array, so 1), radius 1 the 3x3 (9). Total 10.
         assert_eq!(&mind.mem[..6], &[42, 1, 10, 12, 200, 1 + 20]);
+    }
+
+    #[test]
+    fn states_consts_looks_signals_and_for_each_compile_and_run() {
+        use crate::actors::{ActorMind, ActorPub, ChunkActors};
+        use crate::rules::vm::{self, Ctx, Halo};
+        use crate::stage::{ActorId, ChunkCells, Pos as WorldPos};
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "const LOAD = 30min
+             const TWICE = LOAD * 2 + min(1, 2)
+             sub tally(what: pred) { let n = 0  for each what within 3 as f { n += 1 + look_of(f) }  return n }
+             kind a { mem s, n, m, p, h, l
+               when s == 1 => { s = 2  next B }
+               state A {
+                 when true => { n = tally(a:3)  m = tally(a)  p = pack(-3, 5)  h = hi(p)  l = lo(p)
+                                s = TWICE  signal = p  look = 4  next B }
+               }
+               state B {
+                 when nearest a:3 within 2 as f => { s = signal_of(f)  idle }
+                 when true => die
+               } }",
+        );
+        assert_eq!(k.defs[0].states, 2);
+        // Self at (10, 10); a:3 two east, a:0 one north-west, a:3 out of reach.
+        let mut cells = ChunkCells::default();
+        let mut actors = ChunkActors::default();
+        for (slot, (x, y, look, signal)) in [
+            (10, 10, 0, 0),
+            (12, 10, 3, 77),
+            (9, 9, 0, 0),
+            (20, 20, 3, 0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let cell = y * 64 + x;
+            cells.occupant[cell] = ActorId::pack(0, slot as u16);
+            actors.rows.push(ActorPub {
+                cell: cell as u16,
+                look,
+                signal,
+                ..ActorPub::zeroed()
+            });
+        }
+        let halo = Halo {
+            chunks: [
+                None,
+                None,
+                None,
+                None,
+                Some((&cells, &actors)),
+                None,
+                None,
+                None,
+                None,
+            ],
+            tags: &k.tag_bits,
+        };
+        let ctx = Ctx {
+            halo: &halo,
+            kind: &k.defs[0],
+            cell: 10 * 64 + 10,
+            pos: WorldPos::new(10, 10),
+            tick: 5,
+            rng: vm::rng_base(1, 5, 9),
+            look: 0,
+            signal: 0,
+        };
+        // State A (the first): the loops, the bytes, the effects, `next`.
+        let mut mind = ActorMind::zeroed();
+        let out = vm::think(&k, ctx, &mut mind);
+        assert_eq!(out.trap, None, "{out:?}");
+        assert_eq!(out.action, Action::Idle);
+        assert_eq!(
+            (out.next, out.look, out.signal),
+            (Some(1), Some(4), Some(-763))
+        );
+        // tally(a:3) = 1 + 3; tally(a) = (1 + 3) + (1 + 0); pack/hi/lo round-trip.
+        assert_eq!(&mind.mem[..6], &[901, 4, 5, -763, -3, 5]);
+        // State B: reads the neighbour's signal through `a:3`.
+        mind.state = 1;
+        let out = vm::think(&k, ctx, &mut mind);
+        assert_eq!((out.trap, out.action, out.next), (None, Action::Idle, None));
+        assert_eq!(mind.mem[0], 77);
+        // The reflex runs first, in any state.
+        mind.mem[0] = 1;
+        let out = vm::think(&k, ctx, &mut mind);
+        assert_eq!((out.next, mind.mem[0]), (Some(1), 2));
+        // Nothing to see: B falls to `die`.
+        let empty = ChunkActors::default();
+        let bare = ChunkCells::default();
+        let halo = Halo {
+            chunks: [
+                None,
+                None,
+                None,
+                None,
+                Some((&bare, &empty)),
+                None,
+                None,
+                None,
+                None,
+            ],
+            tags: &k.tag_bits,
+        };
+        let out = vm::think(&k, Ctx { halo: &halo, ..ctx }, &mut mind);
+        assert_eq!(out.action, Action::Die);
+
+        let errs = [
+            (
+                "kind a { state S { when true => next T } }",
+                "has no state `T`",
+            ),
+            (
+                "sub f() { next S }  kind a { state S { when true => f() } }",
+                "`next` inside a sub",
+            ),
+            (
+                "kind a { mem m  when true => m = 1 }  const C = m",
+                "not a constant declared above",
+            ),
+            ("const C = 1  const C = 2", "already a name"),
+            (
+                "kind a { tags t  when nearest t:1 within 2 as v => idle }",
+                "`t` is not a kind",
+            ),
+            (
+                "kind a { state S { } state S { } }",
+                "state `S` declared twice",
+            ),
+        ];
+        for (text, want) in errs {
+            let e = compile_err(text);
+            assert!(e.contains(want), "{text}: {e}");
+        }
     }
 
     #[test]

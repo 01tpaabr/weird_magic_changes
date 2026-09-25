@@ -15,8 +15,7 @@
 //! `EndRule` halts if the body emitted an action or a `next`, otherwise
 //! execution falls through to the next rule. Falling off the end is `idle`.
 
-use crate::actors::ChunkActors;
-use crate::actors::{ActorMind, MEM_SLOTS, NEED_SLOTS};
+use crate::actors::{ActorMind, ActorPub, ChunkActors, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use crate::stage::{ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, Feature, Ground, Pos};
 use crate::time::{Clock, daylight};
@@ -131,7 +130,30 @@ pub enum OpCode {
     /// Halt if an action or a `next` was emitted, else fall through
     EndRule,
     Halt,
+    /// `v ->`; set own `signal`, clamped to `i16` (an effect, like `SetLook`)
+    SetSignal,
+    /// `dx dy -> look` of whoever stands there, else of the cover there; 0
+    /// for nobody
+    LookAt,
+    /// `dx dy -> signal` of whoever stands there, else of the cover there;
+    /// 0 for nobody
+    SignalAt,
+    /// `hi lo -> hi * 256 + (lo & 255)`: two signed bytes in one value
+    Pack,
+    /// `v -> v >> 8` (arithmetic): the first byte of a `pack`
+    Hi,
+    /// `v -> v` sign-extended from its low byte: the second byte of a `pack`
+    Lo,
+    /// One step of `for each`. Locals `a..a+5` hold `dx, dy, cursor, pred,
+    /// r`. `-> found`: the first matching cell at or after the cursor, in
+    /// ring order (rings `1..=r`, each clockwise from its top-left corner),
+    /// is bound into `dx, dy` and the cursor moves past it. The first step
+    /// (cursor 0) pays the search's fuel.
+    ForEach,
 }
+
+/// Locals a `for each` loop keeps: `dx, dy, cursor, pred, r`.
+pub const FOR_EACH_LOCALS: u8 = 5;
 
 /// Senses readable with `Sense a`.
 #[repr(u8)]
@@ -279,6 +301,8 @@ pub struct Outcome {
     pub next: Option<u8>,
     /// `look = v` effect, if the think set one.
     pub look: Option<u8>,
+    /// `signal = v` effect, if the think set one.
+    pub signal: Option<i16>,
     pub trap: Option<Trap>,
     /// Ops executed, for `wmc why` and the fuel counters.
     pub used: u32,
@@ -288,7 +312,8 @@ pub struct Outcome {
 
 /// Predicate values, one `i32` at run time: a kind (`0..TAG_BASE`), a tag
 /// (`TAG_BASE + tag index`, matched against the occupant kind's tag bits),
-/// or one of these.
+/// a kind showing a look (`LOOK_BASE + look << 16 + kind`, `flower:1`), or
+/// one of these.
 pub mod pred {
     /// Walkable, nobody standing there.
     pub const FREE: i32 = -1;
@@ -297,6 +322,12 @@ pub mod pred {
     pub const GROUND_BASE: i32 = -0x100;
     pub const FEATURE_BASE: i32 = -0x200;
     pub const TAG_BASE: i32 = 0x1_0000;
+    pub const LOOK_BASE: i32 = 0x0100_0000;
+
+    /// `kind:look`: that kind, showing that look byte.
+    pub const fn kind_look(kind: u16, look: u8) -> i32 {
+        LOOK_BASE + ((look as i32) << 16) + kind as i32
+    }
 
     pub const fn ground(g: u8) -> i32 {
         GROUND_BASE - g as i32
@@ -306,13 +337,22 @@ pub mod pred {
     }
 }
 
-/// Does local cell `i` of `cells` match `pred`? `tags` is the tag bitset
-/// per kind (`Kinds::tag_bits`).
+/// Does local cell `i` of `cells` match `pred`? `actors` are the chunk's
+/// public rows (for `kind:look`), `tags` the tag bitset per kind
+/// (`Kinds::tag_bits`).
 #[inline]
-fn matches(pred: i32, cells: &ChunkCells, i: usize, tags: &[u64]) -> bool {
+fn matches(pred: i32, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: &[u64]) -> bool {
     // A kind or a tag matches whoever stands on the cell or covers it.
     let is = |id: ActorId| match id.unpack() {
         None => false,
+        Some((kind, slot)) if pred >= pred::LOOK_BASE => {
+            let v = pred - pred::LOOK_BASE;
+            i32::from(kind) == v & 0xFFFF
+                && actors
+                    .rows
+                    .get(usize::from(slot))
+                    .is_some_and(|r| i32::from(r.look) == v >> 16)
+        }
         Some((kind, _)) if pred >= pred::TAG_BASE => {
             let bit = (pred - pred::TAG_BASE) as u32;
             bit < 64
@@ -375,7 +415,7 @@ impl<'a> Halo<'a> {
     #[inline]
     pub fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
         match self.at(lx, ly, dx, dy) {
-            Some((cells, _, i)) => matches(pred, cells, i, self.tags),
+            Some((cells, actors, i)) => matches(pred, cells, actors, i, self.tags),
             // Unloaded: rock, nobody.
             None => pred == pred::feature(Feature::Rock as u8),
         }
@@ -385,6 +425,14 @@ impl<'a> Halo<'a> {
     #[inline]
     pub fn free(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> bool {
         self.matches(lx, ly, dx, dy, pred::FREE)
+    }
+
+    /// The public row of whoever stands at the cell, else of its cover.
+    #[inline]
+    pub fn row_at(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> Option<&'a ActorPub> {
+        let (cells, actors, i) = self.at(lx, ly, dx, dy)?;
+        let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
+        actors.rows.get(usize::from(slot))
     }
 }
 
@@ -541,6 +589,45 @@ impl Machine<'_> {
             }
         }
         Ok(None)
+    }
+
+    /// One `for each` step (see [`OpCode::ForEach`]): locals `a..a+5`.
+    fn for_each(&mut self, a: u8) -> Result<bool, Trap> {
+        if usize::from(a) + usize::from(FOR_EACH_LOCALS) > FRAME_LOCALS {
+            return Err(Trap::BadLocal);
+        }
+        let base = self.local(a)?;
+        let cursor = self.locals[base + 2].max(0);
+        let pred = self.locals[base + 3];
+        let r = self.locals[base + 4].clamp(0, i32::from(self.ctx.kind.sight));
+        if cursor == 0 {
+            let side = (2 * r + 1) as u32;
+            self.spend(side * side / SEARCH_DIV)?;
+        }
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        // Cells before ring `ring` (rings from 1): 4 * ring * (ring - 1).
+        let mut ring = 1;
+        while ring <= r && 4 * ring * (ring + 1) <= cursor {
+            ring += 1;
+        }
+        let mut k = cursor;
+        while ring <= r {
+            let first = 4 * ring * (ring - 1);
+            let n = 8 * ring;
+            while k < first + n {
+                let (dx, dy) = ring_cell(ring, k - first);
+                k += 1;
+                if self.ctx.halo.matches(lx, ly, dx, dy, pred) {
+                    self.locals[base] = dx;
+                    self.locals[base + 1] = dy;
+                    self.locals[base + 2] = k;
+                    return Ok(true);
+                }
+            }
+            ring += 1;
+        }
+        self.locals[base + 2] = k;
+        Ok(false)
     }
 
     fn act(&mut self, a: u8) -> Result<(), Trap> {
@@ -833,6 +920,39 @@ impl Machine<'_> {
                     }
                 }
                 O::Halt => return Ok(()),
+                O::SetSignal => {
+                    let v = self.pop()?;
+                    self.out.signal =
+                        Some(v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
+                }
+                O::LookAt | O::SignalAt => {
+                    let dy = self.pop()?;
+                    let dx = self.pop()?;
+                    let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                    let v = match self.ctx.halo.row_at(lx, ly, dx, dy) {
+                        None => 0,
+                        Some(r) if op.code == O::LookAt => i32::from(r.look),
+                        Some(r) => i32::from(r.signal),
+                    };
+                    self.push(v)?;
+                }
+                O::Pack => {
+                    let lo = self.pop()?;
+                    let hi = self.pop()?;
+                    self.push(hi.wrapping_mul(256).wrapping_add(lo & 0xFF))?;
+                }
+                O::Hi => {
+                    let v = self.pop()?;
+                    self.push(v >> 8)?;
+                }
+                O::Lo => {
+                    let v = self.pop()?;
+                    self.push(i32::from(v as u8 as i8))?;
+                }
+                O::ForEach => {
+                    let found = self.for_each(op.a)?;
+                    self.push(i32::from(found))?;
+                }
             }
         }
     }
@@ -922,6 +1042,7 @@ pub fn think(program: &super::Kinds, ctx: Ctx<'_>, mind: &mut ActorMind) -> Outc
         m.out.action = Action::Idle;
         m.out.next = None;
         m.out.look = None;
+        m.out.signal = None;
     }
     m.out
 }

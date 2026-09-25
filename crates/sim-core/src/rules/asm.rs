@@ -123,6 +123,11 @@ impl Asm {
         self.emit(OpCode::Nearest, slot, 0)
     }
 
+    /// One `for each` step over locals `slot..slot + 5` (`-> found`).
+    pub fn for_each(&mut self, slot: u8) -> &mut Self {
+        self.emit(OpCode::ForEach, slot, 0)
+    }
+
     pub fn act(&mut self, a: Action) -> &mut Self {
         self.emit(OpCode::Act, a as u8, 0)
     }
