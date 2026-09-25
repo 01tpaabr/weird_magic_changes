@@ -176,19 +176,23 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
     let tally = world.resource::<Tally>();
     writeln!(
         out,
-        "life:      {:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "kind", "alive", "born", "became", "eaten", "died"
+        "life:      {:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>9} {:>6}",
+        "kind", "alive", "born", "became", "eaten", "died", "thinks", "ops/think", "traps"
     )?;
     for (i, name) in kinds.names().enumerate() {
         let k = i as u16;
+        let thinks = tally.get(k, life::THINKS);
         writeln!(
             out,
-            "           {name:<10} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            "           {name:<10} {:>8} {:>8} {:>8} {:>8} {:>8} {:>10} {:>9.1} {:>6}",
             per_kind[i],
             tally.get(k, life::BORN),
             tally.get(k, life::BECAME),
             tally.get(k, life::EATEN),
             tally.get(k, life::DIED),
+            thinks,
+            tally.get(k, life::OPS) as f64 / thinks.max(1) as f64,
+            tally.get(k, life::TRAPS),
         )?;
     }
     Ok(())

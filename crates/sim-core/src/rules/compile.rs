@@ -536,6 +536,7 @@ fn sense_named(name: &str) -> Option<Sense> {
         "ground" => Sense::Ground,
         "feature" => Sense::Feature,
         "taken" => Sense::Taken,
+        "trapped" => Sense::Trapped,
         _ => return None,
     })
 }

@@ -122,7 +122,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 | group | senses | source |
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
-| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `event(FUEL)` (step 7) | latched bytes written by the resolve phases, cleared after the think that read them |
+| events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
 | here / at | `ground`, `feature`, `scent(ch)`; `ground_at(t)`, `feature_at(t)`, `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, row-major in a ring, ring start rotated by one RNG draw |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
@@ -220,7 +220,8 @@ TIME     := INT ("min" | "h" | "d")
   body that called them finishes); recursion depth 8. Locals never persist.
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
   override up to 4096. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
-  `event(FUEL)` and bumps a per-chunk counter. The sim never panics on a rules file.
+  `trapped` for the next think and counts a trap for the kind (the `TRAPS` counter on the
+  status row, the `traps` column of `wmc run`). The sim never panics on a rules file.
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
   64 800 goes to the pool), kind ids in **sorted file name then declaration order**, the
@@ -309,9 +310,9 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    claim[target]` wins the cell; losers get `BLOCKED`; a cover spawn claims nothing and takes
    its cell in key order if it is walkable and has no cover yet; a cover row's `move` and a
    `become` across layers are REFUSED; `become`, self-`die` (a standing actor touches its
-   cell), `drink`, `look`, `result` written. Births, `become`s, bites that fed and deaths are
-   counted per kind (`Tally`: not saved, not hashed; the status rows of `wmc play` and the
-   table after `wmc run` print it).
+   cell), `drink`, `look`, `result` written. Births, `become`s, bites that fed and deaths,
+   and thinks, ops and traps, are counted per kind (`Tally`: not saved, not hashed; the
+   status rows of `wmc play` and the table after `wmc run` print it, with ops per think).
 4. **Migrate** (sequential): cross-chunk `move`/`spawn` into cells free now and not touched
    this tick; contenders settled by key. An in-chunk winner beats a cross-chunk one (**home
    advantage**, deterministic, documented; decision 30).

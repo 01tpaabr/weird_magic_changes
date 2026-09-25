@@ -197,10 +197,12 @@ pub enum Sense {
     Feature,
     /// 1 if something was taken from this actor since its last think
     Taken,
+    /// 1 if the last think trapped (fuel out, a second action, a fault)
+    Trapped,
 }
 
 impl Sense {
-    pub const COUNT: u8 = 16;
+    pub const COUNT: u8 = 17;
 
     pub fn from_u8(a: u8) -> Option<Self> {
         (a < Self::COUNT).then(|| {
@@ -222,6 +224,7 @@ impl Sense {
                 Self::Ground,
                 Self::Feature,
                 Self::Taken,
+                Self::Trapped,
             ][usize::from(a)]
         })
     }
@@ -595,6 +598,7 @@ impl Machine<'_> {
                 pred::feature(cells.feature[i] as u8)
             }
             Sense::Taken => i32::from(self.mind.events & event::TAKEN != 0),
+            Sense::Trapped => i32::from(self.mind.events & event::FUEL != 0),
         }
     }
 

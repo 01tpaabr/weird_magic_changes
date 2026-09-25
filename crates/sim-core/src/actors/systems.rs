@@ -64,15 +64,15 @@ pub struct Intent {
     pub mark: Option<(u8, u8)>,
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
+    /// Ops the think executed (saturating), for the per-kind counters.
+    pub used: u16,
 }
 
 /// The intents of one chunk's actors this tick. Scratch: cleared by Think,
-/// consumed by Resolve and Apply. `traps` counts trapped thinks since load,
-/// for the status line.
+/// consumed by Resolve and Apply.
 #[derive(Component, Debug, Default)]
 pub struct Intents {
     pub list: Vec<Intent>,
-    pub traps: u32,
 }
 
 /// A cross-chunk effect, from a source chunk's actor to a cell of `to`.
@@ -159,7 +159,7 @@ pub struct Scratch {
     events: Vec<[u32; LIFE_EVENTS]>,
 }
 
-/// Life events counted per kind: `Tally::counts[kind][event]`.
+/// Life events and work counted per kind: `Tally::counts[kind][event]`.
 pub mod life {
     /// A row created by `spawn`.
     pub const BORN: usize = 0;
@@ -169,12 +169,19 @@ pub mod life {
     pub const EATEN: usize = 2;
     /// Died of an empty vital need (or its own `die`).
     pub const DIED: usize = 3;
+    /// Thinks run.
+    pub const THINKS: usize = 4;
+    /// Bytecode ops those thinks executed.
+    pub const OPS: usize = 5;
+    /// Thinks that trapped (fuel out, a second action, a fault) and idled.
+    pub const TRAPS: usize = 6;
 }
-const LIFE_EVENTS: usize = 4;
+const LIFE_EVENTS: usize = 7;
 
-/// Life events per kind since the world was loaded: births, `become`s,
-/// deaths by bites and by needs. Sums, so the order they are added in does
-/// not matter; not saved, not in the checksum.
+/// Life events and work per kind since the world was loaded: births,
+/// `become`s, deaths by bites and by needs; thinks, ops and traps. Sums, so
+/// the order they are added in does not matter; not saved, not in the
+/// checksum.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct Tally {
     pub counts: Vec<[u64; LIFE_EVENTS]>,
@@ -226,11 +233,15 @@ impl Scratch {
     /// Count a life event of `kind` this tick. The per-kind table grows on
     /// first use of a kind: chunk-level, not per actor.
     fn count(&mut self, kind: u16, event: usize) {
+        self.add(kind, event, 1);
+    }
+
+    fn add(&mut self, kind: u16, event: usize, n: u32) {
         let k = usize::from(kind);
         if self.events.len() <= k {
             self.events.resize(k + 1, [0; LIFE_EVENTS]);
         }
-        self.events[k][event] += 1;
+        self.events[k][event] = self.events[k][event].saturating_add(n);
     }
 
     /// Free at tick start and untouched since: a cross-chunk mover may enter.
@@ -355,6 +366,7 @@ fn think_one(
         with: [0; 2],
         mark: None,
         trapped: false,
+        used: 0,
     };
     if vm::decay(kind, mind, tick) {
         clear_events(mind);
@@ -393,6 +405,7 @@ fn think_one(
         intent.kind = u16::from(out.need);
     }
     intent.trapped = out.trap.is_some();
+    intent.used = u16::try_from(out.used).unwrap_or(u16::MAX);
     let (lx, ly) = local_xy(cell);
     match out.action {
         Action::Move => {
@@ -838,14 +851,14 @@ pub fn apply(
         &mut ChunkCells,
         &mut ChunkActors,
         &mut ChunkMinds,
-        &mut Intents,
+        &Intents,
         &mut Scratch,
         &mut Outbox,
     )>,
 ) {
     let (tick, seed, kinds) = (tick.0, cfg.seed, &*kinds);
     q.par_iter_mut().for_each(
-        |(coord, mut cells, mut pubs, mut minds, mut intents, mut scratch, mut outbox)| {
+        |(coord, mut cells, mut pubs, mut minds, intents, mut scratch, mut outbox)| {
             // Exchange drained the bites; what goes in now is moves and spawns.
             outbox.list.clear();
             if intents.list.is_empty() {
@@ -872,10 +885,14 @@ pub fn apply(
                 }
             }
 
-            let mut traps = 0;
             for it in &intents.list {
                 let slot = usize::from(it.slot);
-                traps += u32::from(it.trapped);
+                let kind = pubs.rows[slot].kind;
+                scratch.count(kind, life::THINKS);
+                scratch.add(kind, life::OPS, u32::from(it.used));
+                if it.trapped {
+                    scratch.count(kind, life::TRAPS);
+                }
                 if pubs.rows[slot].flags & flags::DEAD != 0 {
                     continue; // died in Exchange: its intent is void
                 }
@@ -1022,7 +1039,6 @@ pub fn apply(
                     *s = s.saturating_add(v);
                 }
             }
-            intents.traps += traps;
         },
     );
 }

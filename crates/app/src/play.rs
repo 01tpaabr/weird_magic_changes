@@ -519,7 +519,9 @@ fn render_frame(
 
 /// Two status rows: how many of each kind are loaded, and the life events
 /// since the world was opened, each kind by its glyph
-/// (`alive C97 o4 ...`, `born o12 | grew c4 | eaten C3 | died C5`).
+/// (`alive C97 o4 ...`, `born o12 | grew c4 | eaten C3 | died C5`), with
+/// `TRAPS b2` when a kind's program ran out of fuel or faulted (a rules
+/// bug: `wmc why` shows the think).
 fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (String, String) {
     let mut alive = vec![0usize; kinds.len()];
     for a in rows {
@@ -540,6 +542,7 @@ fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (Stri
         ("grew", life::BECAME),
         ("eaten", life::EATEN),
         ("died", life::DIED),
+        ("TRAPS", life::TRAPS),
     ] {
         let parts: Vec<String> = (0..kinds.len())
             .filter_map(|k| {

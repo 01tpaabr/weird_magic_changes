@@ -1074,6 +1074,7 @@ mod tests {
             amount: 0,
             with: [0; 2],
             mark: None,
+            used: 0,
             trapped: false,
         };
         w.get_mut::<ChunkActors>(e0).unwrap().rows[1].flags |= flags::WAKE;
@@ -1450,6 +1451,58 @@ mod tests {
             brought > hours(4) as i32,
             "bees brought nectar home: {brought} ticks' worth, {born} bees"
         );
+    }
+
+    /// Thinks, ops and traps are counted per kind; a think that runs out of
+    /// fuel idles and the next one sees `trapped`.
+    #[test]
+    fn thinks_ops_and_traps_are_counted_per_kind() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Tally, life};
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind spin { cadence 1  mem saw
+               when trapped => { saw += 1  idle }
+               when true => { while true { } } }
+             kind calm { cadence 2  when true => idle }",
+        )
+        .unwrap();
+        let cfg = WorldConfig {
+            width: 64,
+            height: 64,
+            ..cfg(3)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(5, 5),
+            0,
+            newborn(&kinds, 0, 0x51, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(9, 5),
+            1,
+            newborn(&kinds, 1, 0x52, now)
+        ));
+        for _ in 0..10 {
+            step(&mut w);
+        }
+        let t = w.resource::<Tally>();
+        assert_eq!(t.get(0, life::THINKS), 10);
+        // Every other think traps (the one after sees `trapped` and idles).
+        assert_eq!(t.get(0, life::TRAPS), 5);
+        assert!(
+            t.get(0, life::OPS) >= 5 * 500,
+            "a trapped think spends its fuel"
+        );
+        assert_eq!((t.get(1, life::THINKS), t.get(1, life::TRAPS)), (5, 0));
+        assert_eq!(t.get(1, life::OPS), 5 * 4); // Push 1, Jz, Act, EndRule
+        let spin = rows(&mut w).into_iter().find(|r| r.0 == 0x51).unwrap();
+        assert_eq!(spin.3.mem[0], 5);
     }
 
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
