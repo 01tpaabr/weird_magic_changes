@@ -47,8 +47,12 @@ use crate::par::par_map;
 use crate::rng::splitmix64;
 
 /// log2 of the chunk side. 64² = 4096 cells: 4 KiB per byte layer, 16 KiB
-/// for the occupant layer, one task. Tune with `make bench`; changing it
-/// changes save files (bump `store::FORMAT_VERSION`) but never sim results.
+/// per actor-id layer, one task. Tune with `make bench`. Changing it changes
+/// save files (bump `store::FORMAT_VERSION`) **and sim results**: actors
+/// resolve cross-chunk moves after in-chunk ones (home advantage, decision
+/// 30), and a cell system's cadence is staggered by chunk coordinate, so
+/// where the borders fall is part of a world's identity (the save header
+/// records it). Worldgen alone does not depend on it.
 pub const CHUNK_BITS: u32 = 6;
 /// Chunk side length in cells.
 pub const CHUNK_SIZE: i32 = 1 << CHUNK_BITS;

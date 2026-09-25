@@ -483,8 +483,10 @@ fn think_one<const TRACE: bool>(
             intent.dy = dy as i8;
         }
         Action::Drink => {
+            // Adjacent water (or underfoot, which a standing actor never is).
+            let (dx, dy) = (i32::from(out.dx), i32::from(out.dy));
             let water = pred::ground(Ground::Water as u8);
-            let valid = halo.matches(lx, ly, i32::from(out.dx), i32::from(out.dy), water);
+            let valid = dx.abs() <= 1 && dy.abs() <= 1 && halo.matches(lx, ly, dx, dy, water);
             intent.kind = u16::from(valid);
         }
         _ => {}

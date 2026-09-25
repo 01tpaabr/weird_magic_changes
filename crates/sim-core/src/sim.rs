@@ -1727,6 +1727,39 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    /// `drink` needs adjacent water: from three cells away it is refused.
+    #[test]
+    fn drinking_needs_adjacent_water() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::rules::vm::result;
+        let kinds = compile(
+            "t.rules",
+            "kind d { cadence 1  sight 4  need water max 1h  mem r
+               when r == 0 and nearest water within 4 as w => { r = 9  drink w }
+               when r == 9 => { r = result  idle } }",
+        )
+        .unwrap();
+        let cfg = WorldConfig {
+            width: 64,
+            height: 64,
+            ..cfg(1)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let (cc, i) = Pos::new(13, 10).split();
+        stage::chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
+        let mut m = newborn(&kinds, 0, 0xD1, tick(&w));
+        m.needs[0] = 100;
+        assert!(place_actor(&mut w, Pos::new(10, 10), 0, m));
+        for _ in 0..3 {
+            step(&mut w);
+        }
+        let d = rows(&mut w).into_iter().find(|r| r.0 == 0xD1).unwrap();
+        assert_eq!(d.3.mem[0], i32::from(result::REFUSED));
+        assert!(d.3.needs[0] < 100, "no refill from afar: {}", d.3.needs[0]);
+    }
+
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
     /// a tuft (both layers of one cell taken) and grazes it underfoot, a
     /// quarter tuft a bite, until the tuft is gone; the patch never blocks.

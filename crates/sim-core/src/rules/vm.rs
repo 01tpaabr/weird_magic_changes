@@ -245,7 +245,7 @@ pub enum Action {
     /// `dx dy`: one step in that direction (Think reduces it to a unit step
     /// and slides around a blocked cell)
     Move,
-    /// `dx dy`: refill `water` from the water cell there
+    /// `dx dy`: refill `water` from the adjacent water cell there
     Drink,
     /// `dx dy`: bite the adjacent actor there (`bite` off its `health`);
     /// if it dies this tick, the lowest-key eater gains its kind's `food`

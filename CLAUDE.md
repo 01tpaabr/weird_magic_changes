@@ -46,7 +46,7 @@ When two of these conflict, the higher one wins.
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), worldgen, store, rng, time, SimTick
 rules/              *.rules files: the kinds (all built into the binary; WMC_RULES=<dir> swaps them)
-docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), PERF.md (baselines)
+docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
 
@@ -80,7 +80,7 @@ make fmt
   `~/.cargo/registry/src/*/bevy_ecs-0.19.*/src`, or `cargo doc -p bevy --no-deps --open`.
   The skill's `references/` hold verified cheatsheets.
 - New sim system: a plain fn in `sim-core`, added to `SimTick` inside a `Phase` set, with a
-  checksum test. New actor kind: a `.rules` file (`docs/ACTORS.md` §5), `wmc lint` it. New
+  checksum test. New actor kind: a `.rules` file (`docs/RULES.md`), `wmc lint` it, `wmc why` to debug it. New
   sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).

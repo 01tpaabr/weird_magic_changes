@@ -442,4 +442,8 @@ where it touches the tick.
    hive 25 cells from flowers it cannot see; its bees find them, dance, recruit, lay a
    trail, bring home more than they cost, and the flowers spread. On the built-in 256x256
    world two hives hold 20-60 bees through 16 days.
-7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.
+7. **Tooling.** Done: thinks, ops and traps per kind (`wmc run` columns, `TRAPS` on the
+   status row, the `trapped` sense); `wmc why` (the compiler's rule table, a traced VM run
+   that costs nothing when off, `sim::explain`); hot reload on `r` with rows and saved chunks
+   remapped by name (decision 34); `docs/RULES.md`, the author's reference. `drink` now needs
+   adjacent water, like every other action on a neighbour.
