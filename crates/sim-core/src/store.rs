@@ -32,7 +32,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 5;
+pub const FORMAT_VERSION: u32 = 6;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -118,8 +118,6 @@ impl Store {
                 water_level: r.f32()?,
                 rock_on_soil: r.f32()?,
                 rock_on_water: r.f32()?,
-                seed_density: r.f32()?,
-                animal_density: r.f32()?,
             },
             kinds: Vec::new(),
             rules_hash: 0,
@@ -154,8 +152,6 @@ impl Store {
         w.f32(m.params.water_level);
         w.f32(m.params.rock_on_soil);
         w.f32(m.params.rock_on_water);
-        w.f32(m.params.seed_density);
-        w.f32(m.params.animal_density);
         w.u32(u32::try_from(m.kinds.len()).expect("kind count fits u32"));
         for k in &m.kinds {
             w.u32(u32::try_from(k.len()).expect("kind name fits u32"));
@@ -463,7 +459,7 @@ mod tests {
         let c = ChunkCoord::new(0, 0);
         fs::write(
             s.chunk_path(c),
-            b"WMCC\x05\x00\x00\x00\x06\x00\x00\x00 short",
+            b"WMCC\x06\x00\x00\x00\x06\x00\x00\x00 short",
         )
         .unwrap();
         assert!(s.read_chunk(c).is_err());
@@ -501,15 +497,15 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v4 file is refused by version.
+        // A v5 file is refused by version.
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 4;
+        bytes[4] = 5;
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(
             s.read_chunk(c)
                 .unwrap_err()
                 .to_string()
-                .contains("format 4")
+                .contains("format 5")
         );
         fs::remove_dir_all(s.dir()).unwrap();
     }

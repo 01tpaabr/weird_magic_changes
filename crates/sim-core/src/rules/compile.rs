@@ -17,7 +17,7 @@ use std::fmt;
 
 use super::asm::{Asm, Label};
 use super::vm::{Action, FRAME_LOCALS, OpCode, Sense, pred};
-use super::{KindDef, Kinds, NeedDef};
+use super::{KindDef, Kinds, NeedDef, PLACE_ONE};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground};
 use crate::time::{days, hours, minutes};
@@ -282,6 +282,8 @@ struct KindAst {
     fuel: u32,
     food: i32,
     bite: u8,
+    /// Worldgen share, out of `PLACE_ONE`.
+    place: u32,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
     rules: Vec<Rule>,
@@ -321,6 +323,8 @@ enum Cond {
 enum Target {
     Named(String, Pos),
     Here,
+    /// The lowest-key actor that bit this one since its last think.
+    Attacker,
     Dir(i32, i32),
     Toward(Box<Target>),
     Away(Box<Target>),
@@ -391,6 +395,10 @@ enum Stmt {
     },
     Move(Target),
     Drink(Target),
+    Eat(Target),
+    Hit(Target),
+    /// `look = v`: an effect, not an action.
+    Look(Expr),
 }
 
 #[derive(Debug, Clone)]
@@ -456,13 +464,14 @@ fn sense_named(name: &str) -> Option<Sense> {
 
 // `water`, `soil`, `rock` and `free` are contextual: predicates after
 // `count`/`nearest`/`is`/`random`, plain names elsewhere (so a kind may
-// declare `need water`).
-const KEYWORDS: [&str; 46] = [
-    "kind", "sub", "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "need", "max",
+// declare `need water`). `food` likewise: a declaration where a declaration
+// starts, a need name everywhere else (`need food`, `food < 12h`).
+const KEYWORDS: &[&str] = &[
+    "kind", "sub", "glyph", "tags", "cadence", "sight", "fuel", "bite", "place", "need", "max",
     "decay", "vital", "mem", "when", "if", "else", "while", "repeat", "let", "return", "choose",
     "and", "or", "not", "nearest", "count", "within", "as", "true", "false", "idle", "die",
-    "become", "spawn", "move", "drink", "at", "here", "toward", "away", "random", "north", "east",
-    "south", "west",
+    "become", "spawn", "move", "drink", "eat", "hit", "at", "here", "toward", "away", "random",
+    "attacker", "north", "east", "south", "west",
 ];
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
@@ -673,6 +682,7 @@ impl Parser<'_> {
             fuel: 512,
             food: 0,
             bite: 1,
+            place: 0,
             needs: Vec::new(),
             mems: Vec::new(),
             rules: Vec::new(),
@@ -718,6 +728,15 @@ impl Parser<'_> {
                 k.fuel = f as u32;
             } else if self.eat_kw("food") {
                 k.food = self.int_or_time("a food value")?;
+            } else if self.eat_kw("place") {
+                // `place N / D`: this share of walkable cells starts as this kind.
+                let n = self.int("a numerator")?;
+                self.expect_sym("/")?;
+                let d = self.int("a denominator")?;
+                if n < 0 || d < 1 || n > d {
+                    return Err(self.err_at(&p, "place is N / D with 0 <= N <= D"));
+                }
+                k.place = (u64::from(n as u32) * u64::from(PLACE_ONE) / u64::from(d as u32)) as u32;
             } else if self.eat_kw("bite") {
                 let b = self.int("a bite")?;
                 if !(0..=255).contains(&b) {
@@ -893,6 +912,17 @@ impl Parser<'_> {
         if self.eat_kw("drink") {
             return Ok(Stmt::Drink(self.target()?));
         }
+        if self.eat_kw("eat") {
+            return Ok(Stmt::Eat(self.target()?));
+        }
+        if self.eat_kw("hit") {
+            return Ok(Stmt::Hit(self.target()?));
+        }
+        if self.is_kw("look") && matches!(self.peek2(), Tok::Sym("=")) {
+            self.bump();
+            self.bump();
+            return Ok(Stmt::Look(self.expr()?));
+        }
         // A call or an assignment.
         let (name, at) = self.ident("statement")?;
         if self.is_sym("(") {
@@ -949,7 +979,7 @@ impl Parser<'_> {
     }
 
     fn starts_target(&self) -> bool {
-        matches!(self.peek(), Tok::Name(n) if ["here", "toward", "away", "random", "north", "east", "south", "west"].contains(&n.as_str()))
+        matches!(self.peek(), Tok::Name(n) if ["here", "attacker", "toward", "away", "random", "north", "east", "south", "west"].contains(&n.as_str()))
             || (self.is_kw("at") && matches!(self.peek2(), Tok::Sym("(")))
     }
 
@@ -957,6 +987,9 @@ impl Parser<'_> {
         let at = self.pos();
         if self.eat_kw("here") {
             return Ok(Target::Here);
+        }
+        if self.eat_kw("attacker") {
+            return Ok(Target::Attacker);
         }
         if self.eat_kw("toward") {
             return Ok(Target::Toward(Box::new(self.target()?)));
@@ -982,7 +1015,7 @@ impl Parser<'_> {
             }
         }
         let (name, _) = self.ident(
-            "target (a binding, here, north/east/south/west, toward, away, at(x, y) or random free)",
+            "target (a binding, here, attacker, north/east/south/west, toward, away, at(x, y) or random free)",
         )?;
         Ok(Target::Named(name, at))
     }
@@ -1251,6 +1284,9 @@ struct Gen<'a> {
     next_local: u8,
     /// Position for errors without a better one.
     here: Pos,
+    /// Tag names, in first-appearance order (kind order, then declaration
+    /// order): a tag's bit is its index here.
+    tags: Vec<String>,
 }
 
 impl<'a> Gen<'a> {
@@ -1258,6 +1294,7 @@ impl<'a> Gen<'a> {
         Self {
             kinds,
             subs,
+            tags: Vec::new(),
             asm: Asm::new(),
             consts: Vec::new(),
             kind: None,
@@ -1303,6 +1340,28 @@ impl<'a> Gen<'a> {
                 return Err(self.err(&s.at, format!("sub `{}` has too many parameters", s.name)));
             }
         }
+        // Tags: global names, a bit each, never a kind's name.
+        let mut placed = 0u64;
+        for k in self.kinds {
+            for t in &k.tags {
+                if self.kind_id(t).is_some() {
+                    return Err(self.err(&k.at, format!("tag `{t}` is also a kind's name")));
+                }
+                if !self.tags.contains(t) {
+                    if self.tags.len() == 64 {
+                        return Err(self.err(&k.at, "at most 64 tags in a rule set"));
+                    }
+                    self.tags.push(t.clone());
+                }
+            }
+            placed += u64::from(k.place);
+            if placed > u64::from(PLACE_ONE) {
+                return Err(self.err(
+                    &k.at,
+                    "the `place` shares of all kinds add up to more than 1",
+                ));
+            }
+        }
         let mut defs = Vec::with_capacity(self.kinds.len());
         for i in 0..self.kinds.len() {
             self.kind = Some(i);
@@ -1319,11 +1378,19 @@ impl<'a> Gen<'a> {
                 self.asm.end_rule().bind(next);
             }
             self.asm.halt();
+            let tags = k.tags.iter().fold(0u64, |bits, t| {
+                bits | 1
+                    << self
+                        .tags
+                        .iter()
+                        .position(|x| x == t)
+                        .expect("collected above")
+            });
             defs.push(KindDef {
                 id: i as u16,
                 name: k.name.clone(),
                 glyph: k.glyph,
-                tags: 0,
+                tags,
                 cadence_shift: k.cadence_shift,
                 sight: k.sight,
                 fuel: k.fuel,
@@ -1333,6 +1400,7 @@ impl<'a> Gen<'a> {
                 mems: k.mems.clone(),
                 states: 1,
                 entry,
+                place: k.place,
             });
         }
         let mut sub_entries = Vec::with_capacity(self.subs.len());
@@ -1485,10 +1553,13 @@ impl<'a> Gen<'a> {
                     self.asm.load(slot);
                     return Ok(());
                 }
-                i32::from(
-                    self.kind_id(name)
-                        .ok_or_else(|| self.err(at, format!("unknown kind `{name}`")))?,
-                )
+                if let Some(id) = self.kind_id(name) {
+                    i32::from(id)
+                } else if let Some(bit) = self.tags.iter().position(|t| t == name) {
+                    pred::TAG_BASE + bit as i32
+                } else {
+                    return Err(self.err(at, format!("unknown kind or tag `{name}`")));
+                }
             }
         };
         self.push_int(v);
@@ -1500,6 +1571,9 @@ impl<'a> Gen<'a> {
         match t {
             Target::Here => {
                 self.asm.push(0).push(0);
+            }
+            Target::Attacker => {
+                self.asm.sense(Sense::HurtDir).op(OpCode::DirOf);
             }
             Target::Dir(dx, dy) => {
                 self.asm.push(*dx).push(*dy);
@@ -1851,6 +1925,18 @@ impl<'a> Gen<'a> {
                 self.target(t)?;
                 self.asm.act(Action::Drink);
             }
+            Stmt::Eat(t) => {
+                self.target(t)?;
+                self.asm.act(Action::Eat);
+            }
+            Stmt::Hit(t) => {
+                self.target(t)?;
+                self.asm.act(Action::Hit);
+            }
+            Stmt::Look(e) => {
+                self.expr(e)?;
+                self.asm.op(OpCode::SetLook);
+            }
         }
         Ok(())
     }
@@ -2188,6 +2274,7 @@ mod tests {
                 None,
                 None,
             ],
+            tags: &k.tag_bits,
         };
         let mut mind = ActorMind::zeroed();
         let ctx = Ctx {
@@ -2236,6 +2323,7 @@ mod tests {
                 None,
                 None,
             ],
+            tags: &k.tag_bits,
         };
         let mut counts = [0; 3];
         for uid in 0..500u64 {

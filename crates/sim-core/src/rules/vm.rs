@@ -118,6 +118,12 @@ pub enum OpCode {
     FreeAt,
     /// `dx dy pred -> 1` if the cell there matches `pred`
     IsAt,
+    /// `i -> dx dy` of direction `i` (1..=8 clockwise from north, as
+    /// `hurt_dir` reports it); anything else is `0 0`
+    DirOf,
+    /// `v ->`; set own `look` byte (an effect: it rides along with the
+    /// action and does not end the rule)
+    SetLook,
     /// Emit action `a` (see [`Action`]); pops its operands
     Act,
     /// `next a`: switch to state `a` for the following think
@@ -198,6 +204,11 @@ pub enum Action {
     Move,
     /// `dx dy`: refill `water` from the water cell there
     Drink,
+    /// `dx dy`: bite the adjacent actor there (`bite` off its `health`);
+    /// if it dies this tick, the lowest-key eater gains its kind's `food`
+    Eat,
+    /// `dx dy`: bite the adjacent actor there, no food
+    Hit,
 }
 
 impl Action {
@@ -209,6 +220,8 @@ impl Action {
             3 => Some(Self::Spawn),
             4 => Some(Self::Move),
             5 => Some(Self::Drink),
+            6 => Some(Self::Eat),
+            7 => Some(Self::Hit),
             _ => None,
         }
     }
@@ -260,6 +273,8 @@ pub struct Outcome {
     pub dx: i8,
     pub dy: i8,
     pub next: Option<u8>,
+    /// `look = v` effect, if the think set one.
+    pub look: Option<u8>,
     pub trap: Option<Trap>,
     /// Ops executed, for `wmc why` and the fuel counters.
     pub used: u32,
@@ -267,8 +282,9 @@ pub struct Outcome {
 
 // ---- predicates ------------------------------------------------------------------------
 
-/// Predicate values, one `i32` at run time: a kind (`>= 0`), or one of
-/// these. Tags come later and share the kind namespace above `TAG_BASE`.
+/// Predicate values, one `i32` at run time: a kind (`0..TAG_BASE`), a tag
+/// (`TAG_BASE + tag index`, matched against the occupant kind's tag bits),
+/// or one of these.
 pub mod pred {
     pub const FREE: i32 = -1;
     pub const GROUND_BASE: i32 = -0x100;
@@ -283,9 +299,22 @@ pub mod pred {
     }
 }
 
-/// Does local cell `i` of `cells` match `pred`?
+/// Does local cell `i` of `cells` match `pred`? `tags` is the tag bitset
+/// per kind (`Kinds::tag_bits`).
 #[inline]
-fn matches(pred: i32, cells: &ChunkCells, i: usize) -> bool {
+fn matches(pred: i32, cells: &ChunkCells, i: usize, tags: &[u64]) -> bool {
+    if pred >= pred::TAG_BASE {
+        let bit = (pred - pred::TAG_BASE) as u32;
+        return match cells.occupant[i].unpack() {
+            Some((kind, _)) => {
+                bit < 64
+                    && tags
+                        .get(usize::from(kind))
+                        .is_some_and(|t| t >> bit & 1 == 1)
+            }
+            None => false,
+        };
+    }
     if pred >= 0 {
         return match cells.occupant[i].unpack() {
             Some((kind, _)) => i32::from(kind) == pred,
@@ -305,9 +334,11 @@ fn matches(pred: i32, cells: &ChunkCells, i: usize) -> bool {
 
 /// A chunk and its eight neighbours, as loaded at tick start. Index
 /// `(oy + 1) * 3 + (ox + 1)`; `None` = not loaded (a wall: rock, nobody).
+/// `tags` is the kind table's tag bitset per kind, for tag predicates.
 #[derive(Debug, Clone, Copy)]
 pub struct Halo<'a> {
     pub chunks: [Option<(&'a ChunkCells, &'a ChunkActors)>; 9],
+    pub tags: &'a [u64],
 }
 
 impl<'a> Halo<'a> {
@@ -337,7 +368,7 @@ impl<'a> Halo<'a> {
     #[inline]
     pub fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
         match self.at(lx, ly, dx, dy) {
-            Some((cells, _, i)) => matches(pred, cells, i),
+            Some((cells, _, i)) => matches(pred, cells, i, self.tags),
             // Unloaded: rock, nobody.
             None => pred == pred::feature(Feature::Rock as u8),
         }
@@ -524,10 +555,11 @@ impl Machine<'_> {
                 self.out.dx = i8::try_from(dx).map_err(|_| Trap::BadAction)?;
                 self.out.dy = i8::try_from(dy).map_err(|_| Trap::BadAction)?;
             }
-            Action::Move | Action::Drink => {
+            Action::Move | Action::Drink | Action::Eat | Action::Hit => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
-                // Far targets are fine: Think reduces a move to one step.
+                // Far targets are fine: Think reduces a move to one step,
+                // Resolve refuses a bite that is not adjacent.
                 self.out.dx = dx.clamp(-127, 127) as i8;
                 self.out.dy = dy.clamp(-127, 127) as i8;
             }
@@ -767,6 +799,20 @@ impl Machine<'_> {
                     let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
                     self.push(i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred)))?;
                 }
+                O::DirOf => {
+                    let i = self.pop()?;
+                    let (dx, dy) = usize::try_from(i - 1)
+                        .ok()
+                        .and_then(|i| DIRS8.get(i))
+                        .copied()
+                        .unwrap_or((0, 0));
+                    self.push(dx)?;
+                    self.push(dy)?;
+                }
+                O::SetLook => {
+                    let v = self.pop()?;
+                    self.out.look = Some(v.clamp(0, 255) as u8);
+                }
                 O::Act => self.act(op.a)?,
                 O::Next => {
                     if usize::from(op.a) >= self.ctx.kind.states.max(1) as usize {
@@ -813,6 +859,29 @@ fn ring_cell(r: i32, k: i32) -> (i32, i32) {
     }
 }
 
+/// The eight directions clockwise from north; `hurt_dir` is an index into
+/// this plus one (0 = none).
+pub const DIRS8: [(i32, i32); 8] = [
+    (0, -1),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+    (0, 1),
+    (-1, 1),
+    (-1, 0),
+    (-1, -1),
+];
+
+/// `hurt_dir` of a unit step `(dx, dy)`: its index in [`DIRS8`] plus one,
+/// 0 for `(0, 0)` or anything that is not a unit step.
+#[inline]
+pub fn dir_index(dx: i32, dy: i32) -> u8 {
+    DIRS8
+        .iter()
+        .position(|&d| d == (dx, dy))
+        .map_or(0, |i| i as u8 + 1)
+}
+
 /// The RNG stream base for `uid` at `tick`: every draw of the think is
 /// `splitmix64(base + n)`.
 pub const STREAM_THINK: u64 = 0x0010;
@@ -845,6 +914,7 @@ pub fn think(program: &super::Kinds, ctx: Ctx<'_>, mind: &mut ActorMind) -> Outc
         m.out.trap = Some(trap);
         m.out.action = Action::Idle;
         m.out.next = None;
+        m.out.look = None;
     }
     m.out
 }
@@ -907,6 +977,7 @@ mod tests {
             mems: vec![],
             states: 1,
             entry,
+            place: 0,
         }
     }
 
@@ -944,6 +1015,7 @@ mod tests {
                 None,
                 None,
             ],
+            tags: &[],
         };
         let k = kind(needs, 0);
         let kinds = Kinds::from_parts(vec![k], code, consts, vec![]);
@@ -1222,6 +1294,7 @@ mod tests {
                 None,
                 None,
             ],
+            tags: &[],
         };
         let ctx = Ctx {
             halo: &halo,
@@ -1283,7 +1356,10 @@ mod tests {
     #[test]
     fn halo_addressing_crosses_into_neighbours() {
         let (cells, actors) = stage();
-        let mut halo = Halo { chunks: [None; 9] };
+        let mut halo = Halo {
+            chunks: [None; 9],
+            tags: &[],
+        };
         halo.chunks[4] = Some((&cells, &actors));
         halo.chunks[5] = Some((&cells, &actors)); // east neighbour
         // From local (63, 5), +1 in x lands in the east chunk at (0, 5).

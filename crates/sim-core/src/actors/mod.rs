@@ -23,7 +23,7 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::stage::{ActorId, CHUNK_CELLS};
 
-pub use systems::{Effect, Intent, Intents, MigrateScratch, Outbox, Scratch};
+pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch};
 
 /// Need counters per actor, named per kind by its rules file.
 pub const NEED_SLOTS: usize = 4;
@@ -266,7 +266,7 @@ mod tests {
         assert_eq!(d.actors.rows[0].stagger, 0x2345);
         assert_eq!(d.actors.rows[1].cell, 20);
         assert_eq!(d.actors.rows[1].flags, 0);
-        assert_eq!(d.validate(2), Ok(()));
+        assert_eq!(d.validate(5), Ok(()));
         assert_eq!(ActorId::pack(3, 4).unpack(), Some((3, 4)));
         assert_eq!(ActorId::NONE.unpack(), None);
     }
@@ -307,7 +307,7 @@ mod tests {
             );
             assert_eq!(d.minds.rows[slot].uid, u64::from(row.cell - 100));
         }
-        assert_eq!(d.validate(2), Ok(()));
+        assert_eq!(d.validate(5), Ok(()));
         // Compacting again is a no-op; killing everything empties it.
         d.actors_mut().compact();
         assert_eq!(d.actors.rows.len(), 3);
@@ -325,26 +325,26 @@ mod tests {
         d.actors_mut().push(1, SEED, mind(1));
         d.actors_mut().push(2, SEED, mind(2));
         let (o, p, m) = (&d.cells.occupant, &d.actors.rows, &d.minds.rows);
-        assert_eq!(validate(o, p, m, 2), Ok(()));
+        assert_eq!(validate(o, p, m, 5), Ok(()));
         assert!(validate(o, p, m, 0).unwrap_err().contains("unknown kind"));
         assert!(
-            validate(o, p, &m[..1], 2)
+            validate(o, p, &m[..1], 5)
                 .unwrap_err()
                 .contains("private rows")
         );
         let mut bad = p.clone();
         bad[1].flags = flags::DEAD;
-        assert!(validate(o, &bad, m, 2).unwrap_err().contains("dead"));
+        assert!(validate(o, &bad, m, 5).unwrap_err().contains("dead"));
         let mut bad = p.clone();
         bad[1].cell = 3;
-        assert!(validate(o, &bad, m, 2).unwrap_err().contains("expects"));
+        assert!(validate(o, &bad, m, 5).unwrap_err().contains("expects"));
         let mut bad = p.clone();
         bad[1].cell = u16::MAX;
-        assert!(validate(o, &bad, m, 2).unwrap_err().contains("outside"));
+        assert!(validate(o, &bad, m, 5).unwrap_err().contains("outside"));
         let mut bad_o = *o;
         bad_o[7] = ActorId::pack(SEED, 0);
         assert!(
-            validate(&bad_o, p, m, 2)
+            validate(&bad_o, p, m, 5)
                 .unwrap_err()
                 .contains("occupied cells")
         );

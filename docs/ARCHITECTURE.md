@@ -3,7 +3,7 @@
 Status: Stage (chunked, unbounded terrain grid), streaming, persistence, a windowed
 ASCII renderer with a WASD camera, and the time model (integer ticks, day/night, speed
 control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27). Actors are designed
-(`ACTORS.md`, decisions 28-30) and being built in its §11 order. This file records
+(`ACTORS.md`, decisions 28-31) and being built in its §11 order. This file records
 decisions that are already made and the shape the design must fit into. Rows superseded by the Bevy move are struck through and kept for the record.
 
 ## Decisions
@@ -40,6 +40,7 @@ decisions that are already made and the shape the design must fit into. Rows sup
 | 28 | **Actors are rows in the chunk they stand on** (`ChunkActors` = 12-byte public `ActorPub` rows, `ChunkMinds` = 88-byte private `ActorMind` rows, both Pod, same order), never entities; `occupant` packs `(kind, slot)`; identity across ticks is a hashed `uid`, never a slot. A kind is a rules file compiled once into shared bytecode. Cadence stagger is **per actor** (`uid` low bits), amending 23's "by chunk coordinate" | The chunk already is the parallel, streaming and save unit, so actors inside it get all three for free; two components let Think read every chunk's public rows while writing its own minds; per-actor stagger moves a flock organically and a migrant keeps its rhythm. Full design: `ACTORS.md` | If the 12-byte due-scan ever shows in a profile: per-chunk "next due tick" cache, still keyed on uids |
 | 29 | Unloaded chunks **freeze**: on load, every row's `last_think` and `born` shift forward by the frozen interval (`now - last_ticked`), so no need decays and nobody ages off screen | Decision 25 as it stands; off-screen populations never starve while the player is away; a reopen at the save tick is bit-identical to never stopping (tested) | If fairness to off-screen plants matters: skip the shift and add growth catch-up in the same commit (both one line) |
 | 30 | Conflicts are settled by state-derived keys, never by thread or slot: in-chunk claims take the `min` key in a parallel phase, cross-chunk effects run sequentially in `stage.active()` order, and a cell contested by an in-chunk and a cross-chunk mover goes to the in-chunk one (**home advantage**) | Bit-identical on any thread count with one parallel and one sequential pass; the asymmetry touches one rare case and is documented | If a herd at a border looks wrong: the symmetric owner-resolves protocol (an Outcomes component + one more parallel pass) |
+| 31 | **Where worldgen starts each kind is a rules property** (`place N / D`), not a terrain parameter: each walkable cell draws one placement hash, and the shares of the kinds that have one cut `0..2^24` into intervals in kind order. `GenParams` is terrain only again (store v6) | A new kind is one file, including where it lives at the start; one hash per cell is cheaper than one per kind; integers only, no floats in the rules | If placement needs terrain conditions (trees only near water): a `place ... where cond` clause evaluated by the VM at generation time |
 
 ## Layers
 

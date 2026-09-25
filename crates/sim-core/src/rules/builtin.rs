@@ -21,14 +21,14 @@
 //!   mem sun
 //!   when count water within 2 > 0   => water = min(water + 12h, 3d)
 //!   when light > 128 and water > 1d => sun += 1
-//!   when sun >= 40 and nearest free within 2 as c => { sun = 0; spawn seed at c }
+//!   when sun >= 4 and nearest free within 2 as c => { sun = 0; spawn seed at c }
 //! }
 //! ```
 //!
 //! A seed within two cells of water refills, counts lit thinks and becomes a
 //! tree after ~20 of them (about a day at cadence 512: 42 thinks a day, half
 //! of them lit). A tree counts sunny, well-watered thinks and drops a seed
-//! on a free cell within two every ~40 of them (about two days).
+//! on a free cell within two every ~4 of them (about five a day).
 
 use super::Kinds;
 
@@ -45,8 +45,10 @@ pub const FILES: [(&str, &str); 2] = [
 ];
 
 pub const CHICKEN: u16 = 0;
-pub const SEED: u16 = 1;
-pub const TREE: u16 = 2;
+pub const EGG: u16 = 1;
+pub const FOX: u16 = 2;
+pub const SEED: u16 = 3;
+pub const TREE: u16 = 4;
 
 pub fn kinds() -> Kinds {
     super::compile::compile_files(&FILES).expect("the built-in rules compile")
@@ -59,7 +61,7 @@ pub fn hand_assembled() -> Kinds {
     use super::vm::{Action, OpCode, Sense, pred};
     use super::{KindDef, NeedDef};
     use crate::stage::Ground;
-    use crate::time::{days, hours, minutes};
+    use crate::time::{days, hours};
 
     // Ids as the plants file compiles on its own.
     const SEED: u16 = 0;
@@ -124,9 +126,9 @@ pub fn hand_assembled() -> Kinds {
     a.need(WATER).push(days(1) as i32).op(OpCode::Gt).jz(next);
     a.mem(0).push(1).op(OpCode::Add).set_mem(0);
     a.end_rule().bind(next);
-    // when sun >= 40 and nearest free within 2 as c => { sun = 0; spawn seed at c }
+    // when sun >= 4 and nearest free within 2 as c => { sun = 0; spawn seed at c }
     let next = a.label();
-    a.mem(0).push(40).op(OpCode::Ge).jz(next);
+    a.mem(0).push(4).op(OpCode::Ge).jz(next);
     a.push(pred::FREE).push(2).nearest(0).jz(next);
     a.push(0).set_mem(0);
     a.push(i32::from(SEED)).load(0).load(1).act(Action::Spawn);
@@ -145,11 +147,11 @@ pub fn hand_assembled() -> Kinds {
             id: SEED,
             name: "seed".into(),
             glyph: b',',
-            tags: 0,
+            tags: 0b11, // plant, feed
             cadence_shift: CADENCE_SHIFT,
             sight: 2,
             fuel: 512,
-            food: minutes(30) as i32,
+            food: hours(3) as i32,
             bite: 1,
             needs: vec![
                 need("water", days(1) as i32, true),
@@ -158,12 +160,13 @@ pub fn hand_assembled() -> Kinds {
             mems: vec!["lit".into()],
             states: 1,
             entry: seed_entry,
+            place: super::PLACE_ONE / 100,
         },
         KindDef {
             id: TREE,
             name: "tree".into(),
             glyph: b'T',
-            tags: 0,
+            tags: 0b01, // plant
             cadence_shift: CADENCE_SHIFT,
             sight: 2,
             fuel: 512,
@@ -176,6 +179,7 @@ pub fn hand_assembled() -> Kinds {
             mems: vec!["sun".into()],
             states: 1,
             entry: tree_entry,
+            place: 0,
         },
     ];
     Kinds::from_parts(defs, code, consts, vec![])

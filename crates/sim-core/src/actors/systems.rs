@@ -1,24 +1,31 @@
 //! The actor phases of a tick (`docs/ACTORS.md` §1, §6):
 //!
 //! ```text
-//! Think    par  every due actor runs its program against the tick-start world;
-//!               writes its own mind and one Intent per actor into the chunk's Intents
-//! Apply    par  own chunk: sort intents by key, claim target cells (min key), apply:
-//!               die, become, drink, in-chunk move/spawn winners; write result codes;
-//!               clear WAKE; cross-chunk move/spawn go to the Outbox
-//! Migrate  seq  every Outbox in stage.active() order, sorted by key: move/spawn into
-//!               another chunk's cell if it is free and untouched this tick
-//! Compact  par  swap-remove dead rows, repair occupant, reset the claim table
+//! Think     par  every due actor runs its program against the tick-start world;
+//!                writes its own mind and one Intent per actor into the chunk's Intents
+//! Resolve   par  own chunk: sort intents by key, clear WAKE of every thinker, record
+//!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites -> Outbox
+//! Exchange  seq  cross-chunk bites recorded on their victims; then, chunk by chunk in
+//!                stage.active() order: sum bites per victim, hurt + WAKE, deaths; then
+//!                food to the lowest-key eater of every victim that died
+//! Apply     par  own chunk: skip the dead, claim target cells (min key), apply die,
+//!                become, drink, in-chunk move/spawn winners, look; result codes;
+//!                cross-chunk move/spawn -> Outbox
+//! Migrate   seq  every Outbox in stage.active() order, sorted by key: move/spawn into
+//!                another chunk's cell if it is free and untouched this tick
+//! Compact   par  swap-remove dead rows, repair occupant, reset scratch
 //! ```
 //!
 //! Think reads any chunk's cells and public rows (nothing writes them in
 //! this phase, so the live state is the tick-start snapshot) and writes only
-//! its own chunk's minds and intents. Apply and Compact touch only the chunk
-//! they are handed; Migrate is the one sequential phase, because it touches
-//! two chunks at once. Every order is sorted-key order; every key is a
-//! function of state (`uid`, tick), never of a slot or a thread. A cell
-//! whose occupancy changed this tick (vacated, claimed, filled) is not
-//! enterable until the next tick, so moves never chain.
+//! its own chunk's minds and intents. Resolve, Apply and Compact touch only
+//! the chunk they are handed; Exchange and Migrate are the sequential
+//! phases, because they touch two chunks at once. Every order is sorted-key
+//! order; every key is a function of state (`uid`, tick), never of a slot or
+//! a thread. Every bite of a tick lands on a tick-start occupant, on either
+//! side of a chunk border, before anyone moves. A cell whose occupancy
+//! changed this tick (vacated, died, claimed, filled) is not enterable
+//! until the next tick, so moves never chain.
 
 use bevy_ecs::prelude::*;
 
@@ -41,16 +48,18 @@ pub struct Intent {
     pub action: Action,
     /// Operand kind of `Become` / `Spawn`; `1` for a validated `Drink`.
     pub kind: u16,
-    /// Operand offset of `Spawn` / `Move` (a unit step) / `Drink`.
+    /// Operand offset of `Spawn` / `Move` (a unit step) / `Drink` / `Eat` / `Hit`.
     pub dx: i8,
     pub dy: i8,
+    /// `look = v` effect, applied whatever the action's result.
+    pub look: Option<u8>,
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
 }
 
 /// The intents of one chunk's actors this tick. Scratch: cleared by Think,
-/// consumed by Apply. `traps` counts trapped thinks since load, for the
-/// status line.
+/// consumed by Resolve and Apply. `traps` counts trapped thinks since load,
+/// for the status line.
 #[derive(Component, Debug, Default)]
 pub struct Intents {
     pub list: Vec<Intent>,
@@ -73,29 +82,54 @@ pub struct Effect {
 pub enum EffectKind {
     Move,
     Spawn(u16),
+    /// `eat` (true) or `hit`, `bite` damage, `dir` from the victim toward
+    /// the biter (a `hurt_dir` value).
+    Bite {
+        bite: u8,
+        eat: bool,
+        dir: u8,
+    },
 }
 
-/// Cross-chunk effects a chunk's actors asked for this tick. Filled by
-/// Apply, drained by Migrate.
+/// Cross-chunk effects a chunk's actors asked for this tick: bites (filled
+/// by Resolve, drained by Exchange), then moves and spawns (filled by
+/// Apply, drained by Migrate).
 #[derive(Component, Debug, Default)]
 pub struct Outbox {
     pub list: Vec<Effect>,
 }
 
-/// Migrate's working list: every outbox of the tick, sorted by key.
+/// A bite that landed on one of a chunk's actors this tick, from any chunk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hit {
+    /// Victim's local cell (its tick-start position).
+    pub cell: u16,
+    pub key: u64,
+    /// The biter: its chunk and row.
+    pub from: Entity,
+    pub slot: u16,
+    pub bite: u8,
+    pub eat: bool,
+    pub dir: u8,
+}
+
+/// Working lists of the two sequential phases: every outbox of the tick,
+/// sorted by key, and the food owed to eaters.
 #[derive(Resource, Debug, Default)]
-pub struct MigrateScratch {
+pub struct CrossScratch {
     list: Vec<(Entity, Effect)>,
+    credits: Vec<(Entity, u16, i32)>,
 }
 
 /// Per-chunk resolve scratch: the claim table (`UNCLAIMED` = nobody wants
 /// the cell and nothing changed there this tick, `TOUCHED` = its occupancy
 /// changed this tick, else the lowest key that claimed it), the cells to
-/// reset, and how many rows died.
+/// reset, the bites taken, and how many rows died.
 #[derive(Component, Debug)]
 pub struct Scratch {
     claim: Vec<u64>,
     touched: Vec<u16>,
+    pub hits: Vec<Hit>,
     pub deaths: u32,
 }
 
@@ -107,19 +141,24 @@ impl Default for Scratch {
         Self {
             claim: vec![UNCLAIMED; CHUNK_CELLS],
             touched: Vec::new(),
+            hits: Vec::new(),
             deaths: 0,
         }
     }
 }
 
 impl Scratch {
-    /// `claim[cell] = min(claim[cell], key)`.
+    /// `claim[cell] = min(claim[cell], key)`, unless the cell was touched.
     fn claim(&mut self, cell: usize, key: u64) {
         let c = &mut self.claim[cell];
-        if *c == UNCLAIMED {
-            self.touched.push(cell as u16);
+        match *c {
+            TOUCHED => {}
+            UNCLAIMED => {
+                self.touched.push(cell as u16);
+                *c = key;
+            }
+            _ => *c = (*c).min(key),
         }
-        *c = (*c).min(key);
     }
 
     /// The cell's occupancy changed this tick: nobody else enters it.
@@ -140,6 +179,7 @@ impl Scratch {
             self.claim[usize::from(c)] = UNCLAIMED;
         }
         self.touched.clear();
+        self.hits.clear();
     }
 }
 
@@ -160,6 +200,7 @@ fn halo_of<'a>(
     stage: &Stage,
     cells: &'a Query<&ChunkCells>,
     pubs: &'a Query<&ChunkActors>,
+    tags: &'a [u64],
     c: ChunkCoord,
 ) -> Halo<'a> {
     let mut chunks = [None; 9];
@@ -172,7 +213,7 @@ fn halo_of<'a>(
             *slot = Some((cells, pubs));
         }
     }
-    Halo { chunks }
+    Halo { chunks, tags }
 }
 
 // ---- Think ------------------------------------------------------------------------------
@@ -210,7 +251,8 @@ pub fn think(
                 if !due(tick, row, kind.cadence()) {
                     continue;
                 }
-                let halo = halo.get_or_insert_with(|| halo_of(stage, cells, pubs, *coord));
+                let halo = halo
+                    .get_or_insert_with(|| halo_of(stage, cells, pubs, &kinds.tag_bits, *coord));
                 let mind = &mut minds.rows[slot];
                 let intent = think_one(kinds, tick, seed, halo, *coord, slot as u16, row, mind);
                 intents.list.push(intent);
@@ -243,6 +285,7 @@ fn think_one(
         kind: 0,
         dx: 0,
         dy: 0,
+        look: None,
         trapped: false,
     };
     if vm::decay(kind, mind, tick) {
@@ -273,6 +316,7 @@ fn think_one(
     intent.kind = out.kind;
     intent.dx = out.dx;
     intent.dy = out.dy;
+    intent.look = out.look;
     intent.trapped = out.trap.is_some();
     let (lx, ly) = local_xy(cell);
     match out.action {
@@ -303,18 +347,6 @@ fn local_xy(cell: usize) -> (i32, i32) {
     ((cell as i32) & 63, (cell as i32) >> 6)
 }
 
-/// The eight directions clockwise from north.
-const DIRS8: [(i32, i32); 8] = [
-    (0, -1),
-    (1, -1),
-    (1, 0),
-    (1, 1),
-    (0, 1),
-    (-1, 1),
-    (-1, 0),
-    (-1, -1),
-];
-
 /// Reduce a move to one step: `(sign dx, sign dy)`, and if that cell is not
 /// free at tick start, the 45-degree neighbour clockwise, then the one
 /// counter-clockwise. None free: the straight step, which Apply will
@@ -324,14 +356,241 @@ pub fn step_toward(halo: &Halo<'_>, lx: i32, ly: i32, dx: i32, dy: i32) -> (i32,
     if s == (0, 0) {
         return s;
     }
-    let i = DIRS8.iter().position(|&d| d == s).expect("a unit step");
+    let dirs = &vm::DIRS8;
+    let i = dirs.iter().position(|&d| d == s).expect("a unit step");
     for j in [i, (i + 1) % 8, (i + 7) % 8] {
-        let (cx, cy) = DIRS8[j];
+        let (cx, cy) = dirs[j];
         if halo.free(lx, ly, cx, cy) {
             return (cx, cy);
         }
     }
     s
+}
+
+// ---- Resolve ----------------------------------------------------------------------------
+
+/// Own chunk, in parallel: intents into key order, WAKE consumed by every
+/// actor that thought, bites recorded. A bite must be adjacent and land on
+/// an actor with a `health` need (else REFUSED); an empty cell is MISSED.
+/// Bites into another chunk go to the Outbox for Exchange.
+pub fn resolve(
+    kinds: Res<Kinds>,
+    mut q: Query<(
+        Entity,
+        &ChunkCoord,
+        &ChunkCells,
+        &mut ChunkActors,
+        &mut ChunkMinds,
+        &mut Intents,
+        &mut Scratch,
+        &mut Outbox,
+    )>,
+) {
+    let kinds = &*kinds;
+    q.par_iter_mut().for_each(
+        |(e, coord, cells, mut pubs, mut minds, mut intents, mut scratch, mut outbox)| {
+            outbox.list.clear();
+            if intents.list.is_empty() {
+                return;
+            }
+            // Every order below is a function of state, never of slot history.
+            intents.list.sort_unstable_by_key(|i| (i.key, i.slot));
+            for it in &intents.list {
+                let slot = usize::from(it.slot);
+                // The think consumed the wake-up; a bite this tick sets it again.
+                pubs.rows[slot].flags &= !flags::WAKE;
+                if !matches!(it.action, Action::Eat | Action::Hit) {
+                    continue;
+                }
+                let (dx, dy) = (i32::from(it.dx), i32::from(it.dy));
+                let res = if dx.abs() > 1 || dy.abs() > 1 || (dx, dy) == (0, 0) {
+                    result::REFUSED
+                } else {
+                    let row = pubs.rows[slot];
+                    let bite = kinds.def(row.kind).bite;
+                    let eat = it.action == Action::Eat;
+                    let dir = vm::dir_index(-dx, -dy);
+                    match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
+                        Where::Here(cell) => match cells.occupant[cell].unpack() {
+                            None => result::MISSED,
+                            Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
+                            Some(_) => {
+                                scratch.hits.push(Hit {
+                                    cell: cell as u16,
+                                    key: it.key,
+                                    from: e,
+                                    slot: it.slot,
+                                    bite,
+                                    eat,
+                                    dir,
+                                });
+                                result::OK
+                            }
+                        },
+                        Where::Elsewhere(to, cell) => {
+                            outbox.list.push(Effect {
+                                key: it.key,
+                                slot: it.slot,
+                                what: EffectKind::Bite { bite, eat, dir },
+                                to,
+                                cell: cell as u16,
+                            });
+                            result::NONE // Exchange decides
+                        }
+                    }
+                };
+                set_result_in(&mut minds, slot, res);
+            }
+        },
+    );
+}
+
+#[inline]
+fn has_health(kinds: &Kinds, kind: u16) -> bool {
+    kinds.def(kind).need_named("health").is_some()
+}
+
+// ---- Exchange ---------------------------------------------------------------------------
+
+type ChunkQuery<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut ChunkCells,
+        &'static mut ChunkActors,
+        &'static mut ChunkMinds,
+        &'static mut Scratch,
+        &'static mut ChunkMeta,
+    ),
+>;
+
+/// Damage, deaths and kill credit, one thread. First every cross-chunk bite
+/// is recorded on its victim (tick-start occupancy: nothing has died or
+/// moved yet). Then, chunk by chunk in `stage.active()` order, the bites on
+/// each victim are summed off its `health`, its `hurt` grows (saturating),
+/// `hurt_dir` points at the lowest-key biter and `WAKE` is set; at
+/// `health <= 0` it dies. Last, the lowest-key `eat` of every victim that
+/// died gains the victim kind's `food`, if the eater is alive itself.
+pub fn exchange(
+    kinds: Res<Kinds>,
+    stage: Res<Stage>,
+    mut work: ResMut<CrossScratch>,
+    mut outboxes: Query<&mut Outbox>,
+    mut chunks: ChunkQuery,
+) {
+    let kinds = &*kinds;
+    let work = &mut *work;
+    work.list.clear();
+    work.credits.clear();
+    for &(_, e) in stage.active() {
+        if let Ok(mut ob) = outboxes.get_mut(e)
+            && !ob.list.is_empty()
+        {
+            work.list.extend(ob.list.drain(..).map(|fx| (e, fx)));
+        }
+    }
+    work.list.sort_unstable_by_key(|(_, fx)| (fx.key, fx.slot));
+    for &(src_e, fx) in &work.list {
+        let EffectKind::Bite { bite, eat, dir } = fx.what else {
+            continue;
+        };
+        let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
+            Some(Ok((cells, _, _, mut scratch, _))) => {
+                match cells.occupant[usize::from(fx.cell)].unpack() {
+                    None => result::MISSED,
+                    Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
+                    Some(_) => {
+                        scratch.hits.push(Hit {
+                            cell: fx.cell,
+                            key: fx.key,
+                            from: src_e,
+                            slot: fx.slot,
+                            bite,
+                            eat,
+                            dir,
+                        });
+                        result::OK
+                    }
+                }
+            }
+            // Not loaded: nobody there.
+            _ => result::MISSED,
+        };
+        set_result(&mut chunks, src_e, usize::from(fx.slot), res);
+    }
+
+    for &(_, e) in stage.active() {
+        let Ok((mut cells, mut pubs, mut minds, mut scratch, mut meta)) = chunks.get_mut(e) else {
+            continue;
+        };
+        if scratch.hits.is_empty() {
+            continue;
+        }
+        let scratch = &mut *scratch;
+        scratch
+            .hits
+            .sort_unstable_by_key(|h| (h.cell, h.key, h.slot));
+        let mut i = 0;
+        while i < scratch.hits.len() {
+            let first = scratch.hits[i];
+            let mut j = i;
+            let mut damage = 0i32;
+            let mut eater = None;
+            while j < scratch.hits.len() && scratch.hits[j].cell == first.cell {
+                let h = scratch.hits[j];
+                damage += i32::from(h.bite);
+                if h.eat && eater.is_none() {
+                    eater = Some(h);
+                }
+                j += 1;
+            }
+            i = j;
+            let cell = usize::from(first.cell);
+            let Some((vk, vslot)) = cells.occupant[cell].unpack() else {
+                continue;
+            };
+            let vslot = usize::from(vslot);
+            let def = kinds.def(vk);
+            let Some(h) = def.need_named("health") else {
+                continue;
+            };
+            let m = &mut minds.rows[vslot];
+            m.needs[h] = m.needs[h].saturating_sub(damage);
+            m.hurt = m.hurt.saturating_add(damage.clamp(0, 255) as u8);
+            m.hurt_dir = first.dir;
+            let dead = m.needs[h] <= 0;
+            pubs.rows[vslot].flags |= flags::WAKE;
+            if dead {
+                ActorsMut {
+                    pubs: &mut pubs.rows,
+                    minds: &mut minds.rows,
+                    occupant: &mut cells.occupant,
+                }
+                .kill(vslot);
+                scratch.deaths += 1;
+                scratch.touch(cell);
+                if let Some(eater) = eater {
+                    work.credits.push((eater.from, eater.slot, def.food));
+                }
+            }
+            meta.dirty = true;
+        }
+    }
+
+    for &(e, slot, food) in &work.credits {
+        let Ok((_, pubs, mut minds, _, _)) = chunks.get_mut(e) else {
+            continue;
+        };
+        let row = pubs.rows[usize::from(slot)];
+        if row.flags & flags::DEAD != 0 {
+            continue;
+        }
+        let def = kinds.def(row.kind);
+        if let Some(f) = def.need_named("food") {
+            let m = &mut minds.rows[usize::from(slot)];
+            m.needs[f] = m.needs[f].saturating_add(food).min(def.needs[f].max);
+        }
+    }
 }
 
 // ---- Apply ------------------------------------------------------------------------------
@@ -353,20 +612,22 @@ pub fn apply(
     let (tick, seed, kinds) = (tick.0, cfg.seed, &*kinds);
     q.par_iter_mut().for_each(
         |(coord, mut cells, mut pubs, mut minds, mut intents, mut scratch, mut outbox)| {
+            // Exchange drained the bites; what goes in now is moves and spawns.
             outbox.list.clear();
             if intents.list.is_empty() {
                 return;
             }
-            // Every order below is a function of state, never of slot history.
-            intents.list.sort_unstable_by_key(|i| (i.key, i.slot));
-
-            // Claims: in-chunk targets free at tick start, lowest key wins.
+            // Claims: in-chunk targets free at tick start and untouched, lowest
+            // key wins. Intents are in key order since Resolve.
             for it in &intents.list {
                 if !matches!(it.action, Action::Move | Action::Spawn) {
                     continue;
                 }
-                let from = usize::from(pubs.rows[usize::from(it.slot)].cell);
-                if let Some(cell) = local_target(from, it.dx, it.dy)
+                let row = pubs.rows[usize::from(it.slot)];
+                if row.flags & flags::DEAD != 0 {
+                    continue;
+                }
+                if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
                     && cells.walkable(cell)
                     && cells.occupant[cell].is_none()
                 {
@@ -377,6 +638,10 @@ pub fn apply(
             let mut traps = 0;
             for it in &intents.list {
                 let slot = usize::from(it.slot);
+                traps += u32::from(it.trapped);
+                if pubs.rows[slot].flags & flags::DEAD != 0 {
+                    continue; // died in Exchange: its intent is void
+                }
                 let from = usize::from(pubs.rows[slot].cell);
                 let mut actors = ActorsMut {
                     pubs: &mut pubs.rows,
@@ -384,24 +649,27 @@ pub fn apply(
                     occupant: &mut cells.occupant,
                 };
                 let res = match it.action {
-                    Action::Idle => result::OK,
+                    Action::Idle => Some(result::OK),
+                    // Resolve and Exchange already wrote the result.
+                    Action::Eat | Action::Hit => None,
                     Action::Die => {
                         actors.kill(slot);
                         scratch.deaths += 1;
-                        result::OK
+                        scratch.touch(from);
+                        Some(result::OK)
                     }
-                    Action::Become => change_kind(kinds, tick, &mut actors, slot, it.kind),
+                    Action::Become => Some(change_kind(kinds, tick, &mut actors, slot, it.kind)),
                     Action::Drink => {
                         let kind = kinds.def(actors.pubs[slot].kind);
-                        match (it.kind, kind.need_named("water")) {
+                        Some(match (it.kind, kind.need_named("water")) {
                             (1, Some(i)) => {
                                 actors.minds[slot].needs[i] = kind.needs[i].max;
                                 result::OK
                             }
                             _ => result::REFUSED,
-                        }
+                        })
                     }
-                    Action::Move => match target_of(*coord, from, it.dx, it.dy) {
+                    Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let kind = actors.pubs[slot].kind;
                             actors.occupant[from] = ActorId::NONE;
@@ -421,8 +689,8 @@ pub fn apply(
                             });
                             result::NONE // Migrate decides
                         }
-                    },
-                    Action::Spawn => match target_of(*coord, from, it.dx, it.dy) {
+                    }),
+                    Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell)
                             if usize::from(it.kind) < kinds.len()
                                 && scratch.claim[cell] == it.key =>
@@ -435,6 +703,7 @@ pub fn apply(
                                 tick,
                             );
                             actors.push(cell, it.kind, child);
+                            scratch.touch(cell);
                             result::OK
                         }
                         Where::Here(_) => result::BLOCKED,
@@ -449,12 +718,14 @@ pub fn apply(
                             result::NONE
                         }
                         Where::Elsewhere(..) => result::REFUSED,
-                    },
+                    }),
                 };
-                let m = &mut minds.rows[slot];
-                m.events = (m.events & !result::MASK) | res;
-                pubs.rows[slot].flags &= !flags::WAKE;
-                traps += u32::from(it.trapped);
+                if let Some(res) = res {
+                    set_result_in(&mut minds, slot, res);
+                }
+                if let Some(look) = it.look {
+                    pubs.rows[slot].look = look;
+                }
             }
             intents.traps += traps;
         },
@@ -544,18 +815,6 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
 
 // ---- Migrate ----------------------------------------------------------------------------
 
-type ChunkQuery<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static mut ChunkCells,
-        &'static mut ChunkActors,
-        &'static mut ChunkMinds,
-        &'static mut Scratch,
-        &'static mut ChunkMeta,
-    ),
->;
-
 /// Cross-chunk moves and spawns, one thread, every outbox in `stage.active()`
 /// order and then every effect in key order. A target cell must be loaded,
 /// walkable, empty and untouched this tick; an in-chunk winner from Apply
@@ -565,14 +824,16 @@ pub fn migrate(
     cfg: Res<SimConfig>,
     kinds: Res<Kinds>,
     stage: Res<Stage>,
-    mut work: ResMut<MigrateScratch>,
+    mut work: ResMut<CrossScratch>,
     mut outboxes: Query<&mut Outbox>,
     mut chunks: ChunkQuery,
 ) {
     let (tick, seed) = (tick.0, cfg.seed);
     work.list.clear();
     for &(_, e) in stage.active() {
-        if let Ok(mut ob) = outboxes.get_mut(e) {
+        if let Ok(mut ob) = outboxes.get_mut(e)
+            && !ob.list.is_empty()
+        {
             work.list.extend(ob.list.drain(..).map(|fx| (e, fx)));
         }
     }
@@ -581,6 +842,9 @@ pub fn migrate(
     }
     work.list.sort_unstable_by_key(|(_, fx)| (fx.key, fx.slot));
     for &(src_e, fx) in &work.list {
+        if matches!(fx.what, EffectKind::Bite { .. }) {
+            continue; // Exchange's; never here
+        }
         let slot = usize::from(fx.slot);
         let cell = usize::from(fx.cell);
         let Some(dst_e) = stage.entity(fx.to) else {
@@ -615,6 +879,7 @@ pub fn migrate(
                 let moved = &mut to.pubs[usize::from(new)];
                 moved.signal = row.signal;
                 moved.look = row.look;
+                moved.flags = row.flags & flags::WAKE;
                 let mut from = ActorsMut {
                     pubs: &mut src_pubs.rows,
                     minds: &mut src_minds.rows,
@@ -635,6 +900,7 @@ pub fn migrate(
                 to.push(cell, kind, child);
                 set_result_in(src_minds, slot, result::OK);
             }
+            EffectKind::Bite { .. } => unreachable!("skipped above"),
         }
         dst_scratch.touch(cell);
         dst_meta.dirty = true;
@@ -693,7 +959,7 @@ mod tests {
     fn halo_one<'a>(cells: &'a ChunkCells, actors: &'a ChunkActors) -> Halo<'a> {
         let mut chunks = [None; 9];
         chunks[4] = Some((cells, actors));
-        Halo { chunks }
+        Halo { chunks, tags: &[] }
     }
 
     #[test]
@@ -720,6 +986,30 @@ mod tests {
         assert_eq!(intent_key(7, 100), intent_key(7, 100));
         assert_ne!(intent_key(7, 100), intent_key(8, 100));
         assert_ne!(intent_key(7, 100), intent_key(7, 101));
+    }
+
+    #[test]
+    fn claims_take_the_lowest_key_and_never_a_touched_cell() {
+        let mut s = Scratch::default();
+        s.claim(5, 30);
+        s.claim(5, 10);
+        s.claim(5, 20);
+        assert_eq!(s.claim[5], 10);
+        s.touch(6);
+        s.claim(6, 1);
+        assert_eq!(s.claim[6], TOUCHED);
+        assert!(!s.enterable(5) && !s.enterable(6) && s.enterable(7));
+        s.hits.push(Hit {
+            cell: 1,
+            key: 0,
+            from: Entity::PLACEHOLDER,
+            slot: 0,
+            bite: 1,
+            eat: false,
+            dir: 0,
+        });
+        s.reset();
+        assert!(s.enterable(5) && s.enterable(6) && s.hits.is_empty());
     }
 
     #[test]
@@ -786,5 +1076,8 @@ mod tests {
         assert_eq!(step_toward(&halo, 10, 10, 0, 0), (0, 0));
         // Off the halo's edge counts as blocked.
         assert_eq!(step_toward(&halo, 0, 5, -1, 0), (-1, 0));
+        assert_eq!(vm::dir_index(0, -1), 1);
+        assert_eq!(vm::dir_index(-1, -1), 8);
+        assert_eq!(vm::dir_index(0, 0), 0);
     }
 }

@@ -2,9 +2,10 @@
 //!
 //! Every cell is a **pure function of `(seed, x, y)`**: ground comes from
 //! thresholded value noise, rocks from a per-cell hash, and so is every
-//! actor row worldgen places (a `seed` on a walkable cell when its hash
-//! falls under `seed_density`, a `chicken` under `animal_density`, with a
-//! `uid` hashed from its position; a kind the rule set lacks is not placed). No
+//! actor row worldgen places: each walkable cell draws one placement hash,
+//! and the rules' `place N / D` shares cut `0..PLACE_ONE` into one interval
+//! per kind, in kind order (`Kinds::placed`); the row's `uid` is hashed
+//! from its position. No
 //! sequential state, so a chunk's content never depends on when, in which
 //! order, or on how many threads it was generated. Rows are pushed in cell
 //! order, so slot order is pure too. What is *not* pure is the tick a row
@@ -21,9 +22,9 @@ use bytemuck::Zeroable;
 /// Hash streams used by generation. Never reuse a value elsewhere.
 pub const STREAM_GROUND: u64 = 0x0001;
 pub const STREAM_ROCK: u64 = 0x0002;
-pub const STREAM_SEED: u64 = 0x0003;
+// 0x0003 and 0x0005 were per-kind placement streams; retired, never reuse.
 pub const STREAM_UID: u64 = 0x0004;
-pub const STREAM_ANIMAL: u64 = 0x0005;
+pub const STREAM_PLACE: u64 = 0x0006;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -37,10 +38,6 @@ pub struct GenParams {
     pub rock_on_soil: f32,
     /// Probability that a water cell holds a rock.
     pub rock_on_water: f32,
-    /// Probability that a walkable cell starts with a seed on it.
-    pub seed_density: f32,
-    /// Probability that a walkable cell without a seed starts with a chicken.
-    pub animal_density: f32,
 }
 
 impl Default for GenParams {
@@ -50,8 +47,6 @@ impl Default for GenParams {
             water_level: 0.30,
             rock_on_soil: 0.04,
             rock_on_water: 0.01,
-            seed_density: 0.01,
-            animal_density: 0.002,
         }
     }
 }
@@ -79,21 +74,15 @@ pub fn generate_chunk(
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
     out.actors.rows.clear();
     out.minds.rows.clear();
-    let seed_kind = kinds.by_name("seed").map(|k| k.id);
-    let animal_kind = kinds.by_name("chicken").map(|k| k.id);
+    if !kinds.places_any() {
+        return;
+    }
     for i in 0..CHUNK_CELLS {
-        let p = coord.cell(i);
         if !out.cells.walkable(i) {
             continue;
         }
-        let kind = if seed_here(seed, params, p.x, p.y) {
-            seed_kind
-        } else if animal_here(seed, params, p.x, p.y) {
-            animal_kind
-        } else {
-            None
-        };
-        if let Some(kind) = kind {
+        let p = coord.cell(i);
+        if let Some(kind) = kinds.placed(placement_hash(seed, p.x, p.y)) {
             let mind = ActorMind {
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
@@ -101,6 +90,12 @@ pub fn generate_chunk(
             out.actors_mut().push(i, kind, mind);
         }
     }
+}
+
+/// A cell's placement draw in `0..PLACE_ONE` (the top 24 bits). Pure.
+#[inline]
+pub fn placement_hash(seed: u64, x: i32, y: i32) -> u32 {
+    (hash_cell(seed, STREAM_PLACE, x, y) >> 40) as u32
 }
 
 /// Generate many chunks in parallel, results in input order. Each task
@@ -117,18 +112,6 @@ pub fn generate_many(
         generate_chunk(seed, params, kinds, c, data);
     });
     out
-}
-
-/// Does a seed start on this (walkable) cell? Pure.
-#[inline]
-fn seed_here(seed: u64, p: &GenParams, x: i32, y: i32) -> bool {
-    unit_f32(hash_cell(seed, STREAM_SEED, x, y)) < p.seed_density
-}
-
-/// Does a chicken start on this (walkable, seedless) cell? Pure.
-#[inline]
-fn animal_here(seed: u64, p: &GenParams, x: i32, y: i32) -> bool {
-    unit_f32(hash_cell(seed, STREAM_ANIMAL, x, y)) < p.animal_density
 }
 
 /// Chunks per generation task. Measured (`make bench`, `generate_many`):
@@ -240,8 +223,8 @@ mod tests {
         let mut data = ChunkData::default();
         generate_chunk(7, &p, &kinds, coord, &mut data);
         let cells = &data.cells;
-        let mut expect_rows = 0;
-        let mut chickens = 0;
+        let mut rows = 0;
+        let mut per_kind = vec![0usize; kinds.len()];
         for i in 0..CHUNK_CELLS {
             let Pos { x, y } = coord.cell(i);
             assert_eq!(
@@ -249,23 +232,30 @@ mod tests {
                 gen_cell(7, &p, x, y),
                 "{x},{y}"
             );
-            let seeded = cells.walkable(i) && seed_here(7, &p, x, y);
-            let animal = cells.walkable(i) && !seeded && animal_here(7, &p, x, y);
-            assert_eq!(!cells.occupant[i].is_none(), seeded || animal, "{x},{y}");
-            if seeded || animal {
-                let (kind, slot) = cells.occupant[i].unpack().unwrap();
-                assert_eq!(kind, if seeded { SEED } else { CHICKEN });
-                chickens += usize::from(animal);
-                assert_eq!(usize::from(slot), expect_rows, "rows are in cell order");
-                let mind = data.minds.rows[expect_rows];
+            let want = if cells.walkable(i) {
+                kinds.placed(placement_hash(7, x, y))
+            } else {
+                None
+            };
+            assert_eq!(cells.occupant[i].unpack().map(|(k, _)| k), want, "{x},{y}");
+            if let Some((kind, slot)) = cells.occupant[i].unpack() {
+                per_kind[usize::from(kind)] += 1;
+                assert_eq!(usize::from(slot), rows, "rows are in cell order");
+                let mind = data.minds.rows[rows];
                 assert_eq!(mind.uid, hash_cell(7, STREAM_UID, x, y));
                 assert_eq!((mind.born, mind.last_think), (0, 0));
-                expect_rows += 1;
+                rows += 1;
             }
         }
         assert!(
-            expect_rows > chickens && chickens > 0,
-            "default densities place seeds and chickens"
+            per_kind[usize::from(SEED)] > per_kind[usize::from(CHICKEN)]
+                && per_kind[usize::from(CHICKEN)] > 0,
+            "the built-in shares place seeds and chickens: {per_kind:?}"
+        );
+        assert_eq!(
+            per_kind[usize::from(crate::rules::TREE)],
+            0,
+            "trees are grown, not placed"
         );
         assert_eq!(data.validate(kinds.len()), Ok(()));
         // Regenerating into a dirty buffer gives the same bytes.
@@ -275,21 +265,30 @@ mod tests {
         generate_chunk(7, &p, &kinds, coord, &mut again);
         assert_eq!(data.hash(), again.hash());
         assert_eq!(data, again);
-        // Density 0 is a stage with nobody on it; a rule set without the
-        // kind places none of it either.
-        let bare = GenParams {
-            seed_density: 0.0,
-            animal_density: 0.0,
-            ..p
-        };
+        // Rules that place nobody leave the same terrain, bare.
         let mut empty = ChunkData::default();
-        generate_chunk(7, &bare, &kinds, coord, &mut empty);
+        generate_chunk(7, &p, &kinds.clone().without_placement(), coord, &mut empty);
         assert!(empty.actors.rows.is_empty());
-        let plants_only = crate::rules::compile("p", crate::rules::builtin::FILES[1].1).unwrap();
-        let mut no_animals = ChunkData::default();
-        generate_chunk(7, &p, &plants_only, coord, &mut no_animals);
-        assert_eq!(no_animals.actors.rows.len(), expect_rows - chickens);
         assert_eq!(empty.cells.ground, data.cells.ground);
+    }
+
+    #[test]
+    fn placement_shares_split_the_range_in_kind_order() {
+        let k = crate::rules::compile(
+            "t",
+            "kind a { place 1 / 4 } kind b { } kind c { place 1 / 2 }",
+        )
+        .unwrap();
+        let one = crate::rules::PLACE_ONE;
+        assert_eq!(k.placed(0), Some(0));
+        assert_eq!(k.placed(one / 4 - 1), Some(0));
+        assert_eq!(k.placed(one / 4), Some(2));
+        assert_eq!(k.placed(one * 3 / 4 - 1), Some(2));
+        assert_eq!(k.placed(one * 3 / 4), None);
+        assert!(
+            crate::rules::compile("t", "kind a { place 3 / 4 } kind b { place 1 / 2 }").is_err()
+        );
+        assert!(crate::rules::compile("t", "kind a { place 5 / 4 }").is_err());
     }
 
     #[test]

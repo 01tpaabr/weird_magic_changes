@@ -18,7 +18,7 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use vm::Op;
 
-pub use builtin::{CHICKEN, SEED, TREE};
+pub use builtin::{CHICKEN, EGG, FOX, SEED, TREE};
 pub use compile::{CompileError, compile, compile_dir, compile_files};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
@@ -59,7 +59,14 @@ pub struct KindDef {
     pub states: u8,
     /// Program counter of the think.
     pub entry: u32,
+    /// Share of walkable cells worldgen starts this kind on, out of
+    /// [`PLACE_ONE`] (`place 1 / 100` = `PLACE_ONE / 100`). 0 = never.
+    pub place: u32,
 }
+
+/// The whole of a cell's placement range: `place` values are out of this
+/// (the top 24 bits of a cell hash, exact in integers).
+pub const PLACE_ONE: u32 = 1 << 24;
 
 impl KindDef {
     pub fn cadence(&self) -> u64 {
@@ -114,6 +121,12 @@ pub struct Kinds {
     pub defs: Vec<KindDef>,
     /// `defs[i].glyph`, for the renderer's per-cell lookup.
     pub glyphs: Vec<u8>,
+    /// `defs[i].tags`, for tag predicates in the VM's halo.
+    pub tag_bits: Vec<u64>,
+    /// Worldgen placement: `(cumulative upper bound, kind)` in kind order,
+    /// kinds with `place > 0` only. A walkable cell whose placement hash is
+    /// below an entry's bound (and above the previous one) starts that kind.
+    placement: Vec<(u32, u16)>,
     pub code: Vec<Op>,
     pub consts: Vec<i32>,
     /// Entry pc per sub, indexed by `Call imm`.
@@ -140,6 +153,17 @@ impl Kinds {
             assert!(d.cadence_shift < 32, "{}: cadence", d.name);
         }
         let glyphs = defs.iter().map(|d| d.glyph).collect();
+        let tag_bits = defs.iter().map(|d| d.tags).collect();
+        let mut placement = Vec::new();
+        let mut upto = 0u64;
+        for d in defs.iter().filter(|d| d.place > 0) {
+            upto += u64::from(d.place);
+            assert!(
+                upto <= u64::from(PLACE_ONE),
+                "placement shares exceed the whole"
+            );
+            placement.push((upto as u32, d.id));
+        }
         let n = defs.len();
         let remaps = (0..n * n)
             .map(|i| Remap::between(&defs[i / n], &defs[i % n]))
@@ -148,6 +172,8 @@ impl Kinds {
         Self {
             defs,
             glyphs,
+            tag_bits,
+            placement,
             code,
             consts,
             subs,
@@ -159,6 +185,33 @@ impl Kinds {
     /// The kinds this build knows.
     pub fn builtin() -> Self {
         builtin::kinds()
+    }
+
+    /// The same rules with worldgen placing nobody: a bare stage to put
+    /// actors on by hand (tests, scenarios). A different rule set: its hash
+    /// differs.
+    pub fn without_placement(self) -> Self {
+        let defs = self
+            .defs
+            .into_iter()
+            .map(|d| KindDef { place: 0, ..d })
+            .collect();
+        Self::from_parts(defs, self.code, self.consts, self.subs)
+    }
+
+    /// The kind worldgen starts on a walkable cell whose placement hash is
+    /// `u` (`0..PLACE_ONE`), if any.
+    #[inline]
+    pub fn placed(&self, u: u32) -> Option<u16> {
+        self.placement
+            .iter()
+            .find(|&&(upto, _)| u < upto)
+            .map(|&(_, kind)| kind)
+    }
+
+    /// Does worldgen place anyone at all?
+    pub fn places_any(&self) -> bool {
+        !self.placement.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -200,6 +253,7 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.sight) << 16
             | u64::from(d.bite) << 24);
         mix(d.tags);
+        mix(u64::from(d.place) | 1 << 42);
         mix(u64::from(d.fuel) | u64::from(d.food as u32) << 32);
         mix(u64::from(d.entry) | u64::from(d.states) << 32);
         for n in &d.needs {
@@ -236,22 +290,34 @@ mod tests {
         let k = Kinds::builtin();
         assert_eq!(
             k.names().collect::<Vec<_>>(),
-            vec!["chicken", "seed", "tree"]
+            vec!["chicken", "egg", "fox", "seed", "tree"]
         );
-        assert_eq!(k.def(CHICKEN).id, CHICKEN);
-        assert_eq!(k.def(SEED).id, SEED);
-        assert_eq!(k.def(TREE).id, TREE);
-        assert_eq!(k.glyphs, vec![b'c', b',', b'T']);
+        for (id, name) in [
+            (CHICKEN, "chicken"),
+            (EGG, "egg"),
+            (FOX, "fox"),
+            (SEED, "seed"),
+            (TREE, "tree"),
+        ] {
+            assert_eq!(k.def(id).name, name);
+            assert_eq!(k.def(id).id, id);
+        }
+        assert_eq!(k.glyphs, vec![b'c', b'o', b'f', b',', b'T']);
         assert_eq!(k.hash, Kinds::builtin().hash);
-        assert!(!k.is_empty() && k.len() == 3);
-        assert_eq!(k.def(CHICKEN).need_named("water"), Some(0));
+        assert!(!k.is_empty() && k.len() == 5);
+        assert_eq!(k.def(CHICKEN).need_named("water"), Some(1));
         assert_eq!(k.def(TREE).need_named("food"), None);
+        // Tags in first-appearance order: animal, meat, plant, feed.
+        assert_eq!(k.tag_bits, vec![0b0011, 0b0010, 0b0001, 0b1100, 0b0100]);
         let mut other = Kinds::builtin();
         other.defs[0].glyph = b'x';
         assert_ne!(
             hash_all(&other.defs, &other.code, &other.consts, &other.subs),
             k.hash
         );
+        let bare = Kinds::builtin().without_placement();
+        assert!(!bare.places_any() && k.places_any());
+        assert_ne!(bare.hash, k.hash);
     }
 
     #[test]

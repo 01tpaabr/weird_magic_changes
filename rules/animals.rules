@@ -1,26 +1,72 @@
 # Animals. Shared subs first: a sub sees only its parameters and locals, so
-# any kind can call it. (Files compile in name order: this one before
-# plants.rules, so chicken is kind 0.)
+# any kind can call it. Files compile in name order (animals.rules before
+# plants.rules), so the kinds number chicken 0, egg 1, fox 2, seed 3, tree 4.
 
 sub flee(t: target) {
   if free(away t) { move away t } else { move random free }
 }
 
-sub drink_from(r) {                 # drink if beside water, else walk to it
-  if nearest water within 1 as w { drink w }
-  else if nearest water within r as w { move toward w }
+sub graze(what: pred, r) {          # eat the nearest `what`, walking to it first
+  if nearest what within r as s {
+    if dist(s) == 1 { eat s } else { move toward s }
+  }
 }
 
 sub wander() { choose { 3: move random free   2: idle } }
 
 kind chicken {
   glyph "c"
-  cadence 8                         # thinks every 8 ticks (32 game seconds)
+  tags animal meat
+  cadence 4                         # thinks every 4 ticks (16 game seconds)
   sight 6
+  food 12h                          # what an eater gains
+  place 1 / 500                     # worldgen starts 1 walkable cell in 500 as a chicken
+  need food   max 1d vital
   need water  max 2h vital
   need health max 20 decay 0 vital
+  mem knows_water, water_x, water_y, last_egg
 
-  when water < 40min              => drink_from(6)
-  when hour >= 20 or hour < 5     => idle             # roosts at night
-  when true                       => wander()
+  when hurt > 0                    => flee(attacker)
+  when nearest fox within 5 as f   => flee(f)
+  when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }   # remember it; falls through
+  when water < 40min and nearest water within 1 as w => drink w
+  when water < 40min and knows_water == 1 => move toward at(water_x, water_y)
+  when food < 20h                  => graze(feed, 6)
+  when age > 1d and food > 16h and water > 1h and day > last_egg and chance(10)
+       and nearest free within 1 as c => { last_egg = day  spawn egg at c }
+  when hour >= 20 or hour < 5      => { look = 1  idle }             # roosts at night
+  when true                        => { look = 0  wander() }
+}
+
+kind egg {
+  glyph "o"
+  tags meat
+  cadence 64
+  food 3h
+  need health max 3 decay 0 vital
+  when age > 6h => become chicken
+}
+
+kind fox {
+  glyph "f"
+  tags animal
+  cadence 4
+  sight 8
+  bite 10                           # two bites kill a chicken
+  food 1d
+  place 1 / 10000
+  need food   max 2d vital
+  need water  max 1d vital
+  need health max 40 decay 0 vital
+  mem knows_water, water_x, water_y, last_litter
+
+  when nearest water within 8 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
+  when water < 6h and nearest water within 1 as w => { look = 0  drink w }
+  when water < 6h and knows_water == 1 => { look = 0  move toward at(water_x, water_y) }
+  when light > 100 and food > 1d   => { look = 1  idle }             # sleeps by day when fed
+  when food < 36h and nearest meat within 1 as m => { look = 0  eat m }
+  when food < 36h and nearest meat within 8 as m => { look = 0  move toward m }
+  when age > 3d and food > 1d and day > last_litter and chance(5)
+       and nearest free within 1 as c => { last_litter = day  spawn fox at c }
+  when true                        => { look = 0  wander() }
 }

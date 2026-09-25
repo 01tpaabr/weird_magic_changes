@@ -25,7 +25,7 @@ use std::io;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
-use crate::actors::{ChunkActors, ChunkMinds, MigrateScratch, systems};
+use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::rules::Kinds;
 use crate::stage::worldgen::{GenParams, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
@@ -71,7 +71,11 @@ pub enum Phase {
     Simulate,
     /// Every due actor runs its program; writes own minds + intents.
     Think,
-    /// Own-chunk resolution: claims, die/become/drink/move/spawn, result codes.
+    /// Own chunk: intents into key order, WAKE consumed, bites recorded.
+    Resolve,
+    /// Damage, deaths and kill credit, sequentially in coordinate order.
+    Exchange,
+    /// Own-chunk resolution: claims, die/become/drink/move/spawn, look, result codes.
     Apply,
     /// Cross-chunk moves and spawns, sequentially in coordinate order.
     Migrate,
@@ -118,7 +122,7 @@ pub fn install(world: &mut World) {
 pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<Stage>();
     world.init_resource::<Tick>();
-    world.init_resource::<MigrateScratch>();
+    world.init_resource::<CrossScratch>();
     world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
@@ -131,6 +135,8 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
         (
             Phase::Simulate,
             Phase::Think,
+            Phase::Resolve,
+            Phase::Exchange,
             Phase::Apply,
             Phase::Migrate,
             Phase::Compact,
@@ -140,6 +146,8 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     );
     schedule.add_systems((
         systems::think.in_set(Phase::Think),
+        systems::resolve.in_set(Phase::Resolve),
+        systems::exchange.in_set(Phase::Exchange),
         systems::apply.in_set(Phase::Apply),
         systems::migrate.in_set(Phase::Migrate),
         systems::compact.in_set(Phase::Compact),
@@ -411,6 +419,37 @@ fn load_chunks(
     Ok((to_gen.len(), read))
 }
 
+/// Put an actor of `kind` with `mind` on the cell at `p`, for scenarios and
+/// tests (worldgen and `spawn` are the in-game ways). `false` if the chunk
+/// is not loaded or the cell is not walkable or not empty. Marks the chunk
+/// dirty. Not for use inside a tick.
+pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> bool {
+    let (cc, i) = p.split();
+    let Some(e) = world.resource::<Stage>().entity(cc) else {
+        return false;
+    };
+    let mut q = world.query::<(
+        &mut ChunkCells,
+        &mut ChunkActors,
+        &mut ChunkMinds,
+        &mut ChunkMeta,
+    )>();
+    let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
+        return false;
+    };
+    if !cells.walkable(i) || !cells.occupant[i].is_none() {
+        return false;
+    }
+    ActorsMut {
+        pubs: &mut pubs.rows,
+        minds: &mut minds.rows,
+        occupant: &mut cells.occupant,
+    }
+    .push(i, kind, mind);
+    meta.dirty = true;
+    true
+}
+
 /// Checksum of all loaded state, for determinism tests and bug reports.
 /// The rules are an input: their hash is folded in.
 pub fn checksum(world: &mut World) -> u64 {
@@ -424,27 +463,27 @@ mod tests {
     use super::*;
     use crate::stage::{Feature, Ground};
 
-    /// A stage with nobody on it: the streaming and save tests below count
-    /// clean chunks, and an inhabited chunk is dirty by design.
     fn cfg(seed: u64) -> WorldConfig {
         WorldConfig {
             seed,
             width: 150,
             height: 70,
-            params: GenParams {
-                seed_density: 0.0,
-                animal_density: 0.0,
-                ..GenParams::default()
-            },
+            params: GenParams::default(),
         }
     }
 
-    /// The default density: seeds everywhere.
-    fn cfg_seeded(seed: u64) -> WorldConfig {
-        WorldConfig {
-            params: GenParams::default(),
-            ..cfg(seed)
-        }
+    /// The built-in rules, placing nobody: the streaming and save tests
+    /// below count clean chunks, and an inhabited chunk is dirty by design.
+    fn bare() -> Kinds {
+        Kinds::builtin().without_placement()
+    }
+
+    fn bare_world(cfg: &WorldConfig) -> World {
+        new_world_with(cfg, bare())
+    }
+
+    fn open_bare(store: &Store) -> io::Result<Option<World>> {
+        open_world_with(store, bare())
     }
 
     fn tmp_store(name: &str) -> Store {
@@ -465,7 +504,7 @@ mod tests {
 
     #[test]
     fn new_world_covers_initial_region_in_whole_chunks() {
-        let w = new_world(&cfg(1));
+        let w = bare_world(&cfg(1));
         assert_eq!(w.resource::<Stage>().loaded_count(), 3 * 2);
         assert!(get(&w, Pos::new(191, 127)).is_some());
         assert!(get(&w, Pos::new(192, 0)).is_none());
@@ -474,7 +513,7 @@ mod tests {
 
     #[test]
     fn new_world_starts_at_dawn() {
-        let mut w = new_world(&cfg(5));
+        let mut w = bare_world(&cfg(5));
         assert_eq!(tick(&w), START_TICK);
         assert_eq!(crate::time::Clock::at(tick(&w)).to_string(), "day 0 06:00");
         for m in w.query::<&ChunkMeta>().iter(&w) {
@@ -484,7 +523,7 @@ mod tests {
 
     #[test]
     fn step_advances_tick_and_changes_checksum() {
-        let mut w = new_world(&cfg(5));
+        let mut w = bare_world(&cfg(5));
         let c0 = checksum(&mut w);
         step(&mut w);
         assert_eq!(tick(&w), START_TICK + 1);
@@ -512,7 +551,7 @@ mod tests {
 
     #[test]
     fn streaming_loads_generates_and_unloads_clean_chunks() {
-        let mut w = new_world(&cfg(9));
+        let mut w = bare_world(&cfg(9));
         let policy = LoadPolicy { load: 1, unload: 2 };
         let s = ensure_loaded(&mut w, Pos::new(-500, -500), policy, None).unwrap();
         assert_eq!(s.generated, 9);
@@ -527,7 +566,7 @@ mod tests {
         ensure_loaded(&mut w, Pos::new(70, 30), wide, None).unwrap();
         // Focus chunk (1,0), radius 2 => x in -1..=3, y in -2..=2, minus the far ones.
         assert!(w.resource::<Stage>().loaded_count() > 6);
-        let mut fresh = new_world(&cfg(9));
+        let mut fresh = bare_world(&cfg(9));
         ensure_loaded(&mut fresh, Pos::new(70, 30), wide, None).unwrap();
         assert_eq!(stage::checksum(&mut w), stage::checksum(&mut fresh));
         // Entities come and go: the ECS holds exactly the loaded set.
@@ -537,7 +576,7 @@ mod tests {
 
     #[test]
     fn inhabited_chunks_are_dirty_and_round_trip_through_the_store() {
-        let mut w = new_world(&cfg_seeded(21));
+        let mut w = new_world(&cfg(21));
         let rows: usize = w
             .query::<&ChunkActors>()
             .iter(&w)
@@ -622,24 +661,33 @@ mod tests {
     /// only onto free walkable cells, with every row invariant intact.
     #[test]
     fn a_forest_grows_and_spreads() {
-        use crate::rules::{SEED, TREE};
-        let mut w = new_world(&WorldConfig {
-            width: 128,
-            height: 128,
-            ..cfg_seeded(31)
-        });
+        let plants =
+            || crate::rules::compile("plants.rules", crate::rules::builtin::FILES[1].1).unwrap();
+        let (seed_kind, tree_kind) = (
+            plants().by_name("seed").unwrap().id,
+            plants().by_name("tree").unwrap().id,
+        );
+        let mut w = new_world_with(
+            &WorldConfig {
+                width: 128,
+                height: 128,
+                ..cfg(31)
+            },
+            plants(),
+        );
         let start = count_kinds(&mut w);
-        assert!(start[usize::from(SEED)] > 0 && start[usize::from(TREE)] == 0);
+        assert!(start[usize::from(seed_kind)] > 0 && start[usize::from(tree_kind)] == 0);
         for _ in 0..crate::time::days(4) {
             step(&mut w);
         }
         let end = count_kinds(&mut w);
         assert!(
-            end[usize::from(TREE)] > 0,
+            end[usize::from(tree_kind)] > 0,
             "seeds by water became trees: {end:?}"
         );
         assert!(
-            end[usize::from(SEED)] + end[usize::from(TREE)] != start[usize::from(SEED)],
+            end[usize::from(seed_kind)] + end[usize::from(tree_kind)]
+                != start[usize::from(seed_kind)],
             "seeds died away from water and trees dropped new ones: {start:?} -> {end:?}"
         );
         let kinds = w.resource::<Kinds>().len();
@@ -656,11 +704,14 @@ mod tests {
             }
         }
         // Reproducible from scratch after thousands of ticks.
-        let mut again = new_world(&WorldConfig {
-            width: 128,
-            height: 128,
-            ..cfg_seeded(31)
-        });
+        let mut again = new_world_with(
+            &WorldConfig {
+                width: 128,
+                height: 128,
+                ..cfg(31)
+            },
+            plants(),
+        );
         for _ in 0..crate::time::days(4) {
             step(&mut again);
         }
@@ -673,7 +724,7 @@ mod tests {
     #[test]
     fn reload_mid_run_continues_identically() {
         let store = tmp_store("mid-run");
-        let mut w = new_world(&cfg_seeded(8));
+        let mut w = new_world(&cfg(8));
         let half = crate::time::hours(30);
         for _ in 0..half {
             step(&mut w);
@@ -726,7 +777,7 @@ mod tests {
         let cfg = WorldConfig {
             width: 128,
             height: 128,
-            ..cfg_seeded(17)
+            ..cfg(17)
         };
         let mut w = new_world(&cfg);
         let chickens_at = |w: &mut World| -> Vec<(ChunkCoord, u64, u16)> {
@@ -767,21 +818,23 @@ mod tests {
         let end = chickens_at(&mut w);
         assert!(moved > start.len(), "chickens walk: {moved} moves");
         assert!(crossed > 0, "some chicken crossed a chunk border");
-        // Chickens that start more than `sight` cells from water wander
-        // blind and dry out; the ones near a lake live.
-        assert!(
-            end.len() * 4 >= start.len(),
-            "chickens near water survive: {} of {}",
-            end.len(),
-            start.len()
-        );
-        // Every survivor drank at least once (max 2h, a day has passed).
-        for (_, _, m) in w
-            .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
-            .iter(&w)
-        {
-            for mind in &m.rows {
-                assert!(mind.needs[0] > 0);
+        // Foxes, thirst and hunger thin them out; some live a whole day.
+        assert!(!end.is_empty(), "no chicken survived a day");
+        // Every live row has every vital need above zero (a need at zero is
+        // death at the next think, and damage kills at once).
+        let kinds = w.resource::<Kinds>().clone();
+        for (a, m) in w.query::<(&ChunkActors, &ChunkMinds)>().iter(&w) {
+            for (r, mind) in a.rows.iter().zip(&m.rows) {
+                for (i, need) in kinds.def(r.kind).needs.iter().enumerate() {
+                    if need.vital && !need.decays {
+                        assert!(
+                            mind.needs[i] > 0,
+                            "{} {}",
+                            kinds.def(r.kind).name,
+                            need.name
+                        );
+                    }
+                }
             }
         }
         let mut again = new_world(&cfg);
@@ -911,10 +964,297 @@ mod tests {
         assert_eq!(w.get::<ChunkActors>(east_e).unwrap().rows.len(), 2);
     }
 
+    /// Every cell of the loaded chunks becomes plain soil: scenarios place
+    /// actors where they want them.
+    fn flatten(w: &mut World) {
+        let coords: Vec<ChunkCoord> = w.resource::<Stage>().loaded_coords().collect();
+        for c in coords {
+            let mut cells = stage::chunk_mut(w, c).unwrap();
+            cells.ground = [Ground::Soil; crate::stage::CHUNK_CELLS];
+            cells.feature = [Feature::None; crate::stage::CHUNK_CELLS];
+        }
+    }
+
+    /// `(uid, kind, pos, mind)` of every row, in uid order.
+    fn rows(w: &mut World) -> Vec<(u64, u16, Pos, ActorMind)> {
+        let mut v = Vec::new();
+        for (c, a, m) in w
+            .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
+            .iter(w)
+        {
+            for (r, mind) in a.rows.iter().zip(&m.rows) {
+                v.push((mind.uid, r.kind, c.cell(usize::from(r.cell)), *mind));
+            }
+        }
+        v.sort_unstable_by_key(|r| r.0);
+        v
+    }
+
+    /// Resolve + Exchange on hand-made intents: two eaters on one victim
+    /// (one across a chunk border) kill it and the lower key gets the food;
+    /// a hit wounds, wakes and points `hurt_dir` at the biter; a bite on an
+    /// empty cell misses; a far bite, or one on a kind without health, is
+    /// refused.
+    #[test]
+    fn bites_sum_kill_and_credit_the_lowest_key_eater() {
+        use crate::actors::flags;
+        use crate::actors::systems::{Intent, Intents, Scratch, exchange, newborn, resolve};
+        use crate::rules::vm::{Action, dir_index, result};
+        use crate::time::hours;
+        use bevy_ecs::system::RunSystemOnce;
+        let kinds = crate::rules::compile(
+            "t",
+            "kind wolf  { bite 10 food 1d need food max 2d vital need health max 30 decay 0 vital }
+             kind sheep { food 12h need health max 15 decay 0 vital }
+             kind stone { }",
+        )
+        .unwrap();
+        let (wolf, sheep, stone) = (0u16, 1u16, 2u16);
+        let cfg = WorldConfig {
+            width: 128,
+            height: 64,
+            ..cfg(2)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut put = |x, y, kind, uid| {
+            let mut m = newborn(&kinds, kind, uid, now);
+            if kind == wolf {
+                m.needs[0] = hours(6) as i32;
+            }
+            assert!(place_actor(&mut w, Pos::new(x, y), kind, m));
+        };
+        // Chunk (0, 0), slots in placement order.
+        put(63, 10, sheep, 1); // 0: S, eaten from both sides
+        put(62, 10, wolf, 10); // 1: A, eats east
+        put(20, 20, sheep, 2); // 2: T, only hit
+        put(21, 20, wolf, 12); // 3: F, hits west
+        put(30, 30, wolf, 13); // 4: C, eats an empty cell
+        put(40, 30, wolf, 14); // 5: D, eats two cells away
+        put(51, 30, stone, 3); // 6: a stone
+        put(50, 30, wolf, 15); // 7: E, eats the stone
+        // Chunk (1, 0).
+        put(64, 10, wolf, 11); // 0: B, eats west across the border
+        let e0 = w.resource::<Stage>().entity(ChunkCoord::new(0, 0)).unwrap();
+        let e1 = w.resource::<Stage>().entity(ChunkCoord::new(1, 0)).unwrap();
+        let it = |slot, key, action, dx| Intent {
+            slot,
+            key,
+            action,
+            kind: 0,
+            dx,
+            dy: 0,
+            look: None,
+            trapped: false,
+        };
+        w.get_mut::<ChunkActors>(e0).unwrap().rows[1].flags |= flags::WAKE;
+        w.get_mut::<Intents>(e0).unwrap().list.extend([
+            it(1, 5, Action::Eat, 1),
+            it(3, 7, Action::Hit, -1),
+            it(4, 20, Action::Eat, 1),
+            it(5, 21, Action::Eat, 2),
+            it(7, 22, Action::Eat, 1),
+        ]);
+        w.get_mut::<Intents>(e1)
+            .unwrap()
+            .list
+            .push(it(0, 3, Action::Eat, -1));
+        w.run_system_once(resolve).unwrap();
+        w.run_system_once(exchange).unwrap();
+
+        let pubs0 = w.get::<ChunkActors>(e0).unwrap().rows.clone();
+        let minds0 = w.get::<ChunkMinds>(e0).unwrap().rows.clone();
+        let minds1 = w.get::<ChunkMinds>(e1).unwrap().rows.clone();
+        let res = |m: &ActorMind| m.events & result::MASK;
+        assert!(pubs0[0].flags & flags::DEAD != 0, "S took 20 of 15");
+        assert!(w.get::<ChunkCells>(e0).unwrap().occupant[10 * 64 + 63].is_none());
+        assert_eq!(w.get::<Scratch>(e0).unwrap().deaths, 1);
+        assert_eq!(
+            minds1[0].needs[0],
+            (hours(6) + hours(12)) as i32,
+            "B, the lower key, ate S"
+        );
+        assert_eq!(minds0[1].needs[0], hours(6) as i32, "A bit but ate nothing");
+        assert_eq!((res(&minds0[1]), res(&minds1[0])), (result::OK, result::OK));
+        assert_eq!(
+            pubs0[1].flags & flags::WAKE,
+            0,
+            "A's think consumed its wake"
+        );
+        // T: wounded, woken, pointed at F (east of it).
+        assert_eq!(minds0[2].needs[0], 5);
+        assert_eq!((minds0[2].hurt, minds0[2].hurt_dir), (10, dir_index(1, 0)));
+        assert_ne!(pubs0[2].flags & flags::WAKE, 0);
+        assert_eq!(pubs0[2].flags & flags::DEAD, 0);
+        assert_eq!(res(&minds0[3]), result::OK);
+        assert_eq!(res(&minds0[4]), result::MISSED);
+        assert_eq!(res(&minds0[5]), result::REFUSED);
+        assert_eq!(res(&minds0[7]), result::REFUSED);
+    }
+
+    /// The real rules: a hungry fox next to a penned chicken bites twice
+    /// and eats it, in its own chunk and across a chunk border.
+    #[test]
+    fn a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border() {
+        use crate::actors::systems::newborn;
+        use crate::rules::{CHICKEN, FOX};
+        use crate::time::hours;
+        let kinds = bare();
+        let cfg = WorldConfig {
+            width: 128,
+            height: 64,
+            ..cfg(3)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        for (chicken, fox, cuid, fuid) in [
+            (Pos::new(20, 20), Pos::new(19, 20), 0xC0, 0xF0),
+            (Pos::new(64, 40), Pos::new(63, 40), 0xC1, 0xF1),
+        ] {
+            // A pen of rocks around the chicken, open only where the fox is.
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let p = Pos::new(chicken.x + dx, chicken.y + dy);
+                    if (dx, dy) != (0, 0) && p != fox {
+                        let (cc, i) = p.split();
+                        stage::chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::Rock;
+                    }
+                }
+            }
+            assert!(place_actor(
+                &mut w,
+                chicken,
+                CHICKEN,
+                newborn(&kinds, CHICKEN, cuid, now)
+            ));
+            let mut hungry = newborn(&kinds, FOX, fuid, now);
+            hungry.needs[0] = hours(12) as i32;
+            assert!(place_actor(&mut w, fox, FOX, hungry));
+        }
+        let mut wounded = false;
+        for _ in 0..64 {
+            step(&mut w);
+            check_invariants(&mut w);
+            wounded |= rows(&mut w)
+                .iter()
+                .any(|r| r.1 == CHICKEN && r.3.needs[2] == 10);
+        }
+        let all = rows(&mut w);
+        assert!(wounded, "a chicken was bitten once before it died");
+        assert!(
+            all.iter().all(|r| r.1 != CHICKEN),
+            "both chickens were eaten"
+        );
+        let foxes: Vec<_> = all.iter().filter(|r| r.1 == FOX).collect();
+        assert_eq!(foxes.len(), 2);
+        for f in foxes {
+            assert!(
+                f.3.needs[0] > hours(23) as i32,
+                "fox {:x} gained a chicken's 12h of food: {}",
+                f.0,
+                f.3.needs[0]
+            );
+        }
+    }
+
+    /// A hungry chicken eats the seeds around it; an egg hatches into a
+    /// chicken after six hours, keeping its uid, with its needs full.
+    #[test]
+    fn chickens_graze_seeds_and_eggs_hatch() {
+        use crate::actors::systems::newborn;
+        use crate::rules::{CHICKEN, EGG, SEED};
+        use crate::time::{hours, minutes};
+        let kinds = bare();
+        let cfg = WorldConfig {
+            width: 64,
+            height: 64,
+            ..cfg(4)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
+        hungry.needs[0] = hours(6) as i32;
+        assert!(place_actor(&mut w, Pos::new(30, 30), CHICKEN, hungry));
+        for (x, uid) in [(31, 0x51), (33, 0x53)] {
+            assert!(place_actor(
+                &mut w,
+                Pos::new(x, 30),
+                SEED,
+                newborn(&kinds, SEED, uid, now)
+            ));
+        }
+        assert!(place_actor(
+            &mut w,
+            Pos::new(10, 10),
+            EGG,
+            newborn(&kinds, EGG, 0xE0, now)
+        ));
+        for _ in 0..64 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        assert!(all.iter().all(|r| r.1 != SEED), "both seeds eaten");
+        let grazer = all.iter().find(|r| r.0 == 0xC0).unwrap();
+        assert!(
+            grazer.3.needs[0] > (hours(12) - minutes(10)) as i32,
+            "6h + two seeds of 3h: {}",
+            grazer.3.needs[0]
+        );
+        let mut hatched_at = None;
+        while tick(&w) < now + hours(7) {
+            for _ in 0..16 {
+                step(&mut w);
+            }
+            let egg = rows(&mut w).into_iter().find(|r| r.0 == 0xE0).unwrap();
+            if egg.1 == CHICKEN && hatched_at.is_none() {
+                hatched_at = Some(tick(&w));
+                let chicken = kinds.def(CHICKEN);
+                for (i, need) in chicken.needs.iter().enumerate() {
+                    assert!(egg.3.needs[i] > need.max - 100, "{} starts full", need.name);
+                }
+            }
+        }
+        let at = hatched_at.expect("the egg hatched");
+        assert!(
+            at > now + hours(6) && at <= now + hours(6) + 64 + 16,
+            "{}",
+            at - now
+        );
+    }
+
+    /// The built-in world for two game days: every row invariant holds,
+    /// chickens lay eggs, and the populations move.
+    #[test]
+    fn a_small_ecosystem_runs_two_days() {
+        use crate::rules::{CHICKEN, EGG};
+        let cfg = WorldConfig {
+            width: 256,
+            height: 256,
+            ..cfg(12)
+        };
+        let mut w = new_world(&cfg);
+        let start = count_kinds(&mut w);
+        let mut eggs_seen = 0;
+        for _ in 0..crate::time::days(2) / 512 {
+            for _ in 0..512 {
+                step(&mut w);
+            }
+            check_invariants(&mut w);
+            eggs_seen = eggs_seen.max(count_kinds(&mut w)[usize::from(EGG)]);
+        }
+        let end = count_kinds(&mut w);
+        assert!(start[usize::from(CHICKEN)] > 20, "{start:?}");
+        assert!(eggs_seen > 0, "chickens laid eggs: {start:?} -> {end:?}");
+        assert_ne!(start, end);
+    }
+
     #[test]
     fn corrupt_rows_are_refused_on_load() {
         let store = tmp_store("rows");
-        let mut w = new_world(&cfg_seeded(4));
+        let mut w = new_world(&cfg(4));
         save(&mut w, &store).unwrap();
         let c = ChunkCoord::new(0, 0);
         let mut saved = store.read_chunk(c).unwrap().unwrap();
@@ -942,7 +1282,7 @@ mod tests {
 
     #[test]
     fn dirty_chunks_survive_unload_only_through_a_store() {
-        let mut w = new_world(&cfg(3));
+        let mut w = bare_world(&cfg(3));
         let p = Pos::new(10, 10);
         let (cc, i) = p.split();
         stage::chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::Rock;
@@ -979,7 +1319,7 @@ mod tests {
     #[test]
     fn save_and_open_roundtrip() {
         let store = tmp_store("save");
-        let mut w = new_world(&cfg(11));
+        let mut w = bare_world(&cfg(11));
         step(&mut w);
         step(&mut w);
         let (cc, i) = Pos::new(100, 60).split();
@@ -988,7 +1328,7 @@ mod tests {
         assert_eq!(save(&mut w, &store).unwrap(), 0);
         let expect = checksum(&mut w);
 
-        let mut back = open_world(&store).unwrap().unwrap();
+        let mut back = open_bare(&store).unwrap().unwrap();
         assert_eq!(
             (tick(&back), back.resource::<SimConfig>().seed),
             (START_TICK + 2, 11)
@@ -1012,7 +1352,7 @@ mod tests {
             stage::remove(&mut back, c);
         }
         assert_eq!(checksum(&mut back), expect);
-        assert_eq!(open_world(&tmp_store("empty")).unwrap().map(|_| ()), None);
+        assert_eq!(open_bare(&tmp_store("empty")).unwrap().map(|_| ()), None);
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

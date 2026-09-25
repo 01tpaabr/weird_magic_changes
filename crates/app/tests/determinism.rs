@@ -53,6 +53,22 @@ fn run_checksum_is_identical_across_thread_counts() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// A day and a half of the built-in ecosystem: chickens graze and lay,
+/// foxes hunt (the first bites land around hour 28 with this seed), trees
+/// seed. Every phase runs, the sequential Exchange and Migrate included.
+#[test]
+fn ecosystem_checksum_is_identical_across_thread_counts() {
+    let dir = tmp_dir("eco");
+    let dir = dir.to_str().unwrap();
+    let args = ["run", dir, "32400", "256", "256", "12"];
+    let one = wmc("1", &args);
+    let eight = wmc("8", &args);
+    assert_eq!(line(&one, "chunks:"), line(&eight, "chunks:"));
+    assert_eq!(line(&one, "checksum:"), line(&eight, "checksum:"));
+    assert!(line(&one, "chunks:").contains("fox"), "{one}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 #[test]
 fn show_is_identical_across_thread_counts() {
     let args = ["show", "200", "100", "5"];
