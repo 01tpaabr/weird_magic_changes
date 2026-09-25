@@ -73,6 +73,7 @@ pub fn generate_chunk(
     }
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
     cells.cover = [super::ActorId::NONE; CHUNK_CELLS];
+    cells.scent = [[0; CHUNK_CELLS]; super::SCENT_CHANNELS];
     out.actors.rows.clear();
     out.minds.rows.clear();
     if !kinds.places_any() {

@@ -60,6 +60,8 @@ pub struct Intent {
     pub amount: i32,
     /// A `Spawn`'s child's first two `mem` values.
     pub with: [i32; 2],
+    /// `mark ch v` effect: added to the actor's (tick-start) cell in Apply.
+    pub mark: Option<(u8, u8)>,
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
 }
@@ -351,6 +353,7 @@ fn think_one(
         signal: None,
         amount: 0,
         with: [0; 2],
+        mark: None,
         trapped: false,
     };
     if vm::decay(kind, mind, tick) {
@@ -385,6 +388,7 @@ fn think_one(
     intent.signal = out.signal;
     intent.amount = out.amount;
     intent.with = out.with;
+    intent.mark = out.mark;
     if matches!(out.action, Action::Take | Action::Give) {
         intent.kind = u16::from(out.need);
     }
@@ -1012,6 +1016,10 @@ pub fn apply(
                 }
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
+                }
+                if let Some((ch, v)) = it.mark {
+                    let s = &mut cells.scent[usize::from(ch)][from];
+                    *s = s.saturating_add(v);
                 }
             }
             intents.traps += traps;

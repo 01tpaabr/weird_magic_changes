@@ -5,7 +5,7 @@
 //! ```text
 //! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params, kind names, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
-//!                              (ground, feature, occupant, cover),
+//!                              (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
 //!
@@ -33,7 +33,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 7;
+pub const FORMAT_VERSION: u32 = 8;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -186,6 +186,9 @@ impl Store {
         let feature = r.bytes(CHUNK_CELLS)?;
         let occupant = r.bytes(CHUNK_CELLS * 4)?;
         let cover = r.bytes(CHUNK_CELLS * 4)?;
+        for ch in &mut cells.scent {
+            ch.copy_from_slice(r.bytes(CHUNK_CELLS)?);
+        }
         cells.ground.copy_from_slice(
             bytemuck::checked::try_cast_slice(ground).map_err(|e| bad(e.to_string()))?,
         );
@@ -243,6 +246,9 @@ impl Store {
             .extend_from_slice(bytemuck::cast_slice(&cells.feature));
         for o in cells.occupant.iter().chain(&cells.cover) {
             w.buf.extend_from_slice(&o.0.to_le_bytes());
+        }
+        for ch in &cells.scent {
+            w.buf.extend_from_slice(ch);
         }
         w.u32(u32::try_from(actors.rows.len()).expect("row count fits u32"));
         // Rows are `#[repr(C)]` Pod with explicit padding, LE on every target
@@ -478,7 +484,7 @@ mod tests {
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
         // Row count that the file does not hold.
-        let n_at = 28 + CHUNK_CELLS * 10;
+        let n_at = 28 + CHUNK_CELLS * (10 + crate::stage::SCENT_CHANNELS);
         let mut bytes = good.clone();
         bytes[n_at..n_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
@@ -502,15 +508,15 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v6 file is refused by version.
+        // A v7 file is refused by version.
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 6;
+        bytes[4] = 7;
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(
             s.read_chunk(c)
                 .unwrap_err()
                 .to_string()
-                .contains("format 6")
+                .contains("format 7")
         );
         fs::remove_dir_all(s.dir()).unwrap();
     }

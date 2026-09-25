@@ -87,7 +87,13 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   occupant or the cover, `free` asks only about the occupant, `bare` means walkable with no
   cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
   else the cover's glyph.
-- **Save**: chunk file v7 = cell layers (`occupant`, then `cover`), `n`, `ActorPub[n]`,
+- **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (2) `u8` layers. `mark ch v` adds
+  `v` (saturating) to the actor's tick-start cell in Apply; `scent_decay` (Simulate phase)
+  takes `ceil(s / 32)` from every cell of a chunk every 16 ticks, staggered by a hash of
+  the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone in ~1.5 hours). A
+  channel is a name in the rules, numbered in first-appearance order in the code; a third
+  name is a compile error. The renderer washes a scented cell toward the channel's colour.
+- **Save**: chunk file v8 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
@@ -180,6 +186,7 @@ pred     := NAME [ ":" INT ] | "water" | "soil" | "rock" | "free" | "bare"
 expr     := INT | TIME | NAME | sense | "blocked" | "missed" | "refused" | "(" expr ")"
           | expr ("+"|"-"|"*"|"/"|"%"|"<"|"<="|"=="|"!="|">="|">"|"and"|"or") expr | "not" expr
           | "rand" "(" expr ")" | "chance" "(" expr ")" | "count" pred "within" expr | "dist" "(" target ")"
+          | "scent" "(" NAME [ "," target ] ")" | "look_of" "(" target ")" | "signal_of" "(" target ")"
           | ("min"|"max"|"abs"|"sign"|"clamp"|"pack"|"hi"|"lo") "(" expr ("," expr)* ")"
           | NAME "(" [ expr ("," expr)* ] ")"
 TIME     := INT ("min" | "h" | "d")
@@ -408,5 +415,6 @@ where it touches the tick.
    blocks, `for each`, `sniff`; the bee is the acceptance test. Done so far: `state`/`next`,
    `const`, `for each`, `signal =`, `look_of`/`signal_of`, `kind:look`, `pack`/`hi`/`lo`
    (new opcodes appended, so the programs of the existing kinds and their hash are unchanged);
-   `take`/`give` settled in Exchange, the `taken` sense, `spawn ... with (a, b)`.
+   `take`/`give` settled in Exchange, the `taken` sense, `spawn ... with (a, b)`; scent:
+   `mark`, `scent(ch[, t])`, `sniff`, the fade system, store v8.
 7. **Tooling.** Hot reload, `wmc why`, fuel/trap counters in the status line, `docs/RULES.md`.

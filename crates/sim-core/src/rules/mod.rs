@@ -141,6 +141,8 @@ pub struct Kinds {
     pub consts: Vec<i32>,
     /// Entry pc per sub, indexed by `Call imm`.
     pub subs: Vec<u32>,
+    /// Scent channel names, in channel order (`mark`, `sniff`).
+    pub scents: Vec<String>,
     /// Hash of everything above: the rules as an input to the checksum.
     pub hash: u64,
     /// `remaps[from * defs.len() + to]`.
@@ -189,9 +191,24 @@ impl Kinds {
             code,
             consts,
             subs,
+            scents: Vec::new(),
             hash,
             remaps,
         }
+    }
+
+    /// The same rules with these scent channel names (folded into the
+    /// hash; none leaves it as it was).
+    pub fn with_scents(mut self, scents: Vec<String>) -> Self {
+        for name in &scents {
+            let mut h = self.hash ^ 0x5CE7;
+            for b in name.bytes() {
+                h = splitmix64(h ^ u64::from(b));
+            }
+            self.hash = splitmix64(h);
+        }
+        self.scents = scents;
+        self
     }
 
     /// The kinds this build knows.
@@ -208,7 +225,7 @@ impl Kinds {
             .into_iter()
             .map(|d| KindDef { place: 0, ..d })
             .collect();
-        Self::from_parts(defs, self.code, self.consts, self.subs)
+        Self::from_parts(defs, self.code, self.consts, self.subs).with_scents(self.scents)
     }
 
     /// The kind worldgen starts on a walkable cell whose placement hash is

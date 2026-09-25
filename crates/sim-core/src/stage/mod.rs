@@ -33,6 +33,7 @@
 //! Adding a per-cell scalar (moisture, heat, mana): add an array to
 //! [`ChunkCells`], fold it into `hash`, encode it in `store`, render it in `app`.
 
+pub mod scent;
 pub mod worldgen;
 
 use std::collections::HashMap;
@@ -53,6 +54,9 @@ pub const CHUNK_BITS: u32 = 6;
 pub const CHUNK_SIZE: i32 = 1 << CHUNK_BITS;
 /// Cells per chunk.
 pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
+/// Scent channels per cell (`mark`, `sniff`): named by the rules, numbered
+/// in first-appearance order.
+pub const SCENT_CHANNELS: usize = 2;
 const MASK: i32 = CHUNK_SIZE - 1;
 
 /// What a cell fundamentally is. Exactly one per cell.
@@ -222,6 +226,8 @@ pub struct ChunkCells {
     /// What grows on the ground here, at most one (a `cover` kind: never
     /// blocks, lies under whoever stands on the cell).
     pub cover: [ActorId; CHUNK_CELLS],
+    /// Scent per channel: raised by `mark`, decayed by `scent_decay`.
+    pub scent: [[u8; CHUNK_CELLS]; SCENT_CHANNELS],
 }
 
 impl Default for ChunkCells {
@@ -231,6 +237,7 @@ impl Default for ChunkCells {
             feature: [Feature::None; CHUNK_CELLS],
             occupant: [ActorId::NONE; CHUNK_CELLS],
             cover: [ActorId::NONE; CHUNK_CELLS],
+            scent: [[0; CHUNK_CELLS]; SCENT_CHANNELS],
         }
     }
 }
@@ -247,7 +254,8 @@ impl ChunkCells {
         let h = fnv1a(0xCBF2_9CE4_8422_2325, bytemuck::cast_slice(&self.ground));
         let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
         let h = fnv1a(h, bytemuck::cast_slice(&self.occupant));
-        fnv1a(h, bytemuck::cast_slice(&self.cover))
+        let h = fnv1a(h, bytemuck::cast_slice(&self.cover));
+        fnv1a(h, bytemuck::cast_slice(&self.scent))
     }
 }
 
@@ -301,6 +309,7 @@ pub struct Cell {
     pub feature: Feature,
     pub occupant: ActorId,
     pub cover: ActorId,
+    pub scent: [u8; SCENT_CHANNELS],
 }
 
 /// The set of loaded chunks: coordinate -> entity, plus the canonical order.
@@ -483,6 +492,7 @@ impl StageCells<'_, '_> {
             feature: c.feature[i],
             occupant: c.occupant[i],
             cover: c.cover[i],
+            scent: std::array::from_fn(|j| c.scent[j][i]),
         })
     }
 

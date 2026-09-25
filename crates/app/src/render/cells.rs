@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, Looks, VOID, style};
+use super::palette::{Color, Looks, VOID, scented, style};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -183,12 +183,13 @@ fn render_row<'c>(
                             .zip(&c.cover[local..local + n]),
                     );
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
-                for (((&g, &f), (&o, &cover)), (go, (fo, bo))) in cells.zip(outs) {
-                    // Who stands here, on what grows here.
+                for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
+                    // Who stands here, on what grows here, in what scent.
                     let s = style(g, f, looks.actor(o), looks.actor(cover));
+                    let bg = scented(s.bg, std::array::from_fn(|j| c.scent[j][local + k]));
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
-                    *bo = s.bg.scaled(light).0;
+                    *bo = bg.scaled(light).0;
                 }
             }
             None => {
@@ -251,12 +252,16 @@ mod tests {
                 let want = match stage::chunk(&world, cc) {
                     Some(ch) => {
                         actors += usize::from(!ch.occupant[i].is_none() || !ch.cover[i].is_none());
-                        style(
+                        let s = style(
                             ch.ground[i],
                             ch.feature[i],
                             looks.actor(ch.occupant[i]),
                             looks.actor(ch.cover[i]),
-                        )
+                        );
+                        crate::render::palette::Style {
+                            bg: scented(s.bg, std::array::from_fn(|j| ch.scent[j][i])),
+                            ..s
+                        }
                     }
                     None => VOID,
                 };

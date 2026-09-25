@@ -35,7 +35,7 @@ pub use rules::{KindDef, Kinds};
 pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick, WorldConfig};
 pub use stage::{
     ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, ChunkData,
-    ChunkMeta, Feature, Ground, Pos, Stage, StageCells,
+    ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells,
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};

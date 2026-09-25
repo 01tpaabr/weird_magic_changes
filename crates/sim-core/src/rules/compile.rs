@@ -19,7 +19,7 @@ use super::asm::{Asm, Label};
 use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
 use super::{DEFAULT_COLOR, KindDef, Kinds, NeedDef, PLACE_ONE};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
-use crate::stage::{Feature, Ground};
+use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
 
 /// A compile error with its position.
@@ -344,6 +344,13 @@ enum Cond {
         bind: String,
         at: Pos,
     },
+    /// `sniff ch within r as v`: the strongest cell of scent `ch`.
+    Sniff {
+        ch: String,
+        r: Expr,
+        bind: String,
+        at: Pos,
+    },
     And(Box<Cond>, Box<Cond>),
     Or(Box<Cond>, Box<Cond>),
     Not(Box<Cond>),
@@ -446,6 +453,8 @@ enum Stmt {
     Look(Expr),
     /// `signal = v`: an effect, not an action.
     Signal(Expr),
+    /// `mark ch v`: an effect, adds `v` of scent `ch` to the actor's cell.
+    Mark(String, Expr, Pos),
     /// `next NAME`: this state for the following think; ends the think
     /// like an action.
     Next(String, Pos),
@@ -489,6 +498,8 @@ enum Expr {
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
     SignalOf(Target),
+    /// `scent(ch)` at the actor's cell, `scent(ch, t)` at a target.
+    Scent(String, Option<Target>, Pos),
     /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
     /// and its arguments.
     Fn(OpCode, Vec<Expr>),
@@ -603,6 +614,9 @@ const KEYWORDS: &[&str] = &[
     "take",
     "give",
     "with",
+    "mark",
+    "sniff",
+    "scent",
 ];
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
@@ -1140,6 +1154,10 @@ impl Parser<'_> {
             let (name, at) = self.ident("state name")?;
             return Ok(Stmt::Next(name, at));
         }
+        if self.eat_kw("mark") {
+            let (ch, at) = self.ident("scent name")?;
+            return Ok(Stmt::Mark(ch, self.expr()?, at));
+        }
         if self.eat_kw("for") {
             self.expect_kw("each")?;
             let pred = self.pred()?;
@@ -1294,6 +1312,14 @@ impl Parser<'_> {
             self.expect_kw("as")?;
             let (bind, ..) = self.ident("binding name")?;
             return Ok(Cond::Nearest { pred, r, bind, at });
+        }
+        if self.eat_kw("sniff") {
+            let (ch, _) = self.ident("scent name")?;
+            self.expect_kw("within")?;
+            let r = self.additive()?; // a radius, never a comparison
+            self.expect_kw("as")?;
+            let (bind, ..) = self.ident("binding name")?;
+            return Ok(Cond::Sniff { ch, r, bind, at });
         }
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
@@ -1467,6 +1493,17 @@ impl Parser<'_> {
                         self.expect_sym(")")?;
                         Ok(Expr::IsAt(t, p))
                     }
+                    "scent" => {
+                        self.expect_sym("(")?;
+                        let (ch, _) = self.ident("scent name")?;
+                        let t = if self.eat_sym(",") {
+                            Some(self.target()?)
+                        } else {
+                            None
+                        };
+                        self.expect_sym(")")?;
+                        Ok(Expr::Scent(ch, t, at))
+                    }
                     "look_of" | "signal_of" => {
                         self.expect_sym("(")?;
                         let t = self.target()?;
@@ -1571,6 +1608,8 @@ struct Gen<'a> {
     /// Tag names, in first-appearance order (kind order, then declaration
     /// order): a tag's bit is its index here.
     tags: Vec<String>,
+    /// Scent channel names, in first-appearance order in the code.
+    scents: Vec<String>,
 }
 
 impl<'a> Gen<'a> {
@@ -1581,6 +1620,7 @@ impl<'a> Gen<'a> {
             consts: &items.consts,
             const_vals: Vec::new(),
             tags: Vec::new(),
+            scents: Vec::new(),
             asm: Asm::new(),
             pool: Vec::new(),
             kind: None,
@@ -1736,7 +1776,7 @@ impl<'a> Gen<'a> {
             }
         }
         let code = self.asm.finish();
-        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries))
+        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries).with_scents(self.scents))
     }
 
     fn rules(&mut self, rules: &[Rule]) -> Result<()> {
@@ -1749,6 +1789,24 @@ impl<'a> Gen<'a> {
             self.asm.end_rule().bind(next);
         }
         Ok(())
+    }
+
+    /// The channel of scent `name`, numbered on first use.
+    fn scent(&mut self, name: &str, at: &Pos) -> Result<u8> {
+        if let Some(i) = self.scents.iter().position(|s| s == name) {
+            return Ok(i as u8);
+        }
+        if self.scents.len() == SCENT_CHANNELS {
+            return Err(self.err(
+                at,
+                format!(
+                    "at most {SCENT_CHANNELS} scents in a rule set ({} and `{name}`)",
+                    self.scents.join(", ")
+                ),
+            ));
+        }
+        self.scents.push(name.to_string());
+        Ok((self.scents.len() - 1) as u8)
     }
 
     fn const_value(&self, n: &str) -> Option<i32> {
@@ -1892,6 +1950,27 @@ impl<'a> Gen<'a> {
                 self.pred(pred)?;
                 self.expr(r)?;
                 self.asm.nearest(slot).jz(on_false);
+                self.locals.push(Local {
+                    name: bind.clone(),
+                    slot,
+                    ty: Ty::Target,
+                });
+            }
+            Cond::Sniff { ch, r, bind, at } => {
+                if !top {
+                    return Err(self.err(
+                        at,
+                        "`sniff ... as` must be a top-level conjunct (not under `or` or `not`)",
+                    ));
+                }
+                if self.local(bind).is_some() {
+                    return Err(self.err(at, format!("`{bind}` is already bound")));
+                }
+                let slot = self.alloc_local(at, 2)?;
+                let c = self.scent(ch, at)?;
+                self.push_int(i32::from(c));
+                self.expr(r)?;
+                self.asm.sniff(slot).jz(on_false);
                 self.locals.push(Local {
                     name: bind.clone(),
                     slot,
@@ -2092,6 +2171,16 @@ impl<'a> Gen<'a> {
             Expr::LookOf(t) => {
                 self.target(t)?;
                 self.asm.op(OpCode::LookAt);
+            }
+            Expr::Scent(ch, t, at) => {
+                let c = self.scent(ch, at)?;
+                match t {
+                    Some(t) => self.target(t)?,
+                    None => {
+                        self.asm.push(0).push(0);
+                    }
+                }
+                self.asm.scent_at(c);
             }
             Expr::SignalOf(t) => {
                 self.target(t)?;
@@ -2378,6 +2467,11 @@ impl<'a> Gen<'a> {
             Stmt::Signal(e) => {
                 self.expr(e)?;
                 self.asm.op(OpCode::SetSignal);
+            }
+            Stmt::Mark(ch, e, at) => {
+                let c = self.scent(ch, at)?;
+                self.expr(e)?;
+                self.asm.mark(c);
             }
             Stmt::Next(name, at) => {
                 let Some(k) = self.kind else {

@@ -3,7 +3,7 @@
 Status: Stage (chunked, unbounded terrain grid), streaming, persistence, a windowed
 ASCII renderer with a WASD camera, and the time model (integer ticks, day/night, speed
 control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27). Actors are designed
-(`ACTORS.md`, decisions 28-32) and being built in its §11 order. This file records
+(`ACTORS.md`, decisions 28-33) and being built in its §11 order. This file records
 decisions that are already made and the shape the design must fit into. Rows superseded by the Bevy move are struck through and kept for the record.
 
 ## Decisions
@@ -42,6 +42,7 @@ decisions that are already made and the shape the design must fit into. Rows sup
 | 30 | Conflicts are settled by state-derived keys, never by thread or slot: in-chunk claims take the `min` key in a parallel phase, cross-chunk effects run sequentially in `stage.active()` order, and a cell contested by an in-chunk and a cross-chunk mover goes to the in-chunk one (**home advantage**) | Bit-identical on any thread count with one parallel and one sequential pass; the asymmetry touches one rare case and is documented | If a herd at a border looks wrong: the symmetric owner-resolves protocol (an Outcomes component + one more parallel pass) |
 | 31 | **Where worldgen starts each kind is a rules property** (`place N / D`), not a terrain parameter: each walkable cell draws one placement hash, and the shares of the kinds that have one cut `0..2^24` into intervals in kind order. `GenParams` is terrain only again (store v6) | A new kind is one file, including where it lives at the start; one hash per cell is cheaper than one per kind; integers only, no floats in the rules | If placement needs terrain conditions (trees only near water): a `place ... where cond` clause evaluated by the VM at generation time |
 | 32 | **Ground cover is a second actor layer** (`ChunkCells.cover`, store v7): a kind declared `cover` (grass) lives under the occupant, never blocks a move and never moves; `graze` bites it, searches match a kind or tag on either layer, `bare` = walkable with no cover; the renderer tints a covered cell's background toward the cover's colour (amends 14), so a meadow reads as a green patch under whoever stands in it. Bites apply in key order and every `eat`/`graze` gains the victim's `food` by the share of health it took (replaces the single kill credit of step 5) | Grass that walls off shores starved the chickens behind it; one more `ActorId` array (16 KB per chunk) keeps movement a per-cell ownership question and needs no new search code. Food by share lets a tuft feed without dying and a shared kill feed every biter, in an order-independent sum | If a third layer is ever wanted (items on the ground): a per-cell stack, not a third array |
+| 33 | **Scent is a cell layer, not an actor**: `ChunkCells.scent` = 2 channels of `u8` per cell (store v8), raised by `mark` in Apply (own cell, saturating add) and faded by `scent_decay`, the first cell system: every 16 ticks per chunk, staggered by a hash of the chunk coordinate (decision 23), `s -= ceil(s / 32)`. Channel names come from the rules, numbered in first-appearance order | Broadcast without messages: many actors write, many read, no queue and no order to settle (saturating adds of non-negative values commute; the fade is pure per cell). 8 KB per chunk. Two channels cover a trail and one more signal; a third is a compile error rather than a silent reuse | When a creature needs diffusion (smell spreading to neighbours): a double-buffered pass with a halo, not in-place |
 
 ## Layers
 
@@ -63,7 +64,8 @@ chunk entity: ChunkCoord { x, y }                              immutable compone
               ChunkCells { ground: [Ground; 4096]   u8   Soil | Water
                            feature: [Feature; 4096] u8   None | Rock
                            occupant: [ActorId; 4096] u32  NONE | standing actor
-                           cover: [ActorId; 4096]    u32  NONE | ground-cover actor (grass) }   one table column = the slab
+                           cover: [ActorId; 4096]    u32  NONE | ground-cover actor (grass)
+                           scent: [[u8; 4096]; 2]    u8   per channel, faded every 16 ticks }   one table column = the slab
               ChunkMeta  { dirty, last_ticked }
 Stage (resource) { index:  HashMap<ChunkCoord, Entity>            lookup only
                    active: Vec<(ChunkCoord, Entity)>              sorted by (y, x): THE iteration order }

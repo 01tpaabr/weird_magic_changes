@@ -67,7 +67,7 @@ pub struct SimTick;
 /// ordered explicitly.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// Cell systems (none yet).
+    /// Cell systems: scent fades.
     Simulate,
     /// Every due actor runs its program; writes own minds + intents.
     Think,
@@ -146,6 +146,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
             .chain(),
     );
     schedule.add_systems((
+        crate::stage::scent::scent_decay.in_set(Phase::Simulate),
         systems::think.in_set(Phase::Think),
         systems::resolve.in_set(Phase::Resolve),
         systems::exchange.in_set(Phase::Exchange),
@@ -509,6 +510,7 @@ mod tests {
             feature: c.feature[i],
             occupant: c.occupant[i],
             cover: c.cover[i],
+            scent: std::array::from_fn(|j| c.scent[j][i]),
         })
     }
 
@@ -1071,6 +1073,7 @@ mod tests {
             signal: None,
             amount: 0,
             with: [0; 2],
+            mark: None,
             trapped: false,
         };
         w.get_mut::<ChunkActors>(e0).unwrap().rows[1].flags |= flags::WAKE;
@@ -1280,6 +1283,85 @@ mod tests {
         for k in kids {
             assert!([11, 63, 31].contains(&k.3.mem[1]), "{:?}", k.3.mem);
         }
+    }
+
+    /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
+    /// step later `sniff` finds it (in the chunk and across a border); the
+    /// scent is saved with the chunk and fades to nothing in two hours; a
+    /// third channel does not compile.
+    #[test]
+    fn marks_are_sniffed_saved_and_fade() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::time::hours;
+        let kinds = compile(
+            "t.rules",
+            "kind ant { glyph \"a\"  cadence 1  sight 4
+               mem mode, here_s, sx, sy, far
+               when mode == 0 => { mode = 1  mark trail 200  idle }
+               when mode == 1 => { mode = 2  here_s = scent(trail)  idle }
+               when mode == 2 => { mode = 3  move east }
+               when mode == 3 and sniff trail within 3 as v => { mode = 4  sx = v.dx  sy = v.dy  far = scent(trail, v) }
+               when true => idle }",
+        )
+        .unwrap();
+        assert_eq!(kinds.scents, vec!["trail".to_string()]);
+        let cfg = WorldConfig {
+            width: 128,
+            height: 64,
+            ..cfg(12)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone());
+        flatten(&mut w);
+        let now = tick(&w);
+        for (x, uid) in [(20, 0xA1), (63, 0xA2)] {
+            assert!(place_actor(
+                &mut w,
+                Pos::new(x, 30),
+                0,
+                newborn(&kinds, 0, uid, now)
+            ));
+        }
+        for _ in 0..6 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let all = rows(&mut w);
+        for (uid, x) in [(0xA1, 20), (0xA2, 63)] {
+            let a = all.iter().find(|r| r.0 == uid).unwrap();
+            assert_eq!(a.2, Pos::new(x + 1, 30), "ant {uid:x} stepped east");
+            let m = a.3.mem;
+            assert_eq!(m[0], 4, "ant {uid:x}: {m:?}");
+            assert!(m[1] > 150 && m[1] <= 200, "read its own mark: {m:?}");
+            assert_eq!((m[2], m[3]), (-1, 0), "sniffed the cell it left");
+            assert!(m[4] > 150, "{m:?}");
+            assert!(get(&w, Pos::new(x, 30)).unwrap().scent[0] > 150);
+        }
+        // Saved and read back with the chunk.
+        let store = tmp_store("scent");
+        let c = ChunkCoord::new(0, 0);
+        let cells = stage::chunk(&w, c).unwrap().clone();
+        let e = w.resource::<Stage>().entity(c).unwrap();
+        let actors = w.get::<ChunkActors>(e).unwrap().clone();
+        let minds = w.get::<ChunkMinds>(e).unwrap().clone();
+        store
+            .write_chunk(c, &cells, &actors, &minds, tick(&w))
+            .unwrap();
+        let back = store.read_chunk(c).unwrap().unwrap();
+        assert_eq!(back.data.cells, cells);
+        std::fs::remove_dir_all(store.dir()).unwrap();
+        // Two hours later it is gone.
+        for _ in 0..hours(2) {
+            step(&mut w);
+        }
+        assert_eq!(get(&w, Pos::new(20, 30)).unwrap().scent, [0, 0]);
+
+        let e = compile(
+            "t.rules",
+            "kind a { when true => { mark s1 1  mark s2 1  mark s3 1 } }",
+        )
+        .unwrap_err();
+        assert!(e.to_string().contains("at most 2 scents"), "{e}");
     }
 
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
