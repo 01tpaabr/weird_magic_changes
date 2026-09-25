@@ -45,7 +45,7 @@ When two of these conflict, the higher one wins.
 ```
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), worldgen, store, rng, time, SimTick
-rules/              *.rules files: the kinds (plants.rules is built into the binary)
+rules/              *.rules files: the kinds (all built into the binary; WMC_RULES=<dir> swaps them)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
