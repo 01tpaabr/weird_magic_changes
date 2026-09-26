@@ -377,9 +377,7 @@ impl<'a> Gen<'a> {
                 seen.stmts(&m.body);
             }
         }
-        let mut sub_sets_look = false;
         for s in self.subs {
-            sub_sets_look |= sets_look(&s.body);
             let mut seen = Seen {
                 names: &mut names,
                 who: s.name.clone(),
@@ -472,7 +470,7 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            sets_look_by_kind.push(w.sets_look || sub_sets_look);
+            sets_look_by_kind.push(w.sets_look);
             self.debug.makes.push(w.makes.into_iter().collect());
         }
         self.params.clear();
@@ -901,19 +899,6 @@ impl<'a> Gen<'a> {
     }
 }
 
-/// Does this body (or anything nested in it) set `look`?
-fn sets_look(body: &[Stmt]) -> bool {
-    body.iter().any(|s| match s {
-        Stmt::Look(_) => true,
-        Stmt::If { then, els, .. } => sets_look(then) || sets_look(els),
-        Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
-            sets_look(body)
-        }
-        Stmt::Choose(arms) => arms.iter().any(|(_, b)| sets_look(b)),
-        _ => false,
-    })
-}
-
 /// Ticks as the rules write them: `30min`, `2h`, `1d`, else a count.
 fn shown_ticks(t: u64) -> String {
     let (d, h, m) = (days(1), hours(1), minutes(1));
@@ -990,6 +975,31 @@ mod tests {
         assert!(
             !got.iter()
                 .any(|d| d.contains("nothing marks") || d.contains("no rule sets")),
+            "{got:?}"
+        );
+        // A file sub that sets `look` counts only for the kinds that call it.
+        let got = lint(
+            "sub show() { look = 2 }
+             kind a { when true => idle }
+             kind b { when true => show() }
+             kind c { mem m
+               when nearest a:2 within 3 as o => m = 1
+               when nearest b:2 within 3 as o => m = 2 }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`c` looks for `a:2`, but no rule of `a` sets `look`")),
+            "{got:?}"
+        );
+        assert!(!got.iter().any(|d| d.contains("`b:2`")), "{got:?}");
+        let got = lint(
+            "sub show() { look = 1 }
+             kind q { when true => idle }
+             kind p { mem m  when nearest q:1 within 3 as o => m = 1 }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`p` looks for `q:1`, but no rule of `q` sets `look`")),
             "{got:?}"
         );
     }
