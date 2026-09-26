@@ -1,6 +1,7 @@
-//! The scenario tests (`scenarios/tests/*.scenario`), on the real binary: each
-//! must pass its `expect` lines, and end with the same checksum on 1 thread
-//! and on 8, so every one is a determinism check too.
+//! Every scenario in `scenarios/` (its tests in `tests/` too), on the real
+//! binary: each must pass its `expect` lines, and end with the same checksum
+//! on 1 thread and on 8, so every one is a determinism check too. A scenario
+//! runs with the packs it names (`rules`), else the built-in rules.
 
 use std::path::Path;
 use std::process::Command;
@@ -29,15 +30,19 @@ fn checksum(report: &str) -> &str {
 }
 
 #[test]
-fn every_scenario_test_passes_at_1_and_8_threads() {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios/tests");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "scenario"))
-        .collect();
+fn every_scenario_passes_at_1_and_8_threads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+    let mut files = Vec::new();
+    for dir in [root.clone(), root.join("tests")] {
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            if p.extension().is_some_and(|x| x == "scenario") {
+                files.push(p);
+            }
+        }
+    }
     files.sort();
-    assert!(files.len() >= 4, "{files:?}");
+    assert!(files.len() >= 7, "{files:?}");
     for f in &files {
         let (one, eight) = (run(f, "1"), run(f, "8"));
         assert!(one.contains("(1 threads)") && eight.contains("(8 threads)"));

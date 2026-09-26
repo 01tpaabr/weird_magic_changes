@@ -363,6 +363,7 @@ start hive at (77, 103)                        # exactly there
 
 | statement | default | meaning |
 |---|---|---|
+| `rules PATH ...` | the built-in rules | the packs the world runs (§15), relative to the scenario file |
 | `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks; the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
@@ -406,8 +407,9 @@ rock; after it, `#` starts a comment as usual.
 **Testing a kind.** A scenario can end in a test: `run` steps the world, `expect` checks
 it, as many times as you like, in the order written. `wmc scenario <file>` makes the world
 (nowhere on disk), runs the lines, prints each expectation with what it found and the final
-checksums, and fails if an expectation does. Every file in `scenarios/tests/` runs in
-`make test`, at 1 and 8 threads, and must end with the same checksum at both.
+checksums, and fails if an expectation does. Every scenario in `scenarios/` and
+`scenarios/tests/` runs in `make test`, at 1 and 8 threads, and must end with the same
+checksum at both; one without `run` lines only makes its world.
 
 ```
 # scenarios/tests/eggs_hatch.scenario
@@ -458,8 +460,23 @@ WMC_RULES=rules:mods/wolves wmc run saves/zoo 1000       # the same, for any com
 wmc lint rules mods/wolves                               # check them together
 ```
 
-A save remembers its packs, by absolute path, and reopens with them when neither `--rules`
-nor `WMC_RULES` names any. If one of them is gone it says so and uses the built-in rules.
+A scenario can name its world's packs, relative to the scenario file, so it runs like any
+other with nothing but `--scenario`:
+
+```
+rules ../packs/life                 # in scenarios/life.scenario
+```
+
+A save remembers its packs, by absolute path. So a new world runs `--rules`, else
+`WMC_RULES`, else its scenario's `rules`, else the built-in kinds; a saved one runs
+`--rules`, else `WMC_RULES`, else the packs it was saved with. If one of those is gone it
+says so and uses the built-in rules. `wmc lint --scenario <file>`, with no packs, lints the
+ones the scenario names.
+
+A pack need not build on the built-in kinds. `packs/life` is Conway's Game of Life in two
+kinds, `dead` and `alive`, and nothing else: `scenarios/life.scenario` plays a soup of it
+and checks its live count against a plain Life's, up to generation 100, and
+`scenarios/tests/life_patterns.scenario` tests a blinker, a block and a glider.
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor

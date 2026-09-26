@@ -1,0 +1,31 @@
+# Conway's Game of Life, as a pack: a second world on the same engine, with
+# nothing of the built-in ecosystem. The rule is B3/S23: a dead cell with
+# exactly three live neighbours comes alive, a live cell with two or three
+# stays alive, and every other live cell dies. The soup to play is
+# scenarios/life.scenario; scenarios/tests/life_patterns.scenario tests it.
+
+const BIRTH = 3                  # live neighbours that bring a dead cell to life
+const LONELY = 2                 # fewer than this, a live cell dies
+const CROWDED = 3                # more than this, a live cell dies
+
+# A cell of the board. Every cell holds one actor, dead or alive, and all of
+# them think every tick against the board as it stood when the tick began, so
+# the whole board steps together: one generation a tick. `count alive within 1`
+# counts the 3 x 3 square round a cell, the cell itself included.
+trait cell {
+  cadence 1
+  sight 1
+}
+
+kind dead extends cell {
+  glyph "."
+  color "#5a5a5a"
+  when count alive within 1 == BIRTH => become alive
+}
+
+kind alive extends cell {
+  glyph "O"
+  color "#f4f4f4"
+  # This cell is in its own count: its neighbours are one fewer.
+  when count alive within 1 < LONELY + 1 or count alive within 1 > CROWDED + 1 => become dead
+}

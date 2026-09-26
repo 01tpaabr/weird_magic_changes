@@ -3,6 +3,7 @@
 //! its rules. A scenario is a small text file:
 //!
 //! ```text
+//! rules ../packs/life                           # the packs its world runs (else the built-in rules)
 //! seed 12
 //! size 256 256                                  # cells, rounded up to whole chunks
 //! terrain water_level 0.18 rock_on_soil 0.02    # any GenParams field; the others default
@@ -335,6 +336,10 @@ pub struct Scenario {
     /// A scenario test's `run` and `expect` lines (`wmc scenario`); nothing
     /// a world keeps.
     pub checks: Vec<Check>,
+    /// The rule packs a world of this scenario runs (`rules PATH ...`), as
+    /// written; in a file, relative to it. `--rules` and `WMC_RULES` come
+    /// first, and a saved world keeps its own.
+    pub packs: Vec<String>,
 }
 
 /// A scenario that does not parse: where and why.
@@ -364,6 +369,7 @@ impl Default for Scenario {
             starts: Vec::new(),
             map: None,
             checks: Vec::new(),
+            packs: Vec::new(),
         }
     }
 }
@@ -778,6 +784,12 @@ impl Scenario {
                     };
                     outside = Some((line_no, fill));
                 }
+                "rules" => {
+                    if rest.is_empty() {
+                        return Err(err(line_no, "expected `rules PATH ...`".into()));
+                    }
+                    s.packs.extend(rest.iter().map(|p| p.to_string()));
+                }
                 "run" => {
                     let t = match rest[..] {
                         [t] => value(t).filter(|&t| t > 0),
@@ -803,7 +815,7 @@ impl Scenario {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (seed, size, terrain, start, map, legend, outside, run, expect)"
+                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect)"
                         ),
                     ));
                 }
@@ -1168,6 +1180,9 @@ mod tests {
         );
         assert_eq!(s.map, None);
         assert_eq!(Scenario::parse("e", "").unwrap(), Scenario::default());
+        let packs = Scenario::parse("p", "rules ../packs/life  # its own\nrules more").unwrap();
+        assert_eq!(packs.packs, ["../packs/life", "more"]);
+        assert!(Scenario::parse("p", "rules").is_err());
     }
 
     /// A scenario test's lines, every form, in the order written.

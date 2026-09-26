@@ -133,9 +133,14 @@ fn main() -> anyhow::Result<()> {
             scenario_test(f, &packs)
         }
         Some("lint") => {
-            let packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            let mut packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            if packs.is_empty()
+                && let Some(f) = file
+            {
+                packs = scenario(Some(f))?.packs;
+            }
             if packs.is_empty() {
-                bail!("lint needs a rules directory or file");
+                bail!("lint needs a rules directory or file, or a scenario that names its rules");
             }
             lint(&packs, file, strict)
         }
@@ -150,12 +155,20 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// A scenario file, else the built-in one.
+/// A scenario file, else the built-in one. The packs a file names are
+/// relative to it.
 fn scenario(file: Option<&str>) -> anyhow::Result<Scenario> {
     match file {
         Some(f) => {
             let text = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
-            Ok(Scenario::parse(f, &text)?)
+            let mut s = Scenario::parse(f, &text)?;
+            let dir = std::path::Path::new(f)
+                .parent()
+                .unwrap_or(std::path::Path::new(""));
+            for p in &mut s.packs {
+                *p = dir.join(&*p).to_string_lossy().into_owned();
+            }
+            Ok(s)
         }
         None => Ok(Scenario::builtin()),
     }
@@ -200,7 +213,7 @@ fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
 }
 
 fn show(setup: &Setup) -> anyhow::Result<()> {
-    let kinds = app::compile(&app::packs(&setup.packs))?;
+    let kinds = app::compile(&app::packs_or(&setup.packs, &setup.scenario.packs))?;
     app::warn(&kinds);
     let t0 = Instant::now();
     let mut world = new_world(setup, kinds)?;
@@ -252,7 +265,7 @@ fn show(setup: &Setup) -> anyhow::Result<()> {
 /// one of the setup (its initial region loaded). Never saved by the caller.
 fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let kinds = app::rules_for(&store, &setup.packs)?;
+    let kinds = app::rules_for(&store, &setup.packs, &setup.scenario.packs)?;
     Ok(
         match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
             Some(mut w) => {
@@ -388,7 +401,7 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
 /// expectation does.
 fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
     let s = scenario(Some(file))?;
-    let kinds = app::compile(&app::packs(packs))?;
+    let kinds = app::compile(&app::packs_or(packs, &s.packs))?;
     app::warn(&kinds);
     let mut world = sim::new_world_with(&s, kinds).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
     let mut out = std::io::stdout().lock();

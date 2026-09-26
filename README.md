@@ -25,9 +25,11 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   hens and grow up. Foxes hunt, sleep and raise kits. Flowers make nectar, hives raise
   bees, and bees find flowers, dance the way home and lay scent trails. Grass spreads and
   regrows, seeds grow into trees, and trees drop seeds.
-- **Content as input.** Rule packs (`--rules`), scenario files (seed, size, terrain or a
-  hand-drawn map, who starts where), and saves that reopen under other packs, with kinds
-  matched by name.
+- **Content as input.** Rule packs (`--rules`, or named by the scenario), scenario files
+  (seed, size, terrain or a hand-drawn map, who starts where), and saves that reopen under
+  other packs, with kinds matched by name.
+- **A second world.** `packs/life` is Conway's Game of Life as a pack: two kinds, none of
+  the built-in ones, on the same engine, tested against a plain Life.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), hot reload (`r` in the game), and scenario tests
   (`wmc scenario`).
@@ -56,6 +58,7 @@ make run ARGS="run saves/dev 1000"             # headless: N ticks, µs per tick
 make run ARGS="why saves/dev 77 103 3000"      # after 3000 ticks, why the actor at (77, 103) does what it does
 make run ARGS="lint rules/"                    # compile the rules, print the kind table and the author lint
 make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test
+make run ARGS="play saves/life --scenario scenarios/life.scenario"   # Conway's Life instead
 make ci        # fmt, clippy, and every test (determinism at 1 and 8 threads included)
 ```
 
@@ -92,10 +95,11 @@ kind sheep extends drinker(6, 2h, 3), mortal(8d, 5) {
 }
 ```
 
-A scenario says where they start, and can end in a test:
+A scenario says which packs its world runs and where they start, and can end in a test:
 
 ```
 # meadow.scenario
+rules rules my_pack               # relative to this file: the built-in kinds as a pack, then the sheep
 seed 7
 size 128 128
 start grass 1 / 10
@@ -108,14 +112,16 @@ expect min food of sheep > 12h    # nobody goes hungry
 ```
 
 ```
-make run ARGS="lint rules my_pack"
-make run ARGS="scenario meadow.scenario --rules rules --rules my_pack"
-make run ARGS="play saves/meadow --rules rules --rules my_pack --scenario meadow.scenario"
+make run ARGS="lint --scenario meadow.scenario"       # its packs, and whether the scenario fits them
+make run ARGS="scenario meadow.scenario"
+make run ARGS="play saves/meadow --scenario meadow.scenario"
 ```
 
-`--rules rules` is the built-in content as a pack; packs compile together as one rule set,
-so the sheep can use the built-in fox and grass. A save remembers its packs. The full
-language, scenarios, packs, tests and the lint are in `docs/RULES.md`.
+Packs compile together as one rule set, so the sheep can use the built-in fox and grass.
+`--rules` (or `WMC_RULES`) runs other packs than the scenario names, and a save remembers
+its packs. A pack can also stand alone: `packs/life/life.rules` is the whole of Conway's
+Life, played by `scenarios/life.scenario`. The full language, scenarios, packs, tests and
+the lint are in `docs/RULES.md`.
 
 ## Layout
 
@@ -125,7 +131,8 @@ crates/sim-core    the simulation, on bevy_ecs and bevy_tasks (no renderer, no c
 crates/app         the `wmc` binary: the window, camera, clock and renderer, and the
                    show / play / run / why / lint / scenario commands
 rules/             the built-in kinds (compiled into the binary) and the shared trait library
-scenarios/         the default world; tests/ holds the scenario tests
+packs/             packs of their own: life/ is Conway's Game of Life
+scenarios/         the default world and the Life soup; tests/ holds the scenario tests
 docs/              the documentation below
 ```
 

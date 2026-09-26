@@ -29,6 +29,17 @@ pub fn packs(cli: &[String]) -> Vec<PathBuf> {
     std::env::var_os("WMC_RULES").map_or_else(Vec::new, |v| std::env::split_paths(&v).collect())
 }
 
+/// The packs for a new world: the session's ([`packs`]), else the ones its
+/// scenario names (`rules` lines, relative to the scenario file).
+pub fn packs_or(cli: &[String], scenario: &[String]) -> Vec<PathBuf> {
+    let session = packs(cli);
+    if session.is_empty() {
+        scenario.iter().map(PathBuf::from).collect()
+    } else {
+        session
+    }
+}
+
 /// Compile `packs` as one rule set (`sim_core::rules::compile_packs`);
 /// none is the rules built into the binary.
 pub fn compile(packs: &[PathBuf]) -> anyhow::Result<Kinds> {
@@ -41,12 +52,16 @@ pub fn compile(packs: &[PathBuf]) -> anyhow::Result<Kinds> {
 }
 
 /// The rules for the world in `store`: the session's packs, else (opening
-/// a save) the packs it was last played with, if they all still exist,
-/// else the built-in rules. Says on stderr when it is not the session's
-/// choice, and when the rules changed since the save was last played.
-pub fn rules_for(store: &Store, cli: &[String]) -> anyhow::Result<Kinds> {
+/// a save) the packs it was last played with, if they all still exist, or
+/// (making one) the packs its scenario names, else the built-in rules. Says
+/// on stderr when it is not the session's choice, and when the rules
+/// changed since the save was last played.
+pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::Result<Kinds> {
     let meta = store.read_meta().context("reading save")?;
     let mut packs = packs(cli);
+    if packs.is_empty() && meta.is_none() {
+        packs = scenario.iter().map(PathBuf::from).collect();
+    }
     if let Some(m) = meta
         .as_ref()
         .filter(|m| packs.is_empty() && !m.packs.is_empty())

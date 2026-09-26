@@ -46,7 +46,8 @@ When two of these conflict, the higher one wins.
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), scenario, worldgen, store, rng, time, SimTick
 rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
-scenarios/          *.scenario files: seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
+packs/              packs that stand alone (life/: Conway's Life), named by a scenario's `rules` line
+scenarios/          *.scenario files: rules, seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```

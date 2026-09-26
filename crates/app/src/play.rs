@@ -91,7 +91,7 @@ pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyh
                 ..default()
             }),
     );
-    let kinds = crate::rules_for(&store, packs)?;
+    let kinds = crate::rules_for(&store, packs, &scenario.packs)?;
     let world = app.world_mut();
     sim::install_with(world, kinds);
     if !sim::open(world, &store).context("reading save")? {
