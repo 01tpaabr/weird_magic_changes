@@ -1070,7 +1070,11 @@ impl Parser<'_> {
                 }
                 // `color "#rrggbb"`
                 let c = match self.bump() {
-                    Tok::Str(s) if s.len() == 7 && s.starts_with('#') => {
+                    Tok::Str(s)
+                        if s.len() == 7
+                            && s.starts_with('#')
+                            && s[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+                    {
                         u32::from_str_radix(&s[1..], 16).ok()
                     }
                     _ => None,
@@ -4237,6 +4241,19 @@ mod tests {
         assert_eq!(b.mems, vec!["p", "q"]);
         assert_eq!(b.entry, 1); // kind a's program is one Halt
         assert_eq!(k.code[0].code, OpCode::Halt);
+    }
+
+    #[test]
+    fn color_takes_six_hex_digits_and_nothing_else() {
+        let k = compile_ok("kind a { glyph \"a\" color \"#a0b1c2\" when true => idle }");
+        assert_eq!(k.defs[0].color, 0xa0b1c2);
+        for bad in ["#+fffff", "#-fffff", "#fffff", "#fffffg"] {
+            let text = format!("kind a {{ glyph \"a\" color \"{bad}\" when true => idle }}");
+            assert!(
+                compile_err(&text).contains("color takes \"#rrggbb\""),
+                "{bad}"
+            );
+        }
     }
 
     #[test]
