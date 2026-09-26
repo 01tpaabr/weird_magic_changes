@@ -578,11 +578,11 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **Two actions in a row** are a compile error when the compiler can see both: a statement
   that acts on every path, then another action in the same block.
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at
-  (x, y) to think, and prints that think. It shows the actor's needs and memory, and every
-  rule it checked: `FIRED`, `no` (condition false), `TRAPPED` (the think trapped in its
-  condition) or blank (not reached). Then the decision with its effects, what it wrote, the
-  fuel spent, and after the real step where it went and its result. `-v` adds every op, up
-  to the one that trapped.
+  (x, y) to think (up to its cadence, at least a day), and prints that think. It shows the
+  actor's needs and memory, and every rule it checked: `FIRED`, `no` (condition false),
+  `TRAPPED` (the think trapped in its condition) or blank (not reached). Then the decision
+  with its effects, what it wrote, the fuel spent, and after the real step where it went and
+  its result. `-v` adds every op, up to the one that trapped.
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and

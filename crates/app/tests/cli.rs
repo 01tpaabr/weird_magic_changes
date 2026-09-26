@@ -48,3 +48,34 @@ fn why_follows_ground_cover_under_a_walker() {
     assert!(out.contains("grass at (2, 1)"), "{out}");
     assert!(out.contains("thinks every 256 ticks, due now"), "{out}");
 }
+
+/// `why` waits as long as the actor's cadence, not just a day.
+#[test]
+fn why_waits_out_a_cadence_longer_than_a_day() {
+    let dir = scratch("slow");
+    std::fs::create_dir_all(dir.join("slow")).unwrap();
+    std::fs::write(
+        dir.join("slow/stone.rules"),
+        "kind stone {\n  glyph \"o\"\n  cadence 32768\n  when true => idle\n}\n",
+    )
+    .unwrap();
+    let scenario = dir.join("slow.scenario");
+    std::fs::write(
+        &scenario,
+        "rules slow\nseed 1\nsize 16 16\nstart stone at (3, 3)\n",
+    )
+    .unwrap();
+    let save = dir.join("save");
+    let (ok, out, err) = wmc(&[
+        "why",
+        save.to_str().unwrap(),
+        "3",
+        "3",
+        "5000",
+        "--scenario",
+        scenario.to_str().unwrap(),
+    ]);
+    assert!(ok, "{err}");
+    assert!(out.contains("stone at (3, 3)"), "{out}");
+    assert!(out.contains("thinks every 32768 ticks, due now"), "{out}");
+}

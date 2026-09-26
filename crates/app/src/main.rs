@@ -279,8 +279,9 @@ fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     )
 }
 
-/// `wmc why`: step `ticks`, then wait (up to a day) for the actor at `p`
-/// to be due, explain that think, and run it to show where it went.
+/// `wmc why`: step `ticks`, then wait (up to its cadence, at least a day)
+/// for the actor at `p` to be due, explain that think, and run it to show
+/// where it went.
 fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Result<()> {
     let mut world = open_or_new(dir, setup)?;
     for _ in 0..ticks {
@@ -303,8 +304,14 @@ fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Resul
         if e.due {
             break (at, e);
         }
-        if waited == sim_core::TICKS_PER_DAY {
-            bail!("it did not think within a day");
+        // Its own cadence (a `become` may change it), at least a day.
+        let limit = world
+            .resource::<Kinds>()
+            .def(e.row.kind)
+            .cadence()
+            .max(sim_core::TICKS_PER_DAY);
+        if waited >= limit {
+            bail!("it did not think within {limit} ticks");
         }
         sim::step(&mut world);
         waited += 1;
