@@ -116,9 +116,11 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   write to the store (a save, an unload, a reload) first rewrites every chunk file and then
   the header, so a directory never mixes two numberings. A kind the rules lack, or one that
   moved between standing and ground cover, refuses the open.
-- **Cadence**: `cadence 2^k` per kind; an actor is due when `(tick + stagger) & (2^k - 1) ==
-  0` or `WAKE` is set. Stagger is per actor (decision 28). Only `hurt` and being taken from
-  set `WAKE`; the result of an action is read at the next scheduled think.
+- **Cadence**: `cadence 2^k` per kind; an actor is due when
+  `(tick + (stagger << max(k - 16, 0))) & (2^k - 1) == 0` or `WAKE` is set: the 16-bit
+  stagger spreads over the whole period at any cadence. Stagger is per actor (decision 28).
+  Only `hurt` and being taken from set `WAKE`; the result of an action is read at the next
+  scheduled think.
 - **RNG**: counter-based, no stream state: draw `n` for `uid` at `tick` is
   `splitmix64(splitmix64(seed ^ STREAM_THINK ^ splitmix64(tick) ^ uid) + n)`. Claim key
   `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`.

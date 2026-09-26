@@ -265,10 +265,13 @@ pub fn intent_key(uid: u64, tick: u64) -> u64 {
     splitmix64(uid ^ splitmix64(tick))
 }
 
-/// Is an actor due to think at `tick`?
+/// Is an actor due to think at `tick`? Above a cadence of 2^16 the 16-bit
+/// stagger is shifted up, so the phases still spread over the whole period.
 #[inline]
 pub fn due(tick: u64, row: &ActorPub, cadence: u64) -> bool {
-    row.flags & flags::WAKE != 0 || tick.wrapping_add(u64::from(row.stagger)) & (cadence - 1) == 0
+    let shift = cadence.trailing_zeros().saturating_sub(16);
+    row.flags & flags::WAKE != 0
+        || tick.wrapping_add(u64::from(row.stagger) << shift) & (cadence - 1) == 0
 }
 
 // ---- Think ------------------------------------------------------------------------------
@@ -1420,6 +1423,18 @@ mod tests {
         assert!(due(6, &row, 1)); // cadence 1: every tick
         row.flags = flags::WAKE;
         assert!(due(6, &row, 8));
+        // Above 2^16 the 16-bit stagger is spread over the whole period:
+        // one stagger per even phase, none crowded into its last 65536.
+        let slow = 1 << 17;
+        row.flags = 0;
+        row.stagger = 0xC000;
+        assert!(due(32768, &row, slow) && !due(81920, &row, slow));
+        for t in [2, 4096, 32768, 65536, 98304, 131070] {
+            let n = (0..=u16::MAX)
+                .filter(|&s| due(t, &ActorPub { stagger: s, ..row }, slow))
+                .count();
+            assert_eq!(n, 1, "tick {t}");
+        }
     }
 
     #[test]
