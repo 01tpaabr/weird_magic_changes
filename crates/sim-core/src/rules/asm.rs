@@ -161,14 +161,21 @@ impl Asm {
     }
 
     /// Resolve labels and hand over the code. Panics on an unbound label
-    /// or a jump too far for 16 bits (a program bug, not a run-time one).
-    pub fn finish(mut self) -> Vec<Op> {
+    /// or a jump too far for 16 bits: for hand-written programs.
+    pub fn finish(self) -> Vec<Op> {
+        self.try_finish().expect("jump within 16 bits")
+    }
+
+    /// [`Asm::finish`], with a jump too far for 16 bits (which rules text
+    /// can make) as `Err(index of the jump)`. Panics on an unbound label
+    /// (a program bug, not the author's).
+    pub fn try_finish(mut self) -> Result<Vec<Op>, usize> {
         for (at, l) in self.fixups.drain(..) {
             let target = self.labels[l.0].expect("label bound");
             let rel = target as i64 - (at as i64 + 1);
-            self.code[at].imm = i16::try_from(rel).expect("jump within 16 bits");
+            self.code[at].imm = i16::try_from(rel).map_err(|_| at)?;
         }
-        self.code
+        Ok(self.code)
     }
 }
 
@@ -188,6 +195,18 @@ mod tests {
         assert_eq!(code[3], Op::new(OpCode::Jmp, 0, -4)); // to index 0 from index 4
         assert_eq!(code[4].code, OpCode::Halt);
         assert_eq!(code[0].bits(), 1 << 16); // Push, a = 0, imm = 1
+    }
+
+    #[test]
+    fn a_jump_too_far_for_16_bits_is_an_err() {
+        let mut a = Asm::new();
+        let end = a.label();
+        a.push(1).jz(end);
+        for _ in 0..=i16::MAX {
+            a.op(OpCode::Pop);
+        }
+        a.bind(end).halt();
+        assert_eq!(a.try_finish(), Err(1));
     }
 
     #[test]

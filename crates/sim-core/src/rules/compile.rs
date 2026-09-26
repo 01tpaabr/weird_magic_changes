@@ -2439,7 +2439,11 @@ impl<'a> Gen<'a> {
         self.check_traits()?;
         self.diagnose();
 
-        let code = std::mem::take(&mut self.asm).finish();
+        // The checks in rule, kind_code and sub_body keep every jump in
+        // 16 bits; this is only a backstop.
+        let code = std::mem::take(&mut self.asm)
+            .try_finish()
+            .map_err(|_| self.err(&self.here, "a jump too far for 16 bits: split the rules"))?;
         self.debug.subs = sub_names;
         self.debug.traits = items
             .iter()
@@ -3080,6 +3084,7 @@ impl<'a> Gen<'a> {
         for (s, list) in inst.state_lists.iter().enumerate() {
             self.state = Some(s as u8);
             let skip = self.asm.label();
+            let guard_pc = self.asm.here();
             self.asm
                 .sense(Sense::State)
                 .push(s as i32)
@@ -3087,6 +3092,21 @@ impl<'a> Gen<'a> {
                 .jz(skip);
             self.rule_list(list)?;
             self.asm.halt().bind(skip);
+            // The guard's jump skips the whole state: 16 bits.
+            if self.asm.here() - guard_pc > i16::MAX as u32 {
+                let name = &inst.states[s];
+                let at = std::iter::once(inst.item)
+                    .chain(inst.ancestors.iter().map(|&a| self.insts[a].item))
+                    .find_map(|i| self.items[i].states.iter().find(|st| st.name == *name))
+                    .map_or(&it.at, |st| &st.at);
+                return Err(self.err(
+                    at,
+                    format!(
+                        "state `{name}` of `{}` compiles to more than 32767 ops: split it",
+                        it.name
+                    ),
+                ));
+            }
         }
         self.asm.halt();
         let tags = inst.tags.iter().fold(0u64, |bits, t| {
@@ -3160,6 +3180,12 @@ impl<'a> Gen<'a> {
             self.asm.push(0).ret(true);
         } else {
             self.asm.ret(false);
+        }
+        if self.asm.here() - entry > i16::MAX as u32 {
+            return Err(self.err(
+                &s.at,
+                format!("sub `{}` compiles to more than 32767 ops: split it", s.name),
+            ));
         }
         self.sub = None;
         Ok(entry)
@@ -3398,6 +3424,13 @@ impl<'a> Gen<'a> {
         let body_pc = self.asm.here();
         self.stmts(&rule.body)?;
         self.asm.end_rule().bind(next);
+        // Its jumps are 16 bits.
+        if self.asm.here() - cond_pc > i16::MAX as u32 {
+            return Err(self.err(
+                &rule.at,
+                "rule body too long: it compiles to more than 32767 ops; split it",
+            ));
+        }
         let file = self
             .files
             .iter()
@@ -3537,7 +3570,7 @@ impl<'a> Gen<'a> {
         self.fold(e, at).ok()
     }
 
-    fn push_int(&mut self, v: i32) {
+    fn push_int(&mut self, v: i32) -> Result<()> {
         if let Ok(imm) = i16::try_from(v) {
             self.asm.push(i32::from(imm));
         } else {
@@ -3548,9 +3581,15 @@ impl<'a> Gen<'a> {
                     self.pool.len() - 1
                 }
             };
-            self.asm
-                .push_k(u16::try_from(idx).expect("constant pool fits u16"));
+            let Ok(idx) = u16::try_from(idx) else {
+                return Err(self.err(
+                    &self.here,
+                    "too many distinct constants outside -32768..32767 (max 65536)",
+                ));
+            };
+            self.asm.push_k(idx);
         }
+        Ok(())
     }
 
     fn alloc_local(&mut self, at: &Pos, n: usize) -> Result<u8> {
@@ -3671,7 +3710,7 @@ impl<'a> Gen<'a> {
                 }
                 let slot = self.alloc_local(at, 2)?;
                 let c = self.scent(ch, at)?;
-                self.push_int(i32::from(c));
+                self.push_int(i32::from(c))?;
                 self.expr(r)?;
                 self.asm.sniff(slot).jz(on_false);
                 self.locals.push(Local {
@@ -3748,7 +3787,7 @@ impl<'a> Gen<'a> {
                 }
             },
         };
-        self.push_int(v);
+        self.push_int(v)?;
         Ok(())
     }
 
@@ -3806,7 +3845,7 @@ impl<'a> Gen<'a> {
                 let here = self.here.clone();
                 let tmp = self.alloc_local(&here, 2)?;
                 self.asm.push(0).store(tmp).push(0).store(tmp + 1);
-                self.push_int(pred::FREE);
+                self.push_int(pred::FREE)?;
                 self.asm.push(1).nearest(tmp).op(OpCode::Pop);
                 self.asm.load(tmp).load(tmp + 1);
                 self.next_local = tmp;
@@ -3817,7 +3856,7 @@ impl<'a> Gen<'a> {
 
     fn expr(&mut self, e: &Expr) -> Result<()> {
         match e {
-            Expr::Int(v) => self.push_int(*v),
+            Expr::Int(v) => self.push_int(*v)?,
             Expr::Sense(s) => {
                 self.asm.sense(*s);
             }
@@ -3848,7 +3887,7 @@ impl<'a> Gen<'a> {
                 } else if let Some(i) = self.mem_slot(n) {
                     self.asm.mem(i);
                 } else if let Some(v) = self.param(n).or_else(|| self.const_value(n)) {
-                    self.push_int(v);
+                    self.push_int(v)?;
                 } else {
                     return Err(self.unknown_name(at, n));
                 }
@@ -4177,7 +4216,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Become { kind, at } => {
                 let id = self.concrete(kind, at)?;
-                self.push_int(i32::from(id));
+                self.push_int(i32::from(id))?;
                 self.asm.act(Action::Become);
             }
             Stmt::Spawn {
@@ -4187,7 +4226,7 @@ impl<'a> Gen<'a> {
                 with,
             } => {
                 let id = self.concrete(kind, pos)?;
-                self.push_int(i32::from(id));
+                self.push_int(i32::from(id))?;
                 self.target(at)?;
                 if !with.is_empty() {
                     // The kind's first two slots, in its layout order.
@@ -4203,7 +4242,7 @@ impl<'a> Gen<'a> {
                             .and_then(|(n, _)| with.iter().find(|w| w.0 == *n))
                         {
                             Some((_, e, _)) => self.expr(e)?,
-                            None => self.push_int(0),
+                            None => self.push_int(0)?,
                         }
                     }
                     self.asm.op(OpCode::SpawnWith);
@@ -4227,7 +4266,7 @@ impl<'a> Gen<'a> {
                     self.err(at, format!("`{verb}`: this kind has no need `{need}`"))
                 })?;
                 self.target(target)?;
-                self.push_int(i32::from(slot));
+                self.push_int(i32::from(slot))?;
                 self.expr(amount)?;
                 self.asm
                     .act(if *give { Action::Give } else { Action::Take });
@@ -4336,7 +4375,7 @@ impl<'a> Gen<'a> {
             for (i, (w, _)) in arms.iter().enumerate() {
                 g.expr(w)?;
                 g.asm.push(0).op(OpCode::Max);
-                g.push_int(cap);
+                g.push_int(cap)?;
                 g.asm.op(OpCode::Min).store(base + i as u8);
                 g.asm.load(base + i as u8).op(OpCode::Add);
             }
@@ -5120,6 +5159,56 @@ mod tests {
         assert_eq!(counts[0], 0);
         assert!(counts[1] > 240 && counts[1] < 360, "{counts:?}");
         assert!(counts[2] > 140 && counts[2] < 260, "{counts:?}");
+    }
+
+    #[test]
+    fn code_too_long_for_a_16_bit_jump_is_an_error() {
+        let mut text = String::from("kind k { mem m\n state s {\n");
+        for i in 0..5000 {
+            text.push_str(&format!("  when m == {i} => look = 1\n"));
+        }
+        text.push_str(" }\n}\n");
+        let e = compile_err(&text);
+        assert!(e.contains("state `s` of `k`") && e.contains("32767"), "{e}");
+
+        let mut text = String::from("kind k { mem m\n when true => {\n");
+        for _ in 0..9000 {
+            text.push_str("  m += 1\n");
+        }
+        text.push_str(" }\n}\n");
+        let e = compile_err(&text);
+        assert!(
+            e.starts_with("t.rules:2:2:") && e.contains("rule body too long"),
+            "{e}"
+        );
+
+        let mut text = String::from("sub f() {\n let a = 0\n");
+        for _ in 0..9000 {
+            text.push_str(" a += 1\n");
+        }
+        text.push_str("}\nkind k { when true => f() }\n");
+        let e = compile_err(&text);
+        assert!(
+            e.starts_with("t.rules:1:5:") && e.contains("sub `f`"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn more_than_65536_large_constants_is_an_error() {
+        let mut text = String::from("kind k { mem m\n");
+        let mut c = 40_000;
+        for _ in 0..5 {
+            text.push_str(" when true => {\n");
+            for _ in 0..14_000 {
+                text.push_str(&format!("  m = {c}\n"));
+                c += 1;
+            }
+            text.push_str(" }\n");
+        }
+        text.push_str("}\n");
+        let e = compile_err(&text);
+        assert!(e.contains("too many distinct constants"), "{e}");
     }
 
     #[test]
