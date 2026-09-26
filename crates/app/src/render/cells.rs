@@ -9,7 +9,7 @@
 
 use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
-use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
+use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos, SCENT_CHANNELS};
 
 use super::palette::{Color, Looks, VOID, scented, style};
 
@@ -174,6 +174,10 @@ fn render_row<'c>(
         let (g_out, f_out, b_out) = (&mut glyph[i..i + n], &mut fg[i..i + n], &mut bg[i..i + n]);
         match chunk(cc) {
             Some(c) => {
+                // Most spans hold no scent: then skip it per cell.
+                let scent: [&[u8]; SCENT_CHANNELS] =
+                    std::array::from_fn(|j| &c.scent[j][local..local + n]);
+                let scented_span = scent.iter().any(|ch| ch.iter().fold(0, |a, &s| a | s) != 0);
                 let cells = c.ground[local..local + n]
                     .iter()
                     .zip(&c.feature[local..local + n])
@@ -186,7 +190,11 @@ fn render_row<'c>(
                 for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
                     // Who stands here, on what grows here, in what scent.
                     let s = style(g, f, looks.actor(o), looks.actor(cover));
-                    let bg = scented(s.bg, std::array::from_fn(|j| c.scent[j][local + k]));
+                    let bg = if scented_span {
+                        scented(s.bg, std::array::from_fn(|j| scent[j][k]))
+                    } else {
+                        s.bg
+                    };
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = bg.scaled(light).0;
@@ -207,15 +215,14 @@ fn render_row<'c>(
 mod tests {
     use super::*;
     use bevy::ecs::world::World;
-    use sim_core::stage::worldgen::GenParams;
-    use sim_core::{Kinds, StageCells, WorldConfig, sim, stage};
+    use sim_core::{Kinds, Scenario, StageCells, sim, stage};
 
     fn world(w: u32, h: u32, seed: u64) -> World {
-        sim::new_world(&WorldConfig {
+        sim::new_world(&Scenario {
             width: w,
             height: h,
             seed,
-            params: GenParams::default(),
+            ..Scenario::builtin()
         })
     }
 

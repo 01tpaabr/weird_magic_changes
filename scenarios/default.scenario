@@ -1,0 +1,17 @@
+# The world `wmc show`, `play` and `run` make when given no scenario.
+# A scenario holds the physical world and where each kind starts; the rules
+# hold everything else (docs/RULES.md, "Scenarios"). `[w h seed]` on the
+# command line override `size` and `seed`.
+
+seed 42
+size 80 24
+terrain water_scale 12 water_level 0.30 rock_on_soil 0.04 rock_on_water 0.01
+
+# Each walkable cell draws a number in [0, 1); the shares cut that range in the
+# order written, so reordering these lines moves who starts where.
+start chicken 1 / 400
+start fox     1 / 5000
+start flower  1 / 250
+start hive    1 / 20000
+start grass   1 / 20
+start seed    1 / 100

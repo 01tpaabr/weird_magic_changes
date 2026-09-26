@@ -1,22 +1,23 @@
 //! Deterministic chunk generation.
 //!
-//! Every cell is a **pure function of `(seed, x, y)`**: ground comes from
-//! thresholded value noise, rocks from a per-cell hash, and so is every
-//! actor row worldgen places: each walkable cell draws one placement hash,
-//! and the rules' `place N / D` shares cut `0..PLACE_ONE` into one interval
-//! per kind, in kind order (`Kinds::placed`); the row's `uid` is hashed
-//! from its position. No
-//! sequential state, so a chunk's content never depends on when, in which
-//! order, or on how many threads it was generated. Rows are pushed in cell
-//! order, so slot order is pure too. What is *not* pure is the tick a row
-//! was born at: `sim::load_chunks` stamps it, and marks an inhabited chunk
-//! dirty so it is saved rather than regenerated.
+//! Every cell is a **pure function of `(seed, x, y)`** and the scenario:
+//! ground comes from thresholded value noise, rocks from a per-cell hash,
+//! and so is every actor row worldgen places. A scenario's explicit start
+//! takes its cell; every other walkable cell draws one placement hash,
+//! and the scenario's `start K n / d` shares cut `0..PLACE_ONE` into one
+//! interval per kind, in the order written ([`Placement::placed`]). A row's `uid`
+//! is hashed from its position. No sequential state, so a chunk's content
+//! never depends on when, in which order, or on how many threads it was
+//! generated. Rows are pushed in cell order, so slot order is pure too.
+//! What is *not* pure is the tick a row was born at: `sim::load_chunks`
+//! stamps it, and marks an inhabited chunk dirty so it is saved rather
+//! than regenerated.
 
 use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
 use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
-use crate::rules::Kinds;
+use crate::scenario::{Placed, Placement};
 use bytemuck::Zeroable;
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
@@ -51,13 +52,13 @@ impl Default for GenParams {
     }
 }
 
-/// Fill `out` with chunk `coord`: cells, then the rows worldgen places on
+/// Fill `out` with chunk `coord`: cells, then the rows `placement` puts on
 /// them. Sequential inside the chunk; callers parallelise across chunks
 /// (see [`generate_many`]). Rows come out with `born` and `last_think` zero.
 pub fn generate_chunk(
     seed: u64,
     params: &GenParams,
-    kinds: &Kinds,
+    placement: &Placement,
     coord: ChunkCoord,
     out: &mut ChunkData,
 ) {
@@ -76,20 +77,25 @@ pub fn generate_chunk(
     cells.scent = [[0; CHUNK_CELLS]; super::SCENT_CHANNELS];
     out.actors.rows.clear();
     out.minds.rows.clear();
-    if !kinds.places_any() {
+    let explicit = placement.explicit_in(coord);
+    if explicit.is_empty() && !placement.has_shares() {
         return;
     }
+    // Explicit starts are sorted by cell: merge them into the cell walk.
+    let mut explicit = explicit.iter().peekable();
     for i in 0..CHUNK_CELLS {
-        if !out.cells.walkable(i) {
-            continue;
-        }
         let p = coord.cell(i);
-        if let Some(kind) = kinds.placed(placement_hash(seed, p.x, p.y)) {
+        let here = match explicit.next_if(|e| usize::from(e.1) == i) {
+            Some(&(_, _, placed)) => Some(placed),
+            None if out.cells.walkable(i) => placement.placed(placement_hash(seed, p.x, p.y)),
+            None => None,
+        };
+        if let Some(Placed { kind, cover }) = here {
             let mind = ActorMind {
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
             };
-            if kinds.def(kind).cover {
+            if cover {
                 out.actors_mut().push_cover(i, kind, mind);
             } else {
                 out.actors_mut().push(i, kind, mind);
@@ -110,12 +116,12 @@ pub fn placement_hash(seed: u64, x: i32, y: i32) -> u32 {
 pub fn generate_many(
     seed: u64,
     params: &GenParams,
-    kinds: &Kinds,
+    placement: &Placement,
     coords: &[ChunkCoord],
 ) -> Vec<ChunkData> {
     let mut out = vec![ChunkData::default(); coords.len()];
     par_zip_mut(coords, &mut out, GEN_BATCH, |&c, data| {
-        generate_chunk(seed, params, kinds, c, data);
+        generate_chunk(seed, params, placement, c, data);
     });
     out
 }
@@ -125,9 +131,9 @@ pub fn generate_many(
 /// streaming batches (5 chunks) fully parallel.
 const GEN_BATCH: usize = 1;
 
-/// The whole rule set for one cell. Pure.
+/// The terrain of one cell. Pure.
 #[inline]
-fn gen_cell(seed: u64, p: &GenParams, x: i32, y: i32) -> (Ground, Feature) {
+pub fn gen_cell(seed: u64, p: &GenParams, x: i32, y: i32) -> (Ground, Feature) {
     let n = fbm2(
         seed,
         STREAM_GROUND,
@@ -187,9 +193,16 @@ fn lerp(a: f32, b: f32, t: f32) -> f32 {
 mod tests {
     use super::*;
     use crate::actors::ActorMind;
-    use crate::rules::{CHICKEN, SEED};
+    use crate::rules::{CHICKEN, GRASS, Kinds, SEED};
+    use crate::scenario::{Scenario, Start};
     use crate::stage::{ActorId, Pos};
     use bytemuck::Zeroable;
+
+    /// The built-in scenario's shares against the built-in rules.
+    fn builtin(seed: u64) -> Placement {
+        let s = Scenario::builtin();
+        Placement::resolve(&s.starts, &Kinds::builtin(), seed, &GenParams::default()).unwrap()
+    }
 
     fn grid(r: i32) -> Vec<ChunkCoord> {
         (-r..r)
@@ -204,9 +217,9 @@ mod tests {
     fn generate_many_matches_serial_generation() {
         crate::par::init_task_pool();
         let p = GenParams::default();
-        let kinds = Kinds::builtin();
+        let pl = builtin(42);
         let coords = grid(3);
-        let par: Vec<u64> = generate_many(42, &p, &kinds, &coords)
+        let par: Vec<u64> = generate_many(42, &p, &pl, &coords)
             .iter()
             .map(ChunkData::hash)
             .collect();
@@ -214,7 +227,7 @@ mod tests {
             .iter()
             .map(|&c| {
                 let mut data = ChunkData::default();
-                generate_chunk(42, &p, &kinds, c, &mut data);
+                generate_chunk(42, &p, &pl, c, &mut data);
                 data.hash()
             })
             .collect();
@@ -225,9 +238,10 @@ mod tests {
     fn chunk_matches_per_cell_rule_and_is_order_free() {
         let p = GenParams::default();
         let kinds = Kinds::builtin();
+        let pl = builtin(7);
         let coord = ChunkCoord::new(-2, 3);
         let mut data = ChunkData::default();
-        generate_chunk(7, &p, &kinds, coord, &mut data);
+        generate_chunk(7, &p, &pl, coord, &mut data);
         let cells = &data.cells;
         let mut rows = 0;
         let mut per_kind = vec![0usize; kinds.len()];
@@ -239,7 +253,7 @@ mod tests {
                 "{x},{y}"
             );
             let want = if cells.walkable(i) {
-                kinds.placed(placement_hash(7, x, y))
+                pl.placed(placement_hash(7, x, y)).map(|p| p.kind)
             } else {
                 None
             };
@@ -273,42 +287,81 @@ mod tests {
         let mut again = ChunkData::default();
         again.cells.occupant[3] = ActorId(1);
         again.actors_mut().push(9, SEED, ActorMind::zeroed());
-        generate_chunk(7, &p, &kinds, coord, &mut again);
+        generate_chunk(7, &p, &pl, coord, &mut again);
         assert_eq!(data.hash(), again.hash());
         assert_eq!(data, again);
-        // Rules that place nobody leave the same terrain, bare.
+        // A scenario that starts nobody leaves the same terrain, bare.
         let mut empty = ChunkData::default();
-        generate_chunk(7, &p, &kinds.clone().without_placement(), coord, &mut empty);
+        generate_chunk(7, &p, &Placement::default(), coord, &mut empty);
         assert!(empty.actors.rows.is_empty());
         assert_eq!(empty.cells.ground, data.cells.ground);
     }
 
+    /// An explicit start takes its cell (whatever the shares would have put
+    /// there), in its kind's layer, and rows stay in cell order.
     #[test]
-    fn placement_shares_split_the_range_in_kind_order() {
-        let k = crate::rules::compile(
-            "t",
-            "kind a { place 1 / 4 } kind b { } kind c { place 1 / 2 }",
-        )
-        .unwrap();
-        let one = crate::rules::PLACE_ONE;
-        assert_eq!(k.placed(0), Some(0));
-        assert_eq!(k.placed(one / 4 - 1), Some(0));
-        assert_eq!(k.placed(one / 4), Some(2));
-        assert_eq!(k.placed(one * 3 / 4 - 1), Some(2));
-        assert_eq!(k.placed(one * 3 / 4), None);
-        assert!(
-            crate::rules::compile("t", "kind a { place 3 / 4 } kind b { place 1 / 2 }").is_err()
+    fn explicit_starts_take_their_cell_in_cell_order() {
+        let p = GenParams::default();
+        let kinds = Kinds::builtin();
+        let coord = ChunkCoord::new(1, 0);
+        let mut shares_only = ChunkData::default();
+        generate_chunk(7, &p, &builtin(7), coord, &mut shares_only);
+        // A cell the shares fill with a seed, and an empty walkable one.
+        let seeded = (0..CHUNK_CELLS)
+            .find(|&i| {
+                shares_only.cells.occupant[i]
+                    .unpack()
+                    .is_some_and(|(k, _)| k == SEED)
+            })
+            .unwrap();
+        let empty = (0..CHUNK_CELLS)
+            .rev()
+            .find(|&i| {
+                shares_only.cells.walkable(i)
+                    && shares_only.cells.occupant[i].is_none()
+                    && shares_only.cells.cover[i].is_none()
+            })
+            .unwrap();
+        let at = |kind: &str, i: usize| {
+            let q = coord.cell(i);
+            Start::At {
+                kind: kind.into(),
+                x: q.x,
+                y: q.y,
+            }
+        };
+        let mut starts = Scenario::builtin().starts;
+        starts.extend([at("grass", seeded), at("chicken", empty)]);
+        let pl = Placement::resolve(&starts, &kinds, 7, &p).unwrap();
+        let mut data = ChunkData::default();
+        generate_chunk(7, &p, &pl, coord, &mut data);
+        assert!(data.cells.occupant[seeded].is_none(), "the seed gave way");
+        assert_eq!(
+            data.cells.cover[seeded].unpack().map(|(k, _)| k),
+            Some(GRASS)
         );
-        assert!(crate::rules::compile("t", "kind a { place 5 / 4 }").is_err());
+        assert_eq!(
+            data.cells.occupant[empty].unpack().map(|(k, _)| k),
+            Some(CHICKEN)
+        );
+        assert_eq!(data.actors.rows.len(), shares_only.actors.rows.len() + 1);
+        let cells: Vec<u16> = data.actors.rows.iter().map(|r| r.cell).collect();
+        assert!(cells.is_sorted(), "rows in cell order");
+        let q = coord.cell(empty);
+        let slot = data.cells.occupant[empty].unpack().unwrap().1;
+        assert_eq!(
+            data.minds.rows[usize::from(slot)].uid,
+            hash_cell(7, STREAM_UID, q.x, q.y)
+        );
+        assert_eq!(data.validate(kinds.len()), Ok(()));
     }
 
     #[test]
     fn different_seeds_differ_and_have_all_tile_kinds() {
         crate::par::init_task_pool();
         let p = GenParams::default();
-        let kinds = Kinds::builtin();
-        let a = generate_many(1, &p, &kinds, &grid(2));
-        let b = generate_many(2, &p, &kinds, &grid(2));
+        let a = generate_many(1, &p, &builtin(1), &grid(2));
+        let b = generate_many(2, &p, &builtin(2), &grid(2));
         assert_ne!(a[0].hash(), b[0].hash());
         let cells = a
             .iter()

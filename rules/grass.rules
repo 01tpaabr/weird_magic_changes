@@ -13,7 +13,6 @@ kind grass {
   cadence 256                       # ~84 thinks a day
   sight 8                           # roots reach water 8 cells away
   food 2h                           # a whole tuft's worth: each bite gets its share
-  place 1 / 20
   need water  max 2d vital          # a tuft out of reach of water dries up in two days
   need health max 4 decay 0 vital   # four bites
   mem growth

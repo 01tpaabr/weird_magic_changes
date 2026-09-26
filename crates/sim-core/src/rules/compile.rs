@@ -17,9 +17,7 @@ use std::fmt;
 
 use super::asm::{Asm, Label};
 use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
-use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, PLACE_ONE, RuleInfo,
-};
+use super::{DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
@@ -273,7 +271,7 @@ struct Pos {
 }
 
 /// A `kind` or a `trait`, as written. A trait has parameters and never a
-/// glyph, colour or placement; a kind has no parameters. Either may extend
+/// glyph or colour; a kind has no parameters. Either may extend
 /// others (`docs/ACTORS.md` §5, traits and inheritance).
 #[derive(Debug, Clone)]
 struct ItemAst {
@@ -307,8 +305,6 @@ struct Decls {
     glyph: Option<u8>,
     color: Option<u32>,
     cover: bool,
-    /// Worldgen share, out of `PLACE_ONE`. Never inherited.
-    place: Option<u32>,
     cadence: Option<(Expr, Pos)>,
     sight: Option<(Expr, Pos)>,
     fuel: Option<(Expr, Pos)>,
@@ -1034,19 +1030,11 @@ impl Parser<'_> {
                 };
                 d.color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
             } else if self.eat_kw("place") {
-                if is_trait {
-                    return Err(self.err_at(&p, not_in_trait("placement")));
-                }
-                // `place N / D`: this share of walkable cells starts as this kind.
-                let n = self.int("a numerator")?;
-                self.expect_sym("/")?;
-                let den = self.int("a denominator")?;
-                if n < 0 || den < 1 || n > den {
-                    return Err(self.err_at(&p, "place is N / D with 0 <= N <= D"));
-                }
-                d.place = Some(
-                    (u64::from(n as u32) * u64::from(PLACE_ONE) / u64::from(den as u32)) as u32,
-                );
+                // Where kinds start is the world's business, not the rules'.
+                return Err(self.err_at(
+                    &p,
+                    "`place` moved to the scenario: write `start KIND N / D` in a .scenario file",
+                ));
             } else if self.eat_kw("need") {
                 let (name, ..) = self.ident("need name")?;
                 self.expect_kw("max")?;
@@ -1976,7 +1964,6 @@ impl<'a> Gen<'a> {
             }
         }
         // Tags: global names, a bit each, never a kind's or a trait's name.
-        let mut placed = 0u64;
         for it in items {
             for t in &it.decls.tags {
                 if let Some(o) = self.item_named(t) {
@@ -1989,13 +1976,6 @@ impl<'a> Gen<'a> {
                     }
                     self.tags.push(t.clone());
                 }
-            }
-            placed += u64::from(it.decls.place.unwrap_or(0));
-            if placed > u64::from(PLACE_ONE) {
-                return Err(self.err(
-                    &it.at,
-                    "the `place` shares of all kinds add up to more than 1",
-                ));
             }
         }
         // Constants: global names, folded in declaration order (a constant
@@ -2722,7 +2702,6 @@ impl<'a> Gen<'a> {
             mems: inst.mems.clone(),
             states: inst.states.len().max(1) as u8,
             entry,
-            place: it.decls.place.unwrap_or(0),
             color: inst.color.unwrap_or(DEFAULT_COLOR),
             cover: inst.cover,
             parent,

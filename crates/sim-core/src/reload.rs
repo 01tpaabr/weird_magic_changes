@@ -8,8 +8,10 @@
 //! mems at 0), the state by its name (else the first), each scent channel
 //! by its name (else empty). Loaded chunks are remapped in memory; saved
 //! chunks that are not loaded are rewritten on disk, and the world file gets
-//! the new kind list, so the save stays readable by this rule set. A kind
-//! cannot move between standing and ground cover (refused: restart).
+//! the new kind list, so the save stays readable by this rule set. The
+//! scenario's starts are resolved again (kind ids may have moved); those of
+//! a kind that is gone are dropped. A kind cannot move between standing and
+//! ground cover (refused: restart).
 //!
 //! Reload is a dev tool. It is an input the replay log does not record: a
 //! world that was reloaded is not reproducible from its seed alone.
@@ -20,6 +22,8 @@ use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
 };
 use crate::rules::Kinds;
+use crate::scenario::{Placement, present};
+use crate::sim::SimConfig;
 use crate::stage::{ActorId, ChunkCells, ChunkMeta, SCENT_CHANNELS, Stage};
 use crate::store::Store;
 
@@ -170,6 +174,12 @@ pub fn reload_rules(
 ) -> Result<Reload, String> {
     let old = world.resource::<Kinds>().clone();
     let plan = plan(&old, &new)?;
+    let (starts, placement) = {
+        let c = world.resource::<SimConfig>();
+        let starts = present(&c.starts, &new);
+        let placement = Placement::resolve(&starts, &new, c.seed, &c.params)?;
+        (starts, placement)
+    };
     let mut dropped = vec![0usize; old.len()];
     let loaded: Vec<crate::stage::ChunkCoord> = world.resource::<Stage>().loaded_coords().collect();
     let mut rewritten = 0;
@@ -237,6 +247,8 @@ pub fn reload_rules(
     };
     world.insert_resource(new);
     world.insert_resource(Tally::default());
+    let mut c = world.resource_mut::<SimConfig>();
+    (c.starts, c.placement) = (starts, placement);
     if let Some(store) = store {
         store
             .write_meta(&crate::sim::meta(world))

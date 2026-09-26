@@ -15,6 +15,8 @@
 //! - [`actors`]: actor rows inside chunks and the Think/Apply/Compact phases.
 //! - [`rules`]: the kind table, the rules VM and the built-in programs (`docs/ACTORS.md`).
 //! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
+//! - [`scenario`]: the world a save is made from (seed, size, terrain,
+//!   where kinds start), and its resolution against the rules.
 //! - [`store`]: save directory format (meta + per-chunk files).
 //! - [`time`]: the integer clock: ticks per day, calendar, daylight.
 //! - [`sim`]: resources (`SimConfig`, `Tick`), the `SimTick` schedule and its
@@ -26,6 +28,7 @@ pub mod par;
 pub mod reload;
 pub mod rng;
 pub mod rules;
+pub mod scenario;
 pub mod sim;
 pub mod stage;
 pub mod store;
@@ -33,7 +36,8 @@ pub mod time;
 
 pub use actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds};
 pub use rules::{KindDef, Kinds};
-pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick, WorldConfig};
+pub use scenario::Scenario;
+pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick};
 pub use stage::{
     ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, ChunkData,
     ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells,

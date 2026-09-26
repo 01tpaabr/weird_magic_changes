@@ -69,7 +69,12 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   within a tick; identity across ticks is `uid` or a position (unique: one standing and one cover actor
   per cell).
 - **Worldgen rows** get a tick-free `uid`, so regenerating a chunk equals reloading it.
-  Run-time spawns fold in the tick.
+  Run-time spawns fold in the tick. Which kind starts where is the **scenario's**, not the
+  rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
+  placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
+  one cell. Resolved against the loaded kind table into a `Placement` at create and at every
+  open; a start naming a kind the rules lack, a trait, or a cell that is not walkable
+  refuses the world. The save header keeps the starts by name.
 - **Migration**: a move into another chunk goes to the source `Outbox`; `Migrate` walks
   `stage.active()`, copies the *current* row into the target (damage taken this tick travels
   with it), writes the target's occupant, flags the source DEAD. An unloaded target is a
@@ -87,17 +92,21 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   occupant or the cover, `free` asks only about the occupant, `bare` means walkable with no
   cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
   else the cover's glyph.
-- **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (2) `u8` layers. `mark ch v` adds
+- **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (4) `u8` layers. `mark ch v` adds
   `v` (saturating) to the actor's tick-start cell in Apply; `scent_decay` (Simulate phase)
-  takes `ceil(s / 32)` from every cell of a chunk every 16 ticks, staggered by a hash of
-  the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone in ~1.5 hours). A
-  channel is a name in the rules, numbered in first-appearance order in the code; a third
-  name is a compile error. The renderer washes a scented cell toward the channel's colour.
-- **Save**: chunk file v8 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
+  takes `ceil(s / 32)` from every cell of a chunk's scented channels every 16 ticks,
+  staggered by a hash of the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone
+  in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
+  the code; a fifth name is a compile error. The renderer washes a scented cell toward the
+  channel's colour.
+- **Save**: chunk file v9 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
-  `world.wmc` carries the kind name table; rows are remapped by name on load.
+  `world.wmc` carries the scenario (seed, initial size, terrain, starts, a drawn map from
+  step 8e) and the kind table with each kind's need, mem and state names and the scent
+  channel names, so a save can be remapped by name to other rules (hot reload now, open in
+  step 8c).
 - **Cadence**: `cadence 2^k` per kind; an actor is due when `(tick + stagger) & (2^k - 1) ==
   0` or `WAKE` is set. Stagger is per actor (decision 28). Only `hurt` and being taken from
   set `WAKE`; the result of an action is read at the next scheduled think.
@@ -169,7 +178,6 @@ parents  := parent ("," parent)*
 parent   := NAME [ "(" expr ("," expr)* ")" ]                # arguments: constant expressions
 decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+   # glyph, color: kinds only
           | "cadence" num | "sight" num | "fuel" num | "bite" num | "food" num
-          | "place" INT "/" INT                               # kinds only; worldgen share
           | "need" NAME "max" num [ "decay" INT ] [ "vital" ]
           | "mem" NAME ("," NAME)*
 num      := expr                                             # constant: numbers, consts, trait parameters
@@ -276,9 +284,8 @@ TIME     := INT ("min" | "h" | "d")
   are senses, so they cannot name a parameter or local. A pred name is a sub's `pred`
   parameter, else a kind, else a **tag**: tags are global names numbered in first-appearance
   order (64 at most, never a kind's name), a kind's tags a bitset the VM checks against the
-  occupant (`nearest meat within 8`). `place N / D` gives a kind a share of walkable cells at
-  worldgen: one placement hash per cell, the shares cut `0..2^24` into intervals in kind
-  order, so the terrain parameters in the save header are terrain only (decision 31).
+  occupant (`nearest meat within 8`). Where a kind starts is not in the rules: the
+  scenario's `start` lines say it (§2, decision 36; `place` is an error pointing there).
   `color "#rrggbb"` is the glyph's colour (default a pale yellow), `cover` makes the kind
   ground cover (§2), `dir(h)` is the step for heading `h` (1..8 clockwise from north, 0 =
   none). The files in `rules/` (animals, grass, plants) are built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
@@ -307,7 +314,7 @@ sub turn(h) {                              # mostly straight on
 kind chicken {
   glyph "C"   color "#f2ead8"
   tags animal meat
-  cadence 4   sight 6   food 1d   place 1 / 400
+  cadence 4   sight 6   food 1d
   need food   max 1d vital
   need water  max 4h vital
   need health max 20 decay 0 vital
@@ -487,3 +494,8 @@ where it touches the tick.
    `only`, pre-order numbering, the straight-line second-action error, unreachable-rule
    warnings and inheritance notes in `wmc lint`, `via` in `wmc why`. The built-in rules
    compile to the same programs and hash.
+   8b done: scenario files (`scenarios/*.scenario`: seed, size, terrain, `start K n / d`,
+   `start K at (x, y)`; `--scenario` on every command, `wmc lint --scenario`), `place`
+   removed from the rules, placement resolved per world (`Placement`), store v9 (starts,
+   kinds with slot names, scent names, pack and drawn-map fields for 8c and 8e), four scent
+   channels. The built-in world starts exactly as before.

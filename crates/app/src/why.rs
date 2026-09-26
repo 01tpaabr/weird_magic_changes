@@ -375,14 +375,14 @@ mod tests {
     fn a_report_names_the_rule_that_fired() {
         use sim_core::actors::systems::newborn;
         use sim_core::rules::CHICKEN;
-        let kinds = Kinds::builtin().without_placement();
-        let cfg = sim_core::WorldConfig {
+        let kinds = Kinds::builtin();
+        let cfg = sim_core::Scenario {
             width: 64,
             height: 64,
             seed: 5,
-            params: Default::default(),
+            ..Default::default()
         };
-        let mut w = sim::new_world_with(&cfg, kinds.clone());
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
         let now = sim::tick(&w);
         let at = (0..64 * 64)
             .map(|i| Pos::new(i % 64, i / 64))
@@ -404,13 +404,13 @@ mod tests {
             "trait restful {\n  when hour >= 0 => idle\n}\nkind cat extends restful { glyph \"c\" }",
         )
         .unwrap();
-        let cfg = sim_core::WorldConfig {
+        let cfg = sim_core::Scenario {
             width: 64,
             height: 64,
             seed: 5,
-            params: Default::default(),
+            ..Default::default()
         };
-        let mut w = sim::new_world_with(&cfg, kinds.clone());
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
         let now = sim::tick(&w);
         let at = (0..64 * 64)
             .map(|i| Pos::new(i % 64, i / 64))

@@ -1376,7 +1376,6 @@ mod tests {
             mems: vec![],
             states: 1,
             entry,
-            place: 0,
             color: 0,
             cover: false,
             parent: None,

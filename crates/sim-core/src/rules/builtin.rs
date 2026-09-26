@@ -77,7 +77,6 @@ kind seed {
   cadence 512                       # a think every ~34 game minutes, 42 a day
   sight 2
   food 3h                           # what an eater gains
-  place 1 / 100
   need water  max 1d vital          # dries out in a day away from water
   need health max 1 decay 0 vital   # one bite
   mem lit
@@ -209,7 +208,6 @@ pub fn hand_assembled() -> Kinds {
             mems: vec!["lit".into()],
             states: 1,
             entry: seed_entry,
-            place: super::PLACE_ONE / 100,
             color: 0x00C9_A86A,
             cover: false,
             parent: None,
@@ -231,7 +229,6 @@ pub fn hand_assembled() -> Kinds {
             mems: vec!["sun".into()],
             states: 1,
             entry: tree_entry,
-            place: 0,
             color: 0x003F_9E4D,
             cover: false,
             parent: None,

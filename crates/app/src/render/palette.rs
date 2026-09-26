@@ -98,9 +98,13 @@ pub const TEXT_BG: Color = Color::rgb(0x1b, 0x1b, 0x20);
 /// How far a cell with ground cover is tinted toward the cover's colour: a
 /// meadow reads as a green patch, and whoever stands in it stays drawn.
 pub const COVER_TINT: u8 = 0x70;
-/// Scent channel colours, in channel order: amber, then violet.
-pub const SCENT: [Color; SCENT_CHANNELS] =
-    [Color::rgb(0xff, 0xc4, 0x30), Color::rgb(0xb4, 0x78, 0xff)];
+/// Scent channel colours, in channel order: amber, violet, teal, rose.
+pub const SCENT: [Color; SCENT_CHANNELS] = [
+    Color::rgb(0xff, 0xc4, 0x30),
+    Color::rgb(0xb4, 0x78, 0xff),
+    Color::rgb(0x30, 0xd8, 0xc8),
+    Color::rgb(0xff, 0x5a, 0x8c),
+];
 /// How far full scent (255) tints a cell toward its channel's colour.
 pub const SCENT_TINT: u8 = 0x68;
 
@@ -250,12 +254,13 @@ mod tests {
         assert_eq!(red.mix(green, 255), green);
         assert_eq!(red.mix(green, 128), Color::rgb(127, 128, 0));
         // Scent: none leaves the background alone, full scent tints it.
-        assert_eq!(scented(SOIL_BG, [0, 0]), SOIL_BG);
+        assert_eq!(scented(SOIL_BG, [0; SCENT_CHANNELS]), SOIL_BG);
         assert_eq!(
-            scented(SOIL_BG, [255, 0]),
+            scented(SOIL_BG, [255, 0, 0, 0]),
             SOIL_BG.mix(SCENT[0], SCENT_TINT)
         );
-        assert_ne!(scented(SOIL_BG, [0, 40]), SOIL_BG);
+        assert_ne!(scented(SOIL_BG, [0, 40, 0, 0]), SOIL_BG);
+        assert_ne!(scented(SOIL_BG, [0, 0, 0, 40]), SOIL_BG);
         assert_eq!(
             style(Ground::Soil, Feature::Rock, Some((b'c', red)), None).glyph,
             b'c'

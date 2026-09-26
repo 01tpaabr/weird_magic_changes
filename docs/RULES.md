@@ -8,7 +8,7 @@ and the reasons behind it are in `ACTORS.md`.
 ```
 make run ARGS="lint rules/"                 # compile, print the kind table
 make run ARGS="why saves/dev 77 103"        # what the actor at (77, 103) is thinking
-WMC_RULES=my_rules make run ARGS="play saves/try"
+WMC_RULES=my_rules make run ARGS="play saves/try --scenario my.scenario"
 ```
 
 In `wmc play`, `r` recompiles the rules directory (`WMC_RULES`, else `./rules`) and swaps it
@@ -24,7 +24,6 @@ kind seed {
   cadence 512                       # thinks every 512 ticks
   sight 2
   food 3h                           # what an eater gains
-  place 1 / 100                     # worldgen starts 1 walkable cell in 100 as a seed
   need water  max 1d vital          # dries out in a day away from water
   need health max 1 decay 0 vital   # one bite
   mem lit
@@ -37,7 +36,8 @@ kind seed {
 
 Files compile in file-name order, kinds in declaration order, and that order numbers the
 kinds (`wmc lint` prints it). Kind, sub, const, tag and scent names are global across all
-files. `#` starts a comment. `;` between statements is optional.
+files. `#` starts a comment. `;` between statements is optional. A kind says nothing about
+where it starts in a new world: a scenario does (§14).
 
 ## 2. How a think runs
 
@@ -81,7 +81,6 @@ Declarations come first in a kind, then the reflex rules, then any `state` block
 | `fuel N` | 512 | ops per think, 1 to 4096 |
 | `food T` | 0 | what eating a whole one gives an eater (see `eat`) |
 | `bite N` | 1 | health taken per `eat`/`hit`/`graze`, 0 to 255 |
-| `place N / D` | 0 | worldgen starts this share of walkable cells as this kind |
 | `need NAME max M [decay 0] [vital]` | | a counter, at most 4 per kind |
 | `mem a, b, ...` | | memory slots, at most 12 per kind, all 0 at birth |
 
@@ -250,7 +249,7 @@ Effects combine with the action and don't end the think.
 |---|---|
 | `look = v` | a public byte, 0 to 255: the palette variant, `kind:look` predicates, `look_of(t)` |
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
-| `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 2 channels in a rule set, numbered by first use |
+| `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 4 channels in a rule set, numbered by first use |
 
 ## 10. Senses
 
@@ -346,7 +345,43 @@ Ways to keep a kind cheap:
   (`rest` in the bee).
 - **Keep radii small.** A radius-8 search reads 289 cells, radius 16 reads 1089.
 
-## 14. Debugging
+## 14. Scenarios
+
+Rules say what kinds are and how they behave. Where they start is the world's business: a
+new world is made from a **scenario**, a small text file in `scenarios/`. A save keeps its
+scenario, so every part of the map generates the same way whenever it is first visited.
+
+```
+# scenarios/meadow.scenario
+seed 12
+size 256 256                                   # the region generated at creation, in cells
+terrain water_level 0.18 rock_on_soil 0.02     # knobs of the terrain noise
+start chicken 1 / 400                          # this share of walkable cells
+start grass   1 / 20
+start hive at (77, 103)                        # exactly there
+```
+
+| statement | default | meaning |
+|---|---|---|
+| `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
+| `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks; the rest generates as the camera reaches it |
+| `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
+| `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
+| `start K at (X, Y)` | | one K on that cell, which must be walkable |
+
+Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
+in the order written: a cell starts at most one kind, the shares add up to at most 1, and
+reordering the lines moves who starts where. An explicit start takes its cell, whatever the
+shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
+needs full.
+
+A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
+define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that
+without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create
+a world, and `[w h seed]` after the save directory override `size` and `seed`. Without one
+they use `scenarios/default.scenario`, which starts the built-in kinds.
+
+## 15. Debugging
 
 - **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
   points, each kind's parents and family. Errors come as `file:line:col: message`, and
@@ -366,12 +401,12 @@ Ways to keep a kind cheap:
   you removed are dropped. Saved chunks are rewritten to match, so reopen the save with the
   same rules (`WMC_RULES=...`).
 
-## 15. Limits
+## 16. Limits
 
 | | |
 |---|---|
 | needs, mem slots per kind | 4, 12 |
-| tags, scent channels per rule set | 64, 2 |
+| tags, scent channels per rule set | 64, 4 |
 | states per kind | 64 |
 | sight | 16 |
 | fuel per think | 4096 |

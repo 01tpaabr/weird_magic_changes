@@ -41,7 +41,6 @@ kind chicken {
   cadence 4                         # thinks every 4 ticks (16 game seconds)
   sight 6
   food 1d                           # what an eater gains: a fox's day
-  place 1 / 400                     # worldgen starts 1 walkable cell in 400 as a chicken
   need food   max 1d vital
   need water  max 4h vital
   need health max 20 decay 0 vital
@@ -113,7 +112,6 @@ kind fox {
   sight 16                          # knows its whole territory
   bite 10                           # two bites kill a chicken
   food 1d
-  place 1 / 5000
   need food   max 1d vital
   need water  max 1d vital
   need health max 40 decay 0 vital

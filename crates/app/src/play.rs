@@ -38,7 +38,7 @@ use sim_core::actors::{Tally, life};
 use sim_core::{
     CHUNK_SIZE, ChunkActors, Kinds, LoadPolicy, Pos, SimConfig, StageCells, Store, StreamStats,
 };
-use sim_core::{WorldConfig, par, sim, time};
+use sim_core::{Scenario, par, sim, time};
 
 use crate::camera::{Input, ViewCamera};
 use crate::clock::SimClock;
@@ -62,8 +62,9 @@ const MAX_DT: f64 = 0.1;
 pub const TICK_BUDGET: Duration = Duration::from_millis(10);
 const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | r reload rules | +/- zoom | q quit";
 
-/// Open (or create) the world in `dir` and run the window until quit.
-pub fn run(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
+/// Open the world in `dir`, else create it from `scenario` (read from
+/// `name`, for errors), and run the window until quit.
+pub fn run(dir: &str, scenario: &Scenario, name: &str) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
     let mut app = App::new();
     let task_pool_options = par::threads_from_env()
@@ -93,7 +94,7 @@ pub fn run(dir: &str, cfg: &WorldConfig) -> anyhow::Result<()> {
     let world = app.world_mut();
     sim::install_with(world, kinds);
     if !sim::open(world, &store).context("reading save")? {
-        sim::create(world, cfg);
+        sim::create(world, scenario).map_err(|e| anyhow::anyhow!("{name}: {e}"))?;
         store
             .write_meta(&sim::meta(world))
             .context("writing save meta")?;

@@ -9,7 +9,6 @@ kind seed {
   cadence 512                       # a think every ~34 game minutes, 42 a day
   sight 2
   food 3h                           # what an eater gains
-  place 1 / 100
   need water  max 1d vital          # dries out in a day away from water
   need health max 1 decay 0 vital   # one bite
   mem lit

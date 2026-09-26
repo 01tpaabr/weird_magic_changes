@@ -21,7 +21,6 @@ kind flower {
   tags plant
   cadence 64                        # ~337 thinks a day
   sight 6                           # roots reach water 6 cells away
-  place 1 / 250
   need water  max 1d vital
   need nectar max 2h decay 0
   need health max 4 decay 0 vital
@@ -43,7 +42,6 @@ kind hive {
   color "#c98a1b"
   cadence 64
   sight 8
-  place 1 / 20000
   need nectar max 4d decay 0        # the stores; a new hive starts full
   need health max 200 decay 0 vital
 

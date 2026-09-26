@@ -60,7 +60,7 @@ pub const CHUNK_SIZE: i32 = 1 << CHUNK_BITS;
 pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
 /// Scent channels per cell (`mark`, `sniff`): named by the rules, numbered
 /// in first-appearance order.
-pub const SCENT_CHANNELS: usize = 2;
+pub const SCENT_CHANNELS: usize = 4;
 const MASK: i32 = CHUNK_SIZE - 1;
 
 /// What a cell fundamentally is. Exactly one per cell.

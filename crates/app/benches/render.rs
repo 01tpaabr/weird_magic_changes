@@ -8,18 +8,17 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use app::render::cells::{CellFrame, Viewport, render_cells};
 use app::render::grid;
 use app::render::palette::Looks;
-use sim_core::stage::worldgen::GenParams;
-use sim_core::{Kinds, Pos, WorldConfig, par, sim, stage};
+use sim_core::{Kinds, Pos, Scenario, par, sim, stage};
 
 const COLS: u32 = 160;
 const ROWS: u32 = 90;
 
 fn world() -> bevy::ecs::world::World {
-    sim::new_world(&WorldConfig {
+    sim::new_world(&Scenario {
         width: 512,
         height: 256,
         seed: 7,
-        params: GenParams::default(),
+        ..Scenario::builtin()
     })
 }
 

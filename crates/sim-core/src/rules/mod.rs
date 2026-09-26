@@ -59,9 +59,6 @@ pub struct KindDef {
     pub states: u8,
     /// Program counter of the think.
     pub entry: u32,
-    /// Share of walkable cells worldgen starts this kind on, out of
-    /// [`PLACE_ONE`] (`place 1 / 100` = `PLACE_ONE / 100`). 0 = never.
-    pub place: u32,
     /// `0xRRGGBB`. Opaque to the sim, like `glyph`: only the palette reads it.
     pub color: u32,
     /// Ground cover: lives in the cell's `cover` layer, never blocks, lies
@@ -152,10 +149,6 @@ pub struct DebugInfo {
 /// Colour of a kind that declares none: the palette's old actor yellow.
 pub const DEFAULT_COLOR: u32 = 0x00FF_F39C;
 
-/// The whole of a cell's placement range: `place` values are out of this
-/// (the top 24 bits of a cell hash, exact in integers).
-pub const PLACE_ONE: u32 = 1 << 24;
-
 impl KindDef {
     pub fn cadence(&self) -> u64 {
         1 << self.cadence_shift
@@ -216,10 +209,6 @@ pub struct Kinds {
     /// One past the last kind of each kind's family (see
     /// [`KindDef::parent`]): a kind predicate matches `k..family_end[k]`.
     pub family_end: Vec<u16>,
-    /// Worldgen placement: `(cumulative upper bound, kind)` in kind order,
-    /// kinds with `place > 0` only. A walkable cell whose placement hash is
-    /// below an entry's bound (and above the previous one) starts that kind.
-    placement: Vec<(u32, u16)>,
     pub code: Vec<Op>,
     pub consts: Vec<i32>,
     /// Entry pc per sub, indexed by `Call imm`.
@@ -265,16 +254,6 @@ impl Kinds {
             }
         }
         let colors = defs.iter().map(|d| d.color).collect();
-        let mut placement = Vec::new();
-        let mut upto = 0u64;
-        for d in defs.iter().filter(|d| d.place > 0) {
-            upto += u64::from(d.place);
-            assert!(
-                upto <= u64::from(PLACE_ONE),
-                "placement shares exceed the whole"
-            );
-            placement.push((upto as u32, d.id));
-        }
         let n = defs.len();
         let remaps = (0..n * n)
             .map(|i| Remap::between(&defs[i / n], &defs[i % n]))
@@ -286,7 +265,6 @@ impl Kinds {
             colors,
             tag_bits,
             family_end,
-            placement,
             code,
             consts,
             subs,
@@ -320,35 +298,6 @@ impl Kinds {
     /// The kinds this build knows.
     pub fn builtin() -> Self {
         builtin::kinds()
-    }
-
-    /// The same rules with worldgen placing nobody: a bare stage to put
-    /// actors on by hand (tests, scenarios). A different rule set: its hash
-    /// differs.
-    pub fn without_placement(self) -> Self {
-        let defs = self
-            .defs
-            .into_iter()
-            .map(|d| KindDef { place: 0, ..d })
-            .collect();
-        Self::from_parts(defs, self.code, self.consts, self.subs)
-            .with_scents(self.scents)
-            .with_debug(self.debug)
-    }
-
-    /// The kind worldgen starts on a walkable cell whose placement hash is
-    /// `u` (`0..PLACE_ONE`), if any.
-    #[inline]
-    pub fn placed(&self, u: u32) -> Option<u16> {
-        self.placement
-            .iter()
-            .find(|&&(upto, _)| u < upto)
-            .map(|&(_, kind)| kind)
-    }
-
-    /// Does worldgen place anyone at all?
-    pub fn places_any(&self) -> bool {
-        !self.placement.is_empty()
     }
 
     pub fn len(&self) -> usize {
@@ -390,7 +339,6 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.sight) << 16
             | u64::from(d.bite) << 24);
         mix(d.tags);
-        mix(u64::from(d.place) | 1 << 42);
         mix(u64::from(d.color) | 1 << 43);
         mix(u64::from(d.cover) | 1 << 44);
         mix(u64::from(d.fuel) | u64::from(d.food as u32) << 32);
@@ -463,9 +411,6 @@ mod tests {
             hash_all(&other.defs, &other.code, &other.consts, &other.subs),
             k.hash
         );
-        let bare = Kinds::builtin().without_placement();
-        assert!(!bare.places_any() && k.places_any());
-        assert_ne!(bare.hash, k.hash);
     }
 
     #[test]

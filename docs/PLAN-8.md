@@ -79,7 +79,7 @@ no rules hash), and every gate below compares **`state:`** and the population li
 | Commit | Gate |
 |---|---|
 | 8a | `state:` and populations identical to baseline (no built-in kind extends anything yet, so family = exact). `step/16x16` A/B: the family range check replaces an equality; expect no change, record it. |
-| 8b | identical to 8a (the default scenario carries exactly today's shares, cut in kind-id order as today). |
+| 8b | identical to 8a (the default scenario carries exactly today's shares, cut in kind-id order as today). **Done**, in two local stages: with 2 scent channels, `state:` and populations identical to 8a at 1 and 8 threads (`b4d70180c11c4739`, `9be341adc187c931`); with 4 channels the scent layers hash differently, populations identical, 1 = 8 threads. **New reference for 8c:** full gate `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`; quick gate `checksum 2a242e3e8362499b`, `state c11c0f6d5a472758`; population lines unchanged from the baseline. |
 | 8c | identical to 8b when the packs match. |
 | 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. |
 | 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. |
@@ -330,6 +330,26 @@ section with the format), `ARCHITECTURE.md` decision 36 (placement belongs to th
 scenario; amends 31) and the store v9 note, `CLAUDE.md` (layout: `scenarios/`; commands:
 `--scenario`). Gate per §2.
 
+### 4.6 As built (deviations from the text above)
+
+- `WorldConfig` is gone: `Scenario` is the world config (`sim::create(world, &Scenario) ->
+  Result<(), String>`, `new_world_with(&Scenario, Kinds) -> Result<World, String>`,
+  `new_world` panics on a scenario that does not fit the built-in rules). `Scenario::BUILTIN`
+  / `Scenario::builtin()` instead of `DEFAULT`; `Scenario::default()` is the empty scenario.
+- Shares are cut **in the order written**, not in kind-id order: the default scenario lists
+  them in kind order (so the built-in world is unchanged), and a world's starting map no
+  longer depends on how a pack numbers its kinds (8c ids move, 8d renumbers).
+- `Placement` carries `Placed { kind, cover }`, so `generate_chunk(seed, params, placement,
+  coord, out)` takes no `Kinds`. Explicit starts are merged into the cell walk: rows stay in
+  cell order.
+- No `scenario_hash`: the header stores the scenario itself (seed, size, params, starts).
+  `WorldMeta` also got `scents: Vec<String>` (8c remaps scent layers by name), and
+  `DrawnMap` has `outside: Option<u8>` (8e's `outside`; `None` = noise).
+- Hot reload re-resolves the starts against the new rules (ids may move) and drops the
+  starts of kinds that are gone (`scenario::present`).
+- `scent_decay` fades only the channels that hold scent (bit-identical; `fade(0) == 0`).
+- `place` in a rules file is a compile error pointing to the scenario.
+
 ## 5. Commit 8c: packs, open by name
 
 ### 5.1 Open by name (D4)
@@ -518,7 +538,7 @@ closing paragraph. Then delete this file.
 
 - [x] baseline recorded in §2
 - [x] 8a traits, extends, inherit, family, only, member subs, diagnostics (also: `vm::Want`, a predicate decoded once per search, -12% on the tick)
-- [ ] 8b scenario file, place removed, store v9, four scent channels
+- [x] 8b scenario file, place removed, store v9, four scent channels (see §4.6)
 - [ ] 8c packs, open by name, rewrite on save
 - [ ] 8d content on traits, vocabulary in RULES.md
 - [ ] 8e drawn maps
