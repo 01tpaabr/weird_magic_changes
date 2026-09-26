@@ -328,6 +328,29 @@ impl<'a> Gen<'a> {
         // The rule set as a whole.
         let mut names = Names::default();
         for it in items {
+            // `extends T(args)` and the declared numbers are constant
+            // expressions too.
+            let mut seen = Seen {
+                names: &mut names,
+                who: it.name.clone(),
+                here: it.at.clone(),
+                each: 0,
+            };
+            for p in &it.parents {
+                for a in &p.args {
+                    seen.expr(a);
+                }
+            }
+            let d = &it.decls;
+            for (e, _) in [&d.cadence, &d.sight, &d.fuel, &d.food, &d.bite]
+                .into_iter()
+                .flatten()
+            {
+                seen.expr(e);
+            }
+            for n in &d.needs {
+                seen.expr(&n.max);
+            }
             for r in it
                 .rules
                 .iter()
@@ -1102,5 +1125,24 @@ mod tests {
                       state B { when true => idle } }";
         let got = lint(good);
         assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn a_const_used_only_in_a_declaration() {
+        let got = lint(
+            "const S = 2 const R = 8 const C = 4 const M = 50 const F = 3 const B = 2 const U = 512 const Z = 1
+             trait looker(r) { when count water within r > 0 => idle }
+             kind owl extends looker(S) { sight R cadence C fuel U food F bite B
+               need food max M  need health max 5 decay 0 vital
+               inherit looker }",
+        );
+        for c in ["S", "R", "C", "M", "F", "B", "U"] {
+            let not = format!("const `{c}` is never used");
+            assert!(!got.iter().any(|d| d.contains(&not)), "{not}: {got:?}");
+        }
+        assert!(
+            got.iter().any(|d| d.contains("const `Z` is never used")),
+            "{got:?}"
+        );
     }
 }
