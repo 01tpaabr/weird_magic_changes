@@ -933,6 +933,9 @@ pub fn apply(
                 if row.flags & flags::DEAD != 0 {
                     continue;
                 }
+                if it.action == Action::Move && row.flags & flags::COVER != 0 {
+                    continue; // REFUSED below: a rooted row claims nothing
+                }
                 if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
                     && cells.walkable(cell)
                     && cells.occupant[cell].is_none()

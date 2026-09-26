@@ -1578,6 +1578,49 @@ mod tests {
         }
     }
 
+    /// A cover row's `move` is refused and claims nothing: a walker
+    /// stepping onto the cell in front of the moss gets it, whatever the
+    /// two keys.
+    #[test]
+    fn a_rooted_move_claims_no_cell() {
+        use crate::actors::systems::{intent_key, newborn};
+        let kinds = crate::rules::compile(
+            "t.rules",
+            "kind moss { cover cadence 1 when true => move east }
+             kind walker { cadence 1 when true => move west }",
+        )
+        .unwrap();
+        let (moss, walker) = (0, 1);
+        let mut w = new_world_with(&cfg(3), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut lower = 0;
+        for y in 1..=8 {
+            let (m, k) = (0x500 + y as u64, 0x600 + y as u64);
+            assert!(place_actor(
+                &mut w,
+                Pos::new(1, y),
+                moss,
+                newborn(&kinds, moss, m, now)
+            ));
+            assert!(place_actor(
+                &mut w,
+                Pos::new(3, y),
+                walker,
+                newborn(&kinds, walker, k, now)
+            ));
+            lower += usize::from(intent_key(m, now) < intent_key(k, now));
+        }
+        assert!(lower > 0, "some moss must hold the lower key");
+        step(&mut w);
+        check_invariants(&mut w);
+        for (uid, kind, p, _) in rows(&mut w) {
+            let y = (uid & 0xff) as i32;
+            let x = if kind == moss { 1 } else { 2 };
+            assert_eq!(p, Pos::new(x, y), "uid {uid:x}");
+        }
+    }
+
     /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
     /// step later `sniff` finds it (in the chunk and across a border); the
     /// scent is saved with the chunk and fades to nothing in two hours; a
