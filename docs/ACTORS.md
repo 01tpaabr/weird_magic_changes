@@ -123,8 +123,9 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).
-- **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the rules directory (`WMC_RULES`,
-  else `./rules`) is recompiled and swapped in between two ticks. Rows are remapped by
+- **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the packs the world runs (as it
+  was opened: `--rules`, `WMC_RULES`, the save's packs or the scenario's `rules`; `./rules`
+  for the built-in set) are recompiled and swapped in between two ticks. Rows are remapped by
   name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
   the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
   channel by its name. Saved chunks that are not loaded are rewritten the same way and
