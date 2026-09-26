@@ -35,8 +35,9 @@ kind seed {
 }
 ```
 
-Files compile in file-name order, kinds in declaration order, and that order numbers the
-kinds (`wmc lint` prints it). Kind, sub, const, tag and scent names are global across all
+Files compile in file-name order. Kinds are numbered in pre-order: roots in file then
+declaration order, each kind's children right after it, so a family is one range of ids
+(`wmc lint` prints the numbering). Kind, sub, const, tag and scent names are global across all
 files. `#` starts a comment. `;` between statements is optional. A kind says nothing about
 where it starts in a new world: a scenario does (§14).
 
@@ -193,8 +194,10 @@ kind lamb extends sheep {                 # everything a sheep is, except what i
 its own:
 - **No `inherit` in the list:** the parents' rules come after the kind's own.
 - **`inherit`** runs every parent's rules at that point.
-- **`inherit NAME`** runs that ancestor's rules, and only those, at that point. Anything a
-  list doesn't `inherit` is left out, which is how the chick above skips the hen's rules.
+- **`inherit NAME`** runs that ancestor's list as that ancestor runs it (its own rules and
+  whatever it inherits), at that point; a splice never brings the same rules twice.
+  Anything a list doesn't `inherit` is left out, which is how the lamb above skips the
+  sheep's own rules.
 
 A trait may name only the needs, memory, states and subs it or its own parents declare.
 Every trait is compiled on its own to check this, even if no kind uses it yet, so a trait

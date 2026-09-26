@@ -1,14 +1,20 @@
 //! The rules compiler: text -> [`Kinds`] (`docs/ACTORS.md` §5).
 //!
-//! Three small passes over one file: a lexer (tokens with line and column),
-//! a recursive-descent parser (an AST per kind and per sub), and a code
-//! generator that drives [`Asm`]. Kinds are numbered in declaration order,
-//! files in sorted-name order, never directory order, so two processes agree
-//! on every kind id. Every error carries `file:line:col`; the sim never runs
-//! a program that did not compile.
+//! Passes: a lexer per file (tokens with line and column); a
+//! recursive-descent parser that adds each file's kinds, traits, subs,
+//! consts and tags to one item list; inheritance resolution (parents
+//! linearized; declarations, needs, mems, states and rule lists merged); a
+//! code generator that drives [`Asm`]; and the author lint (`lint`). Files
+//! go in sorted-name order, never directory order, and kinds are numbered
+//! in pre-order over the inheritance forest (roots in file then declaration
+//! order, each kind's children right after it), so two processes agree on
+//! every kind id and a family is one id range. Every error carries
+//! `file:line:col`; the sim never runs a program that did not compile.
 //!
-//! Subs are file-scope and shared by every kind, so inside a sub a name is a
-//! parameter or a local, never a need or a mem slot. A sub that `return`s a
+//! A file sub is shared by every kind, so inside it a name is a parameter,
+//! a local or a const, never a need or a mem slot. A member sub (a sub
+//! inside a trait or kind) is compiled per kind and sees that kind's needs,
+//! mems and states. A sub that `return`s a
 //! value anywhere is a function (usable in expressions), otherwise a
 //! procedure (a statement). Targets are `(dx, dy)` pairs: two stack values
 //! in flight, two locals at rest.
@@ -5162,6 +5168,33 @@ mod tests {
                 "`c` does not run the reflex rules of `t1` (no `inherit` splices them)"
             ]
         );
+    }
+
+    /// `inherit NAME` splices that ancestor's list as it runs it, with what
+    /// the ancestor itself inherits, and each rule once.
+    #[test]
+    fn inherit_name_splices_the_ancestors_resolved_list() {
+        let k = compile_ok(
+            "trait t { when hour == 1 => idle }
+             kind p extends t { when hour == 2 => idle }
+             kind k extends p {
+               when hour == 3 => idle
+               inherit p
+               when true => idle
+             }
+             kind q extends p { inherit t  inherit p }",
+        );
+        let t = |v: &str| Some(v.to_string());
+        assert_eq!(
+            rule_lines(&k, "k"),
+            [
+                (None, 4, None),
+                (None, 2, t("p")),
+                (None, 1, t("t")),
+                (None, 6, None)
+            ]
+        );
+        assert_eq!(rule_lines(&k, "q"), [(None, 1, t("t")), (None, 2, t("p"))]);
     }
 
     #[test]

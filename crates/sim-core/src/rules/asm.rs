@@ -1,6 +1,7 @@
 //! A tiny assembler for [`Op`] programs: labels with forward references,
-//! one method per instruction. The compiler's back end, and how the
-//! built-in programs are written until the compiler exists.
+//! one method per instruction. The compiler's back end; the VM tests and
+//! the plants oracle (`builtin::hand_assembled`) also write programs with
+//! it by hand.
 
 use super::vm::{Action, Op, OpCode, Sense};
 
