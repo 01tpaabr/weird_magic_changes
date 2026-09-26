@@ -891,6 +891,15 @@ impl Scenario {
         let Some((_, entries)) = legend else {
             return Err(err(map_line, "a map needs a legend".into()));
         };
+        for (y, (at, row)) in drawn.iter().enumerate() {
+            if let Some((x, c)) = row.chars().enumerate().find(|(_, c)| !c.is_ascii()) {
+                return Err(err(
+                    *at,
+                    format!("`{c}` at ({x}, {y}): map cells are ASCII characters"),
+                ));
+            }
+        }
+        // All ASCII: a byte is a cell.
         let width = drawn[0].1.len();
         for (at, row) in &drawn {
             if row.len() != width {
@@ -1561,6 +1570,11 @@ legend {
                 format!("map {{\n..\n}}\nmap {{\n..\n}}\n{legend}"),
                 "a second map",
             ),
+            (
+                format!("map {{\né.\n..\n}}\n{legend}"),
+                "t:2: `é` at (0, 0): map cells are ASCII characters",
+            ),
+            (format!("map {{\n.é\n}}\n{legend}"), "`é` at (1, 0)"),
             (
                 format!("outside soil\noutside water\nmap {{\n..\n}}\n{legend}"),
                 "t:2: a second `outside` (first at line 1)",
