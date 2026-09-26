@@ -281,7 +281,9 @@ TIME     := INT ("min" | "h" | "d")
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
   override up to 4096. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
   `trapped` for the next think and counts a trap for the kind (the `TRAPS` counter on the
-  status row, the `traps` column of `wmc run`). The sim never panics on a rules file.
+  status row, the `traps` column of `wmc run`); needs and mem written before the trap stay,
+  the action, `next`, `look`, `signal` and `mark` are dropped. The sim never panics on a
+  rules file.
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
   64 800 goes to the pool), kind ids in **pre-order over the inheritance forest, roots and

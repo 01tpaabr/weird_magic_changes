@@ -1334,6 +1334,7 @@ fn think_with<const TRACE: bool>(
         mind,
     };
     if let Err(trap) = m.run::<TRACE>(&program.code, &program.consts, &program.subs, trace) {
+        // Needs and mem written before the trap stay (RULES.md §13).
         // The op that trapped (none for a bad pc), so `wmc why` shows where.
         if TRACE && let Some(&op) = program.code.get(m.at) {
             trace.push(Step {
@@ -1547,6 +1548,20 @@ mod tests {
         let out = run(a.finish(), vec![], vec![], &mut mind());
         assert_eq!(out.trap, Some(Trap::SecondAction));
         assert_eq!(out.action, Action::Idle);
+    }
+
+    /// RULES.md §13: a trap keeps the mem and need writes made before it
+    /// and drops the action, `next` and the effects.
+    #[test]
+    fn a_trap_keeps_earlier_writes_and_drops_effects() {
+        let mut a = Asm::new();
+        a.push(5).set_mem(0).next(0).push(3).op(OpCode::SetLook);
+        a.act(Action::Die).act(Action::Die).halt();
+        let mut m = mind();
+        let out = run(a.finish(), vec![], vec![], &mut m);
+        assert_eq!(out.trap, Some(Trap::SecondAction));
+        assert_eq!(m.mem[0], 5);
+        assert_eq!((out.action, out.next, out.look), (Action::Idle, None, None));
     }
 
     /// A traced think records the op that trapped too (`wmc why` shows
