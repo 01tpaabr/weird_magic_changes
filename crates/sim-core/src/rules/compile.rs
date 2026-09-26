@@ -4933,6 +4933,19 @@ mod tests {
         }
     }
 
+    /// Only a file sub is refused `next`: a member sub is its kind's own.
+    #[test]
+    fn a_member_sub_may_next() {
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "kind k { sub go() { next B }  when true => go()
+               state A { when true => idle }  state B { when true => idle } }",
+        );
+        let mut mind = crate::actors::ActorMind::zeroed();
+        let out = run_think(&k, "k", &mut mind);
+        assert_eq!((out.trap, out.next), (None, Some(1)), "{out:?}");
+    }
+
     #[test]
     fn choose_draws_once_and_large_constants_use_the_pool() {
         let k = compile_ok(

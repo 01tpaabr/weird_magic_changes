@@ -135,7 +135,8 @@ kind bee {
 An actor starts in the first state. `next NAME` switches for the next think and ends this one
 like an action; it can be combined with one action (`{ next FORAGE  move toward f }`), and
 a second `next` in the same block is an error.
-`become` starts the new kind in its first state. `next` isn't allowed inside a sub.
+`become` starts the new kind in its first state. `next` isn't allowed inside a file sub (a
+member sub may use it, §6).
 
 ## 6. Traits: sharing behaviour between kinds
 

@@ -234,7 +234,8 @@ TIME     := INT ("min" | "h" | "d")
 - `choose` evaluates all weights (clamped >= 0), draws once, runs that arm.
 - `state` blocks follow the reflex rules; an actor starts in the first one, `next NAME`
   switches for the following think and ends this one like an action, `become` resets to
-  the first. `next` inside a sub is a compile error (states belong to a kind).
+  the first. `next` inside a file sub is a compile error (states belong to a kind); a
+  member sub may use it.
 - **Traits and inheritance** (step 8a). A `trait` is a kind without a glyph, rows or id:
   declarations, member subs, rules and states that kinds include with `extends`. A kind
   extends at most one kind and any number of traits; a trait extends traits. Trait
