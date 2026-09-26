@@ -72,9 +72,12 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   Run-time spawns fold in the tick. Which kind starts where is the **scenario's**, not the
   rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
   placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
-  one cell. Resolved against the loaded kind table into a `Placement` at create and at every
-  open; a start naming a kind the rules lack, a trait, or a cell that is not walkable
-  refuses the world. The save header keeps the starts by name.
+  one cell (`with (food = 2h)` sets its needs or memory by name). A scenario may also draw
+  its ground (`map`, `legend`, `outside`, step 8e): drawn cells replace the noise, kind
+  characters become explicit starts. Resolved against the loaded kind table into a
+  `Placement` at create and at every open; a start naming a kind the rules lack, a trait,
+  or a cell that is not walkable refuses the world. The save header keeps the starts by
+  name and the drawn map.
 - **Migration**: a move into another chunk goes to the source `Outbox`; `Migrate` walks
   `stage.active()`, copies the *current* row into the target (damage taken this tick travels
   with it), writes the target's occupant, flags the source DEAD. An unloaded target is a
@@ -526,6 +529,11 @@ where it touches the tick.
    namespace, pack order then file names), a save remembers its packs and reopens with them,
    saves open by name under other packs (remapped as read, the directory rewritten at the
    first write), `r` reloads the world's packs.
+   8e done: drawn maps in scenarios (`map { }` rows from (0, 0), `legend { }` one entry
+   per line: soil, water, rock or a kind; `outside` noise or a fill), kept in the save
+   header; `start ... with (need = v)` and legend `with` set a start's needs and memory
+   (a new start tag, still format 9). `scenarios/tests/fox_pen.scenario` is the cornered
+   chicken as data.
    8d done: the built-in kinds rewritten on a trait library (`rules/lib.rules`: `walker`,
    `drinker`, `rooted`, `mortal` and the shared subs; `fowl` in animals.rules), `chick
    extends chicken` (kinds renumbered in pre-order: chicken 0, chick 1, egg 2), `only

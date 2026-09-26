@@ -183,8 +183,8 @@ impl Store {
             rock_on_soil: r.f32()?,
             rock_on_water: r.f32()?,
         };
-        let n = r.count(u32::from(u16::MAX), "starts")?;
-        let mut starts = Vec::with_capacity(n);
+        let n = r.count(1 << 24, "starts")?;
+        let mut starts = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
             let tag = r.u8()?;
             let kind = r.str()?;
@@ -194,11 +194,18 @@ impl Store {
                     num: r.u32()?,
                     den: r.u32()?,
                 },
-                1 => Start::At {
-                    kind,
-                    x: r.i32()?,
-                    y: r.i32()?,
-                },
+                // 2: an explicit start with `with` values (still format 9:
+                // saves without them read as before).
+                1 | 2 => {
+                    let (x, y) = (r.i32()?, r.i32()?);
+                    let mut with = Vec::new();
+                    if tag == 2 {
+                        for _ in 0..r.count(u32::from(u8::MAX), "values in a start")? {
+                            with.push((r.str()?, r.i32()?));
+                        }
+                    }
+                    Start::At { kind, x, y, with }
+                }
                 t => return Err(bad(format!("start tag {t}"))),
             });
         }
@@ -214,12 +221,14 @@ impl Store {
                     0 => None,
                     _ => Some(r.u8()?),
                 };
-                Some(DrawnMap {
+                let map = DrawnMap {
                     width,
                     height,
                     cells,
                     outside,
-                })
+                };
+                map.validate().map_err(bad)?;
+                Some(map)
             }
             t => return Err(bad(format!("map tag {t}"))),
         };
@@ -273,11 +282,18 @@ impl Store {
                     w.u32(*num);
                     w.u32(*den);
                 }
-                Start::At { kind, x, y } => {
-                    w.u8(1);
+                Start::At { kind, x, y, with } => {
+                    w.u8(if with.is_empty() { 1 } else { 2 });
                     w.str(kind);
                     w.i32(*x);
                     w.i32(*y);
+                    if !with.is_empty() {
+                        w.len(with.len());
+                        for (name, v) in with {
+                            w.str(name);
+                            w.i32(*v);
+                        }
+                    }
                 }
             }
         }
@@ -569,7 +585,7 @@ mod tests {
     /// The built-in scenario's shares against the built-in rules.
     fn builtin() -> Placement {
         let s = Scenario::builtin();
-        Placement::resolve(&s.starts, &Kinds::builtin(), s.seed, &s.params).unwrap()
+        Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain()).unwrap()
     }
 
     fn tmp_store(name: &str) -> Store {
@@ -599,10 +615,12 @@ mod tests {
                     num: 1,
                     den: 100,
                 },
+                Start::at("árvore", -3, 70000),
                 Start::At {
-                    kind: "árvore".into(),
-                    x: -3,
-                    y: 70000,
+                    kind: "fox".into(),
+                    x: 5,
+                    y: 6,
+                    with: vec![("food".into(), 1800), ("chase".into(), -2)],
                 },
             ],
             map: Some(DrawnMap {
@@ -646,6 +664,17 @@ mod tests {
         };
         s.write_meta(&none).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(none.clone()));
+        // A map byte that is no cell is refused.
+        let bad_map = WorldMeta {
+            map: Some(DrawnMap {
+                cells: vec![0, 1, 0x10, 0, 0, 0x22],
+                ..m.map.clone().unwrap()
+            }),
+            ..m.clone()
+        };
+        s.write_meta(&bad_map).unwrap();
+        let err = s.read_meta().unwrap_err().to_string();
+        assert!(err.contains("0x22"), "{err}");
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
@@ -671,7 +700,16 @@ mod tests {
         let s = tmp_store("chunk");
         let c = ChunkCoord::new(-7, 3);
         let mut data = ChunkData::default();
-        generate_chunk(3, &GenParams::default(), &builtin(), c, &mut data);
+        generate_chunk(
+            &Scenario {
+                seed: 3,
+                ..Scenario::builtin()
+            }
+            .terrain(),
+            &builtin(),
+            c,
+            &mut data,
+        );
         assert!(!data.actors.rows.is_empty(), "the default density seeds");
         data.cells.feature[0] = Feature::Rock;
         data.cells.ground[CHUNK_CELLS - 1] = Ground::Water;
@@ -725,7 +763,16 @@ mod tests {
         .unwrap();
         assert!(s.read_chunk(c).is_err());
         let mut data = ChunkData::default();
-        generate_chunk(1, &GenParams::default(), &builtin(), c, &mut data);
+        generate_chunk(
+            &Scenario {
+                seed: 1,
+                ..Scenario::builtin()
+            }
+            .terrain(),
+            &builtin(),
+            c,
+            &mut data,
+        );
         s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
             .unwrap();
         let good = fs::read(s.chunk_path(c)).unwrap();

@@ -25,12 +25,12 @@ fn bench_generate(c: &mut Criterion) {
     sim_core::par::init_task_pool();
     let mut g = c.benchmark_group("generate_many");
     let s = scenario(0, 0);
-    let placement = Placement::resolve(&s.starts, &Kinds::builtin(), s.seed, &s.params).unwrap();
+    let placement = Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain()).unwrap();
     for &side in &[4i32, 32] {
         let coords = grid(side);
         g.throughput(Throughput::Elements(coords.len() as u64 * 4096));
         g.bench_function(format!("{side}x{side} chunks"), |b| {
-            b.iter(|| generate_many(s.seed, &s.params, &placement, &coords));
+            b.iter(|| generate_many(&s.terrain(), &placement, &coords));
         });
     }
     g.finish();

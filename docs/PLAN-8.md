@@ -82,7 +82,7 @@ no rules hash), and every gate below compares **`state:`** and the population li
 | 8b | identical to 8a (the default scenario carries exactly today's shares, cut in kind-id order as today). **Done**, in two local stages: with 2 scent channels, `state:` and populations identical to 8a at 1 and 8 threads (`b4d70180c11c4739`, `9be341adc187c931`); with 4 channels the scent layers hash differently, populations identical, 1 = 8 threads. **New reference for 8c:** full gate `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`; quick gate `checksum 2a242e3e8362499b`, `state c11c0f6d5a472758`; population lines unchanged from the baseline. |
 | 8c | identical to 8b when the packs match. **Done:** built-in rules at 1 and 8 threads, and `--rules rules` at 8, all `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`, populations unchanged. |
 | 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. **Done:** full gate `checksum 745e63078789e157`, `state ef03c4b25feb7529` at 1 and 8 threads (`332685 actors: chicken 1885, chick 1550, egg 0, fox 160, flower 8659, hive 52, bee 1079, grass 317802, seed 1029, tree 469`); quick gate `73c2cc51bbaff126` / `170530c04b9a192b`, the same counts as 8c; day-16 means over seeds 12-16 within a few percent of 8c (PERF.md actors-8d). |
-| 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. |
+| 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. **Done:** `scenarios/tests/fox_pen.scenario`, checked by `the_fox_pen_scenario_reproduces_the_cornered_chicken`: both hens bitten and eaten, both foxes fed, the second pen across x = 64. |
 | 8f | `make ci`; `wmc lint rules/` on the built-in content reports no warnings (fix the content if it does, those are real). |
 | 8g | every `scenarios/tests/*.scenario` passes at 1 and 8 threads. |
 
@@ -511,6 +511,24 @@ outside noise                             # or: soil | rock | water; default noi
 - Docs: `RULES.md` scenarios section; `ACTORS.md` §11 8e; `ARCHITECTURE.md` a note on
   decision 13 (worldgen stays a pure function of the inputs; the map is one of them).
 
+### 7.1 As built (deviations from the text above)
+
+- Scenarios can set a start's initial state: `start K at (x, y) with (food = 2h, ...)`, and
+  `F fox with (food = 2h)` in a legend. It sets needs (checked against their range) and
+  memory by name, over a newborn. The gate's fox starts starving, which the scenario
+  could not express otherwise; 8g's tests need the same. In the save it is a new start
+  tag (2), so format 9 saves still read.
+- `legend { }` takes one entry per line, not the single-line form in the example above:
+  after the entry's character, `#` starts a comment, so `# rock` defines rock. A `map { }`
+  has no comments. Rows are trimmed, blank lines skipped.
+- Worldgen reads a `Terrain { seed, params, map }` (`Terrain::cell`); the same function
+  checks that explicit starts stand on walkable cells, so the two cannot disagree.
+  `generate_chunk(terrain, placement, coord, out)`.
+- Starts in the header: up to 2^24 (a large drawn map holds many). A map is validated on
+  read (every byte a cell).
+- Tests beyond the plan: a save keeps its map (a clean chunk regenerates from it, and the
+  outside fill); the scenario examples in RULES.md §14 parse and resolve.
+
 ## 8. Commit 8f: the author lint
 
 A pass in `rules/lint.rs` (sim-core) over the parsed AST plus the compiled `Kinds`,
@@ -595,7 +613,7 @@ closing paragraph. Then delete this file.
 - [x] 8b scenario file, place removed, store v9, four scent channels (see §4.6)
 - [x] 8c packs, open by name, rewrite on save (see §5.4)
 - [x] 8d content on traits, vocabulary in RULES.md (see §6.1)
-- [ ] 8e drawn maps
+- [x] 8e drawn maps (see §7.1)
 - [ ] 8f author lint, --strict, reload surfacing
 - [ ] 8g scenario tests, make test runs them, content tests moved
 - [ ] ACTORS.md §11 step 8 written from this plan; ARCHITECTURE decisions 35, 36 (and 34 amended); this file deleted

@@ -366,13 +366,41 @@ start hive at (77, 103)                        # exactly there
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks; the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
-| `start K at (X, Y)` | | one K on that cell, which must be walkable |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
+| `map { ... }` | | cells drawn from (0, 0), one character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
+| `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with` |
+| `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
 reordering the lines moves who starts where. An explicit start takes its cell, whatever the
 shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
-needs full.
+needs full, but for what `with` sets.
+
+**A drawn map.** A scenario can draw its ground instead of rolling it. The map's size is the
+scenario's `size` (leave `size` out, or make it match), shares still apply to its walkable
+cells, and every kind character becomes a `start K at (x, y)`. This is the fox and the
+cornered hen of `scenarios/tests/fox_pen.scenario`, with the pen drawn:
+
+```
+seed 3
+outside soil
+map {
+  .....
+  .###.
+  .FC#.
+  .###.
+}
+legend {
+  . soil
+  # rock
+  C chicken
+  F fox with (food = 2h)     # starving: it hunts at once
+}
+```
+
+In a legend, the first character on the line is the one it defines, so `#` can stand for
+rock; after it, `#` starts a comment as usual.
 
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
 define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that

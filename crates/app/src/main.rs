@@ -434,7 +434,7 @@ fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
     )?;
     if let Some(f) = scenario_file {
         let s = scenario(Some(f))?;
-        Placement::resolve(&s.starts, &kinds, s.seed, &s.params)
+        Placement::resolve(&s.starts, &kinds, &s.terrain())
             .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
         let (mut share, mut at) = (0.0, 0);
         for st in &s.starts {
@@ -443,9 +443,23 @@ fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
                 Start::At { .. } => at += 1,
             }
         }
+        let map = match &s.map {
+            None => String::new(),
+            Some(m) => format!(
+                ", a drawn map {}x{} with {} outside",
+                m.width,
+                m.height,
+                match m.outside.and_then(sim_core::scenario::DrawnMap::decode) {
+                    None => "noise",
+                    Some((_, sim_core::Feature::Rock)) => "rock",
+                    Some((sim_core::Ground::Water, _)) => "water",
+                    Some(_) => "soil",
+                }
+            ),
+        };
         writeln!(
             out,
-            "scenario {f}: seed {} size {}x{}, {} shares ({:.2}% of walkable cells), {at} explicit starts",
+            "scenario {f}: seed {} size {}x{}, {} shares ({:.2}% of walkable cells), {at} explicit starts{map}",
             s.seed,
             s.width,
             s.height,

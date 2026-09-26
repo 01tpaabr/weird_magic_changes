@@ -28,8 +28,8 @@ use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{Placement, Scenario, Start};
-use crate::stage::worldgen::{GenParams, generate_many};
+use crate::scenario::{DrawnMap, Placement, Scenario, Start};
+use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{SavedKind, Store, WorldMeta};
 use crate::time::START_TICK;
@@ -45,8 +45,21 @@ pub struct SimConfig {
     pub initial_height: u32,
     /// Where kinds start, by name, as the scenario says.
     pub starts: Vec<Start>,
+    /// The scenario's drawn map, if it has one.
+    pub map: Option<DrawnMap>,
     /// `starts` resolved against the loaded kind table: what worldgen places.
     pub placement: Placement,
+}
+
+impl SimConfig {
+    /// The world's ground: its seed's noise under its drawn map.
+    pub fn terrain(&self) -> Terrain<'_> {
+        Terrain {
+            seed: self.seed,
+            params: &self.params,
+            map: self.map.as_ref(),
+        }
+    }
 }
 
 /// Ticks since the world began; see [`crate::time`] for the calendar.
@@ -180,8 +193,7 @@ pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), String> {
     let placement = Placement::resolve(
         &scenario.starts,
         world.resource::<Kinds>(),
-        scenario.seed,
-        &scenario.params,
+        &scenario.terrain(),
     )?;
     world.insert_resource(SimConfig {
         seed: scenario.seed,
@@ -189,6 +201,7 @@ pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), String> {
         initial_width: scenario.width,
         initial_height: scenario.height,
         starts: scenario.starts.clone(),
+        map: scenario.map.clone(),
         placement,
     });
     world.insert_resource(Tick(START_TICK));
@@ -252,7 +265,12 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
     } else {
         Some(Plan::between(&m.kinds, &m.scents, kinds).map_err(bad)?)
     };
-    let placement = Placement::resolve(&m.starts, kinds, m.seed, &m.params)
+    let terrain = Terrain {
+        seed: m.seed,
+        params: &m.params,
+        map: m.map.as_ref(),
+    };
+    let placement = Placement::resolve(&m.starts, kinds, &terrain)
         .map_err(|e| bad(format!("the save's starts: {e}")))?;
     world.insert_resource(SimConfig {
         seed: m.seed,
@@ -260,6 +278,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         initial_width: m.initial_width,
         initial_height: m.initial_height,
         starts: m.starts,
+        map: m.map,
         placement,
     });
     world.insert_resource(Tick(m.tick));
@@ -309,7 +328,7 @@ pub fn meta(world: &World) -> WorldMeta {
         initial_height: c.initial_height,
         params: c.params,
         starts: c.starts.clone(),
-        map: None,
+        map: c.map.clone(),
         kinds: SavedKind::table(kinds),
         scents: kinds.scents.clone(),
         packs: kinds.debug.packs.clone(),
@@ -463,15 +482,35 @@ fn load_chunks(
             None => to_gen.push(c),
         }
     }
-    // Every chunk is a pure function of (seed, coord, placement): generated
-    // in parallel, spawned in coordinate order. Its rows are born now, needs
-    // full.
+    // Every chunk is a pure function of (terrain, coord, placement):
+    // generated in parallel, spawned in coordinate order. Its rows are born
+    // now, needs full, but for what a scenario's `with` sets.
     let chunks: Vec<ChunkData> = {
         let (c, kinds) = (world.resource::<SimConfig>(), world.resource::<Kinds>());
-        let mut chunks = generate_many(c.seed, &c.params, &c.placement, &to_gen);
-        for data in &mut chunks {
+        let mut chunks = generate_many(&c.terrain(), &c.placement, &to_gen);
+        for (&coord, data) in to_gen.iter().zip(&mut chunks) {
             for (p, m) in data.actors.rows.iter().zip(&mut data.minds.rows) {
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
+            }
+            for e in c.placement.explicit_in(coord) {
+                if e.needs.is_empty() && e.mems.is_empty() {
+                    continue;
+                }
+                let layer = if e.placed.cover {
+                    &data.cells.cover
+                } else {
+                    &data.cells.occupant
+                };
+                let (_, slot) = layer[usize::from(e.cell)]
+                    .unpack()
+                    .expect("an explicit start is placed");
+                let m = &mut data.minds.rows[usize::from(slot)];
+                for &(i, v) in &e.needs {
+                    m.needs[usize::from(i)] = v;
+                }
+                for &(i, v) in &e.mems {
+                    m.mem[usize::from(i)] = v;
+                }
             }
         }
         chunks
@@ -1312,6 +1351,65 @@ mod tests {
                 f.3.needs
             );
         }
+    }
+
+    /// The same pens as data: `scenarios/tests/fox_pen.scenario` draws them
+    /// (a map and a legend, the foxes starving by `with`), and the built-in
+    /// rules play out the same way: each fox bites twice and eats its hen,
+    /// in chunk (0, 0) and across the border into (1, 0).
+    #[test]
+    fn the_fox_pen_scenario_reproduces_the_cornered_chicken() {
+        use crate::rules::{CHICKEN, FOX};
+        use crate::time::hours;
+        let s = Scenario::parse(
+            "fox_pen.scenario",
+            include_str!("../../../scenarios/tests/fox_pen.scenario"),
+        )
+        .unwrap();
+        let kinds = Kinds::builtin();
+        let mut w = new_world(&s);
+        for (hen, fox) in [
+            (Pos::new(2, 2), Pos::new(1, 2)),
+            (Pos::new(64, 2), Pos::new(63, 2)),
+        ] {
+            let kind = |p: Pos| get(&w, p).unwrap().occupant.unpack().map(|(k, _)| k);
+            assert_eq!((kind(hen), kind(fox)), (Some(CHICKEN), Some(FOX)));
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    let q = Pos::new(hen.x + dx, hen.y + dy);
+                    let rock = get(&w, q).unwrap().feature == Feature::Rock;
+                    assert_eq!(rock, (dx, dy) != (0, 0) && q != fox, "the pen at {q:?}");
+                }
+            }
+        }
+        let fed = |w: &mut World| {
+            rows(w)
+                .iter()
+                .filter(|r| r.1 == FOX)
+                .map(|r| r.3.needs[slot(&kinds, FOX, "food")])
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fed(&mut w), [hours(2) as i32; 2], "starving by `with`");
+        assert_eq!(Pos::new(64, 2).split().0, ChunkCoord::new(1, 0));
+        let mut wounded = false;
+        for _ in 0..64 {
+            step(&mut w);
+            check_invariants(&mut w);
+            wounded |= rows(&mut w)
+                .iter()
+                .any(|r| r.1 == CHICKEN && r.3.needs[slot(&kinds, CHICKEN, "health")] == 10);
+        }
+        assert!(wounded, "a hen was bitten once before it died");
+        assert!(
+            rows(&mut w).iter().all(|r| r.1 != CHICKEN),
+            "both hens were eaten"
+        );
+        let foxes = fed(&mut w);
+        assert_eq!(foxes.len(), 2);
+        assert!(
+            foxes.iter().all(|&f| f > hours(23) as i32),
+            "each ate a whole hen: {foxes:?}"
+        );
     }
 
     /// `take` and `give` move a need between neighbours by name, in key
@@ -2255,6 +2353,49 @@ mod tests {
         let c = get(&back, far).unwrap();
         assert_eq!(c.occupant.unpack().map(|(k, _)| k), Some(HIVE));
         assert_eq!(rows(&mut back), rows(&mut w));
+        assert_eq!(stage::checksum(&mut back), stage::checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A save keeps its drawn map: a clean chunk (never written) comes back
+    /// from it after a reopen, and so does the `outside` fill beyond it.
+    #[test]
+    fn a_saved_world_keeps_its_map() {
+        let row = |fill: char, hen: bool| {
+            let mut r: Vec<char> = std::iter::repeat_n(fill, 130).collect();
+            r[100] = '#'; // in chunk (1, 0), which has no actor and stays clean
+            if hen {
+                r[5] = 'C';
+            }
+            r.into_iter().collect::<String>()
+        };
+        let text = format!(
+            "seed 5\noutside water\nmap {{\n{}\n{}\n}}\nlegend {{\n  . soil\n  # rock\n  C chicken\n}}\n",
+            row('.', true),
+            row('.', false)
+        );
+        let s = Scenario::parse("t", &text).unwrap();
+        let store = tmp_store("map");
+        let mut w = new_world(&s);
+        assert_eq!(w.resource::<Stage>().loaded_count(), 3);
+        save(&mut w, &store).unwrap();
+        assert_eq!(
+            store.saved_chunks().unwrap(),
+            [ChunkCoord::new(0, 0)],
+            "only the hen's chunk"
+        );
+        let mut back = open_world(&store).unwrap().unwrap();
+        assert_eq!(back.resource::<SimConfig>().map, s.map);
+        let around = LoadPolicy { load: 1, unload: 1 };
+        for world in [&mut w, &mut back] {
+            ensure_loaded(world, Pos::new(100, 1), around, Some(&store)).unwrap();
+        }
+        assert_eq!(get(&back, Pos::new(100, 1)).unwrap().feature, Feature::Rock);
+        assert_eq!(
+            get(&back, Pos::new(100, 2)).unwrap().ground,
+            Ground::Water,
+            "outside"
+        );
         assert_eq!(stage::checksum(&mut back), stage::checksum(&mut w));
         std::fs::remove_dir_all(store.dir()).unwrap();
     }

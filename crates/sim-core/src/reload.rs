@@ -246,7 +246,7 @@ pub fn reload_rules(
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);
-        let placement = Placement::resolve(&starts, &new, c.seed, &c.params)?;
+        let placement = Placement::resolve(&starts, &new, &c.terrain())?;
         (starts, placement)
     };
     let mut dropped = vec![0usize; old.len()];

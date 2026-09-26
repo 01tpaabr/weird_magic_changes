@@ -1,0 +1,20 @@
+# The cornered chicken, as data (sim.rs a_fox_eats_a_cornered_chicken...,
+# docs/PLAN-8.md step 8e): two pens of rock, each round a hen and open only
+# where a starving fox stands. The second straddles the border between
+# chunks (0, 0) and (1, 0) at x = 64. Within 64 ticks each fox bites twice
+# (a hen has 20 health, a fox bites 10) and eats its hen.
+seed 3
+outside soil
+map {
+  ..................................................................
+  .###...........................................................###
+  .FC#...........................................................FC#
+  .###...........................................................###
+  ..................................................................
+}
+legend {
+  . soil
+  # rock
+  C chicken
+  F fox with (food = 2h)     # starving: it hunts at once
+}

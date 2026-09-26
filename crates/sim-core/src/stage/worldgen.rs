@@ -2,7 +2,8 @@
 //!
 //! Every cell is a **pure function of `(seed, x, y)`** and the scenario:
 //! ground comes from thresholded value noise, rocks from a per-cell hash,
-//! and so is every actor row worldgen places. A scenario's explicit start
+//! both under the scenario's drawn map where it has one ([`Terrain`]), and
+//! so is every actor row worldgen places. A scenario's explicit start
 //! takes its cell; every other walkable cell draws one placement hash,
 //! and the scenario's `start K n / d` shares cut `0..PLACE_ONE` into one
 //! interval per kind, in the order written ([`Placement::placed`]). A row's `uid`
@@ -17,7 +18,7 @@ use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
 use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, unit_f32};
-use crate::scenario::{Placed, Placement};
+use crate::scenario::{DrawnMap, Placed, Placement};
 use bytemuck::Zeroable;
 
 /// Hash streams used by generation. Never reuse a value elsewhere.
@@ -52,25 +53,52 @@ impl Default for GenParams {
     }
 }
 
+/// A world's ground: its seed's noise, under a scenario's drawn map where
+/// it has one. Pure.
+#[derive(Debug, Clone, Copy)]
+pub struct Terrain<'a> {
+    pub seed: u64,
+    pub params: &'a GenParams,
+    pub map: Option<&'a DrawnMap>,
+}
+
+impl Terrain<'_> {
+    /// The ground and feature of cell `(x, y)`.
+    #[inline]
+    pub fn cell(&self, x: i32, y: i32) -> (Ground, Feature) {
+        match self.map.and_then(|m| m.at(x, y)) {
+            Some(c) => c,
+            None => gen_cell(self.seed, self.params, x, y),
+        }
+    }
+}
+
 /// Fill `out` with chunk `coord`: cells, then the rows `placement` puts on
 /// them. Sequential inside the chunk; callers parallelise across chunks
 /// (see [`generate_many`]). Rows come out with `born` and `last_think` zero.
 pub fn generate_chunk(
-    seed: u64,
-    params: &GenParams,
+    terrain: &Terrain,
     placement: &Placement,
     coord: ChunkCoord,
     out: &mut ChunkData,
 ) {
+    let seed = terrain.seed;
     let cells = &mut out.cells;
-    for (i, (g, f)) in cells
-        .ground
-        .iter_mut()
-        .zip(cells.feature.iter_mut())
-        .enumerate()
-    {
-        let p = coord.cell(i);
-        (*g, *f) = gen_cell(seed, params, p.x, p.y);
+    let ground = cells.ground.iter_mut().zip(cells.feature.iter_mut());
+    // No map: the noise alone, without asking a map about every cell.
+    match terrain.map {
+        None => {
+            for (i, (g, f)) in ground.enumerate() {
+                let p = coord.cell(i);
+                (*g, *f) = gen_cell(seed, terrain.params, p.x, p.y);
+            }
+        }
+        Some(_) => {
+            for (i, (g, f)) in ground.enumerate() {
+                let p = coord.cell(i);
+                (*g, *f) = terrain.cell(p.x, p.y);
+            }
+        }
     }
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
     cells.cover = [super::ActorId::NONE; CHUNK_CELLS];
@@ -85,8 +113,8 @@ pub fn generate_chunk(
     let mut explicit = explicit.iter().peekable();
     for i in 0..CHUNK_CELLS {
         let p = coord.cell(i);
-        let here = match explicit.next_if(|e| usize::from(e.1) == i) {
-            Some(&(_, _, placed)) => Some(placed),
+        let here = match explicit.next_if(|e| usize::from(e.cell) == i) {
+            Some(e) => Some(e.placed),
             None if out.cells.walkable(i) => placement.placed(placement_hash(seed, p.x, p.y)),
             None => None,
         };
@@ -114,14 +142,13 @@ pub fn placement_hash(seed: u64, x: i32, y: i32) -> u32 {
 /// writes its chunks straight into their final slots (disjoint slices of
 /// the output), so nothing is copied afterwards.
 pub fn generate_many(
-    seed: u64,
-    params: &GenParams,
+    terrain: &Terrain,
     placement: &Placement,
     coords: &[ChunkCoord],
 ) -> Vec<ChunkData> {
     let mut out = vec![ChunkData::default(); coords.len()];
     par_zip_mut(coords, &mut out, GEN_BATCH, |&c, data| {
-        generate_chunk(seed, params, placement, c, data);
+        generate_chunk(terrain, placement, c, data);
     });
     out
 }
@@ -131,7 +158,7 @@ pub fn generate_many(
 /// streaming batches (5 chunks) fully parallel.
 const GEN_BATCH: usize = 1;
 
-/// The terrain of one cell. Pure.
+/// The terrain of one cell, from the seed's noise alone. Pure.
 #[inline]
 pub fn gen_cell(seed: u64, p: &GenParams, x: i32, y: i32) -> (Ground, Feature) {
     let n = fbm2(
@@ -198,10 +225,26 @@ mod tests {
     use crate::stage::{ActorId, Pos};
     use bytemuck::Zeroable;
 
+    const P: GenParams = GenParams {
+        water_scale: 12.0,
+        water_level: 0.30,
+        rock_on_soil: 0.04,
+        rock_on_water: 0.01,
+    };
+
+    /// The seed's noise, no map.
+    fn noise(seed: u64) -> Terrain<'static> {
+        Terrain {
+            seed,
+            params: &P,
+            map: None,
+        }
+    }
+
     /// The built-in scenario's shares against the built-in rules.
     fn builtin(seed: u64) -> Placement {
         let s = Scenario::builtin();
-        Placement::resolve(&s.starts, &Kinds::builtin(), seed, &GenParams::default()).unwrap()
+        Placement::resolve(&s.starts, &Kinds::builtin(), &noise(seed)).unwrap()
     }
 
     fn grid(r: i32) -> Vec<ChunkCoord> {
@@ -216,10 +259,9 @@ mod tests {
     #[test]
     fn generate_many_matches_serial_generation() {
         crate::par::init_task_pool();
-        let p = GenParams::default();
         let pl = builtin(42);
         let coords = grid(3);
-        let par: Vec<u64> = generate_many(42, &p, &pl, &coords)
+        let par: Vec<u64> = generate_many(&noise(42), &pl, &coords)
             .iter()
             .map(ChunkData::hash)
             .collect();
@@ -227,7 +269,7 @@ mod tests {
             .iter()
             .map(|&c| {
                 let mut data = ChunkData::default();
-                generate_chunk(42, &p, &pl, c, &mut data);
+                generate_chunk(&noise(42), &pl, c, &mut data);
                 data.hash()
             })
             .collect();
@@ -241,7 +283,7 @@ mod tests {
         let pl = builtin(7);
         let coord = ChunkCoord::new(-2, 3);
         let mut data = ChunkData::default();
-        generate_chunk(7, &p, &pl, coord, &mut data);
+        generate_chunk(&noise(7), &pl, coord, &mut data);
         let cells = &data.cells;
         let mut rows = 0;
         let mut per_kind = vec![0usize; kinds.len()];
@@ -287,12 +329,12 @@ mod tests {
         let mut again = ChunkData::default();
         again.cells.occupant[3] = ActorId(1);
         again.actors_mut().push(9, SEED, ActorMind::zeroed());
-        generate_chunk(7, &p, &pl, coord, &mut again);
+        generate_chunk(&noise(7), &pl, coord, &mut again);
         assert_eq!(data.hash(), again.hash());
         assert_eq!(data, again);
         // A scenario that starts nobody leaves the same terrain, bare.
         let mut empty = ChunkData::default();
-        generate_chunk(7, &p, &Placement::default(), coord, &mut empty);
+        generate_chunk(&noise(7), &Placement::default(), coord, &mut empty);
         assert!(empty.actors.rows.is_empty());
         assert_eq!(empty.cells.ground, data.cells.ground);
     }
@@ -301,11 +343,10 @@ mod tests {
     /// there), in its kind's layer, and rows stay in cell order.
     #[test]
     fn explicit_starts_take_their_cell_in_cell_order() {
-        let p = GenParams::default();
         let kinds = Kinds::builtin();
         let coord = ChunkCoord::new(1, 0);
         let mut shares_only = ChunkData::default();
-        generate_chunk(7, &p, &builtin(7), coord, &mut shares_only);
+        generate_chunk(&noise(7), &builtin(7), coord, &mut shares_only);
         // A cell the shares fill with a seed, and an empty walkable one.
         let seeded = (0..CHUNK_CELLS)
             .find(|&i| {
@@ -324,17 +365,13 @@ mod tests {
             .unwrap();
         let at = |kind: &str, i: usize| {
             let q = coord.cell(i);
-            Start::At {
-                kind: kind.into(),
-                x: q.x,
-                y: q.y,
-            }
+            Start::at(kind, q.x, q.y)
         };
         let mut starts = Scenario::builtin().starts;
         starts.extend([at("grass", seeded), at("chicken", empty)]);
-        let pl = Placement::resolve(&starts, &kinds, 7, &p).unwrap();
+        let pl = Placement::resolve(&starts, &kinds, &noise(7)).unwrap();
         let mut data = ChunkData::default();
-        generate_chunk(7, &p, &pl, coord, &mut data);
+        generate_chunk(&noise(7), &pl, coord, &mut data);
         assert!(data.cells.occupant[seeded].is_none(), "the seed gave way");
         assert_eq!(
             data.cells.cover[seeded].unpack().map(|(k, _)| k),
@@ -359,9 +396,8 @@ mod tests {
     #[test]
     fn different_seeds_differ_and_have_all_tile_kinds() {
         crate::par::init_task_pool();
-        let p = GenParams::default();
-        let a = generate_many(1, &p, &builtin(1), &grid(2));
-        let b = generate_many(2, &p, &builtin(2), &grid(2));
+        let a = generate_many(&noise(1), &builtin(1), &grid(2));
+        let b = generate_many(&noise(2), &builtin(2), &grid(2));
         assert_ne!(a[0].hash(), b[0].hash());
         let cells = a
             .iter()
@@ -375,6 +411,49 @@ mod tests {
         }
         assert!(water > 0 && water < n);
         assert!(rocks > 0 && rock_on_water > 0);
+    }
+
+    /// A drawn map's cells replace the noise inside it and its `outside`
+    /// fill beyond it; its kinds stand where they are drawn.
+    #[test]
+    fn a_drawn_map_lays_its_cells_and_starts() {
+        assert_eq!(P, GenParams::default());
+        let text = |outside: &str| {
+            format!(
+                "seed 7\n{outside}\nmap {{\n.#C\n~.'\n}}\nlegend {{\n  . soil\n  # rock\n  ~ water\n  C chicken\n  ' grass\n}}\n"
+            )
+        };
+        let s = Scenario::parse("t", &text("outside water")).unwrap();
+        let pl = Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain()).unwrap();
+        let mut data = ChunkData::default();
+        generate_chunk(&s.terrain(), &pl, ChunkCoord::new(0, 0), &mut data);
+        let c = &data.cells;
+        assert_eq!((c.ground[0], c.feature[0]), (Ground::Soil, Feature::None));
+        assert_eq!(c.feature[1], Feature::Rock);
+        assert_eq!(c.occupant[2].unpack().map(|(k, _)| k), Some(CHICKEN));
+        assert_eq!(c.ground[64], Ground::Water);
+        assert_eq!(c.cover[66].unpack().map(|(k, _)| k), Some(GRASS));
+        assert_eq!(
+            (c.ground[3], c.ground[64 * 63]),
+            (Ground::Water, Ground::Water),
+            "outside: water"
+        );
+        assert_eq!(data.actors.rows.len(), 2, "no shares: only what is drawn");
+        // Without `outside`, the seed's noise beyond the map.
+        let s = Scenario::parse("t", &text("")).unwrap();
+        let pl = Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain()).unwrap();
+        let mut noisy = ChunkData::default();
+        generate_chunk(&s.terrain(), &pl, ChunkCoord::new(0, 0), &mut noisy);
+        for i in [3, 64 * 63, 4095] {
+            let q = ChunkCoord::new(0, 0).cell(i);
+            let cell = (noisy.cells.ground[i], noisy.cells.feature[i]);
+            assert_eq!(cell, gen_cell(7, &P, q.x, q.y));
+        }
+        assert_eq!(
+            noisy.cells.feature[1],
+            Feature::Rock,
+            "the map still wins inside"
+        );
     }
 
     #[test]
