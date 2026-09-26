@@ -5582,9 +5582,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
-    /// Packs are file lists in the order given: a later pack's kinds come
-    /// after an earlier one's, may extend them and call their subs, and a
-    /// name declared in two packs is an error naming both files.
     #[test]
     fn pack_labels_name_one_file_each_and_a_pack_loads_once() {
         let root = std::env::temp_dir().join(format!("wmc-labels-{}", std::process::id()));
@@ -5629,6 +5626,9 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// Packs are file lists in the order given: a later pack's kinds come
+    /// after an earlier one's, may extend them and call their subs, and a
+    /// name declared in two packs is an error naming both files.
     #[test]
     fn packs_merge_in_order_and_duplicates_name_both_files() {
         let root = std::env::temp_dir().join(format!("wmc-packs-{}", std::process::id()));
