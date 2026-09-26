@@ -494,8 +494,9 @@ rules ../packs/life                 # in scenarios/life.scenario
 A save remembers its packs, by absolute path. So a new world runs `--rules`, else
 `WMC_RULES`, else its scenario's `rules`, else the built-in kinds; a saved one runs
 `--rules`, else `WMC_RULES`, else the packs it was saved with. If one of those is gone it
-says so and uses the built-in rules. `wmc lint --scenario <file>`, with no packs, lints the
-ones the scenario names.
+says so and uses the built-in rules. `wmc lint --scenario <file>`, with no packs (no
+`--rules`, positional pack or `WMC_RULES`), lints the ones the scenario names, the same order
+as for a new world.
 
 A pack need not build on the built-in kinds. `packs/life` is Conway's Game of Life in two
 kinds, `dead` and `alive`, and nothing else. `scenarios/life.scenario` plays it on an
