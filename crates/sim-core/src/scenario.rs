@@ -508,7 +508,8 @@ impl Scenario {
 
     /// Parse a scenario's text. Unknown statements and terrain fields, a
     /// second `seed`, `size`, `outside` or terrain field, shares that are
-    /// not `0 < n / d <= 1`, two shares for one kind,
+    /// not `0 < n / d <= 1` or place nobody (below `1 / PLACE_ONE`), two
+    /// shares for one kind,
     /// shares summing above one, and a map that does not fit its legend or
     /// its size are errors. Kind, need and memory names are checked later,
     /// against the rules ([`Placement::resolve`]).
@@ -694,6 +695,14 @@ impl Scenario {
                             num,
                             den,
                         };
+                        if start.share() == 0 {
+                            return Err(err(
+                                line_no,
+                                format!(
+                                    "`{num} / {den}` is below 1 / {PLACE_ONE}, the smallest share"
+                                ),
+                            ));
+                        }
                         total += u64::from(start.share());
                         if total > u64::from(PLACE_ONE) {
                             return Err(err(line_no, "the shares add up to more than 1".into()));
@@ -1385,6 +1394,11 @@ mod tests {
                 "t:1: `size W H` generates at most 4096 chunks",
             ),
             ("size 4294967295 1", "at most 4096 chunks"),
+            (
+                "start chicken 1 / 20000000",
+                "t:1: `1 / 20000000` is below 1 / 16777216, the smallest share",
+            ),
+            ("start chicken 1 / 4294967295", "the smallest share"),
             ("seed 1\nseed 2", "t:2: a second `seed` (first at line 1)"),
             (
                 "size 8 8\nsize 9 9",
@@ -1405,6 +1419,8 @@ mod tests {
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
         Scenario::parse("t", "size 4096 4096").unwrap();
+        let least = Scenario::parse("t", "start chicken 1 / 16777216").unwrap();
+        assert_eq!(least.starts[0].share(), 1);
         // Different terrain fields on several lines add up.
         let t = Scenario::parse("t", "terrain water_level 0.1\nterrain rock_on_soil 0").unwrap();
         assert_eq!((t.params.water_level, t.params.rock_on_soil), (0.1, 0.0));

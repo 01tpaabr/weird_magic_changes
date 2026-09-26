@@ -389,7 +389,7 @@ start hive at (77, 103)                        # exactly there
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
-reordering the lines moves who starts where. A share is exact to one part in 2^24, so
+reordering the lines moves who starts where. A share is exact to one part in 2^24 (the smallest is 1 / 16777216), so
 halves, quarters and eighths add up exactly (`start alive 3 / 8` and `start dead 5 / 8` fill
 every cell), while `1 / 3` and `2 / 3` leave about one cell in 16.7 million empty. An explicit start takes its cell, whatever the
 shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
