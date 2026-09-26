@@ -771,8 +771,8 @@ impl Machine<'_> {
     }
 
     /// Nearest matching cell in rings `1..=r`: each ring clockwise from its
-    /// top-left corner ([`ring_cell`]), the ring's start rotated by one draw so equidistant ties do not
-    /// lock a flock onto one target.
+    /// top-left corner ([`ring_cell`]), the ring's start rotated by one draw so
+    /// equidistant ties do not lock a flock onto one target.
     fn nearest(&mut self, pred: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
         let r = r.clamp(0, i32::from(self.ctx.kind.sight));
         let side = (2 * r + 1) as u32;
