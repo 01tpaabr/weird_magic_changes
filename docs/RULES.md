@@ -227,7 +227,7 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 |---|---|
 | `idle` | nothing; ends the rule |
 | `die` | the actor is removed |
-| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, state reset, age from now; not between standing and cover kinds |
+| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between standing and cover kinds |
 | `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover |
 | `move t` | one step toward t; slides past a blocked cell by 45 degrees. Contested cells go to the actor with the lowest key this tick; a cell someone left or died on this tick can't be entered until the next. `BLOCKED` if it didn't move |
 | `drink t` | t must be adjacent water: the need named `water` refills to max; else `REFUSED` |
@@ -544,7 +544,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   - a rule that can never run; an ancestor whose rules no `inherit` splices (a note);
   - a predicate tag no kind carries (`wolf looks for meat, but no kind ... is tagged meat`);
   - a `sniff` or `scent()` of a channel nothing marks, `signal_of` when no rule sets
-    `signal`, `K:n` when no rule of K's family sets `look`;
+    `signal`, `K:n` (n above 0: every actor starts at look 0) when no rule of K's family,
+    nor of a kind that becomes one, sets `look`;
   - `eat`, `hit` or `graze` of a target whose predicate the lint can follow (the `nearest`
     that bound it, or a sub's `pred` argument at each call) where a matching kind has no
     `health`; an eater with no `food` need; a drinker with no `water` need;

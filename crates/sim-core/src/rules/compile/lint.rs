@@ -306,6 +306,8 @@ struct Walk {
     drinks: Option<Pos>,
     sets_look: bool,
     makes: BTreeSet<u16>,
+    /// What it `become`s (it keeps its look).
+    becomes: BTreeSet<u16>,
 }
 
 impl Walk {
@@ -398,6 +400,7 @@ impl<'a> Gen<'a> {
 
         // Each kind's code, followed.
         let mut sets_look_by_kind = Vec::with_capacity(self.kind_insts.len());
+        let mut becomes_by_kind = Vec::with_capacity(self.kind_insts.len());
         self.debug.makes = Vec::with_capacity(self.kind_insts.len());
         self.debug.kind_at = Vec::with_capacity(self.kind_insts.len());
         for k in 0..self.kind_insts.len() {
@@ -422,6 +425,7 @@ impl<'a> Gen<'a> {
                 drinks: None,
                 sets_look: false,
                 makes: BTreeSet::new(),
+                becomes: BTreeSet::new(),
             };
             for list in [&inst.reflex].into_iter().chain(&inst.state_lists) {
                 for rr in &list.rules {
@@ -471,6 +475,7 @@ impl<'a> Gen<'a> {
                 }
             }
             sets_look_by_kind.push(w.sets_look);
+            becomes_by_kind.push(w.becomes);
             self.debug.makes.push(w.makes.into_iter().collect());
         }
         self.params.clear();
@@ -489,7 +494,23 @@ impl<'a> Gen<'a> {
                 );
             }
         }
+        // A look set before a `become` stays with the new kind.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for j in 0..becomes_by_kind.len() {
+                if sets_look_by_kind[j] {
+                    for &k in &becomes_by_kind[j] {
+                        changed |= !std::mem::replace(&mut sets_look_by_kind[usize::from(k)], true);
+                    }
+                }
+            }
+        }
         for (kind, only, look, at, who) in &names.looks {
+            // Every actor starts at look 0.
+            if *look == 0 {
+                continue;
+            }
             let Some(k) = self.kind_id(kind) else {
                 continue;
             };
@@ -705,6 +726,7 @@ impl<'a> Gen<'a> {
             Stmt::Become { kind, .. } => {
                 if let Some(k) = self.kind_id(kind) {
                     w.makes.insert(k);
+                    w.becomes.insert(k);
                 }
             }
             Stmt::Look(e) => {
@@ -1000,6 +1022,26 @@ mod tests {
         assert!(
             got.iter()
                 .any(|d| d.contains("`p` looks for `q:1`, but no rule of `q` sets `look`")),
+            "{got:?}"
+        );
+        // Every actor starts at look 0, and `become` keeps the look.
+        let got = lint(
+            "kind a { sight 4 mem n
+               when nearest b:0 within 3 as t => move toward t
+               when n == 0 => { n = count a within 2 } }
+             kind b { when 1 => idle }",
+        );
+        assert!(!got.iter().any(|d| d.contains("sets `look`")), "{got:?}");
+        let chick = "kind chick { when 1 => idle }
+                     kind q { sight 4 mem m  when nearest chick:3 within 3 as t => { m = 1 } }";
+        let egg =
+            "kind egg { mem n  when n == 0 => { look = 3  n = 1 }  when n == 1 => become chick }\n";
+        let got = lint(&[egg, chick].concat());
+        assert!(!got.iter().any(|d| d.contains("sets `look`")), "{got:?}");
+        let got = lint(chick);
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`q` looks for `chick:3`, but no rule of `chick` sets `look`")),
             "{got:?}"
         );
     }
