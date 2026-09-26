@@ -405,13 +405,14 @@ fn value(w: &str) -> Option<i32> {
         return None;
     }
     let n: u64 = w[..digits].parse().ok()?;
+    // Checked: `n` is anything the text says, and `time::days` would overflow.
     let ticks = match &w[digits..] {
-        "" => n,
-        "min" => crate::time::minutes(n),
-        "h" => crate::time::hours(n),
-        "d" => crate::time::days(n),
-        _ => return None,
-    };
+        "" => Some(n),
+        "min" => n.checked_mul(crate::time::TICKS_PER_MINUTE),
+        "h" => n.checked_mul(crate::time::TICKS_PER_HOUR),
+        "d" => n.checked_mul(crate::time::TICKS_PER_DAY),
+        _ => None,
+    }?;
     let v = i32::try_from(ticks).ok()?;
     Some(if neg { -v } else { v })
 }
@@ -1312,12 +1313,38 @@ mod tests {
                 "`with` sets `food` twice",
             ),
             ("start 9lives at (1, 2)", "`9lives` is not a kind name"),
+            ("run 99999999999999999d", "expected `run T`"),
+            (
+                "start fox at (1, 2) with (food = 18000000000000000000min)",
+                "is not a number or a time",
+            ),
+            (
+                "expect min food of fox > 100000000000000000h",
+                "is not a number or a time",
+            ),
         ] {
             let e = Scenario::parse("t", text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
         }
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
+    }
+
+    /// A time too large for ticks is no value, not an overflow (a dev
+    /// panic, a silent wrap in release: `576460752303423489d` is `1d`).
+    #[test]
+    fn times_past_u64_are_no_value() {
+        for w in [
+            "999999999999999999d",
+            "99999999999999999h",
+            "1229782938247303442min",
+            "576460752303423489d",
+            "-576460752303423489d",
+        ] {
+            assert_eq!(value(w), None, "{w}");
+        }
+        assert_eq!(value("1d"), Some(21600));
+        assert_eq!(value("-90min"), Some(-1350));
     }
 
     const PEN: &str = "seed 3
