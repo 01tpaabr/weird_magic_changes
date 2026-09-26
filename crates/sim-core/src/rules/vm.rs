@@ -540,7 +540,8 @@ pub struct Halo<'a> {
 impl<'a> Halo<'a> {
     /// The chunk and local index at `(lx + dx, ly + dy)` from the centre
     /// chunk's local cell `(lx, ly)`. `None` if it falls outside the halo
-    /// or the chunk there is not loaded.
+    /// (however far: a rule computes `dx`/`dy`) or the chunk there is not
+    /// loaded.
     #[inline]
     pub fn at(
         &self,
@@ -549,7 +550,7 @@ impl<'a> Halo<'a> {
         dx: i32,
         dy: i32,
     ) -> Option<(&'a ChunkCells, &'a ChunkActors, usize)> {
-        let (x, y) = (lx + dx, ly + dy);
+        let (x, y) = (lx.checked_add(dx)?, ly.checked_add(dy)?);
         let ox = x >> CHUNK_BITS;
         let oy = y >> CHUNK_BITS;
         if !(-1..=1).contains(&ox) || !(-1..=1).contains(&oy) {
@@ -1113,11 +1114,10 @@ impl Machine<'_> {
                     }
                     O::DirOf => {
                         let i = self.pop()?;
-                        let (dx, dy) = usize::try_from(i - 1)
-                            .ok()
-                            .and_then(|i| DIRS8.get(i))
-                            .copied()
-                            .unwrap_or((0, 0));
+                        let (dx, dy) = match i {
+                            1..=8 => DIRS8[(i - 1) as usize],
+                            _ => (0, 0),
+                        };
                         self.push(dx)?;
                         self.push(dy)?;
                     }
@@ -1358,8 +1358,8 @@ pub fn decay(kind: &KindDef, mind: &mut ActorMind, tick: u64) -> bool {
 /// Where `(dx, dy)` from local cell `cell` lands: the chunk offset
 /// (`-1..=1` each way, or beyond) and the local index there.
 #[inline]
-pub fn offset_cell(cell: usize, dx: i32, dy: i32) -> ((i32, i32), usize) {
-    let (x, y) = (lx(cell) + dx, ly(cell) + dy);
+pub fn offset_cell(cell: usize, dx: i8, dy: i8) -> ((i32, i32), usize) {
+    let (x, y) = (lx(cell) + i32::from(dx), ly(cell) + i32::from(dy));
     let local = ((y & (CHUNK_SIZE - 1)) * CHUNK_SIZE + (x & (CHUNK_SIZE - 1))) as usize;
     ((x >> CHUNK_BITS, y >> CHUNK_BITS), local)
 }
@@ -1744,6 +1744,31 @@ mod tests {
         assert_eq!(sum(8), (Some(Trap::CallDepth), 0), "a 9th traps");
     }
 
+    /// A target a rule computes can be anywhere in i32: far ones read as
+    /// unloaded (rock, nobody), a heading outside 1..=8 is no step.
+    #[test]
+    fn far_targets_and_bad_headings_do_not_panic() {
+        let mut a = Asm::new();
+        a.push_k(0).push(0).op(OpCode::FreeAt).set_mem(0);
+        a.push_k(0)
+            .push(0)
+            .push(pred::feature(1))
+            .op(OpCode::IsAt)
+            .set_mem(1);
+        a.push(0).push_k(0).op(OpCode::LookAt).set_mem(2);
+        a.push(0).push_k(0).op(OpCode::SignalAt).set_mem(3);
+        a.push_k(0).push(0).scent_at(0).set_mem(4);
+        a.push_k(1).op(OpCode::DirOf).set_mem(6).set_mem(5);
+        a.push(9).op(OpCode::DirOf).set_mem(8).set_mem(7);
+        a.push_k(0).op(OpCode::DirOf).set_mem(10).set_mem(9);
+        a.halt();
+        let mut m = mind();
+        m.mem = [7; MEM_SLOTS];
+        let out = run(a.finish(), vec![i32::MAX, i32::MIN], vec![], &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(&m.mem[..11], &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
     #[test]
     fn decay_is_exact_and_kills_at_zero() {
         let k = kind(
@@ -1789,6 +1814,8 @@ mod tests {
         assert_eq!(i, 5 * 64);
         assert!(halo.at(63, 5, 1, -6).is_none()); // north-east: not loaded
         assert!(halo.at(0, 0, -1, 0).is_none()); // west: not loaded
+        assert!(halo.at(63, 5, i32::MAX, 0).is_none()); // far: outside the halo
+        assert!(halo.at(5, 63, 0, i32::MAX).is_none());
         assert_eq!(offset_cell(5 * 64 + 63, 1, 0), ((1, 0), 5 * 64));
         assert_eq!(offset_cell(0, -1, -1), ((-1, -1), CHUNK_CELLS - 1));
         assert_eq!(offset_cell(70, 2, 3), ((0, 0), 70 + 2 + 3 * 64));

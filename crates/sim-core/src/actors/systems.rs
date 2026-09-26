@@ -1132,7 +1132,7 @@ enum Where {
 
 #[inline]
 fn target_of(coord: ChunkCoord, cell: usize, dx: i8, dy: i8) -> Where {
-    let ((ox, oy), local) = vm::offset_cell(cell, i32::from(dx), i32::from(dy));
+    let ((ox, oy), local) = vm::offset_cell(cell, dx, dy);
     if (ox, oy) == (0, 0) {
         Where::Here(local)
     } else {
@@ -1143,7 +1143,7 @@ fn target_of(coord: ChunkCoord, cell: usize, dx: i8, dy: i8) -> Where {
 /// Local index of `(dx, dy)` from `cell`, or `None` if it leaves the chunk.
 #[inline]
 fn local_target(cell: usize, dx: i8, dy: i8) -> Option<usize> {
-    let ((ox, oy), local) = vm::offset_cell(cell, i32::from(dx), i32::from(dy));
+    let ((ox, oy), local) = vm::offset_cell(cell, dx, dy);
     ((ox, oy) == (0, 0)).then_some(local)
 }
 
