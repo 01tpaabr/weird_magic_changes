@@ -286,9 +286,11 @@ TIME     := INT ("min" | "h" | "d")
   64 800 goes to the pool), kind ids in **pre-order over the inheritance forest, roots and
   siblings in sorted file name then declaration order** (without `extends`: file name then
   declaration order), the
-  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`,
-  `free` and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random` and as a
-  sub's `pred` argument, plain names elsewhere, so `need water` and `water < 40min` read as intended; `food` likewise is a
+  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`
+  and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random` and as a
+  sub's `pred` argument, plain names elsewhere (a need, mem or local, never a kind or tag), so
+  `need water` and `water < 40min` read as intended; `free` is reserved (a built-in), and a
+  predicate in those positions. `food` likewise is a
   declaration only where a declaration starts (`need food`, `food < 20h` work). `x` and `y`
   are senses, so they cannot name a parameter or local. A pred name is a sub's `pred`
   parameter, else a kind, else a **tag**: tags are global names numbered in first-appearance
