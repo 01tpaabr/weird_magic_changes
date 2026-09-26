@@ -552,7 +552,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   - a search radius that is a constant above the kind's `sight` (it is clamped);
   - a decaying vital need whose max is at most the kind's cadence (it empties by the next
     think, even when refilled);
-  - an action inside `for each` (a second cell means a second action: a trap);
+  - an action inside `for each`, or a call there to a sub that acts (a second cell means a
+    second action: a trap; `next` is not an action);
   - what is never used: a mem, a need the engine does not read (it reads `health`,
     `water`, `food`), a sub, a const, a state no `next` reaches (the first is where actors
     start), a tag no predicate names (a note);

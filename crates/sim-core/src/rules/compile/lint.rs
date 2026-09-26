@@ -54,8 +54,6 @@ struct Names {
     smells: Vec<(String, Pos, String)>,
     /// Where `signal_of` is read, and by whom.
     signal_reads: Vec<(Pos, String)>,
-    /// Actions inside a `for each`.
-    each_actions: Vec<Pos>,
 }
 
 /// One pass over one item's or sub's code, filling [`Names`].
@@ -63,19 +61,12 @@ struct Seen<'n> {
     names: &'n mut Names,
     who: String,
     here: Pos,
-    each: u32,
 }
 
 impl Seen<'_> {
     fn stmts(&mut self, body: &[Stmt]) {
         for s in body {
             self.stmt(s);
-        }
-    }
-
-    fn act(&mut self, at: &Pos) {
-        if self.each > 0 {
-            self.names.each_actions.push(at.clone());
         }
     }
 
@@ -111,45 +102,33 @@ impl Seen<'_> {
                 args.iter().for_each(|a| self.arg(a));
             }
             Stmt::Return { value, .. } => value.iter().for_each(|e| self.expr(e)),
-            Stmt::Idle(at) | Stmt::Die(at) => self.act(at),
-            Stmt::Become { kind, at } => {
+            Stmt::Idle(_) | Stmt::Die(_) => {}
+            Stmt::Become { kind, .. } => {
                 self.names.all.insert(kind.clone());
-                self.act(at);
             }
-            Stmt::Spawn {
-                kind,
-                at,
-                pos,
-                with,
-            } => {
+            Stmt::Spawn { kind, at, with, .. } => {
                 self.names.all.insert(kind.clone());
                 self.target(at);
                 for (n, e, _) in with {
                     self.names.all.insert(n.clone());
                     self.expr(e);
                 }
-                self.act(pos);
             }
             Stmt::Transfer {
                 target,
                 need,
                 amount,
-                at,
                 ..
             } => {
                 self.names.all.insert(need.clone());
                 self.target(target);
                 self.expr(amount);
-                self.act(at);
             }
-            Stmt::Move(t, at)
-            | Stmt::Drink(t, at)
-            | Stmt::Eat(t, at)
-            | Stmt::Hit(t, at)
-            | Stmt::Graze(t, at) => {
-                self.target(t);
-                self.act(at);
-            }
+            Stmt::Move(t, _)
+            | Stmt::Drink(t, _)
+            | Stmt::Eat(t, _)
+            | Stmt::Hit(t, _)
+            | Stmt::Graze(t, _) => self.target(t),
             Stmt::Look(e) => self.expr(e),
             Stmt::Signal(e) => {
                 self.names.signal_set = true;
@@ -159,16 +138,13 @@ impl Seen<'_> {
                 self.names.marks.insert(ch.clone());
                 self.expr(e);
             }
-            Stmt::Next(name, at) => {
+            Stmt::Next(name, _) => {
                 self.names.nexts.insert(name.clone());
-                self.act(at);
             }
             Stmt::ForEach { pred, r, body, .. } => {
                 self.pred(pred);
                 self.expr(r);
-                self.each += 1;
                 self.stmts(body);
-                self.each -= 1;
             }
         }
     }
@@ -308,6 +284,10 @@ struct Walk {
     makes: BTreeSet<u16>,
     /// What it `become`s (it keeps its look).
     becomes: BTreeSet<u16>,
+    /// `for each` loops around here.
+    each: u32,
+    /// The outermost call made inside a `for each`, and where.
+    each_call: Option<(String, Pos)>,
 }
 
 impl Walk {
@@ -336,7 +316,6 @@ impl<'a> Gen<'a> {
                 names: &mut names,
                 who: it.name.clone(),
                 here: it.at.clone(),
-                each: 0,
             };
             for p in &it.parents {
                 for a in &p.args {
@@ -363,7 +342,6 @@ impl<'a> Gen<'a> {
                         names: &mut names,
                         who: it.name.clone(),
                         here: rule.at.clone(),
-                        each: 0,
                     };
                     seen.cond(&rule.cond);
                     seen.stmts(&rule.body);
@@ -374,7 +352,6 @@ impl<'a> Gen<'a> {
                     names: &mut names,
                     who: it.name.clone(),
                     here: m.at.clone(),
-                    each: 0,
                 };
                 seen.stmts(&m.body);
             }
@@ -384,7 +361,6 @@ impl<'a> Gen<'a> {
                 names: &mut names,
                 who: s.name.clone(),
                 here: s.at.clone(),
-                each: 0,
             };
             seen.stmts(&s.body);
         }
@@ -393,7 +369,6 @@ impl<'a> Gen<'a> {
                 names: &mut names,
                 who: c.name.clone(),
                 here: c.at.clone(),
-                each: 0,
             };
             seen.expr(&c.value);
         }
@@ -426,6 +401,8 @@ impl<'a> Gen<'a> {
                 sets_look: false,
                 makes: BTreeSet::new(),
                 becomes: BTreeSet::new(),
+                each: 0,
+                each_call: None,
             };
             for list in [&inst.reflex].into_iter().chain(&inst.state_lists) {
                 for rr in &list.rules {
@@ -540,12 +517,6 @@ impl<'a> Gen<'a> {
                     format!("`{who}` reads `signal_of`, but no rule sets `signal`"),
                 );
             }
-        }
-        for at in &names.each_actions {
-            out.warn(
-                at,
-                "an action inside `for each` traps when the loop finds a second cell".into(),
-            );
         }
 
         // Never used.
@@ -680,6 +651,36 @@ impl<'a> Gen<'a> {
 
     fn walk_stmt(&mut self, kinds: &Kinds, w: &mut Walk, s: &'a Stmt, out: &mut Out) {
         let eater = &kinds.defs[usize::from(w.kind)].name;
+        // An action inside `for each` (`next` is not one).
+        let acts = match s {
+            Stmt::Move(_, at)
+            | Stmt::Drink(_, at)
+            | Stmt::Eat(_, at)
+            | Stmt::Hit(_, at)
+            | Stmt::Graze(_, at)
+            | Stmt::Transfer { at, .. }
+            | Stmt::Spawn { pos: at, .. }
+            | Stmt::Become { at, .. }
+            | Stmt::Idle(at)
+            | Stmt::Die(at) => Some(at),
+            _ => None,
+        };
+        if let Some(at) = acts
+            && w.each > 0
+        {
+            match &w.each_call {
+                Some((sub, call)) => out.warn(
+                    call,
+                    format!(
+                        "`{sub}` acts: a call inside `for each` traps when the loop finds a second cell"
+                    ),
+                ),
+                None => out.warn(
+                    at,
+                    "an action inside `for each` traps when the loop finds a second cell".into(),
+                ),
+            }
+        }
         match s {
             Stmt::Eat(t, at) | Stmt::Hit(t, at) | Stmt::Graze(t, at) => {
                 let verb = match s {
@@ -771,10 +772,12 @@ impl<'a> Gen<'a> {
                 self.radius(w, r, at, out);
                 let m = self.matcher(kinds, w, pred);
                 w.binds.push((bind.clone(), m));
+                w.each += 1;
                 self.walk_stmts(kinds, w, body, out);
+                w.each -= 1;
                 w.binds.pop();
             }
-            Stmt::Call { name, args, .. } => self.walk_call(kinds, w, name, args, out),
+            Stmt::Call { name, args, at } => self.walk_call(kinds, w, name, args, at, out),
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
                     self.walk_expr(kinds, w, e, out);
@@ -829,7 +832,7 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, a, out);
                 }
             }
-            Expr::Call { name, args, .. } => self.walk_call(kinds, w, name, args, out),
+            Expr::Call { name, args, at } => self.walk_call(kinds, w, name, args, at, out),
             Expr::Dist(t)
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
@@ -869,6 +872,7 @@ impl<'a> Gen<'a> {
         w: &mut Walk,
         name: &str,
         args: &'a [Arg],
+        at: &Pos,
         out: &mut Out,
     ) {
         if w.depth >= 8 {
@@ -911,6 +915,10 @@ impl<'a> Gen<'a> {
             }
         }
         let saved = (std::mem::replace(&mut w.binds, binds), self.params.clone());
+        let each_call = w.each_call.clone();
+        if w.each > 0 && w.each_call.is_none() {
+            w.each_call = Some((name.to_string(), at.clone()));
+        }
         // A member sub sees its owner's parameters; a file sub only its own.
         self.params = owner.map(|o| self.scope_of(o)).unwrap_or_default();
         self.params.extend(ints);
@@ -918,6 +926,7 @@ impl<'a> Gen<'a> {
         self.walk_stmts(kinds, w, &sub.body, out);
         w.depth -= 1;
         (w.binds, self.params) = saved;
+        w.each_call = each_call;
     }
 }
 
@@ -1145,6 +1154,27 @@ mod tests {
         ));
         assert!(!has(
             "kind ant { mem n  when true => { for each free within 1 as c { n += 1 }  idle } }",
+            "inside `for each`"
+        ));
+        assert!(has(
+            "kind ant { when true => for each free within 1 as c { idle } }",
+            "an action inside `for each` traps"
+        ));
+        // A sub that acts, called in the loop: the warning is at the call.
+        let got = lint(
+            "sub flee(t: target) { move away t }
+             kind p { glyph \"p\" sight 4
+               when 1 => { for each p within 3 as t {
+                 flee(t) } } }",
+        );
+        assert!(
+            got.iter().any(|d| d
+                == "4: `flee` acts: a call inside `for each` traps when the loop finds a second cell"),
+            "{got:?}"
+        );
+        // `next` is not an action.
+        assert!(!has(
+            "kind ant { mem n  state A { when true => for each free within 1 as c { n += 1  next B } }  state B { when true => idle } }",
             "inside `for each`"
         ));
     }
