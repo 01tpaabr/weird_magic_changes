@@ -289,21 +289,10 @@ fn expectation(rest: &str) -> Result<Expect, String> {
             v,
         });
     }
-    if first == "at" {
-        let tail = rest.trim_start().strip_prefix("at").unwrap_or("").trim();
-        let close = tail.find(')').ok_or(FORMS)?;
-        let nums: Vec<&str> = tail[..close]
-            .trim_start_matches('(')
-            .split(',')
-            .map(str::trim)
-            .collect();
-        let (Ok(x), Ok(y)) = (
-            nums.first().copied().unwrap_or("").parse::<i32>(),
-            nums.get(1).copied().unwrap_or("").parse::<i32>(),
-        ) else {
-            return Err(FORMS.into());
-        };
-        let after: Vec<&str> = tail[close + 1..].split_whitespace().collect();
+    if first == "at" || first.starts_with("at(") {
+        let tail = rest.trim_start().strip_prefix("at").unwrap_or("");
+        let (x, y, after) = xy(tail).ok_or(FORMS)?;
+        let after: Vec<&str> = after.split_whitespace().collect();
         let who = match after[..] {
             ["nobody"] => None,
             _ => match who_at(&after, 0) {
@@ -419,6 +408,19 @@ fn value(w: &str) -> Option<i32> {
     }?;
     let v = i32::try_from(ticks).ok()?;
     Some(if neg { -v } else { v })
+}
+
+/// `(X, Y)` at the start of `text`: the two coordinates, and the text after
+/// the `)`. Shared by `start ... at` and `expect at`.
+fn xy(text: &str) -> Option<(i32, i32, &str)> {
+    let inner = text.trim_start().strip_prefix('(')?;
+    let close = inner.find(')')?;
+    let (x, y) = inner[..close].split_once(',')?;
+    Some((
+        x.trim().parse().ok()?,
+        y.trim().parse().ok()?,
+        &inner[close + 1..],
+    ))
 }
 
 /// `with (name = v, ...)`: the needs and memory a start sets, by name.
@@ -644,27 +646,12 @@ impl Scenario {
                     }
                     let tail = rest[1..].join(" ");
                     if let Some(at) = tail.strip_prefix("at") {
-                        let (pos, with) = match at.find("with") {
-                            Some(i) => {
-                                (&at[..i], with_list(&at[i..]).map_err(|m| err(line_no, m))?)
-                            }
-                            None => (at, Vec::new()),
-                        };
-                        let nums: Vec<&str> = pos
-                            .trim()
-                            .trim_start_matches('(')
-                            .trim_end_matches(')')
-                            .split(',')
-                            .map(str::trim)
-                            .collect();
-                        let (x, y) = match nums[..] {
-                            [x, y] => (x.parse::<i32>(), y.parse::<i32>()),
-                            _ => {
-                                return Err(err(line_no, "expected `start KIND at (X, Y)`".into()));
-                            }
-                        };
-                        let (Ok(x), Ok(y)) = (x, y) else {
-                            return Err(err(line_no, "expected `start KIND at (X, Y)`".into()));
+                        let (x, y, after) = xy(at).ok_or_else(|| {
+                            err(line_no, "expected `start KIND at (X, Y)`".into())
+                        })?;
+                        let with = match after.trim() {
+                            "" => Vec::new(),
+                            after => with_list(after).map_err(|m| err(line_no, m))?,
                         };
                         s.starts.push(Start::At {
                             kind: kind.to_string(),
@@ -1350,6 +1337,9 @@ mod tests {
             ("expect max food chicken > 1", "expected `expect count"),
             ("expect at 3 chicken", "expected `expect count"),
             ("expect at (1, 2) hen fox", "expected `expect count"),
+            ("expect at 5, 5) chicken", "expected `expect count"),
+            ("expect at (6, 6, 99) chicken", "expected `expect count"),
+            ("expect at ((6, 6)) chicken", "expected `expect count"),
             ("expect checksum zz", "`zz` is not a hex checksum"),
             ("expect nothing", "expected `expect count"),
         ] {
@@ -1373,6 +1363,10 @@ mod tests {
             ),
             ("start a 1 / 2\nstart b 2 / 3", "add up to more than 1"),
             ("start hive at 3", "expected `start KIND at (X, Y)`"),
+            ("start hive at 3, 4", "expected `start KIND at (X, Y)`"),
+            ("start hive at ((3, 4", "expected `start KIND at (X, Y)`"),
+            ("start hive at 3, 4)", "expected `start KIND at (X, Y)`"),
+            ("start hive at (3, 4, 5)", "expected `start KIND at (X, Y)`"),
             ("spawn fox", "unknown statement `spawn`"),
             ("terrain water_level nan", "`nan` is not a number"),
             ("terrain water_scale 0", "above 0"),
@@ -1425,6 +1419,16 @@ mod tests {
             let e = Scenario::parse("t", text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
         }
+        // `at(` without a space is `at (`, in both statements.
+        let tight = Scenario::parse("t", "start hive at(3, 4)\nexpect at(3, 4) hive").unwrap();
+        assert_eq!(tight.starts, [Start::at("hive", 3, 4)]);
+        assert!(matches!(
+            tight.checks[..],
+            [Check::Expect {
+                what: Expect::At { x: 3, y: 4, .. },
+                ..
+            }]
+        ));
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
         Scenario::parse("t", "size 4096 4096").unwrap();
