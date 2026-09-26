@@ -275,9 +275,10 @@ fn halo_of<'a>(
     stage: &Stage,
     cells: &'a Query<&ChunkCells>,
     pubs: &'a Query<&ChunkActors>,
-    tags: &'a [u64],
+    kinds: &'a Kinds,
     c: ChunkCoord,
 ) -> Halo<'a> {
+    let (tags, family_end) = (&kinds.tag_bits[..], &kinds.family_end[..]);
     let mut chunks = [None; 9];
     for (i, slot) in chunks.iter_mut().enumerate() {
         let (ox, oy) = ((i % 3) as i32 - 1, (i / 3) as i32 - 1);
@@ -288,7 +289,11 @@ fn halo_of<'a>(
             *slot = Some((cells, pubs));
         }
     }
-    Halo { chunks, tags }
+    Halo {
+        chunks,
+        tags,
+        family_end,
+    }
 }
 
 // ---- Think ------------------------------------------------------------------------------
@@ -326,8 +331,7 @@ pub fn think(
                 if !due(tick, row, kind.cadence()) {
                     continue;
                 }
-                let halo = halo
-                    .get_or_insert_with(|| halo_of(stage, cells, pubs, &kinds.tag_bits, *coord));
+                let halo = halo.get_or_insert_with(|| halo_of(stage, cells, pubs, kinds, *coord));
                 let mind = &mut minds.rows[slot];
                 let (intent, _) = think_one::<false>(
                     kinds,
@@ -1389,7 +1393,11 @@ mod tests {
     fn halo_one<'a>(cells: &'a ChunkCells, actors: &'a ChunkActors) -> Halo<'a> {
         let mut chunks = [None; 9];
         chunks[4] = Some((cells, actors));
-        Halo { chunks, tags: &[] }
+        Halo {
+            chunks,
+            tags: &[],
+            family_end: &[],
+        }
     }
 
     #[test]

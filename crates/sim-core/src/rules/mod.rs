@@ -67,6 +67,10 @@ pub struct KindDef {
     /// Ground cover: lives in the cell's `cover` layer, never blocks, lies
     /// under whoever stands there; eaten with `graze`, not `eat`.
     pub cover: bool,
+    /// The concrete kind this one `extends`, if any. Kinds are numbered in
+    /// pre-order over this tree, so a kind's family (itself and every kind
+    /// that extends it) is the id range `id..Kinds::family_end[id]`.
+    pub parent: Option<u16>,
 }
 
 /// Where a rule's code sits, for `wmc why`: not part of the program, not
@@ -85,6 +89,44 @@ pub struct RuleInfo {
     /// `body_pc` fired the rule.
     pub cond_pc: u32,
     pub body_pc: u32,
+    /// The trait or ancestor kind the rule was inherited from; `None` for
+    /// the kind's own rules.
+    pub via: Option<String>,
+}
+
+/// How serious a [`Diagnostic`] is. Errors stop the compile and are
+/// [`compile::CompileError`]s; these do not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    /// A likely mistake: the rules compile and run.
+    Warning,
+    /// Information worth knowing.
+    Note,
+}
+
+/// A warning or note about a rule set that compiled (`wmc lint` prints
+/// them as `file:line:col: warning: message`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    pub level: Level,
+    pub file: String,
+    pub line: u32,
+    pub col: u32,
+    pub msg: String,
+}
+
+impl std::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let level = match self.level {
+            Level::Warning => "warning",
+            Level::Note => "note",
+        };
+        write!(
+            f,
+            "{}:{}:{}: {level}: {}",
+            self.file, self.line, self.col, self.msg
+        )
+    }
 }
 
 /// Names and positions the compiler knows and the programs do not need:
@@ -96,8 +138,15 @@ pub struct DebugInfo {
     pub rules: Vec<RuleInfo>,
     /// State names per kind, in state order.
     pub states: Vec<Vec<String>>,
-    /// Sub names, indexed like [`Kinds::subs`].
+    /// Sub names, indexed like [`Kinds::subs`] (a member sub as
+    /// `kind::sub`).
     pub subs: Vec<String>,
+    /// Trait names, in file then declaration order.
+    pub traits: Vec<String>,
+    /// Per kind: its direct parents as written (`drinker(90min)`).
+    pub parents: Vec<Vec<String>>,
+    /// Warnings and notes about the rule set, in kind order.
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 /// Colour of a kind that declares none: the palette's old actor yellow.
@@ -164,6 +213,9 @@ pub struct Kinds {
     pub colors: Vec<u32>,
     /// `defs[i].tags`, for tag predicates in the VM's halo.
     pub tag_bits: Vec<u64>,
+    /// One past the last kind of each kind's family (see
+    /// [`KindDef::parent`]): a kind predicate matches `k..family_end[k]`.
+    pub family_end: Vec<u16>,
     /// Worldgen placement: `(cumulative upper bound, kind)` in kind order,
     /// kinds with `place > 0` only. A walkable cell whose placement hash is
     /// below an entry's bound (and above the previous one) starts that kind.
@@ -199,6 +251,19 @@ impl Kinds {
         }
         let glyphs = defs.iter().map(|d| d.glyph).collect();
         let tag_bits = defs.iter().map(|d| d.tags).collect();
+        // Families: pre-order numbering puts every descendant right after
+        // its ancestor, so a family is one id range.
+        let mut family_end: Vec<u16> = (1..=defs.len() as u16).collect();
+        for id in (0..defs.len()).rev() {
+            if let Some(p) = defs[id].parent {
+                assert!(
+                    usize::from(p) < id,
+                    "{}: a parent is numbered before its children",
+                    defs[id].name
+                );
+                family_end[usize::from(p)] = family_end[usize::from(p)].max(family_end[id]);
+            }
+        }
         let colors = defs.iter().map(|d| d.color).collect();
         let mut placement = Vec::new();
         let mut upto = 0u64;
@@ -220,6 +285,7 @@ impl Kinds {
             glyphs,
             colors,
             tag_bits,
+            family_end,
             placement,
             code,
             consts,
@@ -329,6 +395,9 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
         mix(u64::from(d.cover) | 1 << 44);
         mix(u64::from(d.fuel) | u64::from(d.food as u32) << 32);
         mix(u64::from(d.entry) | u64::from(d.states) << 32);
+        if let Some(p) = d.parent {
+            mix(u64::from(p) | 1 << 45);
+        }
         for n in &d.needs {
             for b in n.name.bytes() {
                 mix(u64::from(b));

@@ -371,6 +371,9 @@ pub mod pred {
     pub const FEATURE_BASE: i32 = -0x200;
     pub const TAG_BASE: i32 = 0x1_0000;
     pub const LOOK_BASE: i32 = 0x0100_0000;
+    /// Added to a kind or `kind:look` value: that kind exactly (`only
+    /// chicken`), not its family.
+    pub const ONLY: i32 = 0x0200_0000;
 
     /// `kind:look`: that kind, showing that look byte.
     pub const fn kind_look(kind: u16, look: u8) -> i32 {
@@ -385,44 +388,112 @@ pub mod pred {
     }
 }
 
-/// Does local cell `i` of `cells` match `pred`? `actors` are the chunk's
-/// public rows (for `kind:look`), `tags` the tag bitset per kind
-/// (`Kinds::tag_bits`).
-#[inline]
-fn matches(pred: i32, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: &[u64]) -> bool {
-    // A kind or a tag matches whoever stands on the cell or covers it.
-    let is = |id: ActorId| match id.unpack() {
-        None => false,
-        Some((kind, slot)) if pred >= pred::LOOK_BASE => {
-            let v = pred - pred::LOOK_BASE;
-            i32::from(kind) == v & 0xFFFF
-                && actors
-                    .rows
-                    .get(usize::from(slot))
-                    .is_some_and(|r| i32::from(r.look) == v >> 16)
+/// A predicate decoded against the kind table: what a cell must hold.
+/// A search decodes its predicate once and tests every cell with it, so a
+/// kind's family costs two compares per cell, like an exact kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Want {
+    /// Someone of a kind in `lo..hi` (a family, or one kind) stands on or
+    /// covers the cell.
+    Kinds(u16, u16),
+    /// The same, showing this `look`.
+    KindsLook(u16, u16, u8),
+    /// Someone whose kind carries tag bit `b`.
+    Tag(u32),
+    Free,
+    Bare,
+    Ground(i32),
+    Feature(i32),
+    /// A value no cell matches.
+    Nothing,
+}
+
+impl Want {
+    /// Decode `pred` (see [`pred`]) with `family_end` (`Kinds::family_end`;
+    /// empty: every kind is its own family).
+    pub fn of(pred: i32, family_end: &[u16]) -> Want {
+        if pred < 0 {
+            return match pred {
+                pred::FREE => Want::Free,
+                pred::BARE => Want::Bare,
+                p if p > pred::FEATURE_BASE => Want::Ground(pred::GROUND_BASE - p),
+                p => Want::Feature(pred::FEATURE_BASE - p),
+            };
         }
-        Some((kind, _)) if pred >= pred::TAG_BASE => {
-            let bit = (pred - pred::TAG_BASE) as u32;
-            bit < 64
-                && tags
-                    .get(usize::from(kind))
-                    .is_some_and(|t| t >> bit & 1 == 1)
+        let (p, exact) = if pred >= pred::ONLY {
+            (pred - pred::ONLY, true)
+        } else {
+            (pred, false)
+        };
+        // `k`'s family: `k` and every kind that extends it, one id range.
+        let range = |k: i32| -> (u16, u16) {
+            let lo = k as u16;
+            let hi = if exact {
+                u32::from(lo) + 1
+            } else {
+                family_end
+                    .get(usize::from(lo))
+                    .map_or(u32::from(lo) + 1, |&e| u32::from(e))
+            };
+            (lo, hi.min(u32::from(u16::MAX)) as u16)
+        };
+        if p >= pred::LOOK_BASE {
+            let v = p - pred::LOOK_BASE;
+            let (lo, hi) = range(v & 0xFFFF);
+            return u8::try_from(v >> 16)
+                .map_or(Want::Nothing, |look| Want::KindsLook(lo, hi, look));
         }
-        Some((kind, _)) => i32::from(kind) == pred,
-    };
-    if pred >= 0 {
-        return is(cells.occupant[i]) || is(cells.cover[i]);
+        if p >= pred::TAG_BASE {
+            let bit = (p - pred::TAG_BASE) as u32;
+            return if bit < 64 {
+                Want::Tag(bit)
+            } else {
+                Want::Nothing
+            };
+        }
+        let (lo, hi) = range(p);
+        Want::Kinds(lo, hi)
     }
-    if pred == pred::FREE {
-        return cells.walkable(i) && cells.occupant[i].is_none();
+
+    /// Does local cell `i` hold what this wants? `actors` are the chunk's
+    /// public rows (for looks), `tags` the tag bitset per kind.
+    #[inline]
+    pub fn test(self, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: &[u64]) -> bool {
+        // A kind or a tag matches whoever stands on the cell or covers it.
+        let (occupant, cover) = (cells.occupant[i], cells.cover[i]);
+        match self {
+            Want::Kinds(lo, hi) => {
+                let hit = |id: ActorId| id.unpack().is_some_and(|(k, _)| k >= lo && k < hi);
+                hit(occupant) || hit(cover)
+            }
+            Want::KindsLook(lo, hi, look) => {
+                let hit = |id: ActorId| {
+                    id.unpack().is_some_and(|(k, slot)| {
+                        k >= lo
+                            && k < hi
+                            && actors
+                                .rows
+                                .get(usize::from(slot))
+                                .is_some_and(|r| r.look == look)
+                    })
+                };
+                hit(occupant) || hit(cover)
+            }
+            Want::Tag(bit) => {
+                let hit = |id: ActorId| {
+                    id.unpack().is_some_and(|(k, _)| {
+                        tags.get(usize::from(k)).is_some_and(|t| t >> bit & 1 == 1)
+                    })
+                };
+                hit(occupant) || hit(cover)
+            }
+            Want::Free => cells.walkable(i) && occupant.is_none(),
+            Want::Bare => cells.walkable(i) && cover.is_none(),
+            Want::Ground(g) => cells.ground[i] as i32 == g,
+            Want::Feature(f) => cells.feature[i] as i32 == f,
+            Want::Nothing => false,
+        }
     }
-    if pred == pred::BARE {
-        return cells.walkable(i) && cells.cover[i].is_none();
-    }
-    if pred > pred::FEATURE_BASE {
-        return cells.ground[i] as i32 == pred::GROUND_BASE - pred;
-    }
-    cells.feature[i] as i32 == pred::FEATURE_BASE - pred
 }
 
 // ---- the halo --------------------------------------------------------------------------
@@ -434,6 +505,8 @@ fn matches(pred: i32, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: 
 pub struct Halo<'a> {
     pub chunks: [Option<(&'a ChunkCells, &'a ChunkActors)>; 9],
     pub tags: &'a [u64],
+    /// `Kinds::family_end`; empty: every kind is its own family.
+    pub family_end: &'a [u16],
 }
 
 impl<'a> Halo<'a> {
@@ -462,17 +535,29 @@ impl<'a> Halo<'a> {
 
     #[inline]
     pub fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
+        self.test(lx, ly, dx, dy, self.want(pred))
+    }
+
+    /// Decode a predicate for [`Halo::test`].
+    #[inline]
+    pub fn want(&self, pred: i32) -> Want {
+        Want::of(pred, self.family_end)
+    }
+
+    /// Does the cell at `(lx + dx, ly + dy)` hold what `want` wants?
+    #[inline]
+    pub fn test(&self, lx: i32, ly: i32, dx: i32, dy: i32, want: Want) -> bool {
         match self.at(lx, ly, dx, dy) {
-            Some((cells, actors, i)) => matches(pred, cells, actors, i, self.tags),
+            Some((cells, actors, i)) => want.test(cells, actors, i, self.tags),
             // Unloaded: rock, nobody.
-            None => pred == pred::feature(Feature::Rock as u8),
+            None => want == Want::Feature(Feature::Rock as i32),
         }
     }
 
     /// Walkable and empty at tick start.
     #[inline]
     pub fn free(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> bool {
-        self.matches(lx, ly, dx, dy, pred::FREE)
+        self.test(lx, ly, dx, dy, Want::Free)
     }
 
     /// Scent channel `ch` at the cell; 0 where not loaded.
@@ -619,10 +704,11 @@ impl Machine<'_> {
         let side = (2 * r + 1) as u32;
         self.spend(side * side / SEARCH_DIV)?;
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let want = self.ctx.halo.want(pred);
         let mut n = 0;
         for dy in -r..=r {
             for dx in -r..=r {
-                n += i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred));
+                n += i32::from(self.ctx.halo.test(lx, ly, dx, dy, want));
             }
         }
         Ok(n)
@@ -636,12 +722,13 @@ impl Machine<'_> {
         let side = (2 * r + 1) as u32;
         self.spend(side * side / SEARCH_DIV)?;
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let want = self.ctx.halo.want(pred);
         for ring in 1..=r {
             let n = 8 * ring;
             let start = (self.draw() % n as u64) as i32;
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
-                if self.ctx.halo.matches(lx, ly, dx, dy, pred) {
+                if self.ctx.halo.test(lx, ly, dx, dy, want) {
                     return Ok(Some((dx, dy)));
                 }
             }
@@ -689,6 +776,7 @@ impl Machine<'_> {
             self.spend(side * side / SEARCH_DIV)?;
         }
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let want = self.ctx.halo.want(pred);
         // Cells before ring `ring` (rings from 1): 4 * ring * (ring - 1).
         let mut ring = 1;
         while ring <= r && 4 * ring * (ring + 1) <= cursor {
@@ -701,7 +789,7 @@ impl Machine<'_> {
             while k < first + n {
                 let (dx, dy) = ring_cell(ring, k - first);
                 k += 1;
-                if self.ctx.halo.matches(lx, ly, dx, dy, pred) {
+                if self.ctx.halo.test(lx, ly, dx, dy, want) {
                     self.locals[base] = dx;
                     self.locals[base + 1] = dy;
                     self.locals[base + 2] = k;
@@ -1291,6 +1379,7 @@ mod tests {
             place: 0,
             color: 0,
             cover: false,
+            parent: None,
         }
     }
 
@@ -1329,6 +1418,7 @@ mod tests {
                 None,
             ],
             tags: &[],
+            family_end: &[],
         };
         let k = kind(needs, 0);
         let kinds = Kinds::from_parts(vec![k], code, consts, vec![]);
@@ -1608,6 +1698,7 @@ mod tests {
                 None,
             ],
             tags: &[],
+            family_end: &[],
         };
         let ctx = Ctx {
             halo: &halo,
@@ -1672,6 +1763,7 @@ mod tests {
         let mut halo = Halo {
             chunks: [None; 9],
             tags: &[],
+            family_end: &[],
         };
         halo.chunks[4] = Some((&cells, &actors));
         halo.chunks[5] = Some((&cells, &actors)); // east neighbour
@@ -1692,5 +1784,43 @@ mod tests {
             u.dedup();
             assert_eq!(u.len(), cells.len());
         }
+    }
+
+    /// A kind predicate matches the kind's family, `only` the kind alone,
+    /// for occupants and ground cover, with and without a look.
+    #[test]
+    fn family_and_only_matching() {
+        use crate::actors::ActorPub;
+        // animal 0 > bird 1 > hen 2; plant 3.
+        let family_end = [3u16, 3, 3, 4];
+        let mut cells = ChunkCells::default();
+        let mut actors = ChunkActors::default();
+        cells.occupant[5] = ActorId::pack(2, 0); // a hen
+        actors.rows.push(ActorPub {
+            cell: 5,
+            kind: 2,
+            look: 7,
+            ..ActorPub::zeroed()
+        });
+        cells.cover[9] = ActorId::pack(3, 1); // a plant, as cover
+        actors.rows.push(ActorPub {
+            cell: 9,
+            kind: 3,
+            ..ActorPub::zeroed()
+        });
+        let m = |p: i32, i: usize| Want::of(p, &family_end).test(&cells, &actors, i, &[]);
+        assert!(
+            m(0, 5) && m(1, 5) && m(2, 5),
+            "a hen is an animal, a bird, a hen"
+        );
+        assert!(!m(3, 5));
+        assert!(!m(pred::ONLY, 5) && !m(pred::ONLY + 1, 5) && m(pred::ONLY + 2, 5));
+        assert!(m(pred::kind_look(0, 7), 5) && !m(pred::kind_look(0, 6), 5));
+        assert!(!m(pred::kind_look(0, 7) + pred::ONLY, 5));
+        assert!(m(pred::kind_look(2, 7) + pred::ONLY, 5));
+        assert!(m(3, 9) && m(pred::ONLY + 3, 9) && !m(0, 9));
+        // No family table: every kind is its own family.
+        assert!(!Want::of(0, &[]).test(&cells, &actors, 5, &[]));
+        assert!(Want::of(2, &[]).test(&cells, &actors, 5, &[]));
     }
 }

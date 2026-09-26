@@ -63,7 +63,12 @@ WMC_THREADS=8 ./target/release/wmc run /tmp/wmc-base 43200 1024 1024 12   # 2 ga
 WMC_THREADS=1 ./target/release/wmc run /tmp/wmc-base 43200 1024 1024 12
 ```
 
-Baseline (fill in): `checksum:` ________________ ; population line ________________.
+Baseline, recorded 2026-09-25 at `b2b0ac4` plus the `state:` line (equal at 1 and 8 threads):
+
+| run | `checksum:` | `state:` | population line |
+|---|---|---|---|
+| `run <dir> 43200 1024 1024 12` | `19cc0641245304b9` | `b4d70180c11c4739` | `332434 actors: chicken 1895, egg 0, chick 1553, fox 160, flower 8723, hive 52, bee 1111, grass 317404, seed 1064, tree 472` |
+| `run <dir> 3000 256 256 12` (quick gate) | `9002ed1c26bab221` | `9be341adc187c931` | `5903 actors: chicken 140, egg 68, chick 0, fox 6, flower 277, hive 2, bee 5, grass 4823, seed 582, tree 0` |
 
 `sim::checksum` mixes the rules hash, and 8a/8b/8c legitimately change the rules hash
 (`parent` mixed in; `place` removed) without changing any state. So the first task of 8a
@@ -511,8 +516,8 @@ closing paragraph. Then delete this file.
 
 ## 12. Checklist
 
-- [ ] baseline recorded in §2
-- [ ] 8a traits, extends, inherit, family, only, member subs, diagnostics
+- [x] baseline recorded in §2
+- [x] 8a traits, extends, inherit, family, only, member subs, diagnostics (also: `vm::Want`, a predicate decoded once per search, -12% on the tick)
 - [ ] 8b scenario file, place removed, store v9, four scent channels
 - [ ] 8c packs, open by name, rewrite on save
 - [ ] 8d content on traits, vocabulary in RULES.md

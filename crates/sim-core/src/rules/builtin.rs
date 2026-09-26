@@ -212,6 +212,7 @@ pub fn hand_assembled() -> Kinds {
             place: super::PLACE_ONE / 100,
             color: 0x00C9_A86A,
             cover: false,
+            parent: None,
         },
         KindDef {
             id: TREE,
@@ -233,6 +234,7 @@ pub fn hand_assembled() -> Kinds {
             place: 0,
             color: 0x003F_9E4D,
             cover: false,
+            parent: None,
         },
     ];
     Kinds::from_parts(defs, code, consts, vec![])

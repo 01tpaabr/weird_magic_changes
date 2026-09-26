@@ -17,7 +17,9 @@ use std::fmt;
 
 use super::asm::{Asm, Label};
 use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
-use super::{DEFAULT_COLOR, DebugInfo, KindDef, Kinds, NeedDef, PLACE_ONE, RuleInfo};
+use super::{
+    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, PLACE_ONE, RuleInfo,
+};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
@@ -270,34 +272,76 @@ struct Pos {
     col: u32,
 }
 
+/// A `kind` or a `trait`, as written. A trait has parameters and never a
+/// glyph, colour or placement; a kind has no parameters. Either may extend
+/// others (`docs/ACTORS.md` §5, traits and inheritance).
 #[derive(Debug, Clone)]
-struct KindAst {
+struct ItemAst {
     at: Pos,
     name: String,
-    glyph: u8,
-    tags: Vec<String>,
-    cadence_shift: u8,
-    sight: u8,
-    fuel: u32,
-    food: i32,
-    bite: u8,
-    /// Worldgen share, out of `PLACE_ONE`.
-    place: u32,
-    /// `0xRRGGBB`, opaque to the sim: the palette draws the glyph in it.
-    color: u32,
-    /// Ground cover (`cover` declaration).
-    cover: bool,
-    needs: Vec<NeedDef>,
-    mems: Vec<String>,
+    is_trait: bool,
+    /// Trait parameters: constants inside the trait, bound by `extends`.
+    params: Vec<(String, Pos)>,
+    parents: Vec<ParentRef>,
+    decls: Decls,
+    /// Member subs: they see this item's needs, mems and states.
+    members: Vec<SubAst>,
     /// Reflexes: scanned first on every think, whatever the state.
-    rules: Vec<Rule>,
+    rules: Vec<RuleItem>,
     states: Vec<StateAst>,
+}
+
+/// `extends NAME` or `extends NAME(args)`.
+#[derive(Debug, Clone)]
+struct ParentRef {
+    name: String,
+    args: Vec<Expr>,
+    at: Pos,
+}
+
+/// What an item declares itself. `None` or empty: not declared here, so an
+/// ancestor's value, else the default, applies. Numbers are constant
+/// expressions, folded per instance (they may use trait parameters).
+#[derive(Debug, Clone, Default)]
+struct Decls {
+    glyph: Option<u8>,
+    color: Option<u32>,
+    cover: bool,
+    /// Worldgen share, out of `PLACE_ONE`. Never inherited.
+    place: Option<u32>,
+    cadence: Option<(Expr, Pos)>,
+    sight: Option<(Expr, Pos)>,
+    fuel: Option<(Expr, Pos)>,
+    food: Option<(Expr, Pos)>,
+    bite: Option<(Expr, Pos)>,
+    tags: Vec<String>,
+    needs: Vec<NeedAst>,
+    mems: Vec<(String, Pos)>,
+}
+
+/// `need NAME max M [decay 0] [vital]`.
+#[derive(Debug, Clone)]
+struct NeedAst {
+    name: String,
+    max: Expr,
+    decays: bool,
+    vital: bool,
+    at: Pos,
+}
+
+/// One entry of a rule list: a rule, or `inherit [NAME]`, which splices
+/// ancestors' rules at that point.
+#[derive(Debug, Clone)]
+enum RuleItem {
+    When(Box<Rule>),
+    Inherit(Option<String>, Pos),
 }
 
 /// Everything the files declare, in file order then declaration order.
 #[derive(Debug, Default)]
 struct Items {
-    kinds: Vec<KindAst>,
+    /// Kinds and traits, in file then declaration order.
+    items: Vec<ItemAst>,
     subs: Vec<SubAst>,
     consts: Vec<ConstAst>,
 }
@@ -314,9 +358,8 @@ struct ConstAst {
 /// actor is in this state.
 #[derive(Debug, Clone)]
 struct StateAst {
-    at: Pos,
     name: String,
-    rules: Vec<Rule>,
+    rules: Vec<RuleItem>,
 }
 
 #[derive(Debug, Clone)]
@@ -426,8 +469,8 @@ enum Stmt {
         value: Option<Expr>,
         at: Pos,
     },
-    Idle,
-    Die,
+    Idle(Pos),
+    Die(Pos),
     Become {
         kind: String,
         at: Pos,
@@ -447,11 +490,11 @@ enum Stmt {
         amount: Expr,
         at: Pos,
     },
-    Move(Target),
-    Drink(Target),
-    Eat(Target),
-    Hit(Target),
-    Graze(Target),
+    Move(Target, Pos),
+    Drink(Target, Pos),
+    Eat(Target, Pos),
+    Hit(Target, Pos),
+    Graze(Target, Pos),
     /// `look = v`: an effect, not an action.
     Look(Expr),
     /// `signal = v`: an effect, not an action.
@@ -474,9 +517,11 @@ enum Stmt {
 
 #[derive(Debug, Clone)]
 enum Pred {
-    Kind(String, Pos),
-    /// `kind:look`: that kind showing that look byte.
-    KindLook(String, u8, Pos),
+    /// A kind (its family, or exactly it with `only`), a tag, or a sub's
+    /// pred parameter.
+    Kind(String, bool, Pos),
+    /// `kind:look`: that kind (family, or `only`) showing that look byte.
+    KindLook(String, u8, bool, Pos),
     Ground(Ground),
     Feature(Feature),
     Free,
@@ -621,7 +666,17 @@ const KEYWORDS: &[&str] = &[
     "mark",
     "sniff",
     "scent",
+    "trait",
+    "extends",
+    "inherit",
+    "only",
 ];
+/// Words that start a declaration in a kind or trait body.
+const DECL_WORDS: [&str; 12] = [
+    "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "color", "place", "need",
+    "mem",
+];
+
 const DIRS: [(&str, i32, i32); 4] = [
     ("north", 0, -1),
     ("east", 1, 0),
@@ -748,20 +803,10 @@ impl Parser<'_> {
         }
     }
 
-    fn int_or_time(&mut self, what: &str) -> Result<i32> {
-        match self.bump() {
-            Tok::Int(v) | Tok::Time(v) => Ok(v),
-            _ => {
-                self.at -= 1;
-                Err(self.err(format!("expected {what}, found {}", self.describe())))
-            }
-        }
-    }
-
     fn file(&mut self, items: &mut Items) -> Result<()> {
         while *self.peek() != Tok::Eof {
-            if self.is_kw("kind") {
-                items.kinds.push(self.kind()?);
+            if self.is_kw("kind") || self.is_kw("trait") {
+                items.items.push(self.item()?);
             } else if self.is_kw("sub") {
                 items.subs.push(self.sub()?);
             } else if self.eat_kw("const") {
@@ -771,7 +816,7 @@ impl Parser<'_> {
                 items.consts.push(ConstAst { at, name, value });
             } else {
                 return Err(self.err(format!(
-                    "expected `kind`, `sub` or `const`, found {}",
+                    "expected `kind`, `trait`, `sub` or `const`, found {}",
                     self.describe()
                 )));
             }
@@ -822,36 +867,135 @@ impl Parser<'_> {
         })
     }
 
-    fn kind(&mut self) -> Result<KindAst> {
-        self.expect_kw("kind")?;
-        let (name, at) = self.ident("kind name")?;
+    fn item(&mut self) -> Result<ItemAst> {
+        let is_trait = self.is_kw("trait");
+        self.bump(); // `kind` or `trait`
+        let (name, at) = self.ident(if is_trait { "trait name" } else { "kind name" })?;
+        let mut params = Vec::new();
+        if self.is_sym("(") {
+            if !is_trait {
+                return Err(self.err("a kind takes no parameters (only a trait does)"));
+            }
+            self.bump();
+            if !self.is_sym(")") {
+                loop {
+                    let (p, pat) = self.ident("parameter name")?;
+                    if params.iter().any(|(q, _)| *q == p) {
+                        return Err(self.err_at(&pat, format!("parameter `{p}` declared twice")));
+                    }
+                    params.push((p, pat));
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
+            }
+            self.expect_sym(")")?;
+        }
+        let mut parents: Vec<ParentRef> = Vec::new();
+        if self.eat_kw("extends") {
+            loop {
+                let (pname, pat) = self.ident("trait or kind name")?;
+                let mut args = Vec::new();
+                if self.eat_sym("(") {
+                    if !self.is_sym(")") {
+                        loop {
+                            args.push(self.expr()?);
+                            if !self.eat_sym(",") {
+                                break;
+                            }
+                        }
+                    }
+                    self.expect_sym(")")?;
+                }
+                if parents.iter().any(|p| p.name == pname) {
+                    return Err(self.err_at(&pat, format!("`{pname}` listed twice")));
+                }
+                parents.push(ParentRef {
+                    name: pname,
+                    args,
+                    at: pat,
+                });
+                if !self.eat_sym(",") {
+                    break;
+                }
+            }
+        }
         self.expect_sym("{")?;
-        let mut k = KindAst {
+        // Declarations, member subs, reflex rules, states: in that order,
+        // so a file reads top-down.
+        let decls = self.decls(is_trait)?;
+        let mut members: Vec<SubAst> = Vec::new();
+        while self.is_kw("sub") {
+            let sub = self.sub()?;
+            if members.iter().any(|m| m.name == sub.name) {
+                return Err(self.err_at(&sub.at, format!("sub `{}` declared twice", sub.name)));
+            }
+            members.push(sub);
+        }
+        let rules = self.rule_items()?;
+        let mut states: Vec<StateAst> = Vec::new();
+        while self.eat_kw("state") {
+            let (sname, sat) = self.ident("state name")?;
+            if states.iter().any(|s| s.name == sname) {
+                return Err(self.err_at(&sat, format!("state `{sname}` declared twice")));
+            }
+            if states.len() == 64 {
+                return Err(self.err_at(&sat, "at most 64 states per kind"));
+            }
+            self.expect_sym("{")?;
+            let srules = self.rule_items()?;
+            if !self.is_sym("}") {
+                return Err(self.err(format!(
+                    "expected `when`, `inherit` or `}}` in state `{sname}`, found {}",
+                    self.describe()
+                )));
+            }
+            self.expect_sym("}")?;
+            states.push(StateAst {
+                name: sname,
+                rules: srules,
+            });
+        }
+        if !self.is_sym("}") {
+            let what = if DECL_WORDS.iter().any(|w| self.is_kw(w)) {
+                "declarations come first, before subs and rules".to_string()
+            } else if self.is_kw("sub") {
+                "member subs come before the rules".to_string()
+            } else {
+                format!(
+                    "expected `when`, `inherit`, `state` or `}}`, found {}",
+                    self.describe()
+                )
+            };
+            return Err(self.err(what));
+        }
+        self.expect_sym("}")?;
+        Ok(ItemAst {
             at,
             name,
-            glyph: b'?',
-            tags: Vec::new(),
-            cadence_shift: 3,
-            sight: 4,
-            fuel: 512,
-            food: 0,
-            bite: 1,
-            place: 0,
-            color: DEFAULT_COLOR,
-            cover: false,
-            needs: Vec::new(),
-            mems: Vec::new(),
-            rules: Vec::new(),
-            states: Vec::new(),
-        };
-        // Declarations, then rules; a declaration after a rule is an error
-        // so a file reads top-down.
-        while !self.is_sym("}") {
+            is_trait,
+            params,
+            parents,
+            decls,
+            members,
+            rules,
+            states,
+        })
+    }
+
+    /// The declarations at the top of a kind or trait body.
+    fn decls(&mut self, is_trait: bool) -> Result<Decls> {
+        let mut d = Decls::default();
+        loop {
             let p = self.pos();
+            let not_in_trait = |what: &str| format!("a trait has no {what}: only a kind does");
             if self.eat_kw("glyph") {
+                if is_trait {
+                    return Err(self.err_at(&p, not_in_trait("glyph")));
+                }
                 match self.bump() {
                     Tok::Str(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_graphic() => {
-                        k.glyph = s.as_bytes()[0];
+                        d.glyph = Some(s.as_bytes()[0]);
                     }
                     _ => {
                         return Err(self.err_at(&p, "glyph takes one printable ASCII character"));
@@ -863,31 +1007,24 @@ impl Parser<'_> {
                         break;
                     }
                     self.bump();
-                    k.tags.push(n);
+                    d.tags.push(n);
                 }
             } else if self.eat_kw("cadence") {
-                let c = self.int("a cadence")?;
-                if c < 1 || !(c as u32).is_power_of_two() {
-                    return Err(self.err_at(&p, "cadence must be a power of two (1, 2, 4, ...)"));
-                }
-                k.cadence_shift = c.trailing_zeros() as u8;
+                d.cadence = Some((self.additive()?, p));
             } else if self.eat_kw("sight") {
-                let s = self.int("a sight radius")?;
-                if !(0..=16).contains(&s) {
-                    return Err(self.err_at(&p, "sight is 0 to 16 cells"));
-                }
-                k.sight = s as u8;
+                d.sight = Some((self.additive()?, p));
             } else if self.eat_kw("fuel") {
-                let f = self.int("a fuel budget")?;
-                if !(1..=4096).contains(&f) {
-                    return Err(self.err_at(&p, "fuel is 1 to 4096 ops per think"));
-                }
-                k.fuel = f as u32;
+                d.fuel = Some((self.additive()?, p));
             } else if self.eat_kw("food") {
-                k.food = self.int_or_time("a food value")?;
+                d.food = Some((self.additive()?, p));
+            } else if self.eat_kw("bite") {
+                d.bite = Some((self.additive()?, p));
             } else if self.eat_kw("cover") {
-                k.cover = true;
+                d.cover = true;
             } else if self.eat_kw("color") {
+                if is_trait {
+                    return Err(self.err_at(&p, not_in_trait("colour")));
+                }
                 // `color "#rrggbb"`
                 let c = match self.bump() {
                     Tok::Str(s) if s.len() == 7 && s.starts_with('#') => {
@@ -895,29 +1032,25 @@ impl Parser<'_> {
                     }
                     _ => None,
                 };
-                k.color = c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?;
+                d.color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
             } else if self.eat_kw("place") {
+                if is_trait {
+                    return Err(self.err_at(&p, not_in_trait("placement")));
+                }
                 // `place N / D`: this share of walkable cells starts as this kind.
                 let n = self.int("a numerator")?;
                 self.expect_sym("/")?;
-                let d = self.int("a denominator")?;
-                if n < 0 || d < 1 || n > d {
+                let den = self.int("a denominator")?;
+                if n < 0 || den < 1 || n > den {
                     return Err(self.err_at(&p, "place is N / D with 0 <= N <= D"));
                 }
-                k.place = (u64::from(n as u32) * u64::from(PLACE_ONE) / u64::from(d as u32)) as u32;
-            } else if self.eat_kw("bite") {
-                let b = self.int("a bite")?;
-                if !(0..=255).contains(&b) {
-                    return Err(self.err_at(&p, "bite is 0 to 255"));
-                }
-                k.bite = b as u8;
+                d.place = Some(
+                    (u64::from(n as u32) * u64::from(PLACE_ONE) / u64::from(den as u32)) as u32,
+                );
             } else if self.eat_kw("need") {
                 let (name, ..) = self.ident("need name")?;
                 self.expect_kw("max")?;
-                let max = self.int_or_time("the need's maximum")?;
-                if max < 1 {
-                    return Err(self.err_at(&p, "a need's max is at least 1"));
-                }
+                let max = self.additive()?;
                 let mut decays = true;
                 if self.eat_kw("decay") {
                     match self.int("0 (points) or 1 (per tick)")? {
@@ -927,78 +1060,51 @@ impl Parser<'_> {
                     }
                 }
                 let vital = self.eat_kw("vital");
-                if k.needs.iter().any(|n| n.name == name) {
+                if d.needs.iter().any(|n| n.name == name) {
                     return Err(self.err_at(&p, format!("need `{name}` declared twice")));
                 }
-                if k.needs.len() == NEED_SLOTS {
-                    return Err(self.err_at(&p, format!("at most {NEED_SLOTS} needs per kind")));
-                }
-                k.needs.push(NeedDef {
+                d.needs.push(NeedAst {
                     name,
                     max,
                     decays,
                     vital,
+                    at: p,
                 });
             } else if self.eat_kw("mem") {
                 loop {
-                    let (name, ..) = self.ident("memory slot name")?;
-                    if k.mems.contains(&name) || k.needs.iter().any(|n| n.name == name) {
-                        return Err(self.err_at(&p, format!("`{name}` declared twice")));
+                    let (name, at) = self.ident("memory slot name")?;
+                    if d.mems.iter().any(|(m, _)| *m == name)
+                        || d.needs.iter().any(|n| n.name == name)
+                    {
+                        return Err(self.err_at(&at, format!("`{name}` declared twice")));
                     }
-                    if k.mems.len() == MEM_SLOTS {
-                        return Err(
-                            self.err_at(&p, format!("at most {MEM_SLOTS} mem slots per kind"))
-                        );
-                    }
-                    k.mems.push(name);
+                    d.mems.push((name, at));
                     if !self.eat_sym(",") {
                         break;
                     }
                 }
-            } else if self.is_kw("when") || self.is_kw("state") {
-                break;
             } else {
-                return Err(self.err(format!(
-                    "expected a declaration, `when` or `state`, found {}",
-                    self.describe()
-                )));
+                return Ok(d);
             }
         }
-        k.rules = self.rules()?;
-        while self.eat_kw("state") {
-            let (name, at) = self.ident("state name")?;
-            if k.states.iter().any(|s| s.name == name) {
-                return Err(self.err_at(&at, format!("state `{name}` declared twice")));
-            }
-            if k.states.len() == 64 {
-                return Err(self.err_at(&at, "at most 64 states per kind"));
-            }
-            self.expect_sym("{")?;
-            let rules = self.rules()?;
-            if !self.is_sym("}") {
-                return Err(self.err(format!(
-                    "expected `when` or `}}` in state `{name}`, found {}",
-                    self.describe()
-                )));
-            }
-            self.expect_sym("}")?;
-            k.states.push(StateAst { at, name, rules });
-        }
-        if !self.is_sym("}") {
-            return Err(self.err(format!(
-                "expected `when`, `state` or `}}`, found {}",
-                self.describe()
-            )));
-        }
-        self.expect_sym("}")?;
-        Ok(k)
     }
 
-    /// `when cond => body`, as many as there are.
-    fn rules(&mut self) -> Result<Vec<Rule>> {
+    /// `when cond => body` and `inherit [NAME]`, as many as there are.
+    fn rule_items(&mut self) -> Result<Vec<RuleItem>> {
         let mut rules = Vec::new();
         loop {
             let at = self.pos();
+            if self.eat_kw("inherit") {
+                let name = match self.peek().clone() {
+                    Tok::Name(n) if !is_reserved(&n) => {
+                        self.bump();
+                        Some(n)
+                    }
+                    _ => None,
+                };
+                rules.push(RuleItem::Inherit(name, at));
+                continue;
+            }
             if !self.eat_kw("when") {
                 break;
             }
@@ -1006,12 +1112,12 @@ impl Parser<'_> {
             let arrow_line = self.pos().line;
             self.expect_sym("=>")?;
             let body = self.body()?;
-            rules.push(Rule {
+            rules.push(RuleItem::When(Box::new(Rule {
                 at,
                 arrow_line,
                 cond,
                 body,
-            });
+            })));
         }
         Ok(rules)
     }
@@ -1095,10 +1201,10 @@ impl Parser<'_> {
             return Ok(Stmt::Choose(arms));
         }
         if self.eat_kw("idle") {
-            return Ok(Stmt::Idle);
+            return Ok(Stmt::Idle(at));
         }
         if self.eat_kw("die") {
-            return Ok(Stmt::Die);
+            return Ok(Stmt::Die(at));
         }
         if self.eat_kw("become") {
             let (kind, at) = self.ident("kind name")?;
@@ -1140,19 +1246,19 @@ impl Parser<'_> {
             });
         }
         if self.eat_kw("move") {
-            return Ok(Stmt::Move(self.target()?));
+            return Ok(Stmt::Move(self.target()?, at));
         }
         if self.eat_kw("drink") {
-            return Ok(Stmt::Drink(self.target()?));
+            return Ok(Stmt::Drink(self.target()?, at));
         }
         if self.eat_kw("eat") {
-            return Ok(Stmt::Eat(self.target()?));
+            return Ok(Stmt::Eat(self.target()?, at));
         }
         if self.eat_kw("hit") {
-            return Ok(Stmt::Hit(self.target()?));
+            return Ok(Stmt::Hit(self.target()?, at));
         }
         if self.eat_kw("graze") {
-            return Ok(Stmt::Graze(self.target()?));
+            return Ok(Stmt::Graze(self.target()?, at));
         }
         if self.is_kw("look") && matches!(self.peek2(), Tok::Sym("=")) {
             self.bump();
@@ -1224,8 +1330,9 @@ impl Parser<'_> {
                 let at = self.pos();
                 let arg = if self.starts_target() {
                     Arg::Target(self.target()?)
-                } else if matches!(self.peek(), Tok::Name(n) if !is_reserved(n))
-                    && matches!(self.peek2(), Tok::Sym(":"))
+                } else if self.is_kw("only")
+                    || (matches!(self.peek(), Tok::Name(n) if !is_reserved(n))
+                        && matches!(self.peek2(), Tok::Sym(":")))
                 {
                     Arg::Pred(self.pred()?)
                 } else if let Tok::Name(n) = self.peek().clone()
@@ -1358,20 +1465,21 @@ impl Parser<'_> {
 
     fn pred(&mut self) -> Result<Pred> {
         let at = self.pos();
-        if self.eat_kw("free") {
-            return Ok(Pred::Free);
-        }
-        if self.eat_kw("bare") {
-            return Ok(Pred::Bare);
-        }
-        if self.eat_kw("water") {
-            return Ok(Pred::Ground(Ground::Water));
-        }
-        if self.eat_kw("soil") {
-            return Ok(Pred::Ground(Ground::Soil));
-        }
-        if self.eat_kw("rock") {
-            return Ok(Pred::Feature(Feature::Rock));
+        let only = self.eat_kw("only");
+        let not_a_kind = |what: &str| format!("`only` applies to a kind, not `{what}`");
+        for (word, p) in [
+            ("free", Pred::Free),
+            ("bare", Pred::Bare),
+            ("water", Pred::Ground(Ground::Water)),
+            ("soil", Pred::Ground(Ground::Soil)),
+            ("rock", Pred::Feature(Feature::Rock)),
+        ] {
+            if self.eat_kw(word) {
+                if only {
+                    return Err(self.err_at(&at, not_a_kind(word)));
+                }
+                return Ok(p);
+            }
         }
         let (name, ..) =
             self.ident("predicate (a kind, a tag, water, soil, rock, free or bare)")?;
@@ -1379,9 +1487,9 @@ impl Parser<'_> {
             let look = self.int("a look value (0 to 255)")?;
             let look =
                 u8::try_from(look).map_err(|_| self.err_at(&at, "a look value is 0 to 255"))?;
-            return Ok(Pred::KindLook(name, look, at));
+            return Ok(Pred::KindLook(name, look, only, at));
         }
-        Ok(Pred::Kind(name, at))
+        Ok(Pred::Kind(name, only, at))
     }
 
     // expr := cmp
@@ -1604,22 +1712,99 @@ struct Local {
     ty: Ty,
 }
 
+/// One rule of a resolved list: the rule, and the instance that wrote it
+/// (whose parameters are in scope and whose tables bound what it may name).
+#[derive(Debug, Clone, Copy)]
+struct RRule<'a> {
+    owner: usize,
+    rule: &'a Rule,
+}
+
+/// A rule list after inheritance: the rules in the order a think scans
+/// them, and every instance whose own rules are in it (so a splice never
+/// brings the same rules twice).
+#[derive(Debug, Clone, Default)]
+struct RList<'a> {
+    rules: Vec<RRule<'a>>,
+    sources: Vec<usize>,
+}
+
+/// A trait or kind with its arguments bound and everything it inherits
+/// merged: what codegen compiles (a concrete kind) or checks (a trait).
+#[derive(Debug, Clone)]
+struct Inst<'a> {
+    item: usize,
+    args: Vec<i32>,
+    /// Direct parents, and every ancestor in linearized order.
+    parents: Vec<usize>,
+    ancestors: Vec<usize>,
+    glyph: Option<u8>,
+    color: Option<u32>,
+    cover: bool,
+    cadence_shift: Option<u8>,
+    sight: Option<u8>,
+    fuel: Option<u32>,
+    food: Option<i32>,
+    bite: Option<u8>,
+    tags: Vec<String>,
+    needs: Vec<NeedDef>,
+    mems: Vec<String>,
+    states: Vec<String>,
+    /// Member subs after overriding: name, the instance that defines it,
+    /// the sub.
+    members: Vec<(String, usize, &'a SubAst)>,
+    reflex: RList<'a>,
+    /// Parallel to `states`.
+    state_lists: Vec<RList<'a>>,
+}
+
+impl<'a> Inst<'a> {
+    fn state_list(&self, name: &str) -> Option<&RList<'a>> {
+        self.states
+            .iter()
+            .position(|s| s == name)
+            .map(|i| &self.state_lists[i])
+    }
+}
+
 struct Gen<'a> {
-    kinds: &'a [KindAst],
+    items: &'a [ItemAst],
     subs: &'a [SubAst],
     consts: &'a [ConstAst],
     /// Folded `const` values, in declaration order.
     const_vals: Vec<(String, i32)>,
     asm: Asm,
     pool: Vec<i32>,
-    /// Current kind (`None` inside a sub), the sub being compiled, locals.
-    kind: Option<usize>,
-    sub: Option<usize>,
+    /// Every resolved instance: each kind, each trait per argument list.
+    insts: Vec<Inst<'a>>,
+    /// Kind id -> its instance; item -> kind id (concrete kinds only).
+    kind_insts: Vec<usize>,
+    item_ids: Vec<Option<u16>>,
+    /// Per kind id: its member subs' indices in the sub table.
+    member_index: Vec<Vec<(String, u16)>>,
+    /// The kind whose code is being compiled (for [`RuleInfo`]).
+    kind: Option<u16>,
+    /// The instance whose tables (needs, mems, states, member subs) the
+    /// code uses: the kind being compiled, or the trait being checked.
+    /// `None` in a file sub, which sees only its parameters.
+    cur: Option<usize>,
+    /// The instance that wrote the rule or member sub being compiled: its
+    /// parameters are in scope, and it may name only what it declares.
+    owner: Option<usize>,
+    /// Member subs callable here: name -> sub table index.
+    members_here: Vec<(String, u16)>,
+    /// The sub being compiled, if any.
+    sub: Option<&'a SubAst>,
+    /// Trait parameters in scope, bound: constants.
+    params: Vec<(String, i32)>,
+    /// Checking traits on their own: declaration ranges are lenient and
+    /// nothing compiled is kept.
+    checking: bool,
     locals: Vec<Local>,
     next_local: u8,
     /// Position for errors without a better one.
     here: Pos,
-    /// Tag names, in first-appearance order (kind order, then declaration
+    /// Tag names, in first-appearance order (item order, then declaration
     /// order): a tag's bit is its index here.
     tags: Vec<String>,
     /// Scent channel names, in first-appearance order in the code.
@@ -1631,6 +1816,31 @@ struct Gen<'a> {
     state: Option<u8>,
 }
 
+/// Does this statement emit an action? Its position, if so.
+fn action_at(s: &Stmt) -> Option<&Pos> {
+    match s {
+        Stmt::Idle(at)
+        | Stmt::Die(at)
+        | Stmt::Become { at, .. }
+        | Stmt::Spawn { pos: at, .. }
+        | Stmt::Transfer { at, .. }
+        | Stmt::Move(_, at)
+        | Stmt::Drink(_, at)
+        | Stmt::Eat(_, at)
+        | Stmt::Hit(_, at)
+        | Stmt::Graze(_, at) => Some(at),
+        _ => None,
+    }
+}
+
+/// A statement's line, where it has one.
+fn stmt_line(s: &Stmt) -> Option<u32> {
+    match s {
+        Stmt::Next(_, at) | Stmt::Call { at, .. } => Some(at.line),
+        _ => action_at(s).map(|at| at.line),
+    }
+}
+
 impl<'a> Gen<'a> {
     fn new(items: &'a Items, files: &'a [(&'a str, &'a str)]) -> Self {
         Self {
@@ -1640,16 +1850,25 @@ impl<'a> Gen<'a> {
                 ..DebugInfo::default()
             },
             state: None,
-            kinds: &items.kinds,
+            items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
             const_vals: Vec::new(),
+            insts: Vec::new(),
+            kind_insts: Vec::new(),
+            item_ids: Vec::new(),
+            member_index: Vec::new(),
             tags: Vec::new(),
             scents: Vec::new(),
             asm: Asm::new(),
             pool: Vec::new(),
             kind: None,
+            cur: None,
+            owner: None,
+            members_here: Vec::new(),
             sub: None,
+            params: Vec::new(),
+            checking: false,
             locals: Vec::new(),
             next_local: 0,
             here: Pos {
@@ -1669,46 +1888,112 @@ impl<'a> Gen<'a> {
         }
     }
 
+    fn item_named(&self, name: &str) -> Option<usize> {
+        self.items.iter().position(|i| i.name == name)
+    }
+
+    /// A concrete kind's id (after numbering).
     fn kind_id(&self, name: &str) -> Option<u16> {
-        self.kinds
+        self.item_named(name)
+            .and_then(|i| self.item_ids.get(i).copied().flatten())
+    }
+
+    /// The id of a concrete kind named in `spawn` or `become`.
+    fn concrete(&self, name: &str, at: &Pos) -> Result<u16> {
+        match self.kind_id(name) {
+            Some(id) => Ok(id),
+            None if self.item_named(name).is_some() => Err(self.err(
+                at,
+                format!("`{name}` is a trait: only a kind can be spawned or become"),
+            )),
+            None => Err(self.err(at, format!("unknown kind `{name}`"))),
+        }
+    }
+
+    fn inst_name(&self, i: usize) -> &'a str {
+        let items = self.items;
+        &items[self.insts[i].item].name
+    }
+
+    /// An instance's parameters, bound to its arguments.
+    fn scope_of(&self, i: usize) -> Vec<(String, i32)> {
+        let inst = &self.insts[i];
+        self.items[inst.item]
+            .params
             .iter()
-            .position(|k| k.name == name)
-            .map(|i| i as u16)
+            .map(|(n, _)| n.clone())
+            .zip(inst.args.iter().copied())
+            .collect()
     }
 
     fn generate(mut self) -> Result<Kinds> {
-        for (i, k) in self.kinds.iter().enumerate() {
-            if self.kinds[..i].iter().any(|o| o.name == k.name) {
-                return Err(self.err(&k.at, format!("kind `{}` declared twice", k.name)));
+        let items = self.items;
+        // Names: kinds and traits share one namespace; subs and consts
+        // are global too (one namespace across every loaded file).
+        for (i, it) in items.iter().enumerate() {
+            if let Some(o) = items[..i].iter().find(|o| o.name == it.name) {
+                return Err(self.err(
+                    &it.at,
+                    format!(
+                        "{} `{}` declared twice (first at {}:{})",
+                        if it.is_trait { "trait" } else { "kind" },
+                        it.name,
+                        o.at.file,
+                        o.at.line
+                    ),
+                ));
             }
         }
         for (i, s) in self.subs.iter().enumerate() {
-            if self.subs[..i].iter().any(|o| o.name == s.name) {
-                return Err(self.err(&s.at, format!("sub `{}` declared twice", s.name)));
+            if let Some(o) = self.subs[..i].iter().find(|o| o.name == s.name) {
+                return Err(self.err(
+                    &s.at,
+                    format!(
+                        "sub `{}` declared twice (first at {}:{})",
+                        s.name, o.at.file, o.at.line
+                    ),
+                ));
             }
+        }
+        let member_subs = items.iter().flat_map(|it| it.members.iter());
+        for s in self.subs.iter().chain(member_subs) {
             let width: u32 = s.params.iter().map(|(_, t)| u32::from(t.width())).sum();
             if width > FRAME_LOCALS as u32 {
                 return Err(self.err(&s.at, format!("sub `{}` has too many parameters", s.name)));
             }
         }
-        // Tags: global names, a bit each, never a kind's name.
+        for it in items {
+            for m in &it.members {
+                if self.subs.iter().any(|s| s.name == m.name) {
+                    return Err(self.err(
+                        &m.at,
+                        format!(
+                            "`{}`'s sub `{}` has the name of a file sub",
+                            it.name, m.name
+                        ),
+                    ));
+                }
+            }
+        }
+        // Tags: global names, a bit each, never a kind's or a trait's name.
         let mut placed = 0u64;
-        for k in self.kinds {
-            for t in &k.tags {
-                if self.kind_id(t).is_some() {
-                    return Err(self.err(&k.at, format!("tag `{t}` is also a kind's name")));
+        for it in items {
+            for t in &it.decls.tags {
+                if let Some(o) = self.item_named(t) {
+                    let what = if items[o].is_trait { "trait" } else { "kind" };
+                    return Err(self.err(&it.at, format!("tag `{t}` is also a {what}'s name")));
                 }
                 if !self.tags.contains(t) {
                     if self.tags.len() == 64 {
-                        return Err(self.err(&k.at, "at most 64 tags in a rule set"));
+                        return Err(self.err(&it.at, "at most 64 tags in a rule set"));
                     }
                     self.tags.push(t.clone());
                 }
             }
-            placed += u64::from(k.place);
+            placed += u64::from(it.decls.place.unwrap_or(0));
             if placed > u64::from(PLACE_ONE) {
                 return Err(self.err(
-                    &k.at,
+                    &it.at,
                     "the `place` shares of all kinds add up to more than 1",
                 ));
             }
@@ -1717,7 +2002,7 @@ impl<'a> Gen<'a> {
         // may use the ones above it).
         for c in self.consts {
             let taken = self.const_vals.iter().any(|(n, _)| *n == c.name)
-                || self.kind_id(&c.name).is_some()
+                || self.item_named(&c.name).is_some()
                 || self.tags.contains(&c.name)
                 || self.subs.iter().any(|s| s.name == c.name);
             if taken {
@@ -1726,126 +2011,1015 @@ impl<'a> Gen<'a> {
             let v = self.fold(&c.value)?;
             self.const_vals.push((c.name.clone(), v));
         }
-        let mut defs = Vec::with_capacity(self.kinds.len());
-        for i in 0..self.kinds.len() {
-            self.kind = Some(i);
-            self.sub = None;
-            let entry = self.asm.here();
-            let k = &self.kinds[i];
-            self.here = k.at.clone();
-            self.state = None;
-            self.rules(&k.rules)?;
-            // States: the current one's rules after the reflexes. An actor
-            // starts in the first; a state out of range runs no rules.
-            self.debug
-                .states
-                .push(k.states.iter().map(|s| s.name.clone()).collect());
-            for (s, st) in k.states.iter().enumerate() {
-                self.here = st.at.clone();
-                self.state = Some(s as u8);
-                let skip = self.asm.label();
-                self.asm
-                    .sense(Sense::State)
-                    .push(s as i32)
-                    .op(OpCode::Eq)
-                    .jz(skip);
-                self.rules(&st.rules)?;
-                self.asm.halt().bind(skip);
-            }
-            self.asm.halt();
-            let tags = k.tags.iter().fold(0u64, |bits, t| {
-                bits | 1
-                    << self
-                        .tags
-                        .iter()
-                        .position(|x| x == t)
-                        .expect("collected above")
-            });
-            defs.push(KindDef {
-                id: i as u16,
-                name: k.name.clone(),
-                glyph: k.glyph,
-                tags,
-                cadence_shift: k.cadence_shift,
-                sight: k.sight,
-                fuel: k.fuel,
-                food: k.food,
-                bite: k.bite,
-                needs: k.needs.clone(),
-                mems: k.mems.clone(),
-                states: k.states.len().max(1) as u8,
-                entry,
-                place: k.place,
-                color: k.color,
-                cover: k.cover,
-            });
-        }
-        let mut sub_entries = Vec::with_capacity(self.subs.len());
-        for i in 0..self.subs.len() {
-            self.kind = None;
-            self.sub = Some(i);
-            let s = &self.subs[i];
-            self.here = s.at.clone();
-            sub_entries.push(self.asm.here());
-            self.locals.clear();
-            self.next_local = 0;
-            for (name, ty) in &s.params {
-                let slot = self.alloc_local(&s.at, ty.width())?;
-                self.locals.push(Local {
-                    name: name.clone(),
-                    slot,
-                    ty: *ty,
-                });
-            }
-            self.stmts(&s.body)?;
-            // Falling off the end: a function returns 0, a procedure nothing.
-            if s.returns {
-                self.asm.push(0).ret(true);
-            } else {
-                self.asm.ret(false);
+        for it in items {
+            for (pn, pat) in &it.params {
+                if self.const_value(pn).is_some() {
+                    return Err(self.err(
+                        pat,
+                        format!(
+                            "parameter `{pn}` of `{}` hides the constant `{pn}`",
+                            it.name
+                        ),
+                    ));
+                }
             }
         }
-        let code = self.asm.finish();
-        self.debug.subs = self.subs.iter().map(|s| s.name.clone()).collect();
+
+        // Every kind, resolved; then numbered so a family is one id range.
+        for (i, it) in items.iter().enumerate() {
+            if !it.is_trait {
+                self.inst(i, Vec::new(), &mut Vec::new())?;
+            }
+        }
+        self.number_kinds();
+        // The sub table: file subs, then each kind's member subs.
+        let mut next_sub = self.subs.len();
+        let mut sub_names: Vec<String> = self.subs.iter().map(|s| s.name.clone()).collect();
+        for k in 0..self.kind_insts.len() {
+            let ki = self.kind_insts[k];
+            let mut here = Vec::new();
+            for (name, ..) in &self.insts[ki].members {
+                let idx = u16::try_from(next_sub)
+                    .map_err(|_| self.err(&items[self.insts[ki].item].at, "too many subs"))?;
+                here.push((name.clone(), idx));
+                sub_names.push(format!("{}::{name}", self.inst_name(ki)));
+                next_sub += 1;
+            }
+            self.member_index.push(here);
+        }
+        let mut sub_entries = vec![0u32; next_sub];
+
+        let mut defs = Vec::with_capacity(self.kind_insts.len());
+        for k in 0..self.kind_insts.len() {
+            defs.push(self.kind_code(k)?);
+        }
+        for (i, entry) in sub_entries.iter_mut().enumerate().take(self.subs.len()) {
+            *entry = self.file_sub_code(i)?;
+        }
+        for k in 0..self.kind_insts.len() {
+            let ki = self.kind_insts[k];
+            let members = self.insts[ki].members.clone();
+            for ((_, owner, sub), (_, idx)) in members.iter().zip(self.member_index[k].clone()) {
+                sub_entries[usize::from(idx)] = self.member_code(k, *owner, sub)?;
+            }
+        }
+        // Traits on their own, whether or not a kind includes them.
+        self.check_traits()?;
+        self.diagnose();
+
+        let code = std::mem::take(&mut self.asm).finish();
+        self.debug.subs = sub_names;
+        self.debug.traits = items
+            .iter()
+            .filter(|i| i.is_trait)
+            .map(|i| i.name.clone())
+            .collect();
+        self.debug.parents = self
+            .kind_insts
+            .iter()
+            .map(|&ki| {
+                self.insts[ki]
+                    .parents
+                    .iter()
+                    .map(|&p| {
+                        let args = &self.insts[p].args;
+                        if args.is_empty() {
+                            self.inst_name(p).to_string()
+                        } else {
+                            let a: Vec<String> = args.iter().map(i32::to_string).collect();
+                            format!("{}({})", self.inst_name(p), a.join(", "))
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
         Ok(Kinds::from_parts(defs, code, self.pool, sub_entries)
             .with_scents(self.scents)
             .with_debug(self.debug))
     }
 
-    fn rules(&mut self, rules: &[Rule]) -> Result<()> {
-        for rule in rules {
-            self.locals.clear();
-            self.next_local = 0;
-            let next = self.asm.label();
-            let cond_pc = self.asm.here();
-            self.cond(&rule.cond, next, true)?;
-            let body_pc = self.asm.here();
-            self.stmts(&rule.body)?;
-            self.asm.end_rule().bind(next);
-            let file = self
-                .files
+    // ---- inheritance ------------------------------------------------------------------
+
+    /// Resolve `item` with `args` (a trait's arguments; none for a kind):
+    /// its ancestors, merged declarations and rule lists. Memoized per
+    /// (item, arguments).
+    fn inst(&mut self, item: usize, args: Vec<i32>, stack: &mut Vec<usize>) -> Result<usize> {
+        if let Some(i) = self
+            .insts
+            .iter()
+            .position(|x| x.item == item && x.args == args)
+        {
+            return Ok(i);
+        }
+        let items = self.items;
+        let it = &items[item];
+        if stack.contains(&item) {
+            let chain: Vec<&str> = stack
                 .iter()
-                .position(|(n, _)| *n == rule.at.file)
-                .unwrap_or(0);
-            // From `when` to the line of `=>`, comments dropped, one line.
-            let text = self.files.get(file).map_or(String::new(), |(_, t)| {
-                t.lines()
-                    .skip(rule.at.line.saturating_sub(1) as usize)
-                    .take((rule.arrow_line.max(rule.at.line) - rule.at.line + 1) as usize)
-                    .map(|l| l.split('#').next().unwrap_or("").trim())
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            });
-            self.debug.rules.push(RuleInfo {
-                kind: self.kind.map_or(0, |k| k as u16),
-                state: self.state,
-                file: file as u16,
-                line: rule.at.line,
-                text,
-                cond_pc,
-                body_pc,
+                .skip_while(|&&i| i != item)
+                .map(|&i| items[i].name.as_str())
+                .chain([it.name.as_str()])
+                .collect();
+            return Err(self.err(
+                &it.at,
+                format!("`{}` extends itself: {}", it.name, chain.join(" -> ")),
+            ));
+        }
+        stack.push(item);
+        let scope: Vec<(String, i32)> = it
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(args.iter().copied())
+            .collect();
+        let mut parents = Vec::new();
+        let mut concrete: Option<&str> = None;
+        for p in &it.parents {
+            let Some(pi) = self.item_named(&p.name) else {
+                return Err(self.err(&p.at, format!("unknown trait or kind `{}`", p.name)));
+            };
+            let parent = &items[pi];
+            if parent.is_trait {
+                if parent.params.len() != p.args.len() {
+                    return Err(self.err(
+                        &p.at,
+                        format!(
+                            "trait `{}` takes {} argument{}, {} given",
+                            parent.name,
+                            parent.params.len(),
+                            if parent.params.len() == 1 { "" } else { "s" },
+                            p.args.len()
+                        ),
+                    ));
+                }
+            } else {
+                if it.is_trait {
+                    return Err(self.err(
+                        &p.at,
+                        format!(
+                            "trait `{}` can extend only traits: `{}` is a kind",
+                            it.name, parent.name
+                        ),
+                    ));
+                }
+                if let Some(c) = concrete {
+                    return Err(self.err(
+                        &p.at,
+                        format!(
+                            "`{}` extends two kinds, `{c}` and `{}`: a kind extends at most one kind, and any number of traits",
+                            it.name, parent.name
+                        ),
+                    ));
+                }
+                if !p.args.is_empty() {
+                    return Err(
+                        self.err(&p.at, format!("kind `{}` takes no arguments", parent.name))
+                    );
+                }
+                concrete = Some(&parent.name);
+            }
+            let saved = std::mem::replace(&mut self.params, scope.clone());
+            let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a)).collect();
+            self.params = saved;
+            let pinst = self.inst(pi, folded?, stack)?;
+            parents.push(pinst);
+        }
+        stack.pop();
+        // Linearize: each parent's ancestors, then the parent; the first
+        // occurrence wins. One trait, two argument lists: ambiguous.
+        let mut ancestors: Vec<usize> = Vec::new();
+        for &p in &parents {
+            let chain: Vec<usize> = self.insts[p].ancestors.iter().copied().chain([p]).collect();
+            for a in chain {
+                if ancestors.contains(&a) {
+                    continue;
+                }
+                if let Some(&o) = ancestors
+                    .iter()
+                    .find(|&&o| self.insts[o].item == self.insts[a].item)
+                {
+                    let fmt = |i: usize| -> String {
+                        let v: Vec<String> =
+                            self.insts[i].args.iter().map(i32::to_string).collect();
+                        v.join(", ")
+                    };
+                    return Err(self.err(
+                        &it.at,
+                        format!(
+                            "`{}` reaches trait `{}` twice, with ({}) and ({})",
+                            it.name,
+                            self.inst_name(a),
+                            fmt(o),
+                            fmt(a)
+                        ),
+                    ));
+                }
+                ancestors.push(a);
+            }
+        }
+        let me = self.insts.len();
+        let saved = std::mem::replace(&mut self.params, scope);
+        let inst = self.merge(item, args, parents, ancestors, me);
+        self.params = saved;
+        let inst = inst?;
+        debug_assert_eq!(self.insts.len(), me, "merge resolves nothing new");
+        self.insts.push(inst);
+        Ok(me)
+    }
+
+    /// A number declared by this item (folded in its scope), checked
+    /// against its range (lenient while checking traits: out of range is
+    /// "not declared").
+    fn decl_num(
+        &self,
+        v: &Option<(Expr, Pos)>,
+        ok: impl Fn(i32) -> bool,
+        msg: &str,
+    ) -> Result<Option<i32>> {
+        let Some((e, at)) = v else {
+            return Ok(None);
+        };
+        let x = self.fold(e)?;
+        if ok(x) {
+            Ok(Some(x))
+        } else if self.checking {
+            Ok(None)
+        } else {
+            Err(self.err(at, msg))
+        }
+    }
+
+    /// The value an item gets for one declaration: its own, else the one its
+    /// direct parents agree on.
+    fn pick<T: Copy + PartialEq>(
+        &self,
+        own: Option<T>,
+        parents: &[usize],
+        get: impl Fn(&Inst<'a>) -> Option<T>,
+        what: &str,
+        item: usize,
+    ) -> Result<Option<T>> {
+        if own.is_some() {
+            return Ok(own);
+        }
+        let mut found: Option<(usize, T)> = None;
+        for &p in parents {
+            if let Some(v) = get(&self.insts[p]) {
+                match found {
+                    None => found = Some((p, v)),
+                    Some((q, w)) if w != v => {
+                        let it = &self.items[item];
+                        return Err(self.err(
+                            &it.at,
+                            format!(
+                                "`{}` inherits different {what} from `{}` and `{}`: declare it in `{}`",
+                                it.name,
+                                self.inst_name(q),
+                                self.inst_name(p),
+                                it.name
+                            ),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(found.map(|(_, v)| v))
+    }
+
+    /// Merge an item's own declarations over its parents' (merged) ones
+    /// and resolve its rule lists. `self.params` is the item's scope.
+    fn merge(
+        &mut self,
+        item: usize,
+        args: Vec<i32>,
+        parents: Vec<usize>,
+        ancestors: Vec<usize>,
+        me: usize,
+    ) -> Result<Inst<'a>> {
+        let items = self.items;
+        let it = &items[item];
+        let d = &it.decls;
+        let cadence = self
+            .decl_num(
+                &d.cadence,
+                |c| c >= 1 && (c as u32).is_power_of_two(),
+                "cadence must be a power of two (1, 2, 4, ...)",
+            )?
+            .map(|c| c.trailing_zeros() as u8);
+        let sight = self
+            .decl_num(
+                &d.sight,
+                |s| (0..=16).contains(&s),
+                "sight is 0 to 16 cells",
+            )?
+            .map(|s| s as u8);
+        let fuel = self
+            .decl_num(
+                &d.fuel,
+                |f| (1..=4096).contains(&f),
+                "fuel is 1 to 4096 ops per think",
+            )?
+            .map(|f| f as u32);
+        let food = self.decl_num(&d.food, |_| true, "")?;
+        let bite = self
+            .decl_num(&d.bite, |b| (0..=255).contains(&b), "bite is 0 to 255")?
+            .map(|b| b as u8);
+        let glyph = self.pick(d.glyph, &parents, |i| i.glyph, "glyphs", item)?;
+        let color = self.pick(d.color, &parents, |i| i.color, "colours", item)?;
+        let cadence_shift = self.pick(cadence, &parents, |i| i.cadence_shift, "cadences", item)?;
+        let sight = self.pick(sight, &parents, |i| i.sight, "sights", item)?;
+        let fuel = self.pick(fuel, &parents, |i| i.fuel, "fuel budgets", item)?;
+        let food = self.pick(food, &parents, |i| i.food, "food values", item)?;
+        let bite = self.pick(bite, &parents, |i| i.bite, "bites", item)?;
+        let cover = d.cover || parents.iter().any(|&p| self.insts[p].cover);
+
+        let mut tags: Vec<String> = Vec::new();
+        for t in parents
+            .iter()
+            .flat_map(|&p| self.insts[p].tags.iter())
+            .chain(&d.tags)
+        {
+            if !tags.contains(t) {
+                tags.push(t.clone());
+            }
+        }
+
+        // Needs by name, parents' slots first; a redeclaration overrides in
+        // place. Parents that disagree must be settled by the item.
+        let mut needs: Vec<NeedDef> = Vec::new();
+        let mut from: Vec<usize> = Vec::new();
+        let mut clashes: Vec<(String, usize, usize)> = Vec::new();
+        for &p in &parents {
+            for n in &self.insts[p].needs {
+                match needs.iter().position(|x| x.name == n.name) {
+                    None => {
+                        needs.push(n.clone());
+                        from.push(p);
+                    }
+                    Some(i) if needs[i] == *n => {}
+                    Some(i) => clashes.push((n.name.clone(), from[i], p)),
+                }
+            }
+        }
+        for na in &d.needs {
+            let max = self.fold(&na.max)?;
+            if max < 1 && !self.checking {
+                return Err(self.err(&na.at, "a need's max is at least 1"));
+            }
+            let def = NeedDef {
+                name: na.name.clone(),
+                max: max.max(1),
+                decays: na.decays,
+                vital: na.vital,
+            };
+            match needs.iter().position(|x| x.name == def.name) {
+                Some(i) => needs[i] = def,
+                None => needs.push(def),
+            }
+        }
+        if let Some((n, a, b)) = clashes
+            .iter()
+            .find(|(n, ..)| !d.needs.iter().any(|x| x.name == *n))
+        {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits need `{n}` from `{}` and `{}`, declared differently: redeclare it in `{}`",
+                    it.name,
+                    self.inst_name(*a),
+                    self.inst_name(*b),
+                    it.name
+                ),
+            ));
+        }
+        if needs.len() > NEED_SLOTS {
+            let names: Vec<&str> = needs.iter().map(|n| n.name.as_str()).collect();
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` has {} needs, at most {NEED_SLOTS}: {}",
+                    it.name,
+                    needs.len(),
+                    names.join(", ")
+                ),
+            ));
+        }
+        let mut mems: Vec<String> = Vec::new();
+        for m in parents.iter().flat_map(|&p| self.insts[p].mems.iter()) {
+            if !mems.contains(m) {
+                mems.push(m.clone());
+            }
+        }
+        for (m, at) in &d.mems {
+            if needs.iter().any(|n| n.name == *m) {
+                return Err(self.err(at, format!("`{m}` is a need of `{}` already", it.name)));
+            }
+            if !mems.contains(m) {
+                mems.push(m.clone());
+            }
+        }
+        if let Some(m) = mems.iter().find(|m| needs.iter().any(|n| n.name == **m)) {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits `{m}` both as a need and as a mem slot",
+                    it.name
+                ),
+            ));
+        }
+        if mems.len() > MEM_SLOTS {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` has {} mem slots, at most {MEM_SLOTS}: {}",
+                    it.name,
+                    mems.len(),
+                    mems.join(", ")
+                ),
+            ));
+        }
+        for (pn, pat) in &it.params {
+            if needs.iter().any(|n| n.name == *pn) || mems.contains(pn) {
+                return Err(self.err(
+                    pat,
+                    format!(
+                        "parameter `{pn}` has the name of a need or mem slot of `{}`",
+                        it.name
+                    ),
+                ));
+            }
+        }
+
+        let mut states: Vec<String> = Vec::new();
+        for s in parents
+            .iter()
+            .flat_map(|&p| self.insts[p].states.iter())
+            .chain(it.states.iter().map(|s| &s.name))
+        {
+            if !states.contains(s) {
+                states.push(s.clone());
+            }
+        }
+        if states.len() > 64 {
+            return Err(self.err(&it.at, format!("`{}` has more than 64 states", it.name)));
+        }
+
+        // Member subs by name; the item's own override its parents'.
+        let mut members: Vec<(String, usize, &'a SubAst)> = Vec::new();
+        let mut sub_clashes: Vec<(String, usize, usize)> = Vec::new();
+        for &p in &parents {
+            for (n, o, sub) in &self.insts[p].members {
+                match members.iter().position(|m| m.0 == *n) {
+                    None => members.push((n.clone(), *o, sub)),
+                    Some(i) if members[i].1 == *o => {}
+                    Some(i) => sub_clashes.push((n.clone(), members[i].1, *o)),
+                }
+            }
+        }
+        for sub in &it.members {
+            match members.iter().position(|m| m.0 == sub.name) {
+                Some(i) => members[i] = (sub.name.clone(), me, sub),
+                None => members.push((sub.name.clone(), me, sub)),
+            }
+        }
+        if let Some((n, a, b)) = sub_clashes
+            .iter()
+            .find(|(n, ..)| !it.members.iter().any(|m| m.name == *n))
+        {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits sub `{n}` from both `{}` and `{}`: define it in `{}`",
+                    it.name,
+                    self.inst_name(*a),
+                    self.inst_name(*b),
+                    it.name
+                ),
+            ));
+        }
+
+        let reflex = self.resolve_list(me, item, &parents, &ancestors, &it.rules, None)?;
+        let mut state_lists = Vec::with_capacity(states.len());
+        for sname in &states {
+            let own: &'a [RuleItem] = it
+                .states
+                .iter()
+                .find(|s| s.name == *sname)
+                .map_or(&[][..], |s| &s.rules[..]);
+            state_lists.push(self.resolve_list(
+                me,
+                item,
+                &parents,
+                &ancestors,
+                own,
+                Some(sname),
+            )?);
+        }
+        Ok(Inst {
+            item,
+            args,
+            parents,
+            ancestors,
+            glyph,
+            color,
+            cover,
+            cadence_shift,
+            sight,
+            fuel,
+            food,
+            bite,
+            tags,
+            needs,
+            mems,
+            states,
+            members,
+            reflex,
+            state_lists,
+        })
+    }
+
+    /// One rule list of the instance `me` (being resolved): its own rules
+    /// in order, `inherit` splicing ancestors' lists where it stands, and,
+    /// if the list has no `inherit` at all, the direct parents' lists
+    /// appended. `state`: which list (`None`: the reflexes).
+    fn resolve_list(
+        &self,
+        me: usize,
+        item: usize,
+        parents: &[usize],
+        ancestors: &[usize],
+        own: &'a [RuleItem],
+        state: Option<&str>,
+    ) -> Result<RList<'a>> {
+        let list_of = |i: usize| -> Option<&RList<'a>> {
+            match state {
+                None => Some(&self.insts[i].reflex),
+                Some(s) => self.insts[i].state_list(s),
+            }
+        };
+        let splice = |out: &mut RList<'a>, l: &RList<'a>| {
+            let new: Vec<usize> = l
+                .sources
+                .iter()
+                .copied()
+                .filter(|s| !out.sources.contains(s))
+                .collect();
+            out.rules
+                .extend(l.rules.iter().filter(|r| new.contains(&r.owner)).copied());
+            out.sources.extend(new);
+        };
+        let mut out = RList {
+            rules: Vec::new(),
+            sources: vec![me],
+        };
+        let mut named: Vec<usize> = Vec::new();
+        let explicit = own.iter().any(|r| matches!(r, RuleItem::Inherit(..)));
+        for r in own {
+            match r {
+                RuleItem::When(rule) => out.rules.push(RRule { owner: me, rule }),
+                RuleItem::Inherit(None, _) => {
+                    for &p in parents {
+                        if let Some(l) = list_of(p) {
+                            splice(&mut out, l);
+                        }
+                    }
+                }
+                RuleItem::Inherit(Some(n), at) => {
+                    let Some(&a) = ancestors.iter().find(|&&a| self.inst_name(a) == n) else {
+                        return Err(self.err(
+                            at,
+                            format!("`{n}` is not an ancestor of `{}`", self.items[item].name),
+                        ));
+                    };
+                    if named.contains(&a) {
+                        return Err(self.err(at, format!("`inherit {n}` twice in one list")));
+                    }
+                    named.push(a);
+                    match list_of(a) {
+                        Some(l) => splice(&mut out, l),
+                        None => {
+                            return Err(self.err(
+                                at,
+                                format!("`{n}` has no state `{}`", state.unwrap_or_default()),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        if !explicit {
+            for &p in parents {
+                if let Some(l) = list_of(p) {
+                    splice(&mut out, l);
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// Number the concrete kinds in pre-order over the inheritance forest:
+    /// roots in file then declaration order, each kind's children right
+    /// after it in the same order. A family is then one id range.
+    fn number_kinds(&mut self) {
+        let items = self.items;
+        let concrete_parent = |i: usize| -> Option<usize> {
+            items[i].parents.iter().find_map(|p| {
+                items
+                    .iter()
+                    .position(|o| o.name == p.name)
+                    .filter(|&pi| !items[pi].is_trait)
+            })
+        };
+        let kinds: Vec<usize> = (0..items.len()).filter(|&i| !items[i].is_trait).collect();
+        let mut order = Vec::with_capacity(kinds.len());
+        let mut stack: Vec<usize> = kinds
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&k| concrete_parent(k).is_none())
+            .collect();
+        while let Some(k) = stack.pop() {
+            order.push(k);
+            stack.extend(
+                kinds
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|&c| concrete_parent(c) == Some(k)),
+            );
+        }
+        self.item_ids = vec![None; items.len()];
+        for (id, &k) in order.iter().enumerate() {
+            self.item_ids[k] = Some(id as u16);
+        }
+        self.kind_insts = order
+            .iter()
+            .map(|&k| {
+                self.insts
+                    .iter()
+                    .position(|x| x.item == k && x.args.is_empty())
+                    .expect("every kind was resolved")
+            })
+            .collect();
+    }
+
+    /// Compile in the context of kind `k`: its tables and member subs.
+    fn enter(&mut self, k: usize) {
+        self.kind = Some(k as u16);
+        self.cur = Some(self.kind_insts[k]);
+        self.members_here = self.member_index[k].clone();
+    }
+
+    fn kind_code(&mut self, k: usize) -> Result<KindDef> {
+        self.enter(k);
+        self.sub = None;
+        let ki = self.kind_insts[k];
+        let inst = self.insts[ki].clone();
+        let it = &self.items[inst.item];
+        self.here = it.at.clone();
+        let entry = self.asm.here();
+        self.state = None;
+        self.rule_list(&inst.reflex)?;
+        // States: the current one's rules after the reflexes. An actor
+        // starts in the first; a state out of range runs no rules.
+        self.debug.states.push(inst.states.clone());
+        for (s, list) in inst.state_lists.iter().enumerate() {
+            self.state = Some(s as u8);
+            let skip = self.asm.label();
+            self.asm
+                .sense(Sense::State)
+                .push(s as i32)
+                .op(OpCode::Eq)
+                .jz(skip);
+            self.rule_list(list)?;
+            self.asm.halt().bind(skip);
+        }
+        self.asm.halt();
+        let tags = inst.tags.iter().fold(0u64, |bits, t| {
+            bits | 1
+                << self
+                    .tags
+                    .iter()
+                    .position(|x| x == t)
+                    .expect("collected above")
+        });
+        let parent = inst
+            .parents
+            .iter()
+            .find_map(|&p| self.item_ids[self.insts[p].item]);
+        Ok(KindDef {
+            id: k as u16,
+            name: it.name.clone(),
+            glyph: inst.glyph.unwrap_or(b'?'),
+            tags,
+            cadence_shift: inst.cadence_shift.unwrap_or(3),
+            sight: inst.sight.unwrap_or(4),
+            fuel: inst.fuel.unwrap_or(512),
+            food: inst.food.unwrap_or(0),
+            bite: inst.bite.unwrap_or(1),
+            needs: inst.needs.clone(),
+            mems: inst.mems.clone(),
+            states: inst.states.len().max(1) as u8,
+            entry,
+            place: it.decls.place.unwrap_or(0),
+            color: inst.color.unwrap_or(DEFAULT_COLOR),
+            cover: inst.cover,
+            parent,
+        })
+    }
+
+    fn file_sub_code(&mut self, i: usize) -> Result<u32> {
+        let subs = self.subs;
+        let s = &subs[i];
+        self.kind = None;
+        self.cur = None;
+        self.owner = None;
+        self.members_here.clear();
+        self.params.clear();
+        self.sub_body(s)
+    }
+
+    fn member_code(&mut self, k: usize, owner: usize, s: &'a SubAst) -> Result<u32> {
+        self.enter(k);
+        self.owner = Some(owner);
+        self.params = self.scope_of(owner);
+        self.sub_body(s)
+    }
+
+    /// A sub's code: its parameters as the first locals, the body, a return.
+    fn sub_body(&mut self, s: &'a SubAst) -> Result<u32> {
+        self.sub = Some(s);
+        self.here = s.at.clone();
+        let entry = self.asm.here();
+        self.locals.clear();
+        self.next_local = 0;
+        for (name, ty) in &s.params {
+            let slot = self.alloc_local(&s.at, ty.width())?;
+            self.locals.push(Local {
+                name: name.clone(),
+                slot,
+                ty: *ty,
             });
         }
+        self.stmts(&s.body)?;
+        // Falling off the end: a function returns 0, a procedure nothing.
+        if s.returns {
+            self.asm.push(0).ret(true);
+        } else {
+            self.asm.ret(false);
+        }
+        self.sub = None;
+        Ok(entry)
+    }
+
+    /// Compile every trait on its own, each parameter bound to 1, and keep
+    /// nothing: a trait names only what it declares, so this proves it
+    /// compiles for any kind that includes it, whether any kind does.
+    fn check_traits(&mut self) -> Result<()> {
+        let saved_asm = std::mem::take(&mut self.asm);
+        let marks = (self.pool.len(), self.scents.len(), self.debug.rules.len());
+        let was = self.checking;
+        self.checking = true;
+        let r = self.check_all_traits();
+        self.asm = saved_asm;
+        self.pool.truncate(marks.0);
+        self.scents.truncate(marks.1);
+        self.debug.rules.truncate(marks.2);
+        self.checking = was;
+        self.kind = None;
+        self.cur = None;
+        self.owner = None;
+        self.sub = None;
+        r
+    }
+
+    fn check_all_traits(&mut self) -> Result<()> {
+        let items = self.items;
+        for (i, it) in items.iter().enumerate() {
+            if !it.is_trait {
+                continue;
+            }
+            let ti = self.inst(i, vec![1; it.params.len()], &mut Vec::new())?;
+            let inst = self.insts[ti].clone();
+            self.kind = None;
+            self.cur = Some(ti);
+            self.members_here = inst.members.iter().map(|(n, ..)| (n.clone(), 0)).collect();
+            self.sub = None;
+            self.state = None;
+            let own = |l: &RList<'a>| -> RList<'a> {
+                RList {
+                    rules: l.rules.iter().filter(|r| r.owner == ti).copied().collect(),
+                    sources: vec![ti],
+                }
+            };
+            self.rule_list(&own(&inst.reflex))?;
+            for (s, list) in inst.state_lists.iter().enumerate() {
+                self.state = Some(s as u8);
+                self.rule_list(&own(list))?;
+            }
+            for (_, owner, sub) in inst.members.iter().filter(|m| m.1 == ti) {
+                self.owner = Some(*owner);
+                self.params = self.scope_of(*owner);
+                self.sub_body(sub)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Warnings and notes about the compiled kinds, in kind order.
+    fn diagnose(&mut self) {
+        let items = self.items;
+        let mut out: Vec<Diagnostic> = Vec::new();
+        let push = |out: &mut Vec<Diagnostic>, level: Level, at: &Pos, msg: String| {
+            let d = Diagnostic {
+                level,
+                file: at.file.clone(),
+                line: at.line,
+                col: at.col,
+                msg,
+            };
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        };
+        for k in 0..self.kind_insts.len() {
+            self.enter(k);
+            let ki = self.kind_insts[k];
+            let inst = self.insts[ki].clone();
+            // A rule that always holds and always ends the think hides every
+            // rule after it (and, among the reflexes, every state's rules).
+            let mut reflex_end: Option<&'a Rule> = None;
+            let lists: Vec<&RList<'a>> = [&inst.reflex]
+                .into_iter()
+                .chain(&inst.state_lists)
+                .collect();
+            for (li, list) in lists.iter().enumerate() {
+                if li > 0 {
+                    if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
+                        push(
+                            &mut out,
+                            Level::Warning,
+                            &first.rule.at,
+                            format!(
+                                "never runs: the reflex rule at {}:{} always ends the think",
+                                end.at.file, end.at.line
+                            ),
+                        );
+                    }
+                    if reflex_end.is_some() {
+                        continue;
+                    }
+                }
+                for (i, rr) in list.rules.iter().enumerate() {
+                    self.owner = Some(rr.owner);
+                    self.params = self.scope_of(rr.owner);
+                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold(e).is_ok_and(|v| v != 0));
+                    if always && self.ends_all(&rr.rule.body, false, 0) {
+                        if let Some(next) = list.rules.get(i + 1) {
+                            push(
+                                &mut out,
+                                Level::Warning,
+                                &next.rule.at,
+                                format!(
+                                    "never runs: the rule at {}:{} always ends the think",
+                                    rr.rule.at.file, rr.rule.at.line
+                                ),
+                            );
+                        }
+                        if li == 0 {
+                            reflex_end = Some(rr.rule);
+                        }
+                        break;
+                    }
+                }
+            }
+            // Ancestors whose reflex rules this kind does not run.
+            for &a in &inst.ancestors {
+                let has_rules = items[self.insts[a].item]
+                    .rules
+                    .iter()
+                    .any(|r| matches!(r, RuleItem::When(_)));
+                if has_rules && !inst.reflex.sources.contains(&a) {
+                    let it = &items[inst.item];
+                    push(
+                        &mut out,
+                        Level::Note,
+                        &it.at,
+                        format!(
+                            "`{}` does not run the reflex rules of `{}` (no `inherit` splices them)",
+                            it.name,
+                            self.inst_name(a)
+                        ),
+                    );
+                }
+            }
+        }
+        self.owner = None;
+        self.params.clear();
+        self.debug.diagnostics = out;
+    }
+
+    /// Does this statement end the think on every path: an action (and, if
+    /// not `acts_only`, a `next`)? Conservative: loops never count, and a
+    /// call counts only through subs that do, eight calls deep.
+    fn ends(&self, s: &Stmt, acts_only: bool, depth: u32) -> bool {
+        match s {
+            Stmt::Next(..) => !acts_only,
+            Stmt::If { then, els, .. } => {
+                !els.is_empty()
+                    && self.ends_all(then, acts_only, depth)
+                    && self.ends_all(els, acts_only, depth)
+            }
+            Stmt::Choose(arms) => {
+                !arms.is_empty()
+                    && arms.iter().all(|(w, body)| {
+                        self.fold(w).is_ok_and(|w| w > 0) && self.ends_all(body, acts_only, depth)
+                    })
+            }
+            Stmt::Call { name, .. } => {
+                depth < 8
+                    && self
+                        .callee(name)
+                        .is_some_and(|sub| self.ends_all(&sub.body, acts_only, depth + 1))
+            }
+            _ => action_at(s).is_some(),
+        }
+    }
+
+    fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32) -> bool {
+        body.iter().any(|s| self.ends(s, acts_only, depth))
+    }
+
+    /// The sub a call named `name` reaches here: a member sub of the
+    /// current tables, else a file sub.
+    fn callee(&self, name: &str) -> Option<&'a SubAst> {
+        if let Some(cur) = self.cur
+            && let Some((_, _, s)) = self.insts[cur].members.iter().find(|(n, ..)| n == name)
+        {
+            return Some(*s);
+        }
+        let subs = self.subs;
+        subs.iter().find(|s| s.name == name)
+    }
+
+    fn rule_list(&mut self, list: &RList<'a>) -> Result<()> {
+        for rr in &list.rules {
+            self.owner = Some(rr.owner);
+            self.params = self.scope_of(rr.owner);
+            self.rule(rr.rule)?;
+        }
+        self.owner = self.cur;
+        Ok(())
+    }
+
+    fn rule(&mut self, rule: &'a Rule) -> Result<()> {
+        self.here = rule.at.clone();
+        self.locals.clear();
+        self.next_local = 0;
+        let next = self.asm.label();
+        let cond_pc = self.asm.here();
+        self.cond(&rule.cond, next, true)?;
+        let body_pc = self.asm.here();
+        self.stmts(&rule.body)?;
+        self.asm.end_rule().bind(next);
+        let file = self
+            .files
+            .iter()
+            .position(|(n, _)| *n == rule.at.file)
+            .unwrap_or(0);
+        // From `when` to the line of `=>`, comments dropped, one line.
+        let from = rule.at.col.saturating_sub(1) as usize;
+        let text = self.files.get(file).map_or(String::new(), |(_, t)| {
+            t.lines()
+                .skip(rule.at.line.saturating_sub(1) as usize)
+                .take((rule.arrow_line.max(rule.at.line) - rule.at.line + 1) as usize)
+                .enumerate()
+                .map(|(i, l)| {
+                    let l = if i == 0 {
+                        l.get(from..).unwrap_or(l)
+                    } else {
+                        l
+                    };
+                    l.split('#').next().unwrap_or("").trim()
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        });
+        let via = match (self.owner, self.cur) {
+            (Some(o), Some(c)) if o != c => Some(self.inst_name(o).to_string()),
+            _ => None,
+        };
+        self.debug.rules.push(RuleInfo {
+            kind: self.kind.unwrap_or(0),
+            state: self.state,
+            file: file as u16,
+            line: rule.at.line,
+            text,
+            cond_pc,
+            body_pc,
+            via,
+        });
         Ok(())
     }
 
@@ -1880,7 +3054,8 @@ impl<'a> Gen<'a> {
         Ok(match e {
             Expr::Int(v) => *v,
             Expr::Name(n, at) => self
-                .const_value(n)
+                .param(n)
+                .or_else(|| self.const_value(n))
                 .ok_or_else(|| self.err(at, format!("`{n}` is not a constant declared above")))?,
             Expr::Neg(a) => self.fold(a)?.wrapping_neg(),
             Expr::Bin(op, a, b) => {
@@ -1962,18 +3137,54 @@ impl<'a> Gen<'a> {
         self.locals.iter().rev().find(|l| l.name == name)
     }
 
+    /// The slot of need `n` in the tables being compiled, if the code's
+    /// owner may name it (a trait sees only what it or its ancestors
+    /// declare).
     fn need_slot(&self, n: &str) -> Option<u8> {
-        let k = &self.kinds[self.kind?];
-        k.needs.iter().position(|d| d.name == n).map(|i| i as u8)
+        let (cur, owner) = (self.cur?, self.owner?);
+        if !self.insts[owner].needs.iter().any(|d| d.name == n) {
+            return None;
+        }
+        self.insts[cur]
+            .needs
+            .iter()
+            .position(|d| d.name == n)
+            .map(|i| i as u8)
     }
 
     fn mem_slot(&self, n: &str) -> Option<u8> {
-        let k = &self.kinds[self.kind?];
-        k.mems.iter().position(|m| m == n).map(|i| i as u8)
+        let (cur, owner) = (self.cur?, self.owner?);
+        if !self.insts[owner].mems.iter().any(|m| m == n) {
+            return None;
+        }
+        self.insts[cur]
+            .mems
+            .iter()
+            .position(|m| m == n)
+            .map(|i| i as u8)
+    }
+
+    /// A trait parameter in scope.
+    fn param(&self, n: &str) -> Option<i32> {
+        self.params.iter().find(|(p, _)| p == n).map(|&(_, v)| v)
     }
 
     fn unknown_name(&self, at: &Pos, n: &str) -> CompileError {
-        if self.sub.is_some() {
+        if let (Some(cur), Some(owner)) = (self.cur, self.owner)
+            && cur != owner
+        {
+            let c = &self.insts[cur];
+            if c.needs.iter().any(|d| d.name == n) || c.mems.iter().any(|m| m == n) {
+                return self.err(
+                    at,
+                    format!(
+                        "`{}` uses `{n}`, which it does not declare (a trait or parent kind sees only its own needs and mems)",
+                        self.inst_name(owner)
+                    ),
+                );
+            }
+        }
+        if self.cur.is_none() {
             self.err(
                 at,
                 format!("unknown name `{n}` (a sub sees only its parameters and locals)"),
@@ -2062,25 +3273,42 @@ impl<'a> Gen<'a> {
             Pred::Bare => pred::BARE,
             Pred::Ground(g) => pred::ground(*g as u8),
             Pred::Feature(f) => pred::feature(*f as u8),
-            Pred::Kind(name, at) => {
+            Pred::Kind(name, only, at) => {
                 if let Some(l) = self.local(name) {
                     if l.ty != Ty::Pred {
                         return Err(self.err(at, format!("`{name}` is not a pred")));
+                    }
+                    if *only {
+                        return Err(self.err(
+                            at,
+                            format!("`only` applies to a kind, not the parameter `{name}`"),
+                        ));
                     }
                     let slot = l.slot;
                     self.asm.load(slot);
                     return Ok(());
                 }
                 if let Some(id) = self.kind_id(name) {
-                    i32::from(id)
+                    i32::from(id) + if *only { pred::ONLY } else { 0 }
+                } else if self.item_named(name).is_some() {
+                    return Err(self.err(
+                        at,
+                        format!("`{name}` is a trait: no actor is one; match a tag instead"),
+                    ));
                 } else if let Some(bit) = self.tags.iter().position(|t| t == name) {
+                    if *only {
+                        return Err(self.err(
+                            at,
+                            format!("`only` applies to a kind, not the tag `{name}`"),
+                        ));
+                    }
                     pred::TAG_BASE + bit as i32
                 } else {
                     return Err(self.err(at, format!("unknown kind or tag `{name}`")));
                 }
             }
-            Pred::KindLook(name, look, at) => match self.kind_id(name) {
-                Some(id) => pred::kind_look(id, *look),
+            Pred::KindLook(name, look, only, at) => match self.kind_id(name) {
+                Some(id) => pred::kind_look(id, *look) + if *only { pred::ONLY } else { 0 },
                 None => {
                     return Err(self.err(at, format!("`{name}:{look}`: `{name}` is not a kind")));
                 }
@@ -2177,7 +3405,7 @@ impl<'a> Gen<'a> {
                     self.asm.need(i);
                 } else if let Some(i) = self.mem_slot(n) {
                     self.asm.mem(i);
-                } else if let Some(v) = self.const_value(n) {
+                } else if let Some(v) = self.param(n).or_else(|| self.const_value(n)) {
                     self.push_int(v);
                 } else {
                     return Err(self.unknown_name(at, n));
@@ -2265,12 +3493,31 @@ impl<'a> Gen<'a> {
 
     /// Emit a call; returns whether the sub leaves a value on the stack.
     fn call(&mut self, name: &str, args: &[Arg], at: &Pos) -> Result<bool> {
-        let idx = self
-            .subs
-            .iter()
-            .position(|s| s.name == name)
-            .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
-        let sub = &self.subs[idx];
+        let (idx, sub): (u16, &'a SubAst) = if let Some(&(_, idx)) =
+            self.members_here.iter().find(|(n, _)| n == name)
+        {
+            // A member sub: the owner must define it (it may be overridden).
+            if let Some(owner) = self.owner
+                && !self.insts[owner].members.iter().any(|(n, ..)| n == name)
+            {
+                return Err(self.err(
+                        at,
+                        format!(
+                            "`{}` calls `{name}`, which it does not define (a trait or parent kind sees only its own subs)",
+                            self.inst_name(owner)
+                        ),
+                    ));
+            }
+            let sub = self.callee(name).expect("a member of the current tables");
+            (idx, sub)
+        } else {
+            let subs = self.subs;
+            let i = subs
+                .iter()
+                .position(|s| s.name == name)
+                .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
+            (i as u16, &subs[i])
+        };
         if args.len() != sub.params.len() {
             return Err(self.err(
                 at,
@@ -2291,10 +3538,12 @@ impl<'a> Gen<'a> {
                 (Ty::Target, Arg::Name(n, p)) => {
                     self.target(&Target::Named(n.clone(), p.clone()))?;
                 }
-                (Ty::Pred, Arg::Name(n, p)) => self.pred(&Pred::Kind(n.clone(), p.clone()))?,
+                (Ty::Pred, Arg::Name(n, p)) => {
+                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?
+                }
                 (Ty::Pred, Arg::Pred(pr)) => self.pred(pr)?,
                 (Ty::Pred, Arg::Expr(Expr::Name(n, p))) => {
-                    self.pred(&Pred::Kind(n.clone(), p.clone()))?;
+                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?;
                 }
                 (ty, _) => {
                     return Err(self.err(
@@ -2311,13 +3560,29 @@ impl<'a> Gen<'a> {
                 }
             }
         }
-        self.asm.call(idx as u16, width);
+        self.asm.call(idx, width);
         Ok(sub.returns)
     }
 
     fn stmts(&mut self, body: &[Stmt]) -> Result<()> {
+        // A statement that acts on every path, then another action in the
+        // same list: a second action, certain; refused here rather than
+        // trapped at run time.
+        let mut acted: Option<Option<u32>> = None;
         for s in body {
+            if let (Some(line), Some(at)) = (acted, action_at(s)) {
+                let earlier = line.map_or(String::new(), |l| format!(" at line {l}"));
+                return Err(self.err(
+                    at,
+                    format!(
+                        "a second action: the think already acted{earlier} (one action per think)"
+                    ),
+                ));
+            }
             self.stmt(s)?;
+            if acted.is_none() && self.ends(s, true, 0) {
+                acted = Some(stmt_line(s));
+            }
         }
         Ok(())
     }
@@ -2333,6 +3598,8 @@ impl<'a> Gen<'a> {
             self.asm.set_need(i);
         } else if let Some(i) = self.mem_slot(name) {
             self.asm.set_mem(i);
+        } else if self.param(name).is_some() || self.const_value(name).is_some() {
+            return Err(self.err(at, format!("cannot assign to `{name}`: it is a constant")));
         } else {
             return Err(self.err(
                 at,
@@ -2428,10 +3695,10 @@ impl<'a> Gen<'a> {
                 }
             }
             Stmt::Return { value, at } => {
-                let Some(i) = self.sub else {
+                let Some(sub) = self.sub else {
                     return Err(self.err(at, "`return` outside a sub"));
                 };
-                match (value, self.subs[i].returns) {
+                match (value, sub.returns) {
                     (Some(e), true) => {
                         self.expr(e)?;
                         self.asm.ret(true);
@@ -2445,16 +3712,14 @@ impl<'a> Gen<'a> {
                     (Some(_), false) => unreachable!("returns_value saw this return"),
                 }
             }
-            Stmt::Idle => {
+            Stmt::Idle(_) => {
                 self.asm.act(Action::Idle);
             }
-            Stmt::Die => {
+            Stmt::Die(_) => {
                 self.asm.act(Action::Die);
             }
             Stmt::Become { kind, at } => {
-                let id = self
-                    .kind_id(kind)
-                    .ok_or_else(|| self.err(at, format!("unknown kind `{kind}`")))?;
+                let id = self.concrete(kind, at)?;
                 self.push_int(i32::from(id));
                 self.asm.act(Action::Become);
             }
@@ -2464,9 +3729,7 @@ impl<'a> Gen<'a> {
                 pos,
                 with,
             } => {
-                let id = self
-                    .kind_id(kind)
-                    .ok_or_else(|| self.err(pos, format!("unknown kind `{kind}`")))?;
+                let id = self.concrete(kind, pos)?;
                 self.push_int(i32::from(id));
                 self.target(at)?;
                 if let Some((a, b)) = with {
@@ -2484,7 +3747,7 @@ impl<'a> Gen<'a> {
                 at,
             } => {
                 let verb = if *give { "give" } else { "take" };
-                if self.kind.is_none() {
+                if self.cur.is_none() {
                     return Err(
                         self.err(at, format!("`{verb}` inside a sub: needs belong to a kind"))
                     );
@@ -2498,23 +3761,23 @@ impl<'a> Gen<'a> {
                 self.asm
                     .act(if *give { Action::Give } else { Action::Take });
             }
-            Stmt::Move(t) => {
+            Stmt::Move(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Move);
             }
-            Stmt::Drink(t) => {
+            Stmt::Drink(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Drink);
             }
-            Stmt::Eat(t) => {
+            Stmt::Eat(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Eat);
             }
-            Stmt::Hit(t) => {
+            Stmt::Hit(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Hit);
             }
-            Stmt::Graze(t) => {
+            Stmt::Graze(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Graze);
             }
@@ -2532,19 +3795,25 @@ impl<'a> Gen<'a> {
                 self.asm.mark(c);
             }
             Stmt::Next(name, at) => {
-                let Some(k) = self.kind else {
+                let (Some(cur), Some(owner)) = (self.cur, self.owner) else {
                     return Err(self.err(at, "`next` inside a sub: states belong to a kind"));
                 };
-                let s = self.kinds[k]
+                if !self.insts[owner].states.iter().any(|st| st == name) {
+                    let o = &self.items[self.insts[owner].item];
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "{} `{}` has no state `{name}`",
+                            if o.is_trait { "trait" } else { "kind" },
+                            o.name
+                        ),
+                    ));
+                }
+                let s = self.insts[cur]
                     .states
                     .iter()
-                    .position(|st| st.name == *name)
-                    .ok_or_else(|| {
-                        self.err(
-                            at,
-                            format!("kind `{}` has no state `{name}`", self.kinds[k].name),
-                        )
-                    })?;
+                    .position(|st| st == name)
+                    .expect("the owner's states are the kind's");
                 self.asm.next(s as u8);
             }
             Stmt::ForEach {
@@ -2716,13 +3985,13 @@ mod tests {
         assert!(compile_err("kind a { when 1 => idle } kind a { }").contains("declared twice"));
         assert!(
             compile_err("kind a { when 1 => idle\n glyph \"x\" }")
-                .contains("expected `when`, `state` or `}`")
+                .contains("declarations come first")
         );
         assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
         assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
         assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
         let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
-        assert!(compile_err(&format!("kind a {{ {many} }}")).contains("at most 4 needs"));
+        assert!(compile_err(&format!("kind a {{ {many} }}")).contains("has 5 needs, at most 4"));
         // The radius binds tighter than a comparison.
         let k = compile_ok("kind a { when count water within 2 > 0 => idle }");
         let ops: Vec<OpCode> = k.code.iter().map(|o| o.code).collect();
@@ -2910,6 +4179,7 @@ mod tests {
                 None,
             ],
             tags: &k.tag_bits,
+            family_end: &k.family_end,
         };
         let mut mind = ActorMind::zeroed();
         let ctx = Ctx {
@@ -2988,6 +4258,7 @@ mod tests {
                 None,
             ],
             tags: &k.tag_bits,
+            family_end: &k.family_end,
         };
         let ctx = Ctx {
             halo: &halo,
@@ -3035,6 +4306,7 @@ mod tests {
                 None,
             ],
             tags: &k.tag_bits,
+            family_end: &k.family_end,
         };
         let out = vm::think(&k, Ctx { halo: &halo, ..ctx }, &mut mind);
         assert_eq!(out.action, Action::Die);
@@ -3095,6 +4367,7 @@ mod tests {
                 None,
             ],
             tags: &k.tag_bits,
+            family_end: &k.family_end,
         };
         let mut counts = [0; 3];
         for uid in 0..500u64 {
@@ -3118,6 +4391,453 @@ mod tests {
         assert!(counts[2] > 140 && counts[2] < 260, "{counts:?}");
     }
 
+    /// Lines of kind `k`'s rules in scan order, with the trait or parent
+    /// each came from.
+    fn rule_lines(k: &Kinds, kind: &str) -> Vec<(Option<u8>, u32, Option<String>)> {
+        let id = k.by_name(kind).unwrap().id;
+        k.debug
+            .rules
+            .iter()
+            .filter(|r| r.kind == id)
+            .map(|r| (r.state, r.line, r.via.clone()))
+            .collect()
+    }
+
+    /// A halo over one bare chunk, for running a think in a test.
+    fn run_think(
+        k: &Kinds,
+        kind: &str,
+        mind: &mut crate::actors::ActorMind,
+    ) -> crate::rules::vm::Outcome {
+        use crate::actors::ChunkActors;
+        use crate::rules::vm::{self, Ctx, Halo};
+        use crate::stage::{ChunkCells, Pos as WorldPos};
+        let cells = ChunkCells::default();
+        let actors = ChunkActors::default();
+        let halo = Halo {
+            chunks: [
+                None,
+                None,
+                None,
+                None,
+                Some((&cells, &actors)),
+                None,
+                None,
+                None,
+                None,
+            ],
+            tags: &k.tag_bits,
+            family_end: &k.family_end,
+        };
+        let ctx = Ctx {
+            halo: &halo,
+            kind: k.by_name(kind).unwrap(),
+            cell: 100,
+            pos: WorldPos::new(36, 1),
+            tick: 5,
+            rng: vm::rng_base(1, 5, 9),
+            look: 0,
+            signal: 0,
+        };
+        vm::think(k, ctx, mind)
+    }
+
+    #[test]
+    fn traits_merge_declarations_in_linearized_order() {
+        let k = compile_ok(
+            "trait mover { cadence 2  sight 6  tags animal  need food max 1d vital  mem heading }
+             trait drinker(t) { tags thirsty  need water max t vital  mem knows_water }
+             kind hen extends mover, drinker(4h) {
+               glyph \"h\"  sight 8  need health max 20 decay 0 vital  mem last_egg }
+             kind chick extends hen { glyph \"c\"  need water max 2h vital }",
+        );
+        let hen = k.by_name("hen").unwrap();
+        assert_eq!((hen.glyph, hen.cadence_shift, hen.sight), (b'h', 1, 8));
+        let needs: Vec<(&str, i32)> = hen.needs.iter().map(|n| (n.name.as_str(), n.max)).collect();
+        assert_eq!(needs, [("food", 21600), ("water", 3600), ("health", 20)]);
+        assert_eq!(hen.mems, ["heading", "knows_water", "last_egg"]);
+        assert_eq!(hen.tags, 0b11);
+        assert_eq!(hen.parent, None);
+        // The chick keeps every slot where the hen has it; its water is its own.
+        let chick = k.by_name("chick").unwrap();
+        let needs: Vec<(&str, i32)> = chick
+            .needs
+            .iter()
+            .map(|n| (n.name.as_str(), n.max))
+            .collect();
+        assert_eq!(needs, [("food", 21600), ("water", 1800), ("health", 20)]);
+        assert_eq!((chick.glyph, chick.sight, chick.tags), (b'c', 8, 0b11));
+        assert_eq!(chick.parent, Some(hen.id));
+        assert_eq!(k.debug.traits, ["mover", "drinker"]);
+        assert_eq!(
+            k.debug.parents[usize::from(hen.id)],
+            ["mover", "drinker(3600)"]
+        );
+        // A parent's tables change nothing for kinds without parents.
+        assert_eq!(k.family_end[usize::from(hen.id)], chick.id + 1);
+    }
+
+    #[test]
+    fn inherit_splices_where_written_and_appends_when_absent() {
+        let k = compile_ok(
+            "trait t1 { when hour == 1 => idle }
+             trait t2 { when hour == 2 => idle }
+             kind a extends t1, t2 {
+               when hour == 3 => idle
+               inherit t2
+               when hour == 4 => idle
+             }
+             kind b extends t1, t2 { when hour == 5 => idle }
+             kind c extends a { when hour == 6 => idle  inherit }",
+        );
+        let t = |v: Option<&str>| v.map(str::to_string);
+        assert_eq!(
+            rule_lines(&k, "a"),
+            [(None, 4, None), (None, 2, t(Some("t2"))), (None, 6, None)]
+        );
+        assert_eq!(
+            rule_lines(&k, "b"),
+            [
+                (None, 8, None),
+                (None, 1, t(Some("t1"))),
+                (None, 2, t(Some("t2")))
+            ]
+        );
+        // `inherit` alone splices the parent's list as the parent runs it:
+        // without t1, which `a` left out.
+        assert_eq!(
+            rule_lines(&k, "c"),
+            [
+                (None, 9, None),
+                (None, 4, t(Some("a"))),
+                (None, 2, t(Some("t2"))),
+                (None, 6, t(Some("a")))
+            ]
+        );
+        let notes: Vec<&str> = k
+            .debug
+            .diagnostics
+            .iter()
+            .filter(|d| d.level == Level::Note)
+            .map(|d| d.msg.as_str())
+            .collect();
+        assert_eq!(
+            notes,
+            [
+                "`a` does not run the reflex rules of `t1` (no `inherit` splices them)",
+                "`c` does not run the reflex rules of `t1` (no `inherit` splices them)"
+            ]
+        );
+    }
+
+    #[test]
+    fn state_blocks_merge_by_name() {
+        let k = compile_ok(
+            "trait walker {
+               state WALK { when hour == 1 => idle }
+               state REST { when hour == 2 => idle }
+             }
+             kind k extends walker {
+               state REST { when hour == 3 => idle  inherit }
+               state EAT { when hour == 4 => next WALK }
+             }",
+        );
+        let id = usize::from(k.by_name("k").unwrap().id);
+        assert_eq!(k.debug.states[id], ["WALK", "REST", "EAT"]);
+        assert_eq!(k.defs[id].states, 3);
+        let w = |v: &str| Some(v.to_string());
+        assert_eq!(
+            rule_lines(&k, "k"),
+            [
+                (Some(0), 2, w("walker")),
+                (Some(1), 6, None),
+                (Some(1), 3, w("walker")),
+                (Some(2), 7, None)
+            ]
+        );
+        // `next WALK` in the kind's own state is state 0.
+        let next = k.code.iter().find(|o| o.code == OpCode::Next).unwrap();
+        assert_eq!(next.a, 0);
+    }
+
+    #[test]
+    fn trait_parameters_fold_per_instantiation() {
+        use crate::actors::ActorMind;
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "const HOUR = 1h
+             trait thirsty(t) { need water max t * 2 vital  when water < t => water = t }
+             kind a extends thirsty(2 * HOUR) { }
+             kind b extends thirsty(6h) { }",
+        );
+        assert_eq!(k.by_name("a").unwrap().needs[0].max, 3600);
+        assert_eq!(k.by_name("b").unwrap().needs[0].max, 10800);
+        for (kind, want) in [("a", 1800), ("b", 5400)] {
+            let mut m = ActorMind::zeroed();
+            let out = run_think(&k, kind, &mut m);
+            assert_eq!(out.trap, None);
+            assert_eq!(m.needs[0], want, "{kind}");
+        }
+        assert!(
+            compile_err("trait t(v) { when 1 => v = 2 } kind a extends t(1) { }")
+                .contains("cannot assign to `v`: it is a constant")
+        );
+    }
+
+    #[test]
+    fn member_subs_see_their_kinds_needs_and_compile_per_kind() {
+        use crate::actors::ActorMind;
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "trait eater { need food max 1d vital }
+             trait sipper {
+               need water max 4h vital
+               sub sip(n) { water = water + n }
+               when water < 1h => { sip(30min)  idle }
+             }
+             kind a extends eater, sipper { }
+             kind b extends sipper { }
+             kind c extends sipper { sub sip(n) { water = 3h } }",
+        );
+        // Water is slot 1 in `a`, slot 0 in `b` and `c`: one sub, compiled per kind.
+        assert_eq!(k.by_name("a").unwrap().need_named("water"), Some(1));
+        assert_eq!(k.by_name("b").unwrap().need_named("water"), Some(0));
+        for (kind, slot, want) in [("a", 1, 450), ("b", 0, 450), ("c", 0, 2700)] {
+            let mut m = ActorMind::zeroed();
+            m.needs = [100; 4];
+            m.needs[slot] = 0;
+            let out = run_think(&k, kind, &mut m);
+            assert_eq!(out.trap, None, "{kind}");
+            assert_eq!(m.needs[slot], want, "{kind}");
+        }
+        assert!(k.debug.subs.contains(&"a::sip".to_string()));
+        assert!(k.debug.subs.contains(&"c::sip".to_string()));
+    }
+
+    #[test]
+    fn family_numbering_is_preorder_by_file_then_declaration() {
+        let k = compile_ok(
+            "kind hen extends bird { }
+             kind animal { }
+             kind plant { }
+             kind bird extends animal { }
+             kind fox extends animal { }
+             kind tree extends plant { }",
+        );
+        assert_eq!(
+            k.names().collect::<Vec<_>>(),
+            ["animal", "bird", "hen", "fox", "plant", "tree"]
+        );
+        assert_eq!(k.family_end, [4, 3, 3, 4, 6, 6]);
+        let parents: Vec<Option<u16>> = k.defs.iter().map(|d| d.parent).collect();
+        assert_eq!(parents, [None, Some(0), Some(1), Some(0), None, Some(4)]);
+        // `only` and families in predicates.
+        let k = compile_ok(
+            "kind animal { }
+             kind bird extends animal {
+               when nearest animal within 1 as a => idle
+               when nearest only animal within 1 as a => idle
+               when nearest bird:2 within 1 as a => idle
+               when nearest only bird:2 within 1 as a => idle
+             }",
+        );
+        let pushes: Vec<i32> = k
+            .code
+            .windows(3)
+            .filter(|w| w[2].code == OpCode::Nearest)
+            .map(|w| match w[0].code {
+                OpCode::PushK => k.consts[w[0].imm as u16 as usize],
+                _ => i32::from(w[0].imm),
+            })
+            .collect();
+        assert_eq!(
+            pushes,
+            [
+                0,
+                pred::ONLY,
+                pred::kind_look(1, 2),
+                pred::kind_look(1, 2) + pred::ONLY
+            ]
+        );
+    }
+
+    #[test]
+    fn extends_errors_name_the_problem() {
+        let errs = [
+            ("kind a extends zz { }", "unknown trait or kind `zz`"),
+            (
+                "kind a extends b { } kind b extends a { }",
+                "extends itself: a -> b -> a",
+            ),
+            (
+                "trait a extends b { } trait b extends a { }",
+                "extends itself",
+            ),
+            (
+                "kind a { } kind b { } kind c extends a, b { }",
+                "extends two kinds, `a` and `b`",
+            ),
+            (
+                "kind a { } trait t extends a { }",
+                "trait `t` can extend only traits",
+            ),
+            (
+                "trait t(v) { } kind a extends t { }",
+                "takes 1 argument, 0 given",
+            ),
+            (
+                "kind a { } kind b extends a(1) { }",
+                "kind `a` takes no arguments",
+            ),
+            (
+                "trait t(v) { } trait u extends t(1) { } kind a extends u, t(2) { }",
+                "reaches trait `t` twice, with (1) and (2)",
+            ),
+            (
+                "trait t { } kind a { inherit t }",
+                "`t` is not an ancestor of `a`",
+            ),
+            (
+                "trait t { when true => idle } kind a extends t { inherit t  inherit t }",
+                "`inherit t` twice",
+            ),
+            (
+                "trait t { } kind a extends t { state S { inherit t } }",
+                "`t` has no state `S`",
+            ),
+            ("trait t { glyph \"x\" }", "a trait has no glyph"),
+            ("trait t { color \"#ffffff\" }", "a trait has no colour"),
+            ("kind a(v) { }", "a kind takes no parameters"),
+            (
+                "trait t { when food < 1 => idle } kind a extends t { need food max 1d }",
+                "`t` uses `food`, which it does not declare",
+            ),
+            ("trait t { when zz > 1 => idle }", "unknown name `zz`"),
+            (
+                "trait t { } kind a { when nearest t within 1 as v => idle }",
+                "`t` is a trait",
+            ),
+            (
+                "trait t { } kind a { when 1 => spawn t at north }",
+                "only a kind can be spawned",
+            ),
+            (
+                "kind a { tags z  when nearest only z within 1 as v => idle }",
+                "`only` applies to a kind",
+            ),
+            (
+                "kind a { when nearest only water within 1 as v => idle }",
+                "`only` applies to a kind",
+            ),
+            (
+                "trait t { when 1 => f() } kind a extends t { sub f() { idle } }",
+                "`t` calls `f`, which it does not define",
+            ),
+            (
+                "sub f() { } kind a { sub f() { } }",
+                "has the name of a file sub",
+            ),
+            ("const X = 1  trait t(X) { }", "hides the constant `X`"),
+            (
+                "trait p { need w max 1h } trait q { need w max 2h } kind a extends p, q { }",
+                "inherits need `w` from `p` and `q`",
+            ),
+            (
+                "trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { }",
+                "inherits different cadences from `p` and `q`",
+            ),
+            (
+                "trait p { sub f() { } } trait q { sub f() { } } kind a extends p, q { }",
+                "inherits sub `f` from both `p` and `q`",
+            ),
+            (
+                "trait t { when 1 => next S } kind a extends t { state S { } }",
+                "trait `t` has no state `S`",
+            ),
+            ("trait t { } kind t { }", "kind `t` declared twice"),
+            (
+                "trait t { need a max 1h need b max 1h need c max 1h need d max 1h need e max 1h }",
+                "has 5 needs",
+            ),
+            (
+                "kind a { when 1 => idle  sub f() { } }",
+                "member subs come before the rules",
+            ),
+        ];
+        for (text, want) in errs {
+            let e = compile_err(text);
+            assert!(e.contains(want), "{text}\n  got: {e}");
+        }
+        // A redeclaration settles parents that disagree.
+        compile_ok(
+            "trait p { need w max 1h } trait q { need w max 2h } kind a extends p, q { need w max 3h }",
+        );
+        compile_ok("trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { cadence 8 }");
+    }
+
+    #[test]
+    fn straight_line_second_action_is_an_error() {
+        for text in [
+            "kind a { when 1 => { idle  move north } }",
+            "kind a { when 1 => { if hour > 1 { idle } else { die }  move north } }",
+            "sub f() { idle } kind a { when 1 => { f()  move north } }",
+            "kind a { when 1 => { choose { 1: idle  2: die }  move north } }",
+        ] {
+            let e = compile_err(text);
+            assert!(e.contains("a second action"), "{text}: {e}");
+        }
+        let e = compile_err("kind a {\n when 1 => {\n idle\n move north } }");
+        assert!(e.starts_with("t.rules:4:2:"), "{e}");
+        assert!(e.contains("already acted at line 3"), "{e}");
+        // Conservative: a branch that may not act, or a `next`, is fine.
+        compile_ok("kind a { when 1 => { if hour > 1 { idle }  move north } }");
+        compile_ok("kind a { when 1 => { next S  move north } state S { } }");
+        compile_ok("kind a { when 1 => { choose { 1: idle  0: look = 1 }  move north } }");
+    }
+
+    #[test]
+    fn unreachable_rule_warning_is_conservative() {
+        let warnings = |text: &str| -> Vec<String> {
+            compile_ok(text)
+                .debug
+                .diagnostics
+                .iter()
+                .filter(|d| d.level == Level::Warning)
+                .map(ToString::to_string)
+                .collect()
+        };
+        assert_eq!(
+            warnings("kind a { when true => idle\n when hour > 1 => die }"),
+            ["t.rules:2:2: warning: never runs: the rule at t.rules:1 always ends the think"]
+        );
+        assert!(warnings("kind a { when true => look = 1\n when hour > 1 => die }").is_empty());
+        assert!(warnings("kind a { when hour > 1 => idle\n when true => die }").is_empty());
+        assert!(
+            warnings("kind a { when true => { if hour > 1 { idle } }\n when 1 => die }").is_empty()
+        );
+        assert_eq!(
+            warnings("kind a { when true => idle\n state S { when 1 => die } }"),
+            [
+                "t.rules:2:12: warning: never runs: the reflex rule at t.rules:1 always ends the think"
+            ]
+        );
+        // Through inheritance: the trait's rule hides the kind's.
+        assert_eq!(
+            warnings(
+                "trait t { when 2 > 1 => idle }\nkind a extends t { inherit t\n when hour > 1 => die }"
+            ),
+            ["t.rules:3:2: warning: never runs: the rule at t.rules:1 always ends the think"]
+        );
+        // One warning per rule, not one per kind that includes it.
+        assert_eq!(
+            warnings(
+                "trait t { when true => idle\n when hour > 1 => die }\nkind a extends t { }\nkind b extends t { }"
+            )
+            .len(),
+            1
+        );
+    }
+
     #[test]
     fn a_directory_compiles_in_sorted_file_order() {
         let dir = std::env::temp_dir().join(format!("wmc-rules-{}", std::process::id()));
@@ -3131,7 +4851,7 @@ mod tests {
         std::fs::write(dir.join("c.rules"), "kind ant { }").unwrap();
         let err = compile_dir(&dir).unwrap_err().to_string();
         assert!(
-            err.starts_with("c.rules:1:6: kind `ant` declared twice"),
+            err.starts_with("c.rules:1:6: kind `ant` declared twice (first at a.rules:1)"),
             "{err}"
         );
         std::fs::remove_dir_all(&dir).unwrap();

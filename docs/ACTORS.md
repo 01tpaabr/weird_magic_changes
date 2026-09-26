@@ -161,15 +161,20 @@ exactly one action). Compiled at load to bytecode for a fuel-bounded integer sta
 
 ```ebnf
 file     := item*
-item     := "include" STRING | "const" NAME "=" expr | sub | kind
-kind     := "kind" NAME [ "extends" NAME ] "{" decl* rule* state* "}"
-decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+
-          | "cadence" INT | "sight" INT | "fuel" INT | "bite" INT
-          | "food" TIME | "place" INT "/" INT                 # worldgen share of walkable cells
-          | "need" NAME "max" (INT | TIME) [ "decay" INT ] [ "vital" ]
+item     := "const" NAME "=" expr | sub | kind | trait
+kind     := "kind" NAME [ "extends" parents ] "{" decl* sub* rule* state* "}"
+trait    := "trait" NAME [ "(" NAME ("," NAME)* ")" ] [ "extends" parents ]
+            "{" decl* sub* rule* state* "}"
+parents  := parent ("," parent)*
+parent   := NAME [ "(" expr ("," expr)* ")" ]                # arguments: constant expressions
+decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+   # glyph, color: kinds only
+          | "cadence" num | "sight" num | "fuel" num | "bite" num | "food" num
+          | "place" INT "/" INT                               # kinds only; worldgen share
+          | "need" NAME "max" num [ "decay" INT ] [ "vital" ]
           | "mem" NAME ("," NAME)*
+num      := expr                                             # constant: numbers, consts, trait parameters
 state    := "state" NAME "{" rule* "}"
-rule     := "when" cond "=>" body
+rule     := "when" cond "=>" body | "inherit" [ NAME ]
 sub      := "sub" NAME "(" [ param ("," param)* ] ")" block
 param    := NAME [ ":" ("target" | "pred") ]                 # default int
 body     := stmt | block
@@ -191,7 +196,7 @@ cond     := expr | "nearest" pred "within" expr "as" NAME | "sniff" NAME "within
           | cond "and" cond | cond "or" cond | "not" cond | "(" cond ")"
 target   := NAME | "here" | "attacker" | "toward" target | "away" target | "at" "(" expr "," expr ")"
           | "north" | "east" | "south" | "west" | "dir" "(" expr ")" | "random" "free"
-pred     := NAME [ ":" INT ] | "water" | "soil" | "rock" | "free" | "bare"
+pred     := [ "only" ] NAME [ ":" INT ] | "water" | "soil" | "rock" | "free" | "bare"
 expr     := INT | TIME | NAME | sense | "blocked" | "missed" | "refused" | "(" expr ")"
           | expr ("+"|"-"|"*"|"/"|"%"|"<"|"<="|"=="|"!="|">="|">"|"and"|"or") expr | "not" expr
           | "rand" "(" expr ")" | "chance" "(" expr ")" | "count" pred "within" expr | "dist" "(" target ")"
@@ -215,6 +220,34 @@ TIME     := INT ("min" | "h" | "d")
 - `state` blocks follow the reflex rules; an actor starts in the first one, `next NAME`
   switches for the following think and ends this one like an action, `become` resets to
   the first. `next` inside a sub is a compile error (states belong to a kind).
+- **Traits and inheritance** (step 8a). A `trait` is a kind without a glyph, rows or id:
+  declarations, member subs, rules and states that kinds include with `extends`. A kind
+  extends at most one kind and any number of traits; a trait extends traits. Trait
+  parameters are constants bound by the arguments (`extends drinker(90min)`), usable in
+  declarations and rules. Ancestors are linearized (each parent's ancestors, then the
+  parent, first occurrence wins; one trait with two argument lists is an error).
+  Declarations merge: numbers, glyph, colour: the kind's own, else what its direct parents
+  agree on (disagreement is an error unless the kind declares it); tags: union; needs and
+  mems: by name, parents' slots first, a redeclared need overrides in place, parents that
+  declare one differently must be settled by the kind; `cover`: any. Member subs merge by
+  name and the kind's own override its parents' (a trait's rule calling `wander()` gets the
+  kind's `wander` if it has one). Rule lists (the reflexes, each state) resolve on their
+  own: `inherit` splices every direct parent's list where it stands, `inherit NAME` that
+  ancestor's list as it runs it, and a list with no `inherit` ends with its parents' lists;
+  a splice never brings the same rules twice. A state the kind does not declare is
+  inherited whole. A trait's rules and subs may name only the needs, mems, states and subs
+  it or its ancestors declare, so it compiles for any kind that includes it; every trait is
+  compiled on its own once (parameters bound to 1) to prove it, used or not.
+- **Families** (step 8a). A kind's name in a predicate matches the kind and every kind that
+  extends it; `only NAME` the kind alone (also `kind:look` and `only kind:look`). Kinds are
+  numbered in pre-order over the inheritance forest (roots in file then declaration order,
+  children right after their parent), so a family is one id range (`Kinds::family_end`), and
+  a search decodes its predicate once into that range (`vm::Want`). `spawn` and `become` name
+  a concrete kind; a trait is never matched, spawned or become.
+- **Checks** (step 8a). Two actions in straight-line code (a statement that acts on every
+  path, then an action in the same list) are a compile error. `wmc lint` prints warnings
+  (a rule after one whose condition is constantly true and whose body always ends the
+  think never runs) and notes (an ancestor whose reflex rules no `inherit` splices).
 - `for each pred within r as v { }` visits the matching cells of rings `1..=r` in a fixed
   order (each ring clockwise from its top-left corner, no rotation: it visits them all),
   pays the search's fuel once, and binds `v` per cell. There is no `break`: an action in
@@ -233,7 +266,9 @@ TIME     := INT ("min" | "h" | "d")
   status row, the `traps` column of `wmc run`). The sim never panics on a rules file.
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
-  64 800 goes to the pool), kind ids in **sorted file name then declaration order**, the
+  64 800 goes to the pool), kind ids in **pre-order over the inheritance forest, roots and
+  siblings in sorted file name then declaration order** (without `extends`: file name then
+  declaration order), the
   rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`,
   `free` and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random`, plain
   names elsewhere, so `need water` and `water < 40min` read as intended; `food` likewise is a
@@ -447,3 +482,8 @@ where it touches the tick.
    that costs nothing when off, `sim::explain`); hot reload on `r` with rows and saved chunks
    remapped by name (decision 34); `docs/RULES.md`, the author's reference. `drink` now needs
    adjacent water, like every other action on a neighbour.
+8. **Rules as input: traits, scenarios, packs, author tooling** (plan: `docs/PLAN-8.md`).
+   8a done: `trait`, `extends` with arguments, `inherit`, member subs, family matching and
+   `only`, pre-order numbering, the straight-line second-action error, unreachable-rule
+   warnings and inheritance notes in `wmc lint`, `via` in `wmc why`. The built-in rules
+   compile to the same programs and hash.

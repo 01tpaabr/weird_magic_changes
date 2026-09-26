@@ -134,7 +134,78 @@ An actor starts in the first state. `next NAME` switches for the next think and 
 like an action; it can be combined with one action (`{ next FORAGE  move toward f }`).
 `become` starts the new kind in its first state. `next` isn't allowed inside a sub.
 
-## 6. Statements
+## 6. Traits: sharing behaviour between kinds
+
+A **trait** is a reusable piece of a kind: declarations, rules, states and subs, but no
+glyph, no colour, and no actors of its own. A kind **extends** traits to include them, and
+may extend one other kind.
+
+```
+trait drinker(thirsty) {                    # a parameter: a constant inside the trait
+  need water max 4h vital
+  mem knows_water, water_x, water_y
+  when water < 30min and nearest water within 1 as w => drink w
+  when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
+  when water < thirsty and knows_water == 1 => move toward at(water_x, water_y)
+}
+
+trait walker {
+  mem heading, detour
+  sub wander() { heading = turn(heading)  move dir(heading) }   # a member sub: sees heading
+  when blocked    => { heading = rand(8) + 1  detour = 3 }
+  when detour > 0 => { detour -= 1  move dir(heading) }
+}
+
+kind hen extends drinker(90min), walker {
+  glyph "C"
+  need food max 1d vital
+  when nearest fox within 5 as f => flee(f)
+  inherit drinker                           # the trait's rules run exactly here
+  when food < 20h => forage(grass, 6)
+  inherit walker
+  when true => wander()
+}
+
+kind chick extends hen {                    # everything a hen is, except what it changes
+  glyph "c"
+  need food max 8h vital                    # redeclared: same slot, new max
+  when age > 2d => become hen
+  inherit drinker                           # takes the hen's drinking and walking,
+  inherit walker                            # but not the hen's own rules
+  when nearest only hen within 6 as m => move toward m
+}
+```
+
+**What a kind gets from its parents.**
+- **Declarations:** its own, else what its parents declare. `cadence`, `sight`, `fuel`,
+  `food`, `bite`, glyph and colour must agree between parents, or the kind declares its
+  own. Tags add up.
+- **Needs and memory:** by name, the parents' first, then the kind's. Redeclaring a need
+  changes its max, decay or vital in place. Two parents that declare the same need
+  differently must be settled by the kind. The 4-need and 12-mem limits apply after
+  merging.
+- **Subs:** a sub inside a trait or kind is a *member sub*. It sees that trait's needs,
+  memory and states, and may `take`, `give` and `next`. A kind can redefine a member sub,
+  and the trait's rules then call the kind's version.
+- **States:** by name. A state the kind does not declare is inherited whole.
+
+**Where inherited rules run.** Each rule list, the reflexes and each state, is resolved on
+its own:
+- **No `inherit` in the list:** the parents' rules come after the kind's own.
+- **`inherit`** runs every parent's rules at that point.
+- **`inherit NAME`** runs that ancestor's rules, and only those, at that point. Anything a
+  list doesn't `inherit` is left out, which is how the chick above skips the hen's rules.
+
+A trait may name only the needs, memory, states and subs it or its own parents declare.
+Every trait is compiled on its own to check this, even if no kind uses it yet, so a trait
+that compiles works in any kind.
+
+**Families.** A kind's name in a predicate matches that kind **and every kind that extends
+it**: `nearest hen` sees chicks too. `only hen` matches hens alone. `spawn` and `become`
+always name one exact kind. A trait is never matched: to find "anything that drinks", give
+the trait a tag (`tags drinker`) and match the tag.
+
+## 7. Statements
 
 | statement | |
 |---|---|
@@ -144,10 +215,10 @@ like an action; it can be combined with one action (`{ next FORAGE  move toward 
 | `while cond { }`, `repeat n { }` | bounded by fuel |
 | `for each pred within r as v { }` | once per matching cell in rings 1..r, in a fixed order (each ring clockwise from its top-left). The search's fuel is paid once. There is no `break`, so collect into locals and act after the loop |
 | `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm |
-| `sub_name(args)` | call a sub (§11) |
+| `sub_name(args)` | call a sub (§12) |
 | `return expr` | inside a sub |
 
-## 7. Actions
+## 8. Actions
 
 Each action is one intent, settled after every actor has thought. The outcome is readable at
 the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the shorthands
@@ -171,7 +242,7 @@ Bites land before anyone moves, on either side of a chunk border, in key order. 
 eaters of one victim each get the share they took. Transfers are settled after bites, also
 in key order.
 
-## 8. Effects
+## 9. Effects
 
 Effects combine with the action and don't end the think.
 
@@ -181,7 +252,7 @@ Effects combine with the action and don't end the think.
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
 | `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 2 channels in a rule set, numbered by first use |
 
-## 9. Senses
+## 10. Senses
 
 | sense | value |
 |---|---|
@@ -209,7 +280,7 @@ neighbouring chunks. An unloaded chunk reads as rock with nobody on it. `nearest
 rings 1 to r (not its own cell), and each ring starts at a random point so a flock doesn't
 all pick the same target.
 
-## 10. Targets and predicates
+## 11. Targets and predicates
 
 A **target** is a cell relative to the actor:
 
@@ -226,13 +297,14 @@ A **predicate** says what a cell must hold:
 
 | predicate | matches |
 |---|---|
-| a kind (`fox`) or a tag (`meat`) | whoever stands there, or the cover there |
-| `kind:look` (`flower:1`) | that kind showing that look |
+| a kind (`fox`) or a tag (`meat`) | whoever stands there, or the cover there; a kind matches its whole family (§6) |
+| `only fox` | that kind exactly, not the kinds that extend it |
+| `kind:look` (`flower:1`), `only kind:look` | that kind (family, or exactly) showing that look |
 | `water`, `soil`, `rock` | the ground, the feature |
 | `free` | walkable, nobody standing |
 | `bare` | walkable, no ground cover |
 
-## 11. Expressions, subs and constants
+## 12. Expressions, subs and constants
 
 Every value is a 32-bit integer; there are no floats. Arithmetic wraps, `x / 0` and
 `x % 0` are 0. Operators: `+ - * / %`, `< <= == != >= >`, `and or not`. Functions:
@@ -257,7 +329,7 @@ so every kind can call it. It may act (`flee` moves); the think then ends when t
 rule's body finishes. Calls nest up to 8 deep. `take`, `give` and `next` belong to kinds, not
 subs.
 
-## 12. Cost
+## 13. Cost
 
 Each op costs 1 fuel, and a search costs `(2r + 1)² / 8` more. A think that runs out of fuel
 becomes `idle`, sets `trapped`, and counts under `TRAPS` on the status bar and in
@@ -274,10 +346,14 @@ Ways to keep a kind cheap:
   (`rest` in the bee).
 - **Keep radii small.** A radius-8 search reads 289 cells, radius 16 reads 1089.
 
-## 13. Debugging
+## 14. Debugging
 
 - **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
-  points. Errors come as `file:line:col: message`.
+  points, each kind's parents and family. Errors come as `file:line:col: message`, and
+  stop the compile. Warnings and notes come as `file:line:col: warning: message` and don't:
+  a rule that can never run, or an ancestor whose rules no `inherit` splices.
+- **Two actions in a row** are a compile error when the compiler can see both: a statement
+  that acts on every path, then another action in the same block.
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at
   (x, y) to think, and prints that think. It shows the actor's needs and memory, and every
   rule it checked: `FIRED`, `no` (condition false) or blank (not reached). Then the decision
@@ -290,7 +366,7 @@ Ways to keep a kind cheap:
   you removed are dropped. Saved chunks are rewritten to match, so reopen the save with the
   same rules (`WMC_RULES=...`).
 
-## 14. Limits
+## 15. Limits
 
 | | |
 |---|---|

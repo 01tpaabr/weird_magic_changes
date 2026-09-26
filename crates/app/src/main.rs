@@ -232,6 +232,9 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         .map(|(n, c)| format!("{n} {c}"))
         .collect();
     let checksum = sim::checksum(&mut world);
+    // The world alone, without the rules hash: equal across rule sets that
+    // compile to the same behaviour (the step-8 gates compare this).
+    let state = stage::checksum(&mut world);
 
     let mut out = std::io::stdout().lock();
     writeln!(
@@ -252,6 +255,7 @@ fn run(dir: &str, ticks: u64, cfg: &WorldConfig) -> anyhow::Result<()> {
         par::thread_count()
     )?;
     writeln!(out, "checksum:  {checksum:016x}")?;
+    writeln!(out, "state:     {state:016x}")?;
     let tally = world.resource::<Tally>();
     writeln!(
         out,
@@ -291,6 +295,9 @@ fn lint(path: &str) -> anyhow::Result<()> {
         sim_core::rules::compile(&name, &text)?
     };
     let mut out = std::io::stdout().lock();
+    if !kinds.debug.traits.is_empty() {
+        writeln!(out, "traits {}", kinds.debug.traits.join(", "))?;
+    }
     for k in &kinds.defs {
         let needs: Vec<String> = k
             .needs
@@ -317,11 +324,40 @@ fn lint(path: &str) -> anyhow::Result<()> {
             needs.join(", "),
             k.mems.join(", "),
         )?;
+        let parents = kinds
+            .debug
+            .parents
+            .get(usize::from(k.id))
+            .filter(|p| !p.is_empty());
+        let end = kinds.family_end[usize::from(k.id)];
+        if parents.is_some() || end > k.id + 1 {
+            let family: Vec<&str> = (k.id + 1..end)
+                .map(|d| kinds.defs[usize::from(d)].name.as_str())
+                .collect();
+            let mut line = format!("     {:<12}", "");
+            if let Some(p) = parents {
+                line.push_str(&format!(" extends {}", p.join(", ")));
+            }
+            if !family.is_empty() {
+                line.push_str(&format!(" family: {}", family.join(", ")));
+            }
+            writeln!(out, "{line}")?;
+        }
     }
+    for d in &kinds.debug.diagnostics {
+        writeln!(out, "{d}")?;
+    }
+    let warnings = kinds
+        .debug
+        .diagnostics
+        .iter()
+        .filter(|d| d.level == sim_core::rules::Level::Warning)
+        .count();
     writeln!(
         out,
-        "{} kinds, {} ops, {} consts, {} subs, hash {:016x}",
+        "{} kinds, {} traits, {} ops, {} consts, {} subs, {warnings} warnings, hash {:016x}",
         kinds.len(),
+        kinds.debug.traits.len(),
         kinds.code.len(),
         kinds.consts.len(),
         kinds.subs.len(),

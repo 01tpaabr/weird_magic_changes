@@ -454,6 +454,7 @@ pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
     let halo = crate::rules::vm::Halo {
         chunks,
         tags: &kinds.tag_bits,
+        family_end: &kinds.family_end,
     };
     Some(systems::explain(
         kinds, tick, seed, &halo, cc, slot, &row, &mind,
@@ -1758,6 +1759,71 @@ mod tests {
         let d = rows(&mut w).into_iter().find(|r| r.0 == 0xD1).unwrap();
         assert_eq!(d.3.mem[0], i32::from(result::REFUSED));
         assert!(d.3.needs[0] < 100, "no refill from afar: {}", d.3.needs[0]);
+    }
+
+    /// A kind built from traits with `inherit` and a member sub behaves
+    /// exactly like the same kind written flat: same rows, tick for tick
+    /// (only the rules hash differs).
+    #[test]
+    fn a_kind_built_from_traits_walks_the_same_path_as_the_flat_one() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let flat = compile(
+            "flat.rules",
+            "kind hen { glyph \"h\"  cadence 2  sight 4
+               need water max 4h vital  need food max 1d vital
+               mem heading, detour
+               when blocked => { heading = rand(8) + 1  detour = 2 }
+               when detour > 0 => { detour -= 1  move dir(heading) }
+               when water < 3h and nearest water within 1 as w => drink w
+               when true => { heading = heading % 8 + 1  move dir(heading) } }",
+        )
+        .unwrap();
+        let built = compile(
+            "built.rules",
+            "trait walker { mem heading, detour
+               sub wander() { heading = heading % 8 + 1  move dir(heading) }
+               when blocked => { heading = rand(8) + 1  detour = 2 }
+               when detour > 0 => { detour -= 1  move dir(heading) } }
+             trait drinker(t) { need water max 4h vital
+               when water < t and nearest water within 1 as w => drink w }
+             kind hen extends walker, drinker(3h) { glyph \"h\"  cadence 2  sight 4
+               need food max 1d vital
+               inherit walker
+               inherit drinker
+               when true => wander() }",
+        )
+        .unwrap();
+        assert_eq!(flat.defs[0].needs, built.defs[0].needs);
+        assert_eq!(flat.defs[0].mems, built.defs[0].mems);
+        assert_ne!(flat.hash, built.hash);
+        let world = |kinds: &Kinds| {
+            let cfg = WorldConfig {
+                width: 64,
+                height: 64,
+                ..cfg(14)
+            };
+            let mut w = new_world_with(&cfg, kinds.clone());
+            flatten(&mut w);
+            for y in 30..34 {
+                for x in 30..34 {
+                    let (cc, i) = Pos::new(x, y).split();
+                    stage::chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
+                }
+            }
+            let now = tick(&w);
+            for (i, (x, y)) in [(10, 10), (28, 31), (40, 50)].into_iter().enumerate() {
+                let m = newborn(kinds, 0, 0x100 + i as u64, now);
+                assert!(place_actor(&mut w, Pos::new(x, y), 0, m));
+            }
+            for _ in 0..3000 {
+                step(&mut w);
+            }
+            w
+        };
+        let (mut a, mut b) = (world(&flat), world(&built));
+        assert_eq!(rows(&mut a), rows(&mut b));
+        assert_eq!(stage::checksum(&mut a), stage::checksum(&mut b));
     }
 
     /// Grass is ground cover: a hungry chicken walks onto a patch, stands on

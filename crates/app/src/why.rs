@@ -178,9 +178,13 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
                 .files
                 .get(usize::from(r.file))
                 .map_or("?", String::as_str);
+            let via = r
+                .via
+                .as_ref()
+                .map_or(String::new(), |v| format!("   [via {v}]"));
             let _ = writeln!(
                 s,
-                "  {:<20} {verdict:<6} {}",
+                "  {:<20} {verdict:<6} {}{via}",
                 format!("{file}:{}", r.line),
                 r.text
             );
@@ -390,5 +394,33 @@ mod tests {
         assert!(r.contains("animals.rules:"), "{r}");
         assert!(r.contains("decides "), "{r}");
         assert!(r.contains("\nops\n"), "{r}");
+    }
+
+    #[test]
+    fn an_inherited_rule_names_where_it_came_from() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "trait restful {\n  when hour >= 0 => idle\n}\nkind cat extends restful { glyph \"c\" }",
+        )
+        .unwrap();
+        let cfg = sim_core::WorldConfig {
+            width: 64,
+            height: 64,
+            seed: 5,
+            params: Default::default(),
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone());
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0xCA, now)))
+            .expect("a walkable cell");
+        let r = report(&w, at, false).expect("a cat there");
+        assert!(r.contains("t.rules:2"), "{r}");
+        assert!(
+            r.contains("FIRED  when hour >= 0 => idle   [via restful]"),
+            "{r}"
+        );
     }
 }
