@@ -1585,6 +1585,51 @@ mod tests {
         }
     }
 
+    /// A `take` that moves nothing (the taker is full, or the target
+    /// empty) is not a take: the target sees no `taken` and does not wake.
+    #[test]
+    fn a_take_that_moves_nothing_is_not_seen() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind pot { glyph \"P\"  cadence 1024
+               need honey max 100 decay 0
+               mem seen
+               when taken => { seen += 1  idle } }
+             kind bee { glyph \"b\"  cadence 1
+               need honey max 50 decay 0
+               mem done
+               when done == 0 => { done = 1  take east honey 10 }
+               when true => idle }",
+        )
+        .unwrap();
+        let (pot, bee) = (0, 1);
+        let mut w = new_world_with(&cfg(9), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        // A full bee at a full pot; an empty bee at an empty pot.
+        for (y, full, uid) in [(10, true, 0xC1), (20, false, 0xC2)] {
+            let mut p = newborn(&kinds, pot, uid + 0x100, now);
+            let mut b = newborn(&kinds, bee, uid, now);
+            if !full {
+                (p.needs[0], b.needs[0]) = (0, 0);
+            }
+            assert!(place_actor(&mut w, Pos::new(11, y), pot, p));
+            assert!(place_actor(&mut w, Pos::new(10, y), bee, b));
+        }
+        for _ in 0..4 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        for uid in [0xC1, 0xC2] {
+            let [b, p] = [uid, uid + 0x100].map(|u| all.iter().find(|r| r.0 == u).unwrap().3);
+            assert_eq!(b.mem[0], 1, "bee {uid:x} took");
+            assert_eq!(p.mem[0], 0, "pot of {uid:x} saw no take");
+            assert_eq!(p.events & crate::rules::vm::event::TAKEN, 0);
+        }
+    }
+
     /// A decaying need is read as it stands now, not as of its owner's
     /// last think: `expect max` sees the drain, a `take` gets only what is
     /// left, and a bite on decaying health takes (and feeds) only that.

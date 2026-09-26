@@ -834,8 +834,8 @@ struct Transfer {
 /// stands on the target cell at tick start. `take` moves up to `amount` of
 /// the target's same-named need into the mover's, `give` the reverse, never
 /// more than the source holds or past the receiver's max. A decaying need
-/// of the target is first decayed to now. The target of a `take` gets
-/// `TAKEN` and wakes. `None` if the mover died this tick (its
+/// of the target is first decayed to now. The target of a `take` that
+/// moved anything gets `TAKEN` and wakes. `None` if the mover died this tick (its
 /// intent is void); else the mover's result: MISSED (nobody there, or dead
 /// now), REFUSED (the target has no such need), OK.
 fn transfer(
@@ -879,6 +879,7 @@ fn transfer(
         // The target last thought a while ago: bring it to now first. An
         // emptied vital need kills it at its next think.
         vm::decay(ddef, m, tick);
+        dst_meta.dirty = true;
     }
     let dv = m.needs[dn];
     let (smax, dmax) = (sdef.needs[t.need].max, ddef.needs[dn].max);
@@ -887,6 +888,9 @@ fn transfer(
     } else {
         t.amount.min(dv.max(0)).min((smax - sv).max(0))
     };
+    if moved == 0 {
+        return Some(result::OK); // nothing moved: nobody saw a take
+    }
     let (sv, dv) = if t.give {
         (sv - moved, dv + moved)
     } else {
