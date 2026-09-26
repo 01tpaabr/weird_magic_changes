@@ -29,6 +29,7 @@ use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch,
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who};
+use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{SavedKind, Store, WorldMeta};
@@ -545,9 +546,26 @@ pub fn explain_slot(world: &World, cc: ChunkCoord, slot: u16) -> Option<systems:
     let e = stage.entity(cc)?;
     let row = *world.get::<ChunkActors>(e)?.rows.get(usize::from(slot))?;
     let mind = *world.get::<ChunkMinds>(e)?.rows.get(usize::from(slot))?;
+    // The think sees the world after the Simulate phase, so a chunk due to
+    // fade its scent this tick is faded first, in a copy. Mirror every
+    // Simulate system here.
+    let faded: Vec<(ChunkCoord, ChunkCells)> = (0..9)
+        .filter_map(|k| {
+            let c = ChunkCoord::new(cc.x + k % 3 - 1, cc.y + k / 3 - 1);
+            if !chunk_due(tick, c, SCENT_CADENCE) {
+                return None;
+            }
+            let mut cells = world.get::<ChunkCells>(stage.entity(c)?)?.clone();
+            fade_chunk(&mut cells).then_some((c, cells))
+        })
+        .collect();
     let halo = crate::rules::vm::Halo::around(cc, kinds, |c| {
         let e = stage.entity(c)?;
-        Some((world.get::<ChunkCells>(e)?, world.get::<ChunkActors>(e)?))
+        let cells = match faded.iter().find(|f| f.0 == c) {
+            Some((_, cells)) => cells,
+            None => world.get::<ChunkCells>(e)?,
+        };
+        Some((cells, world.get::<ChunkActors>(e)?))
     });
     Some(systems::explain(
         kinds, tick, seed, &halo, cc, slot, &row, &mind,
@@ -1867,6 +1885,34 @@ mod tests {
         assert_eq!(p, at);
         let e = explain_slot(&w, cc, slot).unwrap();
         assert_eq!((e.row.kind, e.before.uid), (GRASS, 0x6A));
+    }
+
+    /// `explain` sees the scent the think will see: faded first on the
+    /// chunk's fade tick (the Simulate phase runs before Think).
+    #[test]
+    fn explain_reads_scent_after_the_fade() {
+        let kinds = crate::rules::compile(
+            "dot.rules",
+            "kind dot { cadence 1  mem seen\n\
+               when true => seen = scent(trail)\n\
+               when true => { mark trail 255  idle } }",
+        )
+        .unwrap();
+        let s = Scenario::parse(
+            "t",
+            "seed 1\nsize 64 64\n\
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0\n\
+             start dot at (5, 5)\n",
+        )
+        .unwrap();
+        let mut w = new_world_with(&s, kinds).unwrap();
+        let p = Pos::new(5, 5);
+        for _ in 0..32 {
+            let e = explain(&w, p).unwrap();
+            step(&mut w);
+            let dot = rows(&mut w)[0].3;
+            assert_eq!(e.after.mem[0], dot.mem[0], "tick {}", tick(&w) - 1);
+        }
     }
 
     /// Hot reload maps rows by name: kinds renumbered, a kind gone (its rows

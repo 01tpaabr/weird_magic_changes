@@ -18,7 +18,8 @@ own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slo
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
 state is exactly needs + memory + a state byte: no saved program counter, so a think is a
-pure function of (own row, tick-start world, tick, seed).
+pure function of (own row, the world after this tick's Simulate phase (scent faded), tick,
+seed).
 
 ```
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)

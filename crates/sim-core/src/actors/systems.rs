@@ -351,7 +351,8 @@ pub struct Explained {
 }
 
 /// Run one actor's think on a copy of its mind, with a trace. Pure: the
-/// same function the Think phase runs, against the same tick-start state.
+/// same function the Think phase runs, against the halo it is given
+/// (`sim::explain_slot` builds the one Think sees).
 #[allow(clippy::too_many_arguments)]
 pub fn explain(
     kinds: &Kinds,
