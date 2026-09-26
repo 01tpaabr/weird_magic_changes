@@ -197,8 +197,17 @@ fn value_noise(seed: u64, stream: u64, x: f32, y: f32) -> f32 {
     let y0 = y.floor();
     let fx = smoothstep(x - x0);
     let fy = smoothstep(y - y0);
+    // `as` saturates far out (a tiny `water_scale`); the lattice is only a
+    // hash input, so its `+ 1` wraps rather than overflows.
     let (ix, iy) = (x0 as i32, y0 as i32);
-    let l = |dx: i32, dy: i32| unit_f32(hash_cell(seed, stream, ix + dx, iy + dy));
+    let l = |dx: i32, dy: i32| {
+        unit_f32(hash_cell(
+            seed,
+            stream,
+            ix.wrapping_add(dx),
+            iy.wrapping_add(dy),
+        ))
+    };
     let top = lerp(l(0, 0), l(1, 0), fx);
     let bot = lerp(l(0, 1), l(1, 1), fx);
     lerp(top, bot, fy)
@@ -461,6 +470,25 @@ mod tests {
                 let n = fbm2(3, STREAM_GROUND, x as f32 / 5.0, y as f32 / 5.0);
                 assert!((0.0..=1.0).contains(&n), "{n}");
             }
+        }
+    }
+
+    /// Noise finer than a cell, or a cell at the edge of `i32`, puts the
+    /// lattice at `i32::MAX`: its `+ 1` neighbour wraps instead of
+    /// overflowing, the same in dev and release.
+    #[test]
+    fn tiny_water_scale_and_far_cells_do_not_overflow() {
+        for (scale, x, y) in [
+            (1e-9, 63, 0),
+            (1e-8, 64, 0),
+            (1e-37, 1, 1),
+            (1.0, i32::MAX, i32::MAX),
+        ] {
+            let p = GenParams {
+                water_scale: scale,
+                ..GenParams::default()
+            };
+            assert_eq!(gen_cell(1, &p, x, y), gen_cell(1, &p, x, y));
         }
     }
 }

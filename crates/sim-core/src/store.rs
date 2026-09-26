@@ -184,6 +184,16 @@ impl Store {
             rock_on_soil: r.f32()?,
             rock_on_water: r.f32()?,
         };
+        // What `Scenario::parse` refuses: worldgen trusts these.
+        let knobs = [
+            params.water_scale,
+            params.water_level,
+            params.rock_on_soil,
+            params.rock_on_water,
+        ];
+        if !knobs.iter().all(|v| v.is_finite()) || params.water_scale <= 0.0 {
+            return Err(bad(format!("terrain {params:?}")));
+        }
         let n = r.count(1 << 24, "starts")?;
         let mut starts = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
@@ -679,6 +689,25 @@ mod tests {
         s.write_meta(&bad_map).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
         assert!(err.contains("0x22"), "{err}");
+        // Terrain knobs the scenario parser would refuse are refused.
+        for params in [
+            GenParams {
+                water_scale: 0.0,
+                ..m.params
+            },
+            GenParams {
+                water_level: f32::NAN,
+                ..m.params
+            },
+        ] {
+            s.write_meta(&WorldMeta {
+                params,
+                ..m.clone()
+            })
+            .unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains("terrain"), "{err}");
+        }
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
