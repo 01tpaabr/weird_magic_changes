@@ -800,13 +800,17 @@ mod tests {
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
-        // A v8 header is refused by version.
+        // The previous format's header is refused by version.
+        let old = FORMAT_VERSION - 1;
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
-        bytes[4] = 8;
+        bytes[4..8].copy_from_slice(&old.to_le_bytes());
         fs::write(s.meta_path(), &bytes).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
-        assert!(err.contains("format 8, this build reads 9"), "{err}");
+        assert!(
+            err.contains(&format!("format {old}, this build reads {FORMAT_VERSION}")),
+            "{err}"
+        );
         // A header written for a different day length is refused.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
@@ -925,16 +929,13 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v7 file is refused by version.
+        // The previous format's chunk file is refused by version.
+        let old = FORMAT_VERSION - 1;
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 7;
+        bytes[4..8].copy_from_slice(&old.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
-        assert!(
-            s.read_chunk(c)
-                .unwrap_err()
-                .to_string()
-                .contains("format 7")
-        );
+        let err = s.read_chunk(c).unwrap_err().to_string();
+        assert!(err.contains(&format!("format {old}")), "{err}");
         fs::remove_dir_all(s.dir()).unwrap();
     }
 
