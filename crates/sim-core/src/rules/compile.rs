@@ -2221,6 +2221,14 @@ impl<'a> Gen<'a> {
 
     fn generate(mut self) -> Result<Kinds> {
         let items = self.items;
+        // Kind ids and sub indices are u16 (`Kinds` keeps u16::MAX free);
+        // checked first, before the passes below that grow with the square.
+        if let Some(it) = items.iter().filter(|it| !it.is_trait).nth(65_534) {
+            return Err(self.err(&it.at, "at most 65534 kinds in a rule set"));
+        }
+        if let Some(s) = self.subs.get(65_536) {
+            return Err(self.err(&s.at, "at most 65536 subs in a rule set"));
+        }
         // Names: kinds and traits share one namespace; subs and consts
         // are global too (one namespace across every loaded file).
         for (i, it) in items.iter().enumerate() {
@@ -2411,8 +2419,12 @@ impl<'a> Gen<'a> {
             let ki = self.kind_insts[k];
             let mut here = Vec::new();
             for (name, ..) in &self.insts[ki].members {
-                let idx = u16::try_from(next_sub)
-                    .map_err(|_| self.err(&items[self.insts[ki].item].at, "too many subs"))?;
+                let idx = u16::try_from(next_sub).map_err(|_| {
+                    self.err(
+                        &items[self.insts[ki].item].at,
+                        "at most 65536 subs in a rule set, member subs included",
+                    )
+                })?;
                 here.push((name.clone(), idx));
                 sub_names.push(format!("{}::{name}", self.inst_name(ki)));
                 next_sub += 1;
@@ -3048,7 +3060,7 @@ impl<'a> Gen<'a> {
         }
         self.item_ids = vec![None; items.len()];
         for (id, &k) in order.iter().enumerate() {
-            self.item_ids[k] = Some(id as u16);
+            self.item_ids[k] = Some(u16::try_from(id).expect("checked in generate"));
         }
         self.kind_insts = order
             .iter()
@@ -3063,7 +3075,7 @@ impl<'a> Gen<'a> {
 
     /// Compile in the context of kind `k`: its tables and member subs.
     fn enter(&mut self, k: usize) {
-        self.kind = Some(k as u16);
+        self.kind = Some(u16::try_from(k).expect("checked in generate"));
         self.cur = Some(self.kind_insts[k]);
         self.members_here = self.member_index[k].clone();
     }
@@ -3122,7 +3134,7 @@ impl<'a> Gen<'a> {
             .iter()
             .find_map(|&p| self.item_ids[self.insts[p].item]);
         Ok(KindDef {
-            id: k as u16,
+            id: u16::try_from(k).expect("checked in generate"),
             name: it.name.clone(),
             glyph: inst.glyph.unwrap_or(b'?'),
             tags,
@@ -3997,7 +4009,7 @@ impl<'a> Gen<'a> {
                 .iter()
                 .position(|s| s.name == name)
                 .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
-            (i as u16, &subs[i])
+            (u16::try_from(i).expect("checked in generate"), &subs[i])
         };
         if args.len() != sub.params.len() {
             return Err(self.err(
@@ -5091,6 +5103,30 @@ mod tests {
         let mut mind = crate::actors::ActorMind::zeroed();
         let out = run_think(&k, "k", &mut mind);
         assert_eq!((out.trap, out.next), (None, Some(1)), "{out:?}");
+    }
+
+    #[test]
+    fn more_than_65534_kinds_or_65536_subs_is_an_error() {
+        let mut text = String::new();
+        for i in 0..65_535 {
+            text.push_str(&format!("kind k{i} {{ }}\n"));
+        }
+        let e = compile_err(&text);
+        assert!(
+            e.starts_with("t.rules:65535:") && e.contains("at most 65534 kinds"),
+            "{e}"
+        );
+
+        let mut text = String::new();
+        for i in 0..65_537 {
+            text.push_str(&format!("sub s{i}() {{ return {i} }}\n"));
+        }
+        text.push_str("kind k { mem v\n when true => v = s65536() }\n");
+        let e = compile_err(&text);
+        assert!(
+            e.starts_with("t.rules:65537:") && e.contains("at most 65536 subs"),
+            "{e}"
+        );
     }
 
     #[test]
