@@ -21,12 +21,17 @@ use anyhow::Context;
 use sim_core::{Kinds, Store};
 
 /// The rule packs a session asked for: the `--rules` paths, else
-/// `WMC_RULES` (paths separated by `:`), else none.
+/// `WMC_RULES` (paths separated by `:`; empty entries are skipped, so an
+/// empty `WMC_RULES` is none), else none.
 pub fn packs(cli: &[String]) -> Vec<PathBuf> {
     if !cli.is_empty() {
         return cli.iter().map(PathBuf::from).collect();
     }
-    std::env::var_os("WMC_RULES").map_or_else(Vec::new, |v| std::env::split_paths(&v).collect())
+    std::env::var_os("WMC_RULES").map_or_else(Vec::new, |v| {
+        std::env::split_paths(&v)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect()
+    })
 }
 
 /// The packs for a new world: the session's ([`packs`]), else the ones its

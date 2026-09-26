@@ -164,3 +164,28 @@ fn lint_checks_the_names_an_expect_uses() {
     assert!(ok, "{out}{err}");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// An empty `WMC_RULES` is none (the scenario's packs, else the built-in
+/// rules), and an empty entry in it (`a:`, `a::b`) is skipped.
+#[test]
+fn empty_wmc_rules_entries_are_skipped() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fox_pen = repo.join("scenarios/tests/fox_pen.scenario");
+    let run = |rules: std::ffi::OsString| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env("WMC_RULES", rules)
+            .args(["scenario", fox_pen.to_str().unwrap(), "--threads", "1"])
+            .output()
+            .expect("wmc runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (ok, err) = run("".into());
+    assert!(ok, "{err}");
+    let mut trailing = repo.join("rules").into_os_string();
+    trailing.push(":");
+    let (ok, err) = run(trailing);
+    assert!(ok, "{err}");
+}
