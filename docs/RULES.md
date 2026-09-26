@@ -596,6 +596,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | sight | 16 |
 | fuel per think | 4096 |
 | sub call depth | 8 |
+| value stack per think | 64 (shared by a rule and the subs it calls; a rule or sub that needs more by itself is an error: nest less deeply or split with `let`) |
 | parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5, a `choose` 1 per arm plus 1) |
 | nesting in one rule or sub | 128 levels: each nested statement, parenthesis, call argument, operand, `-`, `not`, `toward` and `away` is one, and so is each operator in a chain (`(m) > 0` is three: the parenthesis, `m` and `>`) |
 | compiled size of one rule, one state's rules, one sub | 32767 ops (jumps are 16 bits; split what is longer) |

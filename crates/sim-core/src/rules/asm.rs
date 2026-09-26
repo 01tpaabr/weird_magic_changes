@@ -17,6 +17,11 @@ pub struct Asm {
     labels: Vec<Option<usize>>,
     /// `(instruction index, label)` to patch.
     fixups: Vec<(usize, Label)>,
+    /// Stack values at the next instruction, the most since
+    /// [`Asm::take_peak`], and at each label (from its first jump).
+    depth: i32,
+    peak: i32,
+    label_depth: Vec<Option<i32>>,
 }
 
 impl Asm {
@@ -31,29 +36,51 @@ impl Asm {
 
     pub fn label(&mut self) -> Label {
         self.labels.push(None);
+        self.label_depth.push(None);
         Label(self.labels.len() - 1)
     }
 
-    /// Place `l` at the next instruction.
+    /// Place `l` at the next instruction. Code after a jump, a halt or a
+    /// return is reached only through a label, so its depth is the label's.
     pub fn bind(&mut self, l: Label) -> &mut Self {
         assert!(self.labels[l.0].is_none(), "label bound twice");
         self.labels[l.0] = Some(self.code.len());
+        self.depth = *self.label_depth[l.0].get_or_insert(self.depth);
         self
     }
 
     pub fn op(&mut self, code: OpCode) -> &mut Self {
-        self.code.push(Op::new(code, 0, 0));
-        self
+        self.emit(code, 0, 0)
     }
 
     fn emit(&mut self, code: OpCode, a: u8, imm: i16) -> &mut Self {
         self.code.push(Op::new(code, a, imm));
+        let (pops, pushes) = code.stack_effect(a);
+        self.depth += i32::from(pushes) - i32::from(pops);
+        self.peak = self.peak.max(self.depth);
         self
     }
 
     fn jump(&mut self, code: OpCode, l: Label) -> &mut Self {
         self.fixups.push((self.code.len(), l));
-        self.emit(code, 0, 0)
+        self.emit(code, 0, 0);
+        self.label_depth[l.0].get_or_insert(self.depth);
+        self
+    }
+
+    /// The sub just called returns a value: count it on the stack.
+    pub fn returned(&mut self) -> &mut Self {
+        self.depth += 1;
+        self.peak = self.peak.max(self.depth);
+        self
+    }
+
+    /// The most values on the stack at once since the last call (the VM
+    /// has [`super::vm::STACK`]).
+    pub fn take_peak(&mut self) -> u32 {
+        let peak = self.peak;
+        self.peak = self.depth;
+        peak.max(0) as u32
     }
 
     pub fn push(&mut self, v: i32) -> &mut Self {
@@ -195,6 +222,26 @@ mod tests {
         assert_eq!(code[3], Op::new(OpCode::Jmp, 0, -4)); // to index 0 from index 4
         assert_eq!(code[4].code, OpCode::Halt);
         assert_eq!(code[0].bits(), 1 << 16); // Push, a = 0, imm = 1
+    }
+
+    #[test]
+    fn the_stack_peak_follows_jumps() {
+        let mut a = Asm::new();
+        a.push(1).push(2).op(OpCode::Add).set_mem(0);
+        assert_eq!(a.take_peak(), 2);
+        let (l, e) = (a.label(), a.label());
+        a.push(1)
+            .jz(l)
+            .push(2)
+            .jmp(e)
+            .bind(l)
+            .push(3)
+            .bind(e)
+            .set_mem(0);
+        assert_eq!(a.take_peak(), 1);
+        assert_eq!(a.depth, 0);
+        a.push(4).call(0, 1).returned().push(5);
+        assert_eq!(a.take_peak(), 2);
     }
 
     #[test]

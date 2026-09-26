@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::asm::{Asm, Label};
-use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
+use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, STACK, Sense, pred, result};
 use super::{DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
@@ -3199,6 +3199,16 @@ impl<'a> Gen<'a> {
                 format!("sub `{}` compiles to more than 32767 ops: split it", s.name),
             ));
         }
+        let peak = self.asm.take_peak();
+        if peak as usize > STACK {
+            return Err(self.err(
+                &s.at,
+                format!(
+                    "sub `{}` needs {peak} stack values; the VM has {STACK}: nest less deeply or split the expression with `let`",
+                    s.name
+                ),
+            ));
+        }
         self.sub = None;
         Ok(entry)
     }
@@ -3441,6 +3451,15 @@ impl<'a> Gen<'a> {
             return Err(self.err(
                 &rule.at,
                 "rule body too long: it compiles to more than 32767 ops; split it",
+            ));
+        }
+        let peak = self.asm.take_peak();
+        if peak as usize > STACK {
+            return Err(self.err(
+                &rule.at,
+                format!(
+                    "this rule needs {peak} stack values; the VM has {STACK}: nest less deeply or split the expression with `let`"
+                ),
             ));
         }
         let file = self
@@ -4058,6 +4077,9 @@ impl<'a> Gen<'a> {
             }
         }
         self.asm.call(idx, width);
+        if sub.returns {
+            self.asm.returned();
+        }
         Ok(sub.returns)
     }
 
@@ -5103,6 +5125,41 @@ mod tests {
         let mut mind = crate::actors::ActorMind::zeroed();
         let out = run_think(&k, "k", &mut mind);
         assert_eq!((out.trap, out.next), (None, Some(1)), "{out:?}");
+    }
+
+    #[test]
+    fn an_expression_deeper_than_the_vm_stack_is_an_error() {
+        let nest = |n: usize, leaf: &str| format!("{}{leaf}{}", "1 + (".repeat(n), ")".repeat(n));
+        let e = compile_err(&format!(
+            "kind k {{ mem m\n when true => m = {} }}",
+            nest(70, "m")
+        ));
+        assert!(
+            e.starts_with("t.rules:2:2:") && e.contains("71 stack values"),
+            "{e}"
+        );
+        let e = compile_err(&format!(
+            "sub f(v) {{ return {} }}\nkind k {{ mem m\n when true => m = f(m) }}",
+            nest(70, "v")
+        ));
+        assert!(e.contains("sub `f` needs 71 stack values"), "{e}");
+        // Arguments wait on the stack while the next one is computed.
+        let e = compile_err(&format!(
+            "kind k {{ mem m\n when true => m = max(m, {}) }}",
+            nest(63, "m")
+        ));
+        assert!(e.contains("65 stack values"), "{e}");
+
+        use bytemuck::Zeroable;
+        let k = compile_ok(&format!(
+            "kind k {{ mem m\n when true => m = {} }}",
+            nest(60, "m")
+        ));
+        let mut mind = crate::actors::ActorMind::zeroed();
+        for _ in 0..2 {
+            assert_eq!(run_think(&k, "k", &mut mind).trap, None);
+        }
+        assert_eq!(mind.mem[0], 120);
     }
 
     #[test]

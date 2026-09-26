@@ -167,6 +167,41 @@ pub enum OpCode {
     ForEach,
 }
 
+impl OpCode {
+    /// `(pops, pushes)` of this op with operand `a`, as the comments above
+    /// say. A `Call` pushes nothing here: what the callee returns is its
+    /// `Ret`'s, counted by the caller (`Asm::returned`).
+    pub fn stack_effect(self, a: u8) -> (u8, u8) {
+        use OpCode as O;
+        match self {
+            O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
+            O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz | O::Jnz => (1, 0),
+            O::SetLook | O::SetSignal | O::Mark => (1, 0),
+            O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
+            O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt | O::And | O::Or => (2, 1),
+            O::Min | O::Max | O::Pack => (2, 1),
+            O::Neg | O::Not | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
+            O::Clamp | O::IsAt => (3, 1),
+            O::Count | O::Nearest | O::Sniff | O::Dist | O::FreeAt => (2, 1),
+            O::LookAt | O::SignalAt | O::ScentAt => (2, 1),
+            O::DirOf => (1, 2),
+            O::SpawnWith => (2, 0),
+            O::Jmp | O::Next | O::EndRule | O::Halt => (0, 0),
+            O::Call => (a, 0),
+            O::Ret => (u8::from(a == 1), 0),
+            O::Act => match Action::from_u8(a) {
+                Some(Action::Become) => (1, 0),
+                Some(Action::Spawn) => (3, 0),
+                Some(Action::Take | Action::Give) => (4, 0),
+                Some(Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze) => {
+                    (2, 0)
+                }
+                Some(Action::Idle | Action::Die) | None => (0, 0),
+            },
+        }
+    }
+}
+
 /// Locals a `for each` loop keeps: `dx, dy, cursor, pred, r`.
 pub const FOR_EACH_LOCALS: u8 = 5;
 
@@ -596,7 +631,9 @@ pub struct Ctx<'a> {
     pub signal: i16,
 }
 
-const STACK: usize = 64;
+/// Values on the stack of one think, shared by a rule and the subs it
+/// calls (RULES.md §18).
+pub const STACK: usize = 64;
 /// Sub frames on top of the rule's own: calls nest this deep (RULES.md §12).
 const FRAMES: usize = 8;
 
