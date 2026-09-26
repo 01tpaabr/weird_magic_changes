@@ -384,6 +384,9 @@ start hive at (77, 103)                        # exactly there
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with` |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
 
+`seed`, `size`, `map`, `legend` and `outside` come once, and each terrain field once (several
+`terrain` lines add up); `rules` and `start` lines add up.
+
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
 reordering the lines moves who starts where. A share is exact to one part in 2^24, so

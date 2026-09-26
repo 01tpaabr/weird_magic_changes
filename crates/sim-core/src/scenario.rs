@@ -506,15 +506,19 @@ impl Scenario {
         }
     }
 
-    /// Parse a scenario's text. Unknown statements and terrain fields,
-    /// shares that are not `0 < n / d <= 1`, two shares for one kind,
+    /// Parse a scenario's text. Unknown statements and terrain fields, a
+    /// second `seed`, `size`, `outside` or terrain field, shares that are
+    /// not `0 < n / d <= 1`, two shares for one kind,
     /// shares summing above one, and a map that does not fit its legend or
     /// its size are errors. Kind, need and memory names are checked later,
     /// against the rules ([`Placement::resolve`]).
     pub fn parse(file: &str, text: &str) -> Result<Scenario, ScenarioError> {
         let mut s = Scenario::default();
         let mut total = 0u64;
+        let mut seed_line: Option<u32> = None;
         let mut size_line: Option<u32> = None;
+        // Where each terrain field was set, in `GenParams` order.
+        let mut terrain_lines: [Option<u32>; 4] = [None; 4];
         let mut rows: Option<(u32, Vec<(u32, String)>)> = None;
         let mut legend: Option<(u32, Vec<(u8, Legend, u32)>)> = None;
         let mut outside: Option<(u32, Option<u8>)> = None;
@@ -539,6 +543,13 @@ impl Scenario {
             };
             match head {
                 "seed" => {
+                    if let Some(first) = seed_line {
+                        return Err(err(
+                            line_no,
+                            format!("a second `seed` (first at line {first})"),
+                        ));
+                    }
+                    seed_line = Some(line_no);
                     s.seed = rest
                         .first()
                         .and_then(|w| w.parse().ok())
@@ -548,6 +559,12 @@ impl Scenario {
                     }
                 }
                 "size" => {
+                    if let Some(first) = size_line {
+                        return Err(err(
+                            line_no,
+                            format!("a second `size` (first at line {first})"),
+                        ));
+                    }
                     let (w, h) = (
                         int(rest.first(), "`size W H`")?,
                         int(rest.get(1), "`size W H`")?,
@@ -590,11 +607,11 @@ impl Scenario {
                                 "water_scale is a size in cells, above 0".into(),
                             ));
                         }
-                        let field = match pair[0] {
-                            "water_scale" => &mut s.params.water_scale,
-                            "water_level" => &mut s.params.water_level,
-                            "rock_on_soil" => &mut s.params.rock_on_soil,
-                            "rock_on_water" => &mut s.params.rock_on_water,
+                        let (i, field) = match pair[0] {
+                            "water_scale" => (0, &mut s.params.water_scale),
+                            "water_level" => (1, &mut s.params.water_level),
+                            "rock_on_soil" => (2, &mut s.params.rock_on_soil),
+                            "rock_on_water" => (3, &mut s.params.rock_on_water),
                             other => {
                                 return Err(err(
                                     line_no,
@@ -604,6 +621,13 @@ impl Scenario {
                                 ));
                             }
                         };
+                        if let Some(first) = terrain_lines[i] {
+                            return Err(err(
+                                line_no,
+                                format!("`{}` set twice (first at line {first})", pair[0]),
+                            ));
+                        }
+                        terrain_lines[i] = Some(line_no);
                         *field = v;
                     }
                 }
@@ -796,6 +820,12 @@ impl Scenario {
                             ));
                         }
                     };
+                    if let Some((first, _)) = outside {
+                        return Err(err(
+                            line_no,
+                            format!("a second `outside` (first at line {first})"),
+                        ));
+                    }
                     outside = Some((line_no, fill));
                 }
                 "rules" => {
@@ -1355,6 +1385,19 @@ mod tests {
                 "t:1: `size W H` generates at most 4096 chunks",
             ),
             ("size 4294967295 1", "at most 4096 chunks"),
+            ("seed 1\nseed 2", "t:2: a second `seed` (first at line 1)"),
+            (
+                "size 8 8\nsize 9 9",
+                "t:2: a second `size` (first at line 1)",
+            ),
+            (
+                "terrain water_level 0.1\nterrain water_level 0.2",
+                "t:2: `water_level` set twice (first at line 1)",
+            ),
+            (
+                "terrain rock_on_soil 0 rock_on_soil 1",
+                "t:1: `rock_on_soil` set twice (first at line 1)",
+            ),
         ] {
             let e = Scenario::parse("t", text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
@@ -1362,6 +1405,9 @@ mod tests {
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
         Scenario::parse("t", "size 4096 4096").unwrap();
+        // Different terrain fields on several lines add up.
+        let t = Scenario::parse("t", "terrain water_level 0.1\nterrain rock_on_soil 0").unwrap();
+        assert_eq!((t.params.water_level, t.params.rock_on_soil), (0.1, 0.0));
     }
 
     /// A time too large for ticks is no value, not an overflow (a dev
@@ -1498,6 +1544,10 @@ legend {
             (
                 format!("map {{\n..\n}}\nmap {{\n..\n}}\n{legend}"),
                 "a second map",
+            ),
+            (
+                format!("outside soil\noutside water\nmap {{\n..\n}}\n{legend}"),
+                "t:2: a second `outside` (first at line 1)",
             ),
         ] {
             let e = Scenario::parse("t", &text).unwrap_err().to_string();
