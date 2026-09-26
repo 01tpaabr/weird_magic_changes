@@ -200,11 +200,14 @@ impl Store {
             let tag = r.u8()?;
             let kind = r.str()?;
             starts.push(match tag {
-                0 => Start::Share {
-                    kind,
-                    num: r.u32()?,
-                    den: r.u32()?,
-                },
+                0 => {
+                    // What `Scenario::parse` refuses: `share()` divides by `den`.
+                    let (num, den) = (r.u32()?, r.u32()?);
+                    if num == 0 || den == 0 || num > den {
+                        return Err(bad(format!("share {num} / {den} for `{kind}`")));
+                    }
+                    Start::Share { kind, num, den }
+                }
                 // 2: an explicit start with `with` values (still format 9:
                 // saves without them read as before).
                 1 | 2 => {
@@ -707,6 +710,21 @@ mod tests {
             .unwrap();
             let err = s.read_meta().unwrap_err().to_string();
             assert!(err.contains("terrain"), "{err}");
+        }
+        // So are shares it would refuse: `share()` divides by `den`.
+        for (num, den) in [(1, 0), (256, 1), (0, 4)] {
+            let starts = vec![Start::Share {
+                kind: "seed".into(),
+                num,
+                den,
+            }];
+            s.write_meta(&WorldMeta {
+                starts,
+                ..m.clone()
+            })
+            .unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains(&format!("share {num} / {den}")), "{err}");
         }
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
