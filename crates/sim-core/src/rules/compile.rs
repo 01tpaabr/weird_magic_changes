@@ -93,7 +93,8 @@ pub fn compile_packs(
             full_paths.push((pack, full));
         }
     }
-    // Every file, with how many trailing path components label it.
+    // Every file once, where first loaded, with how many trailing path
+    // components label it.
     let mut files: Vec<(std::path::PathBuf, usize)> = Vec::new();
     for (pack, full) in &full_paths {
         if full.is_dir() {
@@ -107,8 +108,12 @@ pub fn compile_packs(
             }
             v.sort();
             let k = if full_paths.len() > 1 { 2 } else { 1 };
-            files.extend(v.into_iter().map(|p| (p, k)));
-        } else {
+            for p in v {
+                if !files.iter().any(|(q, _)| *q == p) {
+                    files.push((p, k));
+                }
+            }
+        } else if !files.iter().any(|(q, _)| q == full) {
             files.push((full.clone(), 1));
         }
     }
@@ -5623,6 +5628,9 @@ mod tests {
             (k.debug.packs.len(), k.debug.files.as_slice()),
             (1, ["a.rules".to_string()].as_slice())
         );
+        // A file its directory pack already loaded is that file once.
+        let k = compile_packs(&[&one, &one.join("a.rules")]).unwrap();
+        assert_eq!(k.debug.files.len(), 1, "{:?}", k.debug.files);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
