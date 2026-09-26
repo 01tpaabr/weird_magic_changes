@@ -9,7 +9,7 @@ use std::fmt::Write;
 
 use bevy::prelude::World;
 use sim_core::actors::systems::Explained;
-use sim_core::rules::vm::{Action, OpCode, result};
+use sim_core::rules::vm::{Action, OpCode, need_now, result};
 use sim_core::time::{Clock, TICKS_PER_DAY};
 use sim_core::{Kinds, Pos, sim};
 
@@ -120,7 +120,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             .enumerate()
             .map(|(i, n)| {
                 // As the think saw them: decayed, before its writes.
-                let v = decayed(b.needs[i], n.decays, tick, b.last_think);
+                let v = need_now(b.needs[i], n.decays, tick, b.last_think);
                 if n.decays {
                     format!(
                         "{} {} / {}",
@@ -212,7 +212,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     let mut writes = Vec::new();
     for (i, n) in def.needs.iter().enumerate() {
         // Decay is not a write: compare with the decayed value the rules saw.
-        let seen = decayed(b.needs[i], n.decays, tick, b.last_think);
+        let seen = need_now(b.needs[i], n.decays, tick, b.last_think);
         if a.needs[i] != seen {
             writes.push(format!("{} {} -> {}", n.name, seen, a.needs[i]));
         }
@@ -275,15 +275,6 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
         }
     }
     s
-}
-
-/// A need as the think saw it: decayed by the ticks since the last think.
-fn decayed(v: i32, decays: bool, tick: u64, last: u32) -> i32 {
-    if decays {
-        (i64::from(v) - i64::from((tick as u32).wrapping_sub(last))).max(0) as i32
-    } else {
-        v
-    }
 }
 
 fn decision(kinds: &Kinds, e: &Explained) -> String {
@@ -505,5 +496,36 @@ mod tests {
         };
         let (ops, spent) = (num(" ops, "), num(" of 512 fuel"));
         assert!(spent >= ops + 36, "{cost}");
+    }
+
+    /// Needs show as the think sees them, decayed to now, and decay is not
+    /// a write.
+    #[test]
+    fn a_report_shows_needs_decayed_and_no_decay_writes() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind stone { glyph \"o\"  cadence 64  need w max 1d  when true => idle }",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0x57, now)))
+            .expect("a walkable cell");
+        for _ in 0..10 {
+            sim::step(&mut w);
+        }
+        let r = report(&w, at, false).expect("a stone there");
+        let left = duration(TICKS_PER_DAY as i64 - 10);
+        assert!(r.contains(&format!("needs  w {left} / 1d")), "{r}");
+        assert!(!r.contains("writes"), "{r}");
     }
 }

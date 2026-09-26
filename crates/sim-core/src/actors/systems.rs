@@ -656,20 +656,21 @@ type ChunkQuery<'w, 's> = Query<
 /// Damage, deaths and feeding, one thread. First every cross-chunk bite is
 /// recorded on its victim (tick-start occupancy: nothing has died or moved
 /// yet). Then, chunk by chunk in `stage.active()` order, the bites on each
-/// victim take its `health` in key order, each at most what is left; its
-/// `hurt` grows by what was taken (saturating), `hurt_dir` points at the
-/// lowest-key biter and `WAKE` is set; at `health <= 0` it dies. Every `eat`
+/// victim take its `health` (decayed to now) in key order, each at most
+/// what is left; its `hurt` grows by what was taken (saturating), `hurt_dir`
+/// points at the lowest-key biter and `WAKE` is set; at `health <= 0` it dies. Every `eat`
 /// gains the share of the victim kind's `food` it took (`food * taken /
 /// max health`), if the eater is alive itself at the end: a fox eats a
 /// chicken over two bites, a chicken crops grass that grows back.
 pub fn exchange(
+    tick: Res<Tick>,
     kinds: Res<Kinds>,
     stage: Res<Stage>,
     mut work: ResMut<CrossScratch>,
     mut outboxes: Query<&mut Outbox>,
     mut chunks: ChunkQuery,
 ) {
-    let kinds = &*kinds;
+    let (tick, kinds) = (tick.0, &*kinds);
     let work = &mut *work;
     work.list.clear();
     work.credits.clear();
@@ -754,6 +755,9 @@ pub fn exchange(
             // feeds nobody and a shared kill is shared.
             let max = i64::from(def.needs[h].max.max(1));
             let m = &mut minds.rows[vslot];
+            if def.needs[h].decays {
+                vm::decay(def, m, tick); // health as it stands now
+            }
             let mut left = m.needs[h].max(0);
             for hit in &scratch.hits[group] {
                 let taken = i32::from(hit.bite).min(left);
@@ -812,7 +816,7 @@ pub fn exchange(
             amount,
             give,
         };
-        if let Some(res) = transfer(kinds, &stage, &mut chunks, src_e, slot, &fx, t) {
+        if let Some(res) = transfer(kinds, &stage, tick, &mut chunks, src_e, slot, &fx, t) {
             set_result(&mut chunks, src_e, slot, res);
         }
     }
@@ -829,13 +833,15 @@ struct Transfer {
 /// Settle one transfer between the mover (`src_e`, `slot`) and whoever
 /// stands on the target cell at tick start. `take` moves up to `amount` of
 /// the target's same-named need into the mover's, `give` the reverse, never
-/// more than the source holds or past the receiver's max. The target of a
-/// `take` gets `TAKEN` and wakes. `None` if the mover died this tick (its
+/// more than the source holds or past the receiver's max. A decaying need
+/// of the target is first decayed to now. The target of a `take` gets
+/// `TAKEN` and wakes. `None` if the mover died this tick (its
 /// intent is void); else the mover's result: MISSED (nobody there, or dead
 /// now), REFUSED (the target has no such need), OK.
 fn transfer(
     kinds: &Kinds,
     stage: &Stage,
+    tick: u64,
     chunks: &mut ChunkQuery,
     src_e: Entity,
     slot: usize,
@@ -853,7 +859,7 @@ fn transfer(
     let Some(dst_e) = stage.entity(fx.to) else {
         return Some(result::MISSED);
     };
-    let Ok((cells, dst_pubs, dst_minds, _, _)) = chunks.get(dst_e) else {
+    let Ok((cells, mut dst_pubs, mut dst_minds, _, mut dst_meta)) = chunks.get_mut(dst_e) else {
         return Some(result::MISSED);
     };
     let Some((dk, ds)) = cells.occupant[usize::from(fx.cell)].unpack() else {
@@ -868,7 +874,13 @@ fn transfer(
     let Some(dn) = ddef.need_named(&sdef.needs[t.need].name) else {
         return Some(result::REFUSED);
     };
-    let dv = dst_minds.rows[ds].needs[dn];
+    let m = &mut dst_minds.rows[ds];
+    if ddef.needs[dn].decays {
+        // The target last thought a while ago: bring it to now first. An
+        // emptied vital need kills it at its next think.
+        vm::decay(ddef, m, tick);
+    }
+    let dv = m.needs[dn];
     let (smax, dmax) = (sdef.needs[t.need].max, ddef.needs[dn].max);
     let moved = if t.give {
         t.amount.min(sv.max(0)).min((dmax - dv).max(0))
@@ -880,17 +892,14 @@ fn transfer(
     } else {
         (sv + moved, dv - moved)
     };
+    m.needs[dn] = dv;
+    if !t.give {
+        m.events |= event::TAKEN;
+        dst_pubs.rows[ds].flags |= flags::WAKE;
+    }
+    dst_meta.dirty = true;
     if let Ok((_, _, mut minds, _, mut meta)) = chunks.get_mut(src_e) {
         minds.rows[slot].needs[t.need] = sv;
-        meta.dirty = true;
-    }
-    if let Ok((_, mut pubs, mut minds, _, mut meta)) = chunks.get_mut(dst_e) {
-        let m = &mut minds.rows[ds];
-        m.needs[dn] = dv;
-        if !t.give {
-            m.events |= event::TAKEN;
-            pubs.rows[ds].flags |= flags::WAKE;
-        }
         meta.dirty = true;
     }
     Some(result::OK)

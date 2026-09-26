@@ -1365,18 +1365,24 @@ fn think_with<const TRACE: bool>(
 /// Decay a mind's consumable needs by the ticks since its last think and
 /// stamp it. Returns `true` if a vital need is empty (the actor dies).
 pub fn decay(kind: &KindDef, mind: &mut ActorMind, tick: u64) -> bool {
-    let now = tick as u32;
-    let elapsed = i64::from(now.wrapping_sub(mind.last_think));
-    mind.last_think = now;
     let mut dead = false;
     for (i, need) in kind.needs.iter().enumerate().take(NEED_SLOTS) {
-        if need.decays {
-            let v = (i64::from(mind.needs[i]) - elapsed).max(0);
-            mind.needs[i] = v as i32;
-        }
+        mind.needs[i] = need_now(mind.needs[i], need.decays, tick, mind.last_think);
         dead |= need.vital && mind.needs[i] <= 0;
     }
+    mind.last_think = tick as u32;
     dead
+}
+
+/// A need's value `v` as it stands at `tick`: decayed by the ticks since
+/// `last_think` if it decays, never below 0. What [`decay`] writes.
+pub fn need_now(v: i32, decays: bool, tick: u64, last_think: u32) -> i32 {
+    if decays {
+        let elapsed = i64::from((tick as u32).wrapping_sub(last_think));
+        (i64::from(v) - elapsed).max(0) as i32
+    } else {
+        v
+    }
 }
 
 /// Where `(dx, dy)` from local cell `cell` lands: the chunk offset

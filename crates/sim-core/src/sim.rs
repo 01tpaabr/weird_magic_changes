@@ -682,13 +682,20 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             if !ids.clone().any(|k| slot(k).is_some()) {
                 return Err(format!("`{}` has no need or memory `{name}`", who.kind));
             }
+            // A decaying need as it stands now, as the next think will see it.
+            let now = world.resource::<Tick>().0;
             let mut vals = Vec::new();
             for (a, m) in world.query::<(&ChunkActors, &ChunkMinds)>().iter(world) {
                 for (r, mind) in a.rows.iter().zip(&m.rows) {
                     if ids.contains(&r.kind)
                         && let Some((need, i)) = slot(r.kind)
                     {
-                        vals.push(i64::from(if need { mind.needs[i] } else { mind.mem[i] }));
+                        vals.push(i64::from(if need {
+                            let decays = kinds.def(r.kind).needs[i].decays;
+                            crate::rules::vm::need_now(mind.needs[i], decays, now, mind.last_think)
+                        } else {
+                            mind.mem[i]
+                        }));
                     }
                 }
             }
@@ -1576,6 +1583,75 @@ mod tests {
         for k in kids {
             assert!([11, 63, 31].contains(&k.3.mem[1]), "{:?}", k.3.mem);
         }
+    }
+
+    /// A decaying need is read as it stands now, not as of its owner's
+    /// last think: `expect max` sees the drain, a `take` gets only what is
+    /// left, and a bite on decaying health takes (and feeds) only that.
+    #[test]
+    fn take_bite_and_expect_see_a_need_decayed_to_now() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::scenario::Op;
+        use crate::time::hours;
+        let kinds = compile(
+            "t.rules",
+            "kind pool { glyph \"o\"  cadence 256  need water max 2h }
+             kind wisp { glyph \"w\"  cadence 256  need health max 600  food 600 }
+             kind sipper { glyph \"s\"  cadence 8  bite 255
+               need water max 2h decay 0
+               need food max 2h decay 0
+               mem done
+               when done == 0 and age >= 430 and nearest pool within 1 as p => { done = 1  take p water 2h }
+               when done == 0 and age >= 430 and nearest wisp within 1 as p => { done = 1  eat p } }",
+        )
+        .unwrap();
+        let (pool, wisp, sipper) = (0, 1, 2);
+        let mut w = new_world_with(&cfg(9), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        for (k, at, uid) in [
+            (pool, Pos::new(10, 10), 0xA1),
+            (wisp, Pos::new(10, 20), 0xA2),
+        ] {
+            assert!(place_actor(&mut w, at, k, newborn(&kinds, k, uid, now)));
+            let mut s = newborn(&kinds, sipper, uid + 0x100, now);
+            s.needs = [0; crate::actors::NEED_SLOTS];
+            assert!(place_actor(&mut w, Pos::new(at.x + 1, at.y), sipper, s));
+        }
+        for _ in 0..200 {
+            step(&mut w);
+        }
+        let water = |agg| Expect::Value {
+            agg,
+            name: "water".into(),
+            who: Who {
+                kind: "pool".into(),
+                only: false,
+            },
+            op: Op::Eq,
+            v: hours(2) as i64 - 200,
+        };
+        assert_eq!(
+            expect(&mut w, &water(Agg::Max)),
+            Ok((true, (hours(2) - 200).to_string()))
+        );
+        // Step until each sipper has acted; its take/bite settled that tick.
+        let mut at = [None; 2];
+        while at.iter().any(Option::is_none) {
+            step(&mut w);
+            let all = rows(&mut w);
+            for (i, uid) in [0x1A1, 0x1A2].into_iter().enumerate() {
+                let m = all.iter().find(|r| r.0 == uid).unwrap().3;
+                if at[i].is_none() && m.mem[0] == 1 {
+                    at[i] = Some((tick(&w) - 1 - now, m));
+                }
+            }
+        }
+        let (age, s) = at[0].unwrap();
+        assert_eq!(s.needs[0], (hours(2) - age) as i32, "took what was left");
+        let (age, s) = at[1].unwrap();
+        assert_eq!(s.needs[1], 600 - age as i32, "ate what was left");
     }
 
     /// A cover row's `move` is refused and claims nothing: a walker

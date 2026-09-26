@@ -165,7 +165,8 @@ No per-actor queues. Broadcast goes through `signal`, `look` and per-cell scent 
 ## 4. Needs
 
 `need water max 2h vital`: an `i32` in **ticks-until-empty**, decremented lazily by
-`tick - last_think` when a think starts. `decay 0` needs are in points (health). A vital
+`tick - last_think` when a think starts, or when a bite, `take` or `give` reaches it first
+(Exchange). `decay 0` needs are in points (health). A vital
 need at 0 makes the think emit `die` before any rule runs. Rules read needs by name and may
 write them (`water += 6h`, clamped to max); world-validated refills come from resolved
 actions (`eat`, `drink`, `take`/`give`). Dynamic objectives are a `state` plus targets in
@@ -382,7 +383,8 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    a `Hit` on the chunk's scratch, a cross-chunk one goes to the `Outbox`.
 2. **Exchange** (sequential): cross-chunk bites recorded on their victims against tick-start
    occupancy; then chunk by chunk in `stage.active()` order, bites grouped per victim (and
-   layer): in key order each takes up to its `bite` from the health left, `hurt` grows
+   layer): in key order each takes up to its `bite` from the health left (decayed to now),
+   `hurt` grows
    (saturating), `hurt_dir` points at the lowest-key biter (the `attacker` target reads it),
    `WAKE` set. An `eat` or `graze` that took `t` points gains `food * t / max_health` of the
    victim kind's `food` into its own `food` need, so a kill feeds every biter by its share
@@ -391,7 +393,8 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    has been applied yet, so damage is symmetric across borders. Last, every `take`/`give`
    of the tick (Resolve sends them all here, in-chunk ones too), in key order: the target
    is whoever stands on the adjacent cell and is still alive (else MISSED) and must have a
-   need of the same name (else REFUSED); `take` moves up to the amount from it, `give` to
+   need of the same name (else REFUSED), decayed to now; `take` moves up to the amount
+   from it, `give` to
    it, never more than the source holds nor past the receiver's max. A taken-from actor
    gets `taken` and wakes. A mover that died this tick moves nothing. (Damage is
    summed on one thread here rather than per chunk in Resolve: bites are rare next to

@@ -245,7 +245,8 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 
 Bites land before anyone moves, on either side of a chunk border, in key order. Several
 eaters of one victim each get the share they took. Transfers are settled after bites, also
-in key order.
+in key order. A bite, `take` or `give` finds a decaying need as it stands that tick, not as
+it was at its owner's last think.
 
 ## 9. Effects
 
@@ -445,7 +446,7 @@ expect became chick == 1
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
 | `expect count K OP N` | actors of K alive now |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
-| `expect min\|max\|sum NAME of K OP V` | a need or memory over every actor of K (no actor: the check fails) |
+| `expect min\|max\|sum NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K (no actor: the check fails) |
 | `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
