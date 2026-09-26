@@ -69,51 +69,80 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
 /// files, in sorted file-name order) or a single file; packs go in the
 /// order given, with one namespace across all of them (a name declared in
-/// two packs is an error naming both). With more than one pack, a file is
-/// named `pack/file.rules` in positions, `pack` being the directory's own
-/// name. The packs' absolute paths go in `debug.packs`: a save remembers
-/// them.
+/// two packs is an error naming both). A pack given twice loads once.
+/// With more than one pack, a directory's file is named `pack/file.rules`
+/// in positions, `pack` being the directory's own name; two files that
+/// would share a name take parent directories until they don't. The
+/// packs' absolute paths go in `debug.packs`: a save remembers them.
 pub fn compile_packs(
     packs: &[&std::path::Path],
 ) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
-    let mut texts: Vec<(String, String)> = Vec::new();
-    let mut abs = Vec::with_capacity(packs.len());
+    // Each pack once, where first given: a scenario's `rules` line and the
+    // same `--rules` are one pack.
+    let mut full_paths: Vec<(&std::path::Path, std::path::PathBuf)> = Vec::new();
     for pack in packs {
         let full = std::fs::canonicalize(pack).map_err(|e| format!("{}: {e}", pack.display()))?;
-        let files = if full.is_dir() {
-            let mut v: Vec<_> = std::fs::read_dir(&full)
+        if !full_paths.iter().any(|(_, f)| *f == full) {
+            full_paths.push((pack, full));
+        }
+    }
+    // Every file, with how many trailing path components label it.
+    let mut files: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    for (pack, full) in &full_paths {
+        if full.is_dir() {
+            let mut v: Vec<_> = std::fs::read_dir(full)
                 .map_err(|e| format!("{}: {e}", pack.display()))?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|x| x == "rules"))
                 .collect();
             v.sort();
-            v
+            let k = if full_paths.len() > 1 { 2 } else { 1 };
+            files.extend(v.into_iter().map(|p| (p, k)));
         } else {
-            vec![full.clone()]
-        };
-        let dir_name = full
-            .file_name()
-            .filter(|_| full.is_dir() && packs.len() > 1)
-            .map(|n| n.to_string_lossy().into_owned());
-        for p in files {
-            let file = p
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            let name = match &dir_name {
-                Some(d) => format!("{d}/{file}"),
-                None => file,
-            };
-            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            texts.push((name, text));
+            files.push((full.clone(), 1));
         }
-        abs.push(full.to_string_lossy().into_owned());
+    }
+    // A label names one file: while two are equal, each takes one more
+    // parent directory (`one/pk/a.rules`, `two/pk/a.rules`).
+    let parts = |p: &std::path::Path| -> Vec<String> {
+        p.components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    let label = |p: &std::path::Path, k: usize| {
+        let c = parts(p);
+        c[c.len().saturating_sub(k)..].join("/")
+    };
+    loop {
+        let labels: Vec<String> = files.iter().map(|(p, k)| label(p, *k)).collect();
+        let mut grew = false;
+        for (i, (p, k)) in files.iter_mut().enumerate() {
+            if labels.iter().filter(|l| **l == labels[i]).count() > 1 && *k < parts(p).len() {
+                *k += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut texts: Vec<(String, String)> = Vec::with_capacity(files.len());
+    for (p, k) in &files {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        texts.push((label(p, *k), text));
     }
     let files: Vec<(&str, &str)> = texts
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
         .collect();
     let mut kinds = compile_files(&files)?;
-    kinds.debug.packs = abs;
+    kinds.debug.packs = full_paths
+        .iter()
+        .map(|(_, f)| f.to_string_lossy().into_owned())
+        .collect();
     Ok(kinds)
 }
 
@@ -5495,6 +5524,50 @@ mod tests {
     /// Packs are file lists in the order given: a later pack's kinds come
     /// after an earlier one's, may extend them and call their subs, and a
     /// name declared in two packs is an error naming both files.
+    #[test]
+    fn pack_labels_name_one_file_each_and_a_pack_loads_once() {
+        let root = std::env::temp_dir().join(format!("wmc-labels-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (one, two) = (root.join("one/pk"), root.join("two/pk"));
+        std::fs::create_dir_all(&one).unwrap();
+        std::fs::create_dir_all(&two).unwrap();
+        std::fs::write(
+            one.join("a.rules"),
+            "kind first { glyph \"f\"\n when true => idle }",
+        )
+        .unwrap();
+        std::fs::write(
+            two.join("a.rules"),
+            "kind second {\n when true => move north }",
+        )
+        .unwrap();
+        // Two dirs of one name: each label takes a parent more.
+        let k = compile_packs(&[&one, &two]).unwrap();
+        assert_eq!(k.debug.files, ["one/pk/a.rules", "two/pk/a.rules"]);
+        let id = k.by_name("second").unwrap().id;
+        let r = k.debug.rules.iter().find(|r| r.kind == id).unwrap();
+        assert!(r.text.contains("move north"), "{}", r.text);
+        // Two files of one name, likewise.
+        let k = compile_packs(&[&one.join("a.rules"), &two.join("a.rules")]).unwrap();
+        assert_eq!(k.debug.files, ["one/pk/a.rules", "two/pk/a.rules"]);
+        std::fs::write(two.join("a.rules"), "kind first { }").unwrap();
+        let err = compile_packs(&[&one, &two]).unwrap_err().to_string();
+        assert!(
+            err.starts_with(
+                "two/pk/a.rules:1:6: kind `first` declared twice (first at one/pk/a.rules:1)"
+            ),
+            "{err}"
+        );
+        // The same pack twice is that pack once.
+        let slash = std::path::PathBuf::from(format!("{}/", one.display()));
+        let k = compile_packs(&[&one, &slash]).unwrap();
+        assert_eq!(
+            (k.debug.packs.len(), k.debug.files.as_slice()),
+            (1, ["a.rules".to_string()].as_slice())
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn packs_merge_in_order_and_duplicates_name_both_files() {
         let root = std::env::temp_dir().join(format!("wmc-packs-{}", std::process::id()));

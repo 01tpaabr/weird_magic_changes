@@ -458,7 +458,8 @@ trait, file sub, const, tag and scent name is global across all of them: a kind 
 can extend a kind or trait of another, call its subs and use its constants, and a name
 declared twice, in any two files, is an error naming both. A sub declared inside a kind or
 trait is that item's own: two items may each have a `wander`, but it can't share a name with
-a file sub, a kind or a trait.
+a file sub, a kind or a trait. A pack given twice loads once. With several packs an error
+names a file `pack/file.rules`, with more parent directories where two packs share a name.
 
 ```
 wmc play saves/zoo --rules rules --rules mods/wolves     # the built-in kinds, then a mod's
