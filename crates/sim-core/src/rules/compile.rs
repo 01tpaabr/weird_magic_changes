@@ -2163,6 +2163,16 @@ impl<'a> Gen<'a> {
                     ),
                 ));
             }
+            if let Some(o) = self.item_named(&s.name) {
+                let what = if items[o].is_trait { "trait" } else { "kind" };
+                return Err(self.err(
+                    &s.at,
+                    format!(
+                        "`{}` is already a {what} (first at {}:{})",
+                        s.name, items[o].at.file, items[o].at.line
+                    ),
+                ));
+            }
         }
         // `spawn K ... with (m = a, n = b)`: the names each kind's spawns set.
         let mut sites = Vec::new();
@@ -2227,6 +2237,16 @@ impl<'a> Gen<'a> {
                         ),
                     ));
                 }
+                if let Some(o) = self.item_named(&m.name) {
+                    let what = if items[o].is_trait { "trait" } else { "kind" };
+                    return Err(self.err(
+                        &m.at,
+                        format!(
+                            "`{}`'s sub `{}` has the name of a {what} (first at {}:{})",
+                            it.name, m.name, items[o].at.file, items[o].at.line
+                        ),
+                    ));
+                }
             }
         }
         // Tags: global names, a bit each, never a kind's or a trait's name.
@@ -2235,6 +2255,15 @@ impl<'a> Gen<'a> {
                 if let Some(o) = self.item_named(t) {
                     let what = if items[o].is_trait { "trait" } else { "kind" };
                     return Err(self.err(&it.at, format!("tag `{t}` is also a {what}'s name")));
+                }
+                if let Some(o) = self.subs.iter().find(|s| s.name == *t) {
+                    return Err(self.err(
+                        &it.at,
+                        format!(
+                            "tag `{t}` is also a sub's name (first at {}:{})",
+                            o.at.file, o.at.line
+                        ),
+                    ));
                 }
                 if !self.tags.contains(t) {
                     if self.tags.len() == 64 {
@@ -5507,6 +5536,31 @@ mod tests {
         assert!(
             err.contains("sub `rest` declared twice (first at base/b.rules:2)"),
             "{err}"
+        );
+        // A file sub shares the namespace with kinds, traits and tags.
+        std::fs::write(wild.join("b.rules"), "sub hen() { idle }").unwrap();
+        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
+        assert!(
+            err.starts_with("wild/b.rules:1:5: `hen` is already a kind (first at base/b.rules:1)"),
+            "{err}"
+        );
+        std::fs::write(wild.join("b.rules"), "kind owl { tags rest }").unwrap();
+        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
+        assert!(
+            err.starts_with(
+                "wild/b.rules:1:6: tag `rest` is also a sub's name (first at base/b.rules:2)"
+            ),
+            "{err}"
+        );
+        // A member sub is its kind's or trait's own: two may share a name,
+        // but not a kind's or trait's name.
+        compile_ok(
+            "trait t { sub wander() { idle } } trait u { sub wander() { idle } }
+             kind a extends t { when true => wander() } kind b extends u { when true => wander() }",
+        );
+        assert_eq!(
+            compile_err("kind a { sub b() { idle } when true => b() }\nkind b { }"),
+            "t.rules:1:14: `a`'s sub `b` has the name of a kind (first at t.rules:2)"
         );
         let err = compile_packs(&[&base, &root.join("gone")])
             .unwrap_err()

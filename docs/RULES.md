@@ -454,9 +454,11 @@ they use `scenarios/default.scenario`, which starts the built-in kinds.
 
 A **pack** is a directory of `*.rules` files, or one file. A world's rules are one or more
 packs compiled together, in the order given, files sorted by name inside each. Every kind,
-trait, sub, const, tag and scent name is global across all of them: a kind in one pack can
-extend a kind or trait of another, call its subs and use its constants, and a name declared
-twice, in any two files, is an error naming both.
+trait, file sub, const, tag and scent name is global across all of them: a kind in one pack
+can extend a kind or trait of another, call its subs and use its constants, and a name
+declared twice, in any two files, is an error naming both. A sub declared inside a kind or
+trait is that item's own: two items may each have a `wander`, but it can't share a name with
+a file sub, a kind or a trait.
 
 ```
 wmc play saves/zoo --rules rules --rules mods/wolves     # the built-in kinds, then a mod's
