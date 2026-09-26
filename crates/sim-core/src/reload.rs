@@ -157,7 +157,8 @@ impl Plan {
                 Some(t) => {
                     actors.pubs[slot].kind = t.kind;
                     let cover = row.flags & flags::COVER != 0;
-                    actors.layer(cover)[usize::from(row.cell)] = ActorId::pack(t.kind, slot as u16);
+                    actors.cells.layer_mut(cover)[usize::from(row.cell)] =
+                        ActorId::pack(t.kind, slot as u16);
                     let old = actors.minds[slot];
                     let m = &mut actors.minds[slot];
                     for i in 0..NEED_SLOTS {

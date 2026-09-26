@@ -586,7 +586,7 @@ pub fn resolve(
                     let eat = it.action != Action::Hit;
                     let dir = vm::dir_index(-dx, -dy);
                     match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
-                        Where::Here(cell) => match layer_of(cells, cover)[cell].unpack() {
+                        Where::Here(cell) => match cells.layer(cover)[cell].unpack() {
                             None => result::MISSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
@@ -629,12 +629,6 @@ pub fn resolve(
 #[inline]
 fn has_health(kinds: &Kinds, kind: u16) -> bool {
     kinds.def(kind).need_named("health").is_some()
-}
-
-/// The occupant layer, or the cover layer.
-#[inline]
-fn layer_of(cells: &ChunkCells, cover: bool) -> &[ActorId; CHUNK_CELLS] {
-    if cover { &cells.cover } else { &cells.occupant }
 }
 
 // ---- Exchange ---------------------------------------------------------------------------
@@ -692,7 +686,7 @@ pub fn exchange(
         };
         let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
-                match layer_of(&cells, cover)[usize::from(fx.cell)].unpack() {
+                match cells.layer(cover)[usize::from(fx.cell)].unpack() {
                     None => result::MISSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
@@ -739,7 +733,7 @@ pub fn exchange(
             let group = i..j;
             i = j;
             let cell = usize::from(first.cell);
-            let Some((vk, vslot)) = layer_of(&cells, first.cover)[cell].unpack() else {
+            let Some((vk, vslot)) = cells.layer(first.cover)[cell].unpack() else {
                 continue;
             };
             let vslot = usize::from(vslot);
@@ -968,7 +962,7 @@ pub fn apply(
                     continue; // died in Exchange: its intent is void
                 }
                 let from = usize::from(pubs.rows[slot].cell);
-                let grounded = pubs.rows[slot].flags & flags::COVER != 0;
+                let cover = pubs.rows[slot].flags & flags::COVER != 0;
                 let mut actors = ActorsMut {
                     pubs: &mut pubs.rows,
                     minds: &mut minds.rows,
@@ -982,7 +976,7 @@ pub fn apply(
                         let kind = actors.pubs[slot].kind;
                         actors.kill(slot);
                         scratch.deaths += 1;
-                        if !grounded {
+                        if !cover {
                             scratch.touch(from);
                         }
                         scratch.count(kind, life::DIED);
@@ -1006,7 +1000,7 @@ pub fn apply(
                         })
                     }
                     // Ground cover is rooted.
-                    Action::Move if grounded => Some(result::REFUSED),
+                    Action::Move if cover => Some(result::REFUSED),
                     Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let kind = actors.pubs[slot].kind;
@@ -1188,8 +1182,8 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if usize::from(to) >= kinds.len() {
         return result::REFUSED;
     }
-    let grounded = actors.pubs[slot].flags & flags::COVER != 0;
-    if kinds.def(to).cover != grounded {
+    let cover = actors.pubs[slot].flags & flags::COVER != 0;
+    if kinds.def(to).cover != cover {
         return result::REFUSED; // a row cannot change layers
     }
     let from = actors.pubs[slot].kind;
@@ -1217,7 +1211,7 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     m.born = tick as u32;
     actors.pubs[slot].kind = to;
     let cell = usize::from(actors.pubs[slot].cell);
-    actors.layer(grounded)[cell] = ActorId::pack(to, slot as u16);
+    actors.cells.layer_mut(cover)[cell] = ActorId::pack(to, slot as u16);
     result::OK
 }
 
@@ -1306,11 +1300,7 @@ pub fn migrate(
             }
             EffectKind::Spawn { kind, with } => {
                 let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with);
-                if cover {
-                    to.push_cover(cell, kind, child);
-                } else {
-                    to.push(cell, kind, child);
-                }
+                to.push_in(cell, kind, child, cover);
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }

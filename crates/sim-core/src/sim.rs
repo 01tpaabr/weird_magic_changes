@@ -506,12 +506,7 @@ fn load_chunks(
                 if e.needs.is_empty() && e.mems.is_empty() {
                     continue;
                 }
-                let layer = if e.placed.cover {
-                    &data.cells.cover
-                } else {
-                    &data.cells.occupant
-                };
-                let (_, slot) = layer[usize::from(e.cell)]
+                let (_, slot) = data.cells.layer(e.placed.cover)[usize::from(e.cell)]
                     .unpack()
                     .expect("an explicit start is placed");
                 let m = &mut data.minds.rows[usize::from(slot)];
@@ -615,8 +610,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
         return false;
     };
-    let layer = if cover { &cells.cover } else { &cells.occupant };
-    if !cells.walkable(i) || !layer[i].is_none() {
+    if !cells.walkable(i) || !cells.layer(cover)[i].is_none() {
         return false;
     }
     let mut actors = ActorsMut {
@@ -624,11 +618,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
         minds: &mut minds.rows,
         cells: &mut cells,
     };
-    if cover {
-        actors.push_cover(i, kind, mind);
-    } else {
-        actors.push(i, kind, mind);
-    }
+    actors.push_in(i, kind, mind, cover);
     meta.dirty = true;
     true
 }

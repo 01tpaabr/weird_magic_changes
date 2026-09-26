@@ -147,11 +147,12 @@ impl ActorsMut<'_> {
         self.push_in(cell, kind, mind, true)
     }
 
-    fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
-        let layer = self.layer(cover);
+    /// [`ActorsMut::push`] or [`ActorsMut::push_cover`], by `cover`.
+    pub fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
+        let layer = self.cells.layer_mut(cover);
         assert!(layer[cell].is_none(), "cell {cell} is occupied");
         let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
-        self.layer(cover)[cell] = ActorId::pack(kind, slot);
+        layer[cell] = ActorId::pack(kind, slot);
         self.pubs.push(ActorPub {
             cell: cell as u16,
             kind,
@@ -165,15 +166,6 @@ impl ActorsMut<'_> {
         slot
     }
 
-    #[inline]
-    pub fn layer(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
-        if cover {
-            &mut self.cells.cover
-        } else {
-            &mut self.cells.occupant
-        }
-    }
-
     /// Flag a row dead and free its cell. The row stays until [`compact`].
     ///
     /// [`compact`]: ActorsMut::compact
@@ -181,7 +173,7 @@ impl ActorsMut<'_> {
         let p = self.pubs[slot];
         if p.flags & flags::DEAD == 0 {
             self.pubs[slot].flags |= flags::DEAD;
-            self.layer(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
+            self.cells.layer_mut(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
         }
     }
 
@@ -198,7 +190,7 @@ impl ActorsMut<'_> {
             self.minds.swap_remove(i);
             if i < self.pubs.len() {
                 let moved = self.pubs[i];
-                self.layer(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
+                self.cells.layer_mut(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
                     ActorId::pack(moved.kind, i as u16);
             }
         }
@@ -236,11 +228,7 @@ pub fn validate(
         if cell >= CHUNK_CELLS {
             return Err(format!("row {slot} is on cell {cell}, outside the chunk"));
         }
-        let layer = if p.flags & flags::COVER != 0 {
-            &cells.cover
-        } else {
-            &cells.occupant
-        };
+        let layer = cells.layer(p.flags & flags::COVER != 0);
         let want = ActorId::pack(p.kind, slot as u16);
         if layer[cell] != want {
             return Err(format!(

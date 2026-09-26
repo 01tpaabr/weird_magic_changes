@@ -253,6 +253,22 @@ impl ChunkCells {
         self.ground[i].walkable() && !self.feature[i].blocks()
     }
 
+    /// The occupant layer, or the cover layer.
+    #[inline]
+    pub fn layer(&self, cover: bool) -> &[ActorId; CHUNK_CELLS] {
+        if cover { &self.cover } else { &self.occupant }
+    }
+
+    /// [`ChunkCells::layer`], mutable.
+    #[inline]
+    pub fn layer_mut(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
+        if cover {
+            &mut self.cover
+        } else {
+            &mut self.occupant
+        }
+    }
+
     /// Content hash, independent of where the chunk lives in memory.
     pub fn hash(&self) -> u64 {
         let h = fnv1a(0xCBF2_9CE4_8422_2325, bytemuck::cast_slice(&self.ground));

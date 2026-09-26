@@ -125,11 +125,7 @@ pub fn generate_chunk(
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
             };
-            if cover {
-                out.actors_mut().push_cover(i, kind, mind);
-            } else {
-                out.actors_mut().push(i, kind, mind);
-            }
+            out.actors_mut().push_in(i, kind, mind, cover);
         }
     }
 }
