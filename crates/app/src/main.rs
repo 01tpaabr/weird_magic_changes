@@ -475,7 +475,8 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
 
 /// Compile rule packs and print their kind table and the author lint: the
 /// fast way to check a rules file before a world runs it. With a scenario,
-/// check that its starts fit the rules too, and which kinds never appear.
+/// check that its starts fit the rules too, which kinds never appear, and
+/// which starts lie outside the initial region.
 /// `strict`: any warning fails (for CI).
 fn lint(packs: &[String], scenario_file: Option<&str>, strict: bool) -> anyhow::Result<()> {
     let paths: Vec<std::path::PathBuf> = packs.iter().map(Into::into).collect();
@@ -490,8 +491,9 @@ fn lint(packs: &[String], scenario_file: Option<&str>, strict: bool) -> anyhow::
         None => None,
     };
     let mut diagnostics = kinds.debug.diagnostics.clone();
-    if let Some((_, s)) = &scenario {
+    if let Some((f, s)) = &scenario {
         diagnostics.extend(s.unseen(&kinds));
+        diagnostics.extend(s.outside_region(f));
     }
     let mut out = std::io::stdout().lock();
     if !kinds.debug.traits.is_empty() {

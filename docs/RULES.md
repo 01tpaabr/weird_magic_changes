@@ -426,7 +426,9 @@ it, as many times as you like, in the order written. `wmc scenario <file>` makes
 (nowhere on disk), runs the lines, prints each expectation with what it found and the final
 checksums, and fails if an expectation does. Every scenario in `scenarios/` and
 `scenarios/tests/` runs in `make test`, at 1 and 8 threads, and must end with the same
-checksum at both; one without `run` lines only makes its world.
+checksum at both; one without `run` lines only makes its world. A test sees only the
+initial region (`size`, in whole 64-cell chunks): nothing streams in, so a `start K at`
+outside it is never placed.
 
 ```
 # scenarios/tests/eggs_hatch.scenario
@@ -581,7 +583,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
     `water`, `food`), a sub, a const, a state no `next` reaches (the first is where actors
     start), a tag no predicate names (a note);
   - with `--scenario`, a kind that never appears: the scenario starts none, and nothing
-    that appears spawns or becomes one.
+    that appears spawns or becomes one; a `start K at` outside the initial region (a note).
 - **Two actions in a row** are a compile error when the compiler can see both: a statement
   that acts on every path, then another action in the same block.
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at

@@ -37,7 +37,7 @@ use std::fmt;
 
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
-use crate::stage::{ChunkCoord, Feature, Ground, Pos};
+use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos};
 
 /// A cell's placement draw is out of this: the top 24 bits of a cell hash,
 /// exact in integers. A share `n / d` is `n * PLACE_ONE / d` of it.
@@ -495,6 +495,35 @@ impl Scenario {
                         kinds.defs[k].name
                     ),
                 }
+            })
+            .collect()
+    }
+
+    /// The author lint's other scenario check: a note for each explicit
+    /// start outside the initial region (`[0, size)` in whole chunks). Only
+    /// `play` streams out to it; the headless commands never place it.
+    /// `file` is the scenario's, for the notes (which have no line).
+    pub fn outside_region(&self, file: &str) -> Vec<Diagnostic> {
+        let side =
+            |cells: u32| i64::from(cells.div_ceil(CHUNK_SIZE as u32)) * i64::from(CHUNK_SIZE);
+        let (w, h) = (side(self.width), side(self.height));
+        self.starts
+            .iter()
+            .filter_map(|s| match s {
+                Start::At { kind, x, y, .. }
+                    if !(0..w).contains(&i64::from(*x)) || !(0..h).contains(&i64::from(*y)) =>
+                {
+                    Some(Diagnostic {
+                        level: Level::Note,
+                        file: file.to_string(),
+                        line: 0,
+                        col: 0,
+                        msg: format!(
+                            "`start {kind} at ({x}, {y})` is outside the initial region {w}x{h}: only `play` reaches it by streaming; `run`, `why`, `show` and scenario tests never place it"
+                        ),
+                    })
+                }
+                _ => None,
             })
             .collect()
     }
@@ -1772,6 +1801,31 @@ legend {
         assert_eq!(names, ["flower", "hive", "bee", "grass", "seed", "tree"]);
         let d = &pen.unseen(&k)[0];
         assert_eq!((d.file.as_str(), d.line), ("bees.rules", 18));
+    }
+
+    #[test]
+    fn starts_outside_the_initial_region_get_a_note() {
+        let s = Scenario::parse(
+            "g",
+            "size 80 24
+             start fox at (-1, 3)
+             start hive at (200, 10)
+             start bee at (100, 10)     # inside: the region is whole chunks, 128 x 64
+             start chicken at (5, 5)
+             start seed 1 / 4",
+        )
+        .unwrap();
+        let notes = s.outside_region("g");
+        let msgs: Vec<&str> = notes.iter().map(|d| d.msg.as_str()).collect();
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        assert!(msgs[0].starts_with("`start fox at (-1, 3)` is outside the initial region 128x64"));
+        assert!(msgs[1].starts_with("`start hive at (200, 10)`"));
+        assert!(
+            notes
+                .iter()
+                .all(|d| d.level == Level::Note && d.file == "g")
+        );
+        assert!(Scenario::builtin().outside_region("b").is_empty());
     }
 
     #[test]
