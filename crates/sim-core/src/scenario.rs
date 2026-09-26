@@ -973,14 +973,29 @@ impl DrawnMap {
     }
 }
 
-/// The starts naming a kind `kinds` defines (hot reload drops the others:
-/// a kind that is gone starts nowhere).
+/// The starts naming a kind `kinds` defines (hot reload and opening a save
+/// drop the others: a kind that is gone starts nowhere), each `with` kept
+/// to the needs and mems its kind still has, a need clamped to its range,
+/// as the rows are.
 pub fn present(starts: &[Start], kinds: &Kinds) -> Vec<Start> {
-    starts
-        .iter()
-        .filter(|s| kinds.by_name(s.kind()).is_some())
-        .cloned()
-        .collect()
+    let mut out = Vec::new();
+    for s in starts {
+        let Some(def) = kinds.by_name(s.kind()) else {
+            continue;
+        };
+        let mut s = s.clone();
+        if let Start::At { with, .. } = &mut s {
+            with.retain_mut(|(name, v)| match def.need_named(name) {
+                Some(i) => {
+                    *v = (*v).clamp(0, def.needs[i].max);
+                    true
+                }
+                None => def.mems.iter().any(|m| m == name),
+            });
+        }
+        out.push(s);
+    }
+    out
 }
 
 /// A kind as worldgen places it.
@@ -1594,6 +1609,20 @@ legend {
         .unwrap()
         .starts;
         assert_eq!(present(&starts, &k), [starts[0].clone(), starts[3].clone()]);
+    }
+
+    /// Hot reload keeps a start's `with` to what its kind still has, and
+    /// its needs within the new range, as it does the rows.
+    #[test]
+    fn present_drops_and_clamps_what_with_sets() {
+        let k = crate::rules::compile("t.rules", "kind fox { need food max 10h vital }").unwrap();
+        let starts = Scenario::parse("t", "start fox at (1, 1) with (food = 20h, chase = 3)")
+            .unwrap()
+            .starts;
+        let want = Scenario::parse("t", "start fox at (1, 1) with (food = 9000)")
+            .unwrap()
+            .starts;
+        assert_eq!(present(&starts, &k), want);
     }
 
     /// The scenarios in docs/RULES.md §14 parse and fit the built-in rules.

@@ -29,7 +29,7 @@ use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who};
+use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who, present};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
@@ -242,6 +242,7 @@ pub fn new_world_with(scenario: &Scenario, kinds: Kinds) -> Result<World, String
 /// (another set of packs, a newer version of one) are fine: every chunk
 /// read from the store is remapped as it loads ([`reload::Plan`]), and the
 /// first write to the store moves the whole directory over ([`settle`]).
+/// The saved starts follow them the same way ([`present`]).
 /// Opening never writes. A save with a kind the rules do not define, or
 /// one that moved between standing and ground cover, is refused.
 pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
@@ -272,14 +273,17 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         params: &m.params,
         map: m.map.as_ref(),
     };
-    let placement = Placement::resolve(&m.starts, kinds, &terrain)
+    // The saved starts follow the rules as the rows do (a need past its
+    // new max is clamped, a mem that is gone dropped).
+    let starts = present(&m.starts, kinds);
+    let placement = Placement::resolve(&starts, kinds, &terrain)
         .map_err(|e| bad(format!("the save's starts: {e}")))?;
     world.insert_resource(SimConfig {
         seed: m.seed,
         params: m.params,
         initial_width: m.initial_width,
         initial_height: m.initial_height,
-        starts: m.starts,
+        starts,
         map: m.map,
         placement,
     });
@@ -2906,6 +2910,33 @@ mod tests {
         ensure_loaded(&mut back, Pos::new(64, 64), near, Some(&store)).unwrap();
         let n = count_kinds(&mut back);
         assert!(n[0] == 0 && n[1] > 0, "hens are kind 1 now: {n:?}");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A saved start whose `with` the new rules no longer fit (a need
+    /// with a smaller max, a mem that is gone) is kept to what fits, on
+    /// reload and on open, as the rows are.
+    #[test]
+    fn saved_starts_follow_the_rules_they_open_under() {
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let day = compile("a.rules", "kind fox { need food max 1d vital  mem chase }").unwrap();
+        let short = compile("b.rules", "kind fox { need food max 10h vital }").unwrap();
+        let s = Scenario::parse(
+            "t",
+            "size 64 64
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0
+             start fox at (5, 5) with (food = 22h, chase = 3)",
+        )
+        .unwrap();
+        let store = tmp_store("starts-follow");
+        let mut w = new_world_with(&s, day.clone()).unwrap();
+        save(&mut w, &store).unwrap();
+        let fit = starts("start fox at (5, 5) with (food = 9000)");
+        let back = open_world_with(&store, short.clone()).unwrap().unwrap();
+        assert_eq!(back.resource::<SimConfig>().starts, fit);
+        reload_rules(&mut w, Some(&store), short).unwrap();
+        assert_eq!(w.resource::<SimConfig>().starts, fit);
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
