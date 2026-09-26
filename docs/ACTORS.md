@@ -405,9 +405,10 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    claim[target]` wins the cell; losers get `BLOCKED`; a cover spawn claims nothing and takes
    its cell in key order if it is walkable and has no cover yet; a cover row's `move` and a
    `become` across layers are REFUSED; `become`, self-`die` (a standing actor touches its
-   cell), `drink`, `look`, `result` written. Births, `become`s, bites that fed and deaths,
-   and thinks, ops and traps, are counted per kind (`Tally`: not saved, not hashed; the
-   status rows of `wmc play` and the table after `wmc run` print it, with ops per think).
+   cell), `drink`, `look`, `result` written. Births, `become`s and deaths (by bites:
+   `eaten`, counted in Exchange; by an empty vital need or `die`: `died`), and thinks, ops
+   and traps, are counted per kind (`Tally`: not saved, not hashed; the status rows of `wmc
+   play` and the table after `wmc run` print it, with ops per think).
 4. **Migrate** (sequential): cross-chunk `move`/`spawn` into cells free now and not touched
    this tick; contenders settled by key. An in-chunk winner beats a cross-chunk one (**home
    advantage**, deterministic, documented; decision 30).
