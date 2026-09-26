@@ -695,6 +695,27 @@ impl<'a> Gen<'a> {
                 if let Target::Named(n, _) = t
                     && let Some(Some(m)) = w.bound(n)
                 {
+                    // `eat` and `hit` reach the standing layer, `graze` the cover.
+                    let cover = |v: &u16| kinds.defs[usize::from(*v)].cover;
+                    if matches!(s, Stmt::Graze(..)) {
+                        if !m.ids.is_empty() && !m.ids.iter().any(cover) {
+                            out.warn(
+                                at,
+                                format!(
+                                    "`{eater}` grazes `{}`, which stands: `graze` reaches only ground cover",
+                                    m.shown
+                                ),
+                            );
+                        }
+                    } else if !m.ids.is_empty() && m.ids.iter().all(cover) {
+                        out.warn(
+                            at,
+                            format!(
+                                "`{eater}` {verb} `{}`, which is ground cover: `eat` and `hit` reach only the standing actor there (use `graze`)",
+                                m.shown
+                            ),
+                        );
+                    }
                     for &v in &m.ids {
                         let victim = &kinds.defs[usize::from(v)];
                         if victim.need_named("health").is_none() {
@@ -724,10 +745,18 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, e, out);
                 }
             }
-            Stmt::Become { kind, .. } => {
+            Stmt::Become { kind, at } => {
                 if let Some(k) = self.kind_id(kind) {
                     w.makes.insert(k);
                     w.becomes.insert(k);
+                    if kinds.defs[usize::from(k)].cover != kinds.defs[usize::from(w.kind)].cover {
+                        out.warn(
+                            at,
+                            format!(
+                                "`{eater}` becomes `{kind}`, but a row cannot change layers: always REFUSED"
+                            ),
+                        );
+                    }
                 }
             }
             Stmt::Look(e) => {
@@ -783,9 +812,29 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, e, out);
                 }
             }
-            Stmt::Transfer { target, amount, .. } => {
+            Stmt::Transfer {
+                give,
+                target,
+                amount,
+                at,
+                ..
+            } => {
                 self.walk_target(kinds, w, target, out);
                 self.walk_expr(kinds, w, amount, out);
+                if let Target::Named(n, _) = target
+                    && let Some(Some(m)) = w.bound(n)
+                    && !m.ids.is_empty()
+                    && m.ids.iter().all(|&v| kinds.defs[usize::from(v)].cover)
+                {
+                    let verb = if *give { "gives to" } else { "takes from" };
+                    out.warn(
+                        at,
+                        format!(
+                            "`{eater}` {verb} `{}`, which is ground cover: `take` and `give` reach only the standing actor there",
+                            m.shown
+                        ),
+                    );
+                }
             }
             Stmt::Move(t, _) => self.walk_target(kinds, w, t, out),
             Stmt::Idle(_) | Stmt::Die(_) | Stmt::Next(..) => {}
@@ -1092,6 +1141,57 @@ mod tests {
         assert!(
             !got.iter()
                 .any(|d| d.contains("health") || d.contains("food") || d.contains("water")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn the_cover_and_standing_layers() {
+        let grass =
+            "kind grass { cover  need health max 5 decay 0 vital  food 1h  when true => idle }\n";
+        let got = lint(
+            &[
+                grass,
+                "kind goat { need food max 1d vital  when nearest grass within 1 as g => eat g }
+             kind cow { when nearest grass within 1 as g => hit g }
+             kind seed { need health max 1 decay 0 vital }
+             kind hen { need food max 1d vital  when nearest seed within 1 as s => graze s }
+             kind clover { cover  need nectar max 100 decay 0 }
+             kind bee { need nectar max 100 decay 0
+               when nearest clover within 1 as c => take c nectar 10 }
+             kind moth { mem n  when n == 0 => { n = 1  become grass } }",
+            ]
+            .concat(),
+        );
+        for want in [
+            "`goat` eats `grass`, which is ground cover: `eat` and `hit` reach only the standing actor there (use `graze`)",
+            "`cow` hits `grass`, which is ground cover",
+            "`hen` grazes `seed`, which stands: `graze` reaches only ground cover",
+            "`bee` takes from `clover`, which is ground cover: `take` and `give` reach only the standing actor there",
+            "`moth` becomes `grass`, but a row cannot change layers: always REFUSED",
+        ] {
+            assert!(got.iter().any(|d| d.contains(want)), "{want}: {got:?}");
+        }
+        let got = lint(
+            &[
+                grass,
+                "trait food_ { tags edible }
+             kind seed extends food_ { need health max 1 decay 0 vital  tags edible }
+             kind moss { cover  need health max 1 decay 0 vital  tags edible }
+             kind goat { need food max 1d vital
+               when nearest grass within 1 as g => graze g
+               when nearest seed within 1 as s => eat s
+               when nearest edible within 1 as e => eat e }
+             kind seedling { mem n  when n == 0 => { n = 1  become seed } }
+             kind bee { need nectar max 100 decay 0
+               when nearest seed within 1 as s => give s nectar 1 }",
+            ]
+            .concat(),
+        );
+        assert!(
+            !got.iter().any(|d| d.contains("ground cover")
+                || d.contains("which stands")
+                || d.contains("change layers")),
             "{got:?}"
         );
     }

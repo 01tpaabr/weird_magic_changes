@@ -234,8 +234,8 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 | `eat t` | bites the standing actor at adjacent cell t, which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
 | `hit t` | like `eat`, without the food |
 | `graze t` | like `eat`, on the ground cover at t, adjacent or `here` |
-| `take t NEED n` | moves up to `n` of the adjacent actor's need named NEED into own NEED, never past own max. The target sees `taken` and wakes |
-| `give t NEED n` | moves up to `n` of own NEED into the adjacent actor's NEED, never past its max |
+| `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes |
+| `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover |
 
 Bites land before anyone moves, on either side of a chunk border, in key order. Several
 eaters of one victim each get the share they took. Transfers are settled after bites, also
@@ -549,6 +549,9 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   - `eat`, `hit` or `graze` of a target whose predicate the lint can follow (the `nearest`
     that bound it, or a sub's `pred` argument at each call) where a matching kind has no
     `health`; an eater with no `food` need; a drinker with no `water` need;
+  - the wrong layer: `eat`, `hit`, `take` or `give` of a target that only ground cover
+    matches, `graze` of one that only standing kinds match, `become` between a standing
+    and a cover kind (always `REFUSED`);
   - a search radius that is a constant above the kind's `sight` (it is clamped);
   - a decaying vital need whose max is at most the kind's cadence (it empties by the next
     think, even when refilled);
