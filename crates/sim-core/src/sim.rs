@@ -1621,6 +1621,40 @@ mod tests {
         }
     }
 
+    /// Two rows with one uid (older saves hold such twins) tie on their key
+    /// for the same cell: the first in slot order wins it, the second is
+    /// blocked, instead of spawning onto the mover.
+    #[test]
+    fn a_won_cell_is_taken_even_from_a_tied_key() {
+        use crate::actors::systems::newborn;
+        let kinds = crate::rules::compile(
+            "t.rules",
+            "kind egg { cadence 1 when true => move south }
+             kind tuft { cover cadence 1 when true => spawn sprout at south }
+             kind sprout { cadence 1024 }",
+        )
+        .unwrap();
+        let (egg, tuft, sprout) = (0, 1, 2);
+        let mut w = new_world_with(&cfg(5), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let p = Pos::new(10, 10);
+        assert!(place_actor(&mut w, p, egg, newborn(&kinds, egg, 0x77, now)));
+        assert!(place_actor(
+            &mut w,
+            p,
+            tuft,
+            newborn(&kinds, tuft, 0x77, now)
+        ));
+        step(&mut w);
+        check_invariants(&mut w);
+        let all = rows(&mut w);
+        assert!(all.iter().all(|r| r.1 != sprout), "{all:?}");
+        let at = |k: u16| all.iter().find(|r| r.1 == k).unwrap().2;
+        assert_eq!(at(egg), Pos::new(10, 11));
+        assert_eq!(at(tuft), p);
+    }
+
     /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
     /// step later `sniff` finds it (in the chunk and across a border); the
     /// scent is saved with the chunk and fades to nothing in two hours; a

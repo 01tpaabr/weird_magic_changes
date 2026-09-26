@@ -921,7 +921,8 @@ pub fn apply(
                 return;
             }
             // Claims: in-chunk targets free at tick start and untouched, lowest
-            // key wins. Intents are in key order since Resolve.
+            // key wins. Intents are in key order since Resolve; a winner
+            // touches the cell, so a tied key (twin uids) after it is blocked.
             for it in &intents.list {
                 if !matches!(it.action, Action::Move | Action::Spawn) {
                     continue;
@@ -1002,6 +1003,7 @@ pub fn apply(
                             scratch.touch(from);
                             actors.cells.occupant[cell] = ActorId::pack(kind, it.slot);
                             actors.pubs[slot].cell = cell as u16;
+                            scratch.touch(cell);
                             result::OK
                         }
                         Where::Here(_) => result::BLOCKED,
