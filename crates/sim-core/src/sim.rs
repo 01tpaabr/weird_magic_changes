@@ -648,24 +648,59 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     true
 }
 
+/// The kind ids an `expect` looks at: a kind's family, `only` the kind
+/// alone, as in the rules. An error when the rules have no such kind.
+pub fn expect_family(kinds: &Kinds, who: &Who) -> Result<std::ops::Range<u16>, String> {
+    let k = kinds
+        .by_name(&who.kind)
+        .ok_or_else(|| format!("the rules have no kind `{}`", who.kind))?
+        .id;
+    let end = if who.only {
+        k + 1
+    } else {
+        kinds.family_end[usize::from(k)]
+    };
+    Ok(k..end)
+}
+
+/// Kind `k`'s slot for `name`, per kind (a family's kinds may lay slots out
+/// differently): a need slot of that name, else a mem slot. `true`: a need.
+fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
+    let d = kinds.def(k);
+    d.need_named(name)
+        .map(|i| (true, i))
+        .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
+}
+
+/// Whether the rules define every kind, need and memory `e` names, without
+/// a world: `wmc lint --scenario` checks a test's `expect` lines with it.
+/// The same errors `expect` gives.
+pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
+    match e {
+        Expect::Count { who, .. } | Expect::Tally { who, .. } => {
+            expect_family(kinds, who)?;
+        }
+        Expect::Value { name, who, .. } => {
+            if !expect_family(kinds, who)?.any(|k| expect_slot(kinds, k, name).is_some()) {
+                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
+            }
+        }
+        Expect::At { who: Some(w), .. } => {
+            expect_family(kinds, w)?;
+        }
+        Expect::At { who: None, .. } | Expect::Checksum(_) | Expect::State(_) => {}
+    }
+    Ok(())
+}
+
 /// What a scenario test's `expect` finds in `world` (`wmc scenario`):
 /// whether it holds, and what it saw, for the report. An error when it
-/// names a kind, need or memory the rules do not define. A kind means its
-/// family, `only` the kind alone, as in the rules.
+/// names a kind, need or memory the rules do not define (`check_expect`).
+/// A kind means its family, `only` the kind alone, as in the rules.
 pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
     let kinds = world.resource::<Kinds>().clone();
-    let family = |who: &Who| -> Result<std::ops::Range<u16>, String> {
-        let k = kinds
-            .by_name(&who.kind)
-            .ok_or_else(|| format!("the rules have no kind `{}`", who.kind))?
-            .id;
-        let end = if who.only {
-            k + 1
-        } else {
-            kinds.family_end[usize::from(k)]
-        };
-        Ok(k..end)
-    };
+    check_expect(&kinds, e)?;
+    let family = |who: &Who| expect_family(&kinds, who);
     Ok(match e {
         Expect::Count { who, op, n } => {
             let ids = family(who)?;
@@ -695,17 +730,7 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             v,
         } => {
             let ids = family(who)?;
-            // Per kind (a family's kinds may lay slots out differently): a
-            // need slot of that name, else a mem slot.
-            let slot = |k: u16| -> Option<(bool, usize)> {
-                let d = kinds.def(k);
-                d.need_named(name)
-                    .map(|i| (true, i))
-                    .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
-            };
-            if !ids.clone().any(|k| slot(k).is_some()) {
-                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
-            }
+            let slot = |k: u16| expect_slot(&kinds, k, name);
             // A decaying need as it stands now, as the next think will see it.
             let now = world.resource::<Tick>().0;
             let mut vals = Vec::new();
@@ -2876,6 +2901,45 @@ mod tests {
             ok(true, &format!("{c:016x}"))
         );
         assert!(!expect(&mut w, &Expect::State(c)).unwrap().0);
+    }
+
+    /// `check_expect` finds what an `expect` names that the rules lack,
+    /// with no world: the errors `expect` gives when it reaches the line.
+    #[test]
+    fn expectations_are_checked_against_the_rules() {
+        let kinds = Kinds::builtin();
+        let who = |k: &str| Who {
+            kind: k.into(),
+            only: false,
+        };
+        let count = |k: &str| Expect::Count {
+            who: who(k),
+            op: crate::scenario::Op::Eq,
+            n: 0,
+        };
+        let value = |name: &str, k: &str| Expect::Value {
+            agg: Agg::Max,
+            name: name.into(),
+            who: who(k),
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        assert_eq!(check_expect(&kinds, &count("fox")), Ok(()));
+        assert_eq!(check_expect(&kinds, &value("food", "fox")), Ok(()));
+        assert_eq!(
+            check_expect(&kinds, &count("wolf")),
+            Err("the rules have no kind `wolf`".into())
+        );
+        assert_eq!(
+            check_expect(&kinds, &value("nn", "fox")),
+            Err("`fox` has no need or memory `nn`".into())
+        );
+        let at = |w| Expect::At { x: 0, y: 0, who: w };
+        assert_eq!(check_expect(&kinds, &at(None)), Ok(()));
+        assert_eq!(
+            check_expect(&kinds, &at(Some(who("wolf")))),
+            Err("the rules have no kind `wolf`".into())
+        );
     }
 
     /// Hot reload resolves the scenario's starts against the new rules: a

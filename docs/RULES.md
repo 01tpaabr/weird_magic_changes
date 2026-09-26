@@ -460,8 +460,8 @@ expect became chick == 1
 K alone (`expect count only chick == 1`).
 
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
-define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that
-without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create
+define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that,
+and the kinds, needs and memories its `expect` lines name, without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create
 a world, and `[w h seed]` after the save directory override `size` and `seed` (held to the
 same limits, and no smaller than a drawn map). Without one
 they use `scenarios/default.scenario`, which starts the built-in kinds.

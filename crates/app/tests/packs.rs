@@ -135,3 +135,32 @@ fn lint_takes_its_packs_from_wmc_rules() {
         "{out}"
     );
 }
+
+/// `lint --scenario` checks the kinds, needs and memories a test's `expect`
+/// lines name, before a `run` would have to reach them.
+#[test]
+fn lint_checks_the_names_an_expect_uses() {
+    let root = std::env::temp_dir().join(format!("wmc-lint-expect-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let rules = rules.to_str().unwrap();
+    let head = "size 8 8\nstart egg at (3, 3)\nrun 1\n";
+    let lint = |name: &str, expect: &str| {
+        let f = root.join(name);
+        std::fs::write(&f, format!("{head}{expect}\n")).unwrap();
+        wmc(&["lint", rules, "--scenario", f.to_str().unwrap()])
+    };
+    let (ok, _, err) = lint("wolf.scenario", "expect count wolf == 0");
+    assert!(
+        !ok && err.contains("wolf.scenario:4: the rules have no kind `wolf`"),
+        "{err}"
+    );
+    let (ok, _, err) = lint("nn.scenario", "expect max nn of egg == 0");
+    assert!(
+        !ok && err.contains("nn.scenario:4: `egg` has no need or memory `nn`"),
+        "{err}"
+    );
+    let (ok, out, err) = lint("egg.scenario", "expect count egg == 1");
+    assert!(ok, "{out}{err}");
+    std::fs::remove_dir_all(&root).unwrap();
+}

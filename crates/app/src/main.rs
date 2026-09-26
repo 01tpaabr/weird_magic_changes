@@ -478,8 +478,8 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
 
 /// Compile rule packs and print their kind table and the author lint: the
 /// fast way to check a rules file before a world runs it. With a scenario,
-/// check that its starts fit the rules too, which kinds never appear, and
-/// which starts lie outside the initial region.
+/// check that its starts and its `expect` lines fit the rules too, which
+/// kinds never appear, and which starts lie outside the initial region.
 /// `strict`: any warning fails (for CI).
 fn lint(
     packs: &[std::path::PathBuf],
@@ -492,6 +492,12 @@ fn lint(
             let s = scenario(Some(f))?;
             Placement::resolve(&s.starts, &kinds, &s.terrain())
                 .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+            for c in &s.checks {
+                if let Check::Expect { line, what, .. } = c {
+                    sim::check_expect(&kinds, what)
+                        .map_err(|e| anyhow::anyhow!("{f}:{line}: {e}"))?;
+                }
+            }
             Some((f, s))
         }
         None => None,
