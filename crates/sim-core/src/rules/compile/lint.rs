@@ -301,8 +301,6 @@ struct Walk {
     sight: i32,
     /// Bound names (targets, `pred` parameters) and what they match.
     binds: Vec<(String, Option<Match>)>,
-    /// A sub's int parameters with a constant argument.
-    ints: Vec<(String, i32)>,
     depth: u32,
     eats: Option<Pos>,
     drinks: Option<Pos>,
@@ -398,7 +396,6 @@ impl<'a> Gen<'a> {
                 kind: k as u16,
                 sight: i32::from(def.sight),
                 binds: Vec::new(),
-                ints: Vec::new(),
                 depth: 0,
                 eats: None,
                 drinks: None,
@@ -870,19 +867,14 @@ impl<'a> Gen<'a> {
                 _ => {}
             }
         }
-        let saved = (
-            std::mem::replace(&mut w.binds, binds),
-            std::mem::take(&mut w.ints),
-            self.params.clone(),
-        );
+        let saved = (std::mem::replace(&mut w.binds, binds), self.params.clone());
         // A member sub sees its owner's parameters; a file sub only its own.
         self.params = owner.map(|o| self.scope_of(o)).unwrap_or_default();
-        self.params.extend(ints.iter().cloned());
-        w.ints = ints;
+        self.params.extend(ints);
         w.depth += 1;
         self.walk_stmts(kinds, w, &sub.body, out);
         w.depth -= 1;
-        (w.binds, w.ints, self.params) = saved;
+        (w.binds, self.params) = saved;
     }
 }
 
