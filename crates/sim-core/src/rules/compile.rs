@@ -19,6 +19,8 @@
 //! procedure (a statement). Targets are `(dx, dy)` pairs: two stack values
 //! in flight, two locals at rest.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 
 use super::asm::{Asm, Label};
@@ -2075,6 +2077,9 @@ struct Gen<'a> {
     debug: DebugInfo,
     /// The state whose rules are being compiled (`None`: the reflexes).
     state: Option<u8>,
+    /// [`Gen::ends`] of a call, by (sub address, tables, depth, acts_only):
+    /// only looked up, never iterated.
+    ends_memo: RefCell<HashMap<(usize, Option<usize>, u32, bool), bool>>,
 }
 
 /// Does this statement emit an action? Its position, if so.
@@ -2136,6 +2141,7 @@ impl<'a> Gen<'a> {
                 ..DebugInfo::default()
             },
             state: None,
+            ends_memo: RefCell::default(),
             items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
@@ -3328,10 +3334,18 @@ impl<'a> Gen<'a> {
                     })
             }
             Stmt::Call { name, .. } => {
+                // A callee's answer depends only on it, the tables and the
+                // depth (inside it every name is unknown): remembered.
                 depth < 8
-                    && self
-                        .callee(name)
-                        .is_some_and(|sub| self.ends_all(&sub.body, acts_only, depth + 1, false))
+                    && self.callee(name).is_some_and(|sub| {
+                        let key = (std::ptr::from_ref(sub) as usize, self.cur, depth, acts_only);
+                        if let Some(&v) = self.ends_memo.borrow().get(&key) {
+                            return v;
+                        }
+                        let v = self.ends_all(&sub.body, acts_only, depth + 1, false);
+                        self.ends_memo.borrow_mut().insert(key, v);
+                        v
+                    })
             }
             _ => action_at(s).is_some(),
         }
@@ -5657,6 +5671,16 @@ mod tests {
         // Nothing hides it: still folded.
         let e = compile_err("const W = 1 kind a { when 1 => { choose { W: idle }  move north } }");
         assert!(e.contains("a second action"), "{e}");
+    }
+
+    #[test]
+    fn a_sub_that_calls_itself_many_times_compiles_quickly() {
+        // Without a memo the one-action check walks 16^8 calls.
+        let calls = "a(n - 1) ".repeat(16);
+        compile_ok(&format!(
+            "sub a(n) {{ if n > 0 {{ {calls} }} else {{ n = 0 }} }}\n\
+             kind rock {{ glyph \"r\" when 1 > 0 => idle }}"
+        ));
     }
 
     #[test]
