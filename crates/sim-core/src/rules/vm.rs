@@ -230,31 +230,29 @@ pub enum Sense {
 }
 
 impl Sense {
-    pub const COUNT: u8 = 17;
+    /// Every sense, in numbering order.
+    pub const ALL: [Sense; 17] = [
+        Self::Light,
+        Self::Age,
+        Self::X,
+        Self::Y,
+        Self::Hour,
+        Self::Day,
+        Self::Kind,
+        Self::Look,
+        Self::Signal,
+        Self::State,
+        Self::Hurt,
+        Self::HurtDir,
+        Self::Result,
+        Self::Ground,
+        Self::Feature,
+        Self::Taken,
+        Self::Trapped,
+    ];
 
     pub fn from_u8(a: u8) -> Option<Self> {
-        (a < Self::COUNT).then(|| {
-            // SAFETY-free: the enum is `repr(u8)` and dense from 0.
-            [
-                Self::Light,
-                Self::Age,
-                Self::X,
-                Self::Y,
-                Self::Hour,
-                Self::Day,
-                Self::Kind,
-                Self::Look,
-                Self::Signal,
-                Self::State,
-                Self::Hurt,
-                Self::HurtDir,
-                Self::Result,
-                Self::Ground,
-                Self::Feature,
-                Self::Taken,
-                Self::Trapped,
-            ][usize::from(a)]
-        })
+        Self::ALL.get(usize::from(a)).copied()
     }
 }
 
@@ -1083,14 +1081,19 @@ impl Machine<'_> {
                         let n = self.count(pred, r)?;
                         self.push(n)?;
                     }
-                    O::Nearest => {
+                    O::Nearest | O::Sniff => {
                         let r = self.pop()?;
-                        let pred = self.pop()?;
+                        let what = self.pop()?;
                         let i = self.local(op.a)?;
                         if usize::from(op.a) + 1 >= FRAME_LOCALS {
                             return Err(Trap::BadLocal);
                         }
-                        match self.nearest(pred, r)? {
+                        let found = if op.code == O::Nearest {
+                            self.nearest(what, r)?
+                        } else {
+                            self.sniff(what, r)?
+                        };
+                        match found {
                             Some((dx, dy)) => {
                                 self.locals[i] = dx;
                                 self.locals[i + 1] = dy;
@@ -1197,22 +1200,6 @@ impl Machine<'_> {
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
                         let v = self.ctx.halo.scent(lx, ly, dx, dy, usize::from(op.a));
                         self.push(i32::from(v))?;
-                    }
-                    O::Sniff => {
-                        let r = self.pop()?;
-                        let ch = self.pop()?;
-                        let i = self.local(op.a)?;
-                        if usize::from(op.a) + 1 >= FRAME_LOCALS {
-                            return Err(Trap::BadLocal);
-                        }
-                        match self.sniff(ch, r)? {
-                            Some((dx, dy)) => {
-                                self.locals[i] = dx;
-                                self.locals[i + 1] = dy;
-                                self.push(1)?;
-                            }
-                            None => self.push(0)?,
-                        }
                     }
                 }
                 false
@@ -1478,6 +1465,15 @@ mod tests {
 
     fn mind() -> ActorMind {
         ActorMind::zeroed()
+    }
+
+    #[test]
+    fn sense_numbering_is_dense() {
+        for (i, s) in Sense::ALL.into_iter().enumerate() {
+            assert_eq!(s as usize, i);
+            assert_eq!(Sense::from_u8(i as u8), Some(s));
+        }
+        assert_eq!(Sense::from_u8(Sense::ALL.len() as u8), None);
     }
 
     #[test]
