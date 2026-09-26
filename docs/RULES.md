@@ -596,4 +596,6 @@ in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`
 `rand`, `chance`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
 `ground`, `feature`, `taken`, `trapped`). `wmc lint` says so when you hit one. `water`,
-`soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`.
+`soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`. But
+`water`, `soil`, `rock` and `bare` always mean the predicate where one is read, so they can't
+name a kind or a tag.

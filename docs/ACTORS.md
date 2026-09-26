@@ -290,7 +290,7 @@ TIME     := INT ("min" | "h" | "d")
   declaration only where a declaration starts (`need food`, `food < 20h` work). `x` and `y`
   are senses, so they cannot name a parameter or local. A pred name is a sub's `pred`
   parameter, else a kind, else a **tag**: tags are global names numbered in first-appearance
-  order (64 at most, never a kind's name), a kind's tags a bitset the VM checks against the
+  order (64 at most, never a kind's name nor a predicate word), a kind's tags a bitset the VM checks against the
   occupant (`nearest meat within 8`). Where a kind starts is not in the rules: the
   scenario's `start` lines say it (§2, decision 36; `place` is an error pointing there).
   `color "#rrggbb"` is the glyph's colour (default a pale yellow), `cover` makes the kind

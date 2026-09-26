@@ -971,6 +971,13 @@ impl Parser<'_> {
         let is_trait = self.is_kw("trait");
         self.bump(); // `kind` or `trait`
         let (name, at) = self.ident(if is_trait { "trait name" } else { "kind name" })?;
+        // `count water` is the ground: a kind of that name no pred could match.
+        if !is_trait && pred_word(&name).is_some() {
+            return Err(self.err_at(
+                &at,
+                format!("`{name}` is a predicate word, not a kind name"),
+            ));
+        }
         let mut params = Vec::new();
         if self.is_sym("(") {
             if !is_trait {
@@ -1131,6 +1138,9 @@ impl Parser<'_> {
                     }
                     if is_reserved(&n) {
                         return Err(self.err(format!("`{n}` is a reserved word, not a tag")));
+                    }
+                    if pred_word(&n).is_some() {
+                        return Err(self.err(format!("`{n}` is a predicate word, not a tag")));
                     }
                     self.bump();
                     d.tags.push(n);
@@ -4444,6 +4454,25 @@ mod tests {
         assert!(
             compile_err("sub f(n) { return n } kind a { when f(free) == 1 => idle }")
                 .contains("argument `n` of `f` must be an integer")
+        );
+    }
+
+    #[test]
+    fn a_predicate_word_names_no_kind_or_tag() {
+        for w in ["water", "soil", "rock", "bare"] {
+            assert_eq!(
+                compile_err(&format!("kind {w} {{ glyph \"w\" }}")),
+                format!("t.rules:1:6: `{w}` is a predicate word, not a kind name")
+            );
+            assert_eq!(
+                compile_err(&format!("kind a {{ glyph \"a\" tags meat {w} }}")),
+                format!("t.rules:1:30: `{w}` is a predicate word, not a tag")
+            );
+        }
+        // Still a need, a memory, a trait and a local.
+        compile_ok(
+            "trait water { need water max 1d vital }
+             kind a extends water { mem soil  when true => { let rock = 1  soil = rock  idle } }",
         );
     }
 
