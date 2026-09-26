@@ -155,10 +155,18 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     } else {
         let _ = writeln!(
             s,
-            "rules  (FIRED: its body ran; no: its condition was false; blank: not reached)"
+            "rules  (FIRED: its body ran; no: its condition was false; TRAPPED: the think \
+             trapped in its condition; blank: not reached)"
         );
+        // A trap outside a body is in the condition of the last rule entered.
+        let trapped = e.outcome.trap.and_then(|_| {
+            e.trace
+                .iter()
+                .rev()
+                .find_map(|st| rules.iter().position(|r| r.cond_pc == st.pc))
+        });
         let mut shown_state = None;
-        for r in &rules {
+        for (i, r) in rules.iter().enumerate() {
             if r.state.is_some_and(|st| st != b.state) {
                 continue;
             }
@@ -168,6 +176,8 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             }
             let verdict = if visited(r.body_pc) {
                 "FIRED"
+            } else if trapped == Some(i) {
+                "TRAPPED"
             } else if visited(r.cond_pc) {
                 "no"
             } else {
@@ -422,5 +432,35 @@ mod tests {
             r.contains("FIRED  when hour >= 0 => idle   [via restful]"),
             "{r}"
         );
+    }
+
+    /// A think that traps in a condition (here: out of fuel in a search)
+    /// marks that rule TRAPPED, not `no`, and the ops end at the fault.
+    #[test]
+    fn a_trap_in_a_condition_is_shown_where_it_happened() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind k { glyph \"k\"  sight 16  fuel 20\n  when count free within 16 > 0 => idle\n}",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0xCA, now)))
+            .expect("a walkable cell");
+        let r = report(&w, at, true).expect("a k there");
+        assert!(r.contains("TRAPPED: Fuel"), "{r}");
+        let line = r.lines().find(|l| l.contains("t.rules:2")).unwrap();
+        assert!(line.contains("TRAPPED when count"), "{r}");
+        let last = r.lines().last().unwrap();
+        assert!(last.contains("Count"), "{r}");
     }
 }

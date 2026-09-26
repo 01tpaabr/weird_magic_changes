@@ -649,6 +649,8 @@ struct Machine<'m> {
     frames: [(usize, usize); FRAMES],
     depth: usize,
     pc: usize,
+    /// The op being run (kept only when tracing): a trap's trace ends there.
+    at: usize,
     fuel: u32,
     draws: u64,
     out: Outcome,
@@ -898,6 +900,9 @@ impl Machine<'_> {
         use OpCode as O;
         loop {
             let at = self.pc;
+            if TRACE {
+                self.at = at;
+            }
             let op = *code.get(self.pc).ok_or(Trap::BadPc)?;
             self.pc += 1;
             self.spend(1)?;
@@ -1320,6 +1325,7 @@ fn think_with<const TRACE: bool>(
         frames: [(0, 0); FRAMES],
         depth: 0,
         pc: ctx.kind.entry as usize,
+        at: 0,
         fuel: ctx.kind.fuel,
         draws: 0,
         out: Outcome::default(),
@@ -1328,6 +1334,15 @@ fn think_with<const TRACE: bool>(
         mind,
     };
     if let Err(trap) = m.run::<TRACE>(&program.code, &program.consts, &program.subs, trace) {
+        // The op that trapped (none for a bad pc), so `wmc why` shows where.
+        if TRACE && let Some(&op) = program.code.get(m.at) {
+            trace.push(Step {
+                pc: m.at as u32,
+                op,
+                top: m.sp.checked_sub(1).map(|i| m.stack[i]),
+                fuel: m.fuel,
+            });
+        }
         m.out.trap = Some(trap);
         m.out.action = Action::Idle;
         m.out.next = None;
@@ -1532,6 +1547,47 @@ mod tests {
         let out = run(a.finish(), vec![], vec![], &mut mind());
         assert_eq!(out.trap, Some(Trap::SecondAction));
         assert_eq!(out.action, Action::Idle);
+    }
+
+    /// A traced think records the op that trapped too (`wmc why` shows
+    /// where); a fuel trap's last step has no fuel left.
+    #[test]
+    fn the_trapping_op_is_traced() {
+        let (cells, actors) = stage();
+        let mut halo = Halo {
+            chunks: [None; 9],
+            tags: &[],
+            family_end: &[],
+        };
+        halo.chunks[4] = Some((&cells, &actors));
+        let traced = |a: Asm| {
+            let kinds = Kinds::from_parts(vec![kind(vec![], 0)], a.finish(), vec![], vec![]);
+            let ctx = Ctx {
+                halo: &halo,
+                kind: &kinds.defs[0],
+                cell: 10 * 64 + 11,
+                pos: Pos::new(11, 10),
+                tick: 1000,
+                rng: rng_base(1, 1000, 7),
+                look: 0,
+                signal: 0,
+            };
+            let mut trace = Vec::new();
+            let out = think_traced(&kinds, ctx, &mut mind(), &mut trace);
+            (out.trap, *trace.last().unwrap())
+        };
+        let mut a = Asm::new();
+        a.act(Action::Die).act(Action::Die).halt();
+        let (trap, last) = traced(a);
+        assert_eq!(trap, Some(Trap::SecondAction));
+        assert_eq!((last.pc, last.op.code), (1, OpCode::Act));
+        let mut a = Asm::new();
+        let top = a.label();
+        a.bind(top);
+        a.mem(0).push(1).op(OpCode::Add).set_mem(0).jmp(top);
+        let (trap, last) = traced(a);
+        assert_eq!(trap, Some(Trap::Fuel));
+        assert_eq!(last.fuel, 0);
     }
 
     #[test]
