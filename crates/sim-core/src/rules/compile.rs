@@ -2108,6 +2108,17 @@ fn may_return(s: &Stmt) -> bool {
     }
 }
 
+/// Does a name `f` holds for appear where [`Gen::fold`] would read it?
+fn any_name(e: &Expr, f: &impl Fn(&str) -> bool) -> bool {
+    match e {
+        Expr::Name(n, _) => f(n),
+        Expr::Neg(a) => any_name(a, f),
+        Expr::Bin(_, a, b) => any_name(a, f) || any_name(b, f),
+        Expr::Fn(_, args) => args.iter().any(|a| any_name(a, f)),
+        _ => false,
+    }
+}
+
 /// A statement's line, where it has one.
 fn stmt_line(s: &Stmt) -> Option<u32> {
     match s {
@@ -3249,8 +3260,8 @@ impl<'a> Gen<'a> {
                 for (i, rr) in list.rules.iter().enumerate() {
                     self.owner = Some(rr.owner);
                     self.params = self.scope_of(rr.owner);
-                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold(e, &rr.rule.at).is_ok_and(|v| v != 0));
-                    if always && self.ends_all(&rr.rule.body, false, 0) {
+                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold_known(e, &rr.rule.at, |_| false).is_some_and(|v| v != 0));
+                    if always && self.ends_all(&rr.rule.body, false, 0, false) {
                         if let Some(next) = list.rules.get(i + 1) {
                             push(
                                 &mut out,
@@ -3296,28 +3307,31 @@ impl<'a> Gen<'a> {
     }
 
     /// Does this statement end the think on every path: an action (and, if
-    /// not `acts_only`, a `next`)? Conservative: loops never count, and a
-    /// call counts only through subs that do, eight calls deep.
-    fn ends(&self, s: &Stmt, acts_only: bool, depth: u32) -> bool {
+    /// not `acts_only`, a `next`)? Conservative: loops never count, a call
+    /// counts only through subs that do, eight calls deep, and a `choose`
+    /// weight only if it is a constant nothing here may hide (`lets`: a
+    /// `let` of this body is in scope; inside a callee, its parameters are).
+    fn ends(&self, s: &Stmt, acts_only: bool, depth: u32, lets: bool) -> bool {
         match s {
             Stmt::Next(..) => !acts_only,
             Stmt::If { then, els, .. } => {
                 !els.is_empty()
-                    && self.ends_all(then, acts_only, depth)
-                    && self.ends_all(els, acts_only, depth)
+                    && self.ends_all(then, acts_only, depth, lets)
+                    && self.ends_all(els, acts_only, depth, lets)
             }
             Stmt::Choose(arms) => {
                 !arms.is_empty()
                     && arms.iter().all(|(w, body)| {
-                        self.fold(w, &self.here).is_ok_and(|w| w > 0)
-                            && self.ends_all(body, acts_only, depth)
+                        self.fold_known(w, &self.here, |_| lets || depth > 0)
+                            .is_some_and(|w| w > 0)
+                            && self.ends_all(body, acts_only, depth, lets)
                     })
             }
             Stmt::Call { name, .. } => {
                 depth < 8
                     && self
                         .callee(name)
-                        .is_some_and(|sub| self.ends_all(&sub.body, acts_only, depth + 1))
+                        .is_some_and(|sub| self.ends_all(&sub.body, acts_only, depth + 1, false))
             }
             _ => action_at(s).is_some(),
         }
@@ -3325,9 +3339,10 @@ impl<'a> Gen<'a> {
 
     /// In order: a statement that ends the think before any that may
     /// `return` out of the sub.
-    fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32) -> bool {
+    fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32, lets: bool) -> bool {
+        let lets = lets || body.iter().any(|s| matches!(s, Stmt::Let { .. }));
         for s in body {
-            if self.ends(s, acts_only, depth) {
+            if self.ends(s, acts_only, depth, lets) {
                 return true;
             }
             if may_return(s) {
@@ -3487,6 +3502,25 @@ impl<'a> Gen<'a> {
                 ));
             }
         })
+    }
+
+    /// [`Self::fold`] for the analyses, which may only warn or refuse
+    /// less: `None` if a name in `e` may not be the constant. A local, a
+    /// need or a mem of that name hides it, and so does any name `hidden`
+    /// says may be one.
+    fn fold_known(&self, e: &Expr, at: &Pos, hidden: impl Fn(&str) -> bool) -> Option<i32> {
+        let shadows = |n: &str| {
+            hidden(n)
+                || self.local(n).is_some()
+                || self.cur.is_some_and(|c| {
+                    let i = &self.insts[c];
+                    i.needs.iter().any(|d| d.name == n) || i.mems.iter().any(|m| m == n)
+                })
+        };
+        if any_name(e, &shadows) {
+            return None;
+        }
+        self.fold(e, at).ok()
     }
 
     fn push_int(&mut self, v: i32) {
@@ -3989,7 +4023,7 @@ impl<'a> Gen<'a> {
                 chose = Some(at.line);
             }
             self.stmt(s)?;
-            if acted.is_none() && self.ends(s, true, 0) {
+            if acted.is_none() && self.ends(s, true, 0, false) {
                 acted = Some(stmt_line(s));
             }
         }
@@ -5593,6 +5627,36 @@ mod tests {
         compile_ok(
             "kind a { state A { when true => { if x > 1 { next B }  next A } } state B { } }",
         );
+    }
+
+    #[test]
+    fn a_name_that_hides_a_constant_is_not_folded() {
+        // A local, a sub's parameter, a mem or a need hides the constant.
+        compile_ok(
+            "const w = 1 kind a { when 1 => { let w = 0  choose { w: idle }  move north } }",
+        );
+        compile_ok(
+            "const w = 1 kind a { when 1 => { if hour > 1 { let w = 0  choose { w: idle } } \
+             else { idle }  move north } }",
+        );
+        compile_ok(
+            "const w = 1 sub pick(w) { choose { w: idle } } kind a { when 1 => { pick(0)  move north } }",
+        );
+        for text in [
+            "const w = 1 kind a { mem w  when w => idle\n when 1 => move north }",
+            "const full = 1 kind a { need full max 10 decay 0  when full => idle\n when true => move north }",
+            "const w = 1 kind a { when 1 => { let w = 0  choose { w: idle } }\n when 1 => move north }",
+        ] {
+            let k = compile_ok(text);
+            assert!(
+                k.debug.diagnostics.is_empty(),
+                "{text}: {:?}",
+                k.debug.diagnostics
+            );
+        }
+        // Nothing hides it: still folded.
+        let e = compile_err("const W = 1 kind a { when 1 => { choose { W: idle }  move north } }");
+        assert!(e.contains("a second action"), "{e}");
     }
 
     #[test]

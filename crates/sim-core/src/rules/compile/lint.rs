@@ -283,6 +283,9 @@ struct Walk {
     sight: i32,
     /// Bound names (targets, `pred` parameters) and what they match.
     binds: Vec<(String, Option<Match>)>,
+    /// Names that may hide a constant here: the `let`s met so far, a sub's
+    /// parameters without a constant argument.
+    hidden: Vec<String>,
     depth: u32,
     eats: Option<Pos>,
     drinks: Option<Pos>,
@@ -398,6 +401,7 @@ impl<'a> Gen<'a> {
                 kind: k as u16,
                 sight: i32::from(def.sight),
                 binds: Vec::new(),
+                hidden: Vec::new(),
                 depth: 0,
                 eats: None,
                 drinks: None,
@@ -413,6 +417,7 @@ impl<'a> Gen<'a> {
                     self.params = self.scope_of(rr.owner);
                     self.here = rr.rule.at.clone();
                     let mark = w.binds.len();
+                    w.hidden.clear();
                     self.walk_cond(kinds, &mut w, &rr.rule.cond, &mut out);
                     self.walk_stmts(kinds, &mut w, &rr.rule.body, &mut out);
                     w.binds.truncate(mark);
@@ -631,7 +636,7 @@ impl<'a> Gen<'a> {
     /// A search radius folded where it stands: beyond the kind's sight it
     /// is clamped.
     fn radius(&self, w: &Walk, r: &Expr, at: &Pos, out: &mut Out) {
-        if let Ok(v) = self.fold(r, at)
+        if let Some(v) = self.fold_known(r, at, |n| w.hidden.iter().any(|h| h == n))
             && v > w.sight
         {
             let kind = &self.items[self.insts[self.kind_insts[usize::from(w.kind)]].item].name;
@@ -765,9 +770,12 @@ impl<'a> Gen<'a> {
                 w.sets_look = true;
                 self.walk_expr(kinds, w, e, out);
             }
+            Stmt::Let { name, value, .. } => {
+                self.walk_expr(kinds, w, value, out);
+                w.hidden.push(name.clone());
+            }
             Stmt::Set { value, .. }
             | Stmt::Assign { value, .. }
-            | Stmt::Let { value, .. }
             | Stmt::Signal(value)
             | Stmt::Mark(_, value, _) => self.walk_expr(kinds, w, value, out),
             Stmt::If { cond, then, els } => {
@@ -955,6 +963,7 @@ impl<'a> Gen<'a> {
             };
         let mut binds = Vec::new();
         let mut ints = Vec::new();
+        let hidden = |n: &str| w.hidden.iter().any(|h| h == n);
         for ((p, ty), a) in sub.params.iter().zip(args) {
             match (ty, a) {
                 (Ty::Pred, Arg::Pred(pred)) => {
@@ -971,19 +980,30 @@ impl<'a> Gen<'a> {
                     binds.push((p.clone(), w.bound(n).cloned().flatten()));
                 }
                 (Ty::Int, Arg::Expr(e)) => {
-                    if let Ok(v) = self.fold(e, &self.here) {
+                    if let Some(v) = self.fold_known(e, &self.here, hidden) {
                         ints.push((p.clone(), v));
                     }
                 }
                 (Ty::Int, Arg::Name(n, at)) => {
-                    if let Ok(v) = self.fold(&Expr::Name(n.clone(), at.clone()), at) {
+                    let e = Expr::Name(n.clone(), at.clone());
+                    if let Some(v) = self.fold_known(&e, at, hidden) {
                         ints.push((p.clone(), v));
                     }
                 }
                 _ => {}
             }
         }
-        let saved = (std::mem::replace(&mut w.binds, binds), self.params.clone());
+        let hidden = sub
+            .params
+            .iter()
+            .filter(|(p, _)| !ints.iter().any(|(i, _)| i == p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        let saved = (
+            std::mem::replace(&mut w.binds, binds),
+            std::mem::replace(&mut w.hidden, hidden),
+            self.params.clone(),
+        );
         let each_call = w.each_call.clone();
         if w.each > 0 && w.each_call.is_none() {
             w.each_call = Some((name.to_string(), at.clone()));
@@ -994,7 +1014,7 @@ impl<'a> Gen<'a> {
         w.depth += 1;
         self.walk_stmts(kinds, w, &sub.body, out);
         w.depth -= 1;
-        (w.binds, self.params) = saved;
+        (w.binds, w.hidden, self.params) = saved;
         w.each_call = each_call;
     }
 }
@@ -1253,6 +1273,16 @@ mod tests {
         let good = "trait looker(r) { when count water within r > 0 => idle }
                     kind owl extends looker(8) { sight 8  inherit looker }";
         assert!(!has(good, "exceeds its sight"));
+        // A local or a sub's parameter hides a constant of the same name.
+        for good in [
+            "const w = 99 kind owl { when 1 => { let w = 2  let n = count owl within w  idle } }",
+            "const w = 99 sub scan(w) { if nearest free within w as c { move toward c } }
+             kind owl { when true => scan(hour) }",
+            "const w = 99 sub scan(w) { let n = count owl within w }
+             sub outer(w) { scan(w) } kind owl { when true => outer(hour) }",
+        ] {
+            assert!(!has(good, "exceeds its sight"), "{good}");
+        }
     }
 
     #[test]
