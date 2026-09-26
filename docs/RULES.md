@@ -375,7 +375,9 @@ start hive at (77, 103)                        # exactly there
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
-reordering the lines moves who starts where. An explicit start takes its cell, whatever the
+reordering the lines moves who starts where. A share is exact to one part in 2^24, so
+halves, quarters and eighths add up exactly (`start alive 3 / 8` and `start dead 5 / 8` fill
+every cell), while `1 / 3` and `2 / 3` leave about one cell in 16.7 million empty. An explicit start takes its cell, whatever the
 shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
 needs full, but for what `with` sets.
 
@@ -474,9 +476,10 @@ says so and uses the built-in rules. `wmc lint --scenario <file>`, with no packs
 ones the scenario names.
 
 A pack need not build on the built-in kinds. `packs/life` is Conway's Game of Life in two
-kinds, `dead` and `alive`, and nothing else: `scenarios/life.scenario` plays a soup of it
-and checks its live count against a plain Life's, up to generation 100, and
-`scenarios/tests/life_patterns.scenario` tests a blinker, a block and a glider.
+kinds, `dead` and `alive`, and nothing else. `scenarios/life.scenario` plays it on an
+endless board of random soup; `scenarios/tests/life_soup.scenario` checks a drawn soup's
+live count against a plain Life's up to generation 100, and `life_patterns.scenario` tests
+a blinker, a block and a glider.
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor

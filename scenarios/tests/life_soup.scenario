@@ -1,0 +1,104 @@
+# Conway's Game of Life (the pack is packs/life) on a drawn soup of 96 x 72
+# cells, about a third alive, with rock round it, which stays dead. The board
+# spans four chunks (x = 64 and y = 64 are chunk borders), so neighbours are
+# counted across them. The test at the end holds the pack to a plain Life.
+#
+#   make run ARGS="scenario scenarios/tests/life_soup.scenario"
+#   make run ARGS="play saves/soup --scenario scenarios/tests/life_soup.scenario"   # to watch it
+rules ../../packs/life
+seed 1
+outside rock
+map {
+  O...OO........O.O.....OO.....OO.O....O......O.....O....OOOO..O...O.........O.....OOO......O.....
+  ..O.O........OO.O...OO..O.O.....OO.....OO....O....O...OOO.OO..O.OOOO...O..O..O.O.O....O..O....O.
+  ...OOOO....O.O....O.........O...O...OOO.OO.O...O..O.OOOO....OOOO.........OO............O.O..O.O.
+  .O..O.OO...O...O.OO.....OOOO.OO.......O..O.O..........O.OO......O.O.......O..O..OO........O.O.OO
+  O..OO...O.O.......O.O.O....O..OO.O.......O.O.....O.O.O.OO.O....O.O.O....O..OO.O..O.O..OO..O..O..
+  .....O.O..O.OO.....OOOO.OOO.O.O..OOOO..OO....OO.O.....OO.O..O.O.O.OO..OO.O....O.O..OOOO..OO....O
+  .O.O....O....O....O...O..O.O..OO...OOOO...OO....OO.OOO...O.OO....OO.OO..........O..OO..OO.O..O..
+  ..O.O....O........OO..O...OOO.O.......O.OOO.O..O.O...O.O.............O..O.OO.O..O...O.OOO.OO..OO
+  O...OO.O.....O...........OO.OO.O.O......O...OO.O.OO..OO.OOO.O.......O.OO..........O.OO...O..O...
+  O.....OO.O.O.OO.O.O..O.O...O..OOO.OO......OO.....O...O.O.O.OO.....OOO.OO......O......O..........
+  OOO....OOOOOO.....O.OOOO.OO.....OOO..O....O....O.....O....O...O.........O..O..O.O..O..O......O.O
+  ..OO.......O..........O.....O..OOOO..OOOO....O...OO.O...O...O..O.O......O..O.O......O...O..OO..O
+  O.O.O...OOOO.O...O.OO.....O......O...O.....O....OO..OOO....O....O.O.OO.....O.....O..O...........
+  O....O...OOOO...O........OO....O..O....OO....OOOOOO.OO..OO..OOO..O......O.OO.OO.OO.O...O......O.
+  .O....O.O..OOOOOO..O....O.OO....O....OOOOO..OO.OOOO.O.O.O..O..O.....OO....O.O.O....O...O........
+  OO.O...O......O.OO....OO.....OO...O..O.OO.OOO......OO.O...OOO.OOO.OO..........O.O..OO.OOOOO....O
+  OOO.OOO..O..OO..O....O..O.OO......OO.O..O.O.O..O.O....O..OO..OO...OOO.........OOOO..O.O...O.....
+  O..O...OO..OO..O.OOOO...O..O...O...OOOO......OO....OO.O...OO....O...OO....O..OO.....O.OO.O...OOO
+  ....OOO....OO....O....O.O..OOOO.....O.OO.O....O.O..OO.O.O.OO.OO....OO.O..OO....O..O..O...O.O..O.
+  ...........OO......OOO...O.OO.............O.OOOO.O...O..O.O.O.O.........OO.O.O...O..O....O...OOO
+  O...OOO........O..O.O...O....O.O...O.....O.O..O.OOO..O..O..OO.....O...O...O...O..O..O........O..
+  OO.OO.O....O.OOOOOO..O.....OO.OO...O...O...O..OOOOO......OO.OOO.......OO.O.OOO.O.O.....O.....OO.
+  O...O...O.OO.O.....O...O.......O.O.......OO..O...O....OO...O.O.O.O.OO.O.O..O..O..OO.OO.OO..O....
+  .......O....OO...O..O.O..O...OO.........OOO.O.OOOOOO..OOO...O.O.OO.........O..O....OOO.O...OOOO.
+  .O...OO..........O..OO...O...O.OOO.O.......O..OO.O..O.OOO..OOOO....O....OO..........O..O.O.O.O.O
+  .O....O...OO.O.O...........O..OOO.O..O.O....O....O.OO.....OO.O.......O.......O.O.O.....O.......O
+  OO.OOOOO...OOOO........O..O.OOOOO..OOO.......O..OO.O.O..O.O...OO.O.....OO.O.OO.O..O..OOOO....OOO
+  O..OOO.O..O..O...OO..O....OO.O........O..O.OO..O..O.O..O..........O..O.OOO.....O.OOO.O..O.......
+  OO..OOOO.OO....O...O.OOO..O..O...O.O.O.O.OO..OO..OOOO.O.O..OOOO..O.O.OO.O.O.O....O..O.O...O.O..O
+  OOO.O.OOO.O.OOO...O............OO.OO..O..O...O.O.OOOO..O...O..OOO.O.OOO..OO...O...O..O..O..O..OO
+  ......OOOOO.O......OO..O..OO...O..O..O.O.....O.O...O..O.OO...O.......O..OOO...OO.O.O.OOO.O.O....
+  .........OOO...OOO....O.........OO..O......O.OO..O...O..O..O..OO..OO..O..O..O.OO.O..........O.OO
+  ..OOOOO.OO.O.O.OOOO...O.OO.........O.............OO.....OO.....O...OOOOOO.O....O...O..O.O....O..
+  ..O....O....OOO...OOO...O........O.O.O.OO.......O.O.O..O.O.....O..OO..O.O..OOOO...O.OOO......O..
+  ..O.O....OOO.OOO..O.O...O.......O.O.OOO.OOO.O...O.O..O.O.O..O.O...O...O.O.O...O..OOOO..O..O..O.O
+  .O.O...O..O....O...O.O.OO....O..OO.....O.O..O.OO...OO......OO..OO.OOO..OO.O..O.OO.OOO...........
+  ...........O.O.....O.OOOO.....O..OOO.O.O..O.O.O.OOOOOO.........O.OO.......O......OO.......OOOO..
+  OO....O...O.O.O.........O.OO.........OO..O.O..O.......O.O....O.O.O..O...O...O.O..O......O..O.OOO
+  O.O.O...O..O..O........O...OO.OO..OO.OOOO......O.OO....OO........O.O.OOO...OO.O.O..OOO.O.O..O..O
+  ......O......OO.OOO....OO..O.OOO.O.O.OOO..O.OO.......OO..O..OO.OO.O....O.O.....O.O..........OO..
+  .O.O.......O.O....O...O....O.....O.O...O...O..O.....O.O...OO....O.O........O.O...O...O.........O
+  .....O.OOO.....OO....OOOOO.O....O...O.OOO.OO.OO....O.O..OO.O.O.OO..OOO.....O.......OOOO.......OO
+  .O...O..O...O...OOOOO..O...O.........OOO.O..O.O.OO.OO....OO.O.O.OO.OO....OO.....OO.O...OOOOOO...
+  .......OO..O....O......O....O.O.....OOOOO...OO...O..OOOO...OOOO..O..OOO...OO..OO...O........OOO.
+  ....O..O.....OO..O..O.O......O.OO....OOO......O.O..O...O..O.....OO.......O.O..........O..OO.....
+  .O..O....O.O.O.OO..OO....O.O.........OO.OO....O.OOO...O...O.O...O...OO.OOO.O.O.....O...OOOO..O..
+  ..O.O.O..O.......O...O...O..........OO..O.O..O........O..O..O....O.OO....OO..O.O.OO.O.OO.....OOO
+  ..........O....OO...OO.O...OO..O.O...OOOO...O....OO.OO.O..O.OO.OO.......O.O...O.....O...O.OOOOO.
+  OO.O..OO.....O..O.OO.O..........O..OO....O...O..OOO.O.OO.O...O..OO....O.O..OO.O.O...O.OO.O..OO..
+  ........OO.OOO..OO..O...O.....O..O.O..O..O.OO.O...O..O..O....O.OOOO......O..O...O..O.OOOOO.....O
+  ....OO.OO....OO....O..O.O...OO....O.O...OO.OOO....O.O..O..O.O......O....O...O.O....O.O.O.O....O.
+  O........O..O.....O.OO.O.....O........OO.....OO..O...OO.O....O....O....O..O.O.OOO.....O.......O.
+  .....O.OO......O..OOOO.OO.O..OO.O.O....O....OO...O.....O..O.O....O..O...OOOOOOO.OO..OO.O.O...O.O
+  .O....OOO.O........OOO....O.O.O..OO.OOO...O.O....O..O......O..O.....OO.O.O.............O....OO..
+  .O.O....O..OOO.OOOOO....OO.....OO.O.O.OOO.O.OO..OO..O..OO..OO....O...O..O.O...O...O.OOO.O.....O.
+  O...O.O..OO...O..O.OOO....O..O..O...OOO......O...OOO.O........OOO...OO.OO..O..O...O.....O.O..O..
+  ...O.OO.....OOOO...O...O...O..O.OO.O.......O...O..O.O.O..O.O..OO.OO..O...OO..OOO..O...O.O..OOOO.
+  .....OO........O.........O..O..OO.O.O....O..O......O.......O.O..........OOO..O.....O.......OOO.O
+  .O.O.O......O.OOOOO....O...OO..OO.OO..O.O..OO......O.O...OO.O.........O.O...O.OOOO.OOO.OO..O.O..
+  OO.O.O....OO....O..O..O.OO..OO...O.OOO.O.OO..OOO.......O.O..O....O...OO..OO....O........O...O.O.
+  .O........OOO..O..O..OO....O.O......O.O..O.OOO..O..O.O..O....OO...OOO......OOOOO..O...O.O.O.....
+  OO...OOOO....OOO....OO........O..O....O......O.O.....OOO.OO.O..OO...OO....O.....O...OO....O..OOO
+  O........O..O...O.OOO.O...O...O....O...O.O..OOO.............OO.....O.O..O.OO..O.O.....O.O.O...OO
+  ..O......O....O.O...OO.OOO..OO..O.O.OOOO.O.O...O.OO..O...OO....O..OOO...O...O.....OO...O.O...O.O
+  ..OO...OO.OO...O.....OO.OO.....O.OO.O..O.....OOOO.....O..........OOO....OO.OO....OO.O..OOO......
+  .O...O...OO.OOOOOO.O......O.O...OO..O...O..OOO...OO.OO...O...O.OOOOOO..O.O....O..O.O.O.OOO....OO
+  O.O..........OOO.O...O.OOOOO...O.......OOO...O.OO..........OO.....OO.O.OO..OO.OOO....O...O....O.
+  .O...O....O...O..OOO.O.......O..O.....O...O...OO.........O....OO.OOO....OO.....O.......O...OO.OO
+  O.....OO.O..........OO.O.O.O...O..O....O.O..O.O..O..O....O.O....O...OO....O.O..OO.....O.....O...
+  O....O.....OOO..O.OOO...O.O.O....O.OOO...O..OOO..O....O....O.O........O..OO.O...O.O.....OO.....O
+  .OO..O.O....OO.......O....O..O.O......O..O.O....O..O..OO..O......OO.O......OOOOO.OO......O...OOO
+  ....O........O....O..OO.O..O.O..O.O..O...O..O.....O........OO..O........O....O..O..O....OO...O..
+}
+legend {
+  . dead
+  O alive
+}
+
+# The live cells of a plain Life on this soup, counted by an independent
+# implementation at generations 0, 1, 2, 10, 50 and 100: the pack must play
+# the same game.
+expect count alive == 2433
+run 1
+expect count alive == 2574
+run 1
+expect count alive == 2116
+run 8
+expect count alive == 1494
+run 40
+expect count alive == 694
+run 50
+expect count alive == 557
+expect count dead == 6355          # every board cell holds one actor, dead or alive

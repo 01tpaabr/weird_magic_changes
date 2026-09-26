@@ -1,8 +1,9 @@
 # Conway's Game of Life, as a pack: a second world on the same engine, with
 # nothing of the built-in ecosystem. The rule is B3/S23: a dead cell with
 # exactly three live neighbours comes alive, a live cell with two or three
-# stays alive, and every other live cell dies. The soup to play is
-# scenarios/life.scenario; scenarios/tests/life_patterns.scenario tests it.
+# stays alive, and every other live cell dies. The board to play is
+# scenarios/life.scenario, endless and random; scenarios/tests/life_soup and
+# life_patterns test it.
 
 const BIRTH = 3                  # live neighbours that bring a dead cell to life
 const LONELY = 2                 # fewer than this, a live cell dies

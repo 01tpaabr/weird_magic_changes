@@ -132,7 +132,7 @@ crates/app         the `wmc` binary: the window, camera, clock and renderer, and
                    show / play / run / why / lint / scenario commands
 rules/             the built-in kinds (compiled into the binary) and the shared trait library
 packs/             packs of their own: life/ is Conway's Game of Life
-scenarios/         the default world and the Life soup; tests/ holds the scenario tests
+scenarios/         the default world and an endless Life board; tests/ holds the scenario tests
 docs/              the documentation below
 ```
 

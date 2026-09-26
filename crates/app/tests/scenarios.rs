@@ -42,7 +42,7 @@ fn every_scenario_passes_at_1_and_8_threads() {
         }
     }
     files.sort();
-    assert!(files.len() >= 7, "{files:?}");
+    assert!(files.len() >= 8, "{files:?}");
     for f in &files {
         let (one, eight) = (run(f, "1"), run(f, "8"));
         assert!(one.contains("(1 threads)") && eight.contains("(8 threads)"));
