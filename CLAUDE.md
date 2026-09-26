@@ -47,6 +47,7 @@ crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clo
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), worldgen, store, rng, time, SimTick
 rules/              *.rules files: the kinds (all built into the binary; WMC_RULES=<dir> swaps them)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
+docs/PLAN-8.md      TEMPORARY: the step-8 build plan (traits, scenarios, packs, author tooling); delete when done
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
 
