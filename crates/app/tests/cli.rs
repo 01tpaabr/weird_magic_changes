@@ -1,6 +1,7 @@
-//! The CLI on the real binary: what `wmc why` reports.
+//! The CLI on the real binary: what it refuses before it builds a world,
+//! and what `wmc why` reports.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// `wmc args` with no `WMC_RULES`: success, stdout, stderr.
@@ -81,4 +82,19 @@ fn why_waits_out_a_cadence_longer_than_a_day() {
     assert!(out.contains("stone at (3, 3)"), "{out}");
     assert!(out.contains("thinks every 32768 ticks, due now"), "{out}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `[w h]` on the command line get the checks a `size` line gets.
+#[test]
+fn a_size_from_the_command_line_is_checked() {
+    let (ok, _, err) = wmc(&["show", "0", "0", "1"]);
+    assert!(!ok && err.contains("at least 1"), "{err}");
+    let (ok, _, err) = wmc(&["show", "100000", "100000", "1"]);
+    assert!(!ok && err.contains("at most 4096 up front"), "{err}");
+    let bees = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios/tests/bees.scenario");
+    let bees = bees.to_str().unwrap();
+    let (ok, _, err) = wmc(&["show", "5", "5", "1", "--scenario", bees]);
+    assert!(!ok && err.contains("smaller than the map"), "{err}");
+    let (ok, out, err) = wmc(&["show", "20", "5", "42"]);
+    assert!(ok, "{out}{err}");
 }

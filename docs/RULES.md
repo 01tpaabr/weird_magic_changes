@@ -376,7 +376,7 @@ start hive at (77, 103)                        # exactly there
 |---|---|---|
 | `rules PATH ...` | the built-in rules | the packs the world runs (§15), relative to the scenario file |
 | `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
-| `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks; the rest generates as the camera reaches it |
+| `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks, at most 4096 of them (4096 x 4096 cells); the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
 | `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
@@ -456,7 +456,8 @@ K alone (`expect count only chick == 1`).
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
 define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that
 without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create
-a world, and `[w h seed]` after the save directory override `size` and `seed`. Without one
+a world, and `[w h seed]` after the save directory override `size` and `seed` (held to the
+same limits, and no smaller than a drawn map). Without one
 they use `scenarios/default.scenario`, which starts the built-in kinds.
 
 ## 15. Packs
@@ -608,6 +609,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | compiled size of one rule, one state's rules, one sub | 32767 ops (jumps are 16 bits; split what is longer) |
 | distinct constants outside -32768..32767 per rule set | 65536 |
 | kinds, subs per rule set | 65534, 65536 (each kind's member subs count once per kind that has them) |
+| chunks a scenario's `size` generates at creation | 4096 (4096 x 4096 cells) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,

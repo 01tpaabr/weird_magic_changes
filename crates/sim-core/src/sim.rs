@@ -29,7 +29,9 @@ use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who, present};
+use crate::scenario::{
+    Agg, DrawnMap, Expect, MAX_SIZE_CHUNKS, Placement, Scenario, Start, Who, present,
+};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
@@ -190,8 +192,18 @@ pub fn tick(world: &World) -> u64 {
 /// Turn an installed world into a fresh one made from `scenario`, its
 /// initial region loaded. Same scenario and rules => bit-identical world.
 /// An error, and nothing changed, if the scenario's starts do not fit the
-/// rules ([`Placement::resolve`]).
+/// rules ([`Placement::resolve`]) or its size is more than
+/// [`MAX_SIZE_CHUNKS`].
 pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), String> {
+    let (w, h) = (scenario.width, scenario.height);
+    let chunks =
+        u64::from(w.div_ceil(CHUNK_SIZE as u32)) * u64::from(h.div_ceil(CHUNK_SIZE as u32));
+    if chunks > MAX_SIZE_CHUNKS {
+        return Err(format!(
+            "size {w}x{h} is {chunks} chunks; a new world generates at most \
+             {MAX_SIZE_CHUNKS} chunks up front (the rest streams in)"
+        ));
+    }
     let placement = Placement::resolve(
         &scenario.starts,
         world.resource::<Kinds>(),
@@ -842,6 +854,25 @@ mod tests {
         assert!(get(&w, Pos::new(191, 127)).is_some());
         assert!(get(&w, Pos::new(192, 0)).is_none());
         assert!(get(&w, Pos::new(-1, 0)).is_none());
+    }
+
+    /// A region too large to generate up front is an error, whether it
+    /// comes from a `size` line or not; 0 x 0 (the benches) is none at all.
+    #[test]
+    fn create_refuses_a_region_past_the_limit() {
+        let huge = Scenario {
+            width: 1 << 20,
+            height: 1 << 20,
+            ..cfg(1)
+        };
+        let e = new_world_with(&huge, Kinds::builtin()).unwrap_err();
+        assert!(e.contains("at most 4096 chunks"), "{e}");
+        let w = new_world(&Scenario {
+            width: 0,
+            height: 0,
+            ..cfg(1)
+        });
+        assert_eq!(w.resource::<Stage>().loaded_count(), 0);
     }
 
     #[test]

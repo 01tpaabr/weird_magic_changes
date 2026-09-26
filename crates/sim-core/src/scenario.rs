@@ -46,6 +46,10 @@ pub const PLACE_ONE: u32 = 1 << 24;
 /// The most cells a drawn map may hold.
 const MAP_CELLS: usize = 1 << 24;
 
+/// The most chunks `size` may generate at creation (4096 x 4096 cells,
+/// about 600 MB); the rest generates as the camera reaches it.
+pub const MAX_SIZE_CHUNKS: u64 = 4096;
+
 /// Where a kind starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
@@ -555,6 +559,15 @@ impl Scenario {
                         || h > i64::from(u32::MAX)
                     {
                         return Err(err(line_no, "expected `size W H`, both at least 1".into()));
+                    }
+                    if (w as u64).div_ceil(64) * (h as u64).div_ceil(64) > MAX_SIZE_CHUNKS {
+                        return Err(err(
+                            line_no,
+                            format!(
+                                "`size W H` generates at most {MAX_SIZE_CHUNKS} chunks \
+                                 (4096 x 4096 cells) at creation; the rest streams in"
+                            ),
+                        ));
                     }
                     (s.width, s.height) = (w as u32, h as u32);
                     size_line = Some(line_no);
@@ -1337,12 +1350,18 @@ mod tests {
                 "expect min food of fox > 100000000000000000h",
                 "is not a number or a time",
             ),
+            (
+                "size 100000000 100000000",
+                "t:1: `size W H` generates at most 4096 chunks",
+            ),
+            ("size 4294967295 1", "at most 4096 chunks"),
         ] {
             let e = Scenario::parse("t", text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
         }
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
+        Scenario::parse("t", "size 4096 4096").unwrap();
     }
 
     /// A time too large for ticks is no value, not an overflow (a dev

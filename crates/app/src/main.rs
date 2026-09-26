@@ -31,7 +31,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use sim_core::actors::{Tally, life};
-use sim_core::scenario::{Check, Placement, Start};
+use sim_core::scenario::{Check, MAX_SIZE_CHUNKS, Placement, Start};
 use sim_core::time::Clock;
 use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
 use sim_core::{Scenario, par, sim, stage};
@@ -191,6 +191,30 @@ fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Re
     }
     if let Some(seed) = num(2, "seed")? {
         s.seed = seed;
+    }
+    // What a `size` line is held to (the scenario's own already was).
+    if s.width == 0 || s.height == 0 {
+        bail!("width and height are at least 1");
+    }
+    let chunks = u64::from(s.width.div_ceil(64)) * u64::from(s.height.div_ceil(64));
+    if chunks > MAX_SIZE_CHUNKS {
+        bail!(
+            "{}x{} is {chunks} chunks; a new world generates at most {MAX_SIZE_CHUNKS} up front",
+            s.width,
+            s.height
+        );
+    }
+    if let Some(m) = &s.map
+        && (s.width < m.width || s.height < m.height)
+    {
+        bail!(
+            "{}x{} is smaller than the map of {}, which is {}x{}",
+            s.width,
+            s.height,
+            file.unwrap_or("the scenario"),
+            m.width,
+            m.height
+        );
     }
     Ok(Setup {
         packs,
