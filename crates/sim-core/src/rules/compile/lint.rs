@@ -528,7 +528,7 @@ impl<'a> Gen<'a> {
 
         // Never used.
         let mut tags_told: BTreeSet<&str> = BTreeSet::new();
-        for it in items {
+        for (i, it) in items.iter().enumerate() {
             let owner = if it.is_trait { "trait" } else { "kind" };
             for (m, at) in &it.decls.mems {
                 if !names.all.contains(m) {
@@ -557,12 +557,14 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            for (i, st) in it.states.iter().enumerate() {
-                let first = i == 0
-                    && self
-                        .kind_insts
-                        .iter()
-                        .any(|&ki| self.insts[ki].states.first() == Some(&st.name));
+            for st in &it.states {
+                // Entered if a kind built from this item starts in it (its
+                // first state, which may be inherited).
+                let first = self.kind_insts.iter().any(|&ki| {
+                    let k = &self.insts[ki];
+                    (k.item == i || k.ancestors.iter().any(|&a| self.insts[a].item == i))
+                        && k.states.first() == Some(&st.name)
+                });
                 if !first && !names.nexts.contains(&st.name) {
                     out.warn(
                         &st.at,
@@ -1416,5 +1418,29 @@ mod tests {
             got.iter().any(|d| d.contains("const `Z` is never used")),
             "{got:?}"
         );
+    }
+
+    #[test]
+    fn the_start_state_may_be_inherited() {
+        // k's states: t's first, so k starts in A though it lists B first.
+        let pack = "trait t { state A { when true => idle } }
+                    kind k extends t { state B { when true => idle }  state A { when true => idle } }";
+        let got = lint(pack);
+        assert!(!got.iter().any(|d| d.contains("state `A`")), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|d| d.contains("state `B` of kind `k` is never entered")),
+            "{got:?}"
+        );
+        // Another kind that starts in a `B` does not enter k's.
+        let got = lint(&format!(
+            "{pack}\nkind u {{ state B {{ when true => idle }} }}"
+        ));
+        assert!(
+            got.iter()
+                .any(|d| d.contains("state `B` of kind `k` is never entered")),
+            "{got:?}"
+        );
+        assert!(!got.iter().any(|d| d.contains("of kind `u`")), "{got:?}");
     }
 }
