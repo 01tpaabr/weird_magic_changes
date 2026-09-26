@@ -4329,10 +4329,15 @@ impl<'a> Gen<'a> {
         self.scoped(|g| {
             let base = g.alloc_local(&here, n + 1)?;
             let draw = base + n as u8;
+            // Each weight is capped at i32::MAX / n, so the total cannot wrap
+            // (alloc_local has already held n to 15).
+            let cap = i32::MAX / n as i32;
             g.asm.push(0);
             for (i, (w, _)) in arms.iter().enumerate() {
                 g.expr(w)?;
-                g.asm.push(0).op(OpCode::Max).store(base + i as u8);
+                g.asm.push(0).op(OpCode::Max);
+                g.push_int(cap);
+                g.asm.op(OpCode::Min).store(base + i as u8);
                 g.asm.load(base + i as u8).op(OpCode::Add);
             }
             g.asm.op(OpCode::Rand).store(draw);
@@ -5070,7 +5075,8 @@ mod tests {
         let k = compile_ok(
             "kind a { mem m\n when 1 => choose { 3: m = 1  2: m = 2 }\n when m > 100000 => m = 3d }",
         );
-        assert_eq!(k.consts, vec![100_000, days(3) as i32]);
+        // The first is the weight cap of the two-armed choose.
+        assert_eq!(k.consts, vec![i32::MAX / 2, 100_000, days(3) as i32]);
         let rand = k.code.iter().filter(|o| o.code == OpCode::Rand).count();
         assert_eq!(rand, 1);
         use crate::actors::ChunkActors;
@@ -5114,6 +5120,42 @@ mod tests {
         assert_eq!(counts[0], 0);
         assert!(counts[1] > 240 && counts[1] < 360, "{counts:?}");
         assert!(counts[2] > 140 && counts[2] < 260, "{counts:?}");
+    }
+
+    #[test]
+    fn choose_weights_near_i32_max_do_not_wrap_the_total() {
+        let k = compile_ok(
+            "kind a { mem p, q\n when true => { choose { 2000000000: p += 1  2000000000: q += 1 }  idle } }",
+        );
+        use crate::actors::ChunkActors;
+        use crate::rules::vm::{self, Ctx, Halo};
+        use crate::stage::{ChunkCells, Pos as WorldPos};
+        use bytemuck::Zeroable;
+        let cells = ChunkCells::default();
+        let actors = ChunkActors::default();
+        let mut chunks = [None; 9];
+        chunks[4] = Some((&cells, &actors));
+        let halo = Halo {
+            chunks,
+            tags: &k.tag_bits,
+            family_end: &k.family_end,
+        };
+        let mut mind = crate::actors::ActorMind::zeroed();
+        for uid in 0..64u64 {
+            let ctx = Ctx {
+                halo: &halo,
+                kind: &k.defs[0],
+                cell: 100,
+                pos: WorldPos::new(36, 1),
+                tick: 5,
+                rng: vm::rng_base(3, 5, uid),
+                look: 0,
+                signal: 0,
+            };
+            assert_eq!(vm::think(&k, ctx, &mut mind).trap, None);
+        }
+        let (p, q) = (mind.mem[0], mind.mem[1]);
+        assert!(p > 0 && q > 0, "p {p} q {q}");
     }
 
     /// Lines of kind `k`'s rules in scan order, with the trait or parent

@@ -219,7 +219,7 @@ the trait a tag (`tags drinker`) and match the tag.
 | `if cond { } else if cond { } else { }` | |
 | `while cond { }`, `repeat n { }` | bounded by fuel |
 | `for each pred within r as v { }` | once per matching cell in rings 1..r, in a fixed order (each ring clockwise from its top-left). The search's fuel is paid once. There is no `break`, so collect into locals and act after the loop |
-| `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm |
+| `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm. A negative weight counts as 0, and each weight is capped at 2^31 / (number of arms) |
 | `sub_name(args)` | call a sub (§12) |
 | `return expr` | inside a sub |
 
