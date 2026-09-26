@@ -3147,7 +3147,7 @@ impl<'a> Gen<'a> {
         self.locals.clear();
         self.next_local = 0;
         for (name, ty) in &s.params {
-            let slot = self.alloc_local(&s.at, ty.width())?;
+            let slot = self.alloc_local(&s.at, ty.width().into())?;
             self.locals.push(Local {
                 name: name.clone(),
                 slot,
@@ -3553,9 +3553,9 @@ impl<'a> Gen<'a> {
         }
     }
 
-    fn alloc_local(&mut self, at: &Pos, n: u8) -> Result<u8> {
+    fn alloc_local(&mut self, at: &Pos, n: usize) -> Result<u8> {
         let slot = self.next_local;
-        if usize::from(slot) + usize::from(n) > FRAME_LOCALS {
+        if usize::from(slot) + n > FRAME_LOCALS {
             return Err(self.err(
                 at,
                 format!(
@@ -3563,7 +3563,7 @@ impl<'a> Gen<'a> {
                 ),
             ));
         }
-        self.next_local += n;
+        self.next_local += n as u8;
         Ok(slot)
     }
 
@@ -4298,7 +4298,7 @@ impl<'a> Gen<'a> {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
                 self.scoped(|g| {
-                    let base = g.alloc_local(at, FOR_EACH_LOCALS)?;
+                    let base = g.alloc_local(at, FOR_EACH_LOCALS.into())?;
                     g.pred(pred)?;
                     g.asm.store(base + 3);
                     g.expr(r)?;
@@ -4327,7 +4327,7 @@ impl<'a> Gen<'a> {
         let n = arms.len();
         let here = self.here.clone();
         self.scoped(|g| {
-            let base = g.alloc_local(&here, (n + 1) as u8)?;
+            let base = g.alloc_local(&here, n + 1)?;
             let draw = base + n as u8;
             g.asm.push(0);
             for (i, (w, _)) in arms.iter().enumerate() {
@@ -5047,6 +5047,22 @@ mod tests {
         let mut mind = crate::actors::ActorMind::zeroed();
         let out = run_think(&k, "k", &mut mind);
         assert_eq!((out.trap, out.next), (None, Some(1)), "{out:?}");
+    }
+
+    #[test]
+    fn a_choose_with_too_many_arms_is_refused() {
+        compile_ok(&format!(
+            "kind a {{ mem v  when true => choose {{ {} }} }}",
+            "1: v = 0 ".repeat(15)
+        ));
+        for (arms, before) in [(16, ""), (255, "let a = 1  "), (255, ""), (256, "")] {
+            let text = format!(
+                "kind a {{ mem v  when true => {{ {before}choose {{ {} }} }} }}",
+                "1: v = 0 ".repeat(arms)
+            );
+            let e = compile_err(&text);
+            assert!(e.contains("too many"), "{arms} arms: {e}");
+        }
     }
 
     #[test]
