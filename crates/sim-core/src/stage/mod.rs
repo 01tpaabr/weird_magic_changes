@@ -306,16 +306,6 @@ pub struct ChunkMeta {
     pub last_ticked: u64,
 }
 
-/// Everything a cell holds, copied out. For convenience APIs, not hot loops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cell {
-    pub ground: Ground,
-    pub feature: Feature,
-    pub occupant: ActorId,
-    pub cover: ActorId,
-    pub scent: [u8; SCENT_CHANNELS],
-}
-
 /// The set of loaded chunks: coordinate -> entity, plus the canonical order.
 /// Cell data lives on the entities; this resource is the directory.
 #[derive(Resource, Debug, Default)]
@@ -469,12 +459,6 @@ impl std::fmt::Debug for StageCells<'_, '_> {
 }
 
 impl StageCells<'_, '_> {
-    /// The directory of loaded chunks.
-    #[inline]
-    pub fn stage(&self) -> &Stage {
-        &self.stage
-    }
-
     pub fn loaded_count(&self) -> usize {
         self.stage.loaded_count()
     }
@@ -484,35 +468,6 @@ impl StageCells<'_, '_> {
     pub fn chunk(&self, c: ChunkCoord) -> Option<&ChunkCells> {
         let e = self.stage.entity(c)?;
         self.cells.get(e).ok()
-    }
-
-    /// `None` if the chunk is not loaded.
-    #[inline]
-    pub fn get(&self, p: Pos) -> Option<Cell> {
-        let (cc, i) = p.split();
-        let c = self.chunk(cc)?;
-        Some(Cell {
-            ground: c.ground[i],
-            feature: c.feature[i],
-            occupant: c.occupant[i],
-            cover: c.cover[i],
-            scent: std::array::from_fn(|j| c.scent[j][i]),
-        })
-    }
-
-    /// Terrain permits standing here. `None` if not loaded.
-    #[inline]
-    pub fn walkable(&self, p: Pos) -> Option<bool> {
-        let (cc, i) = p.split();
-        self.chunk(cc).map(|c| c.walkable(i))
-    }
-
-    /// Terrain permits standing here and nobody is here. `None` if not loaded.
-    #[inline]
-    pub fn free(&self, p: Pos) -> Option<bool> {
-        let (cc, i) = p.split();
-        self.chunk(cc)
-            .map(|c| c.walkable(i) && c.occupant[i].is_none())
     }
 }
 
@@ -687,33 +642,26 @@ mod tests {
         insert(&mut w, cc, ChunkData::default(), false, 0);
         let p = Pos::new(3, 4);
         let (_, i) = p.split();
-        let free =
-            |w: &mut World, p: Pos| w.run_system_once(move |s: StageCells| s.free(p)).unwrap();
-        let walkable = |w: &mut World, p: Pos| {
-            w.run_system_once(move |s: StageCells| s.walkable(p))
-                .unwrap()
+        // (walkable, occupant) at `p` through the system param; None if not loaded.
+        let at = |w: &mut World, p: Pos| {
+            let (cc, i) = p.split();
+            w.run_system_once(move |s: StageCells| {
+                s.chunk(cc).map(|c| (c.walkable(i), c.occupant[i]))
+            })
+            .unwrap()
         };
-        assert_eq!(free(&mut w, p), Some(true));
-        assert_eq!(
-            w.run_system_once(|s: StageCells| s.get(Pos::new(64, 0)))
-                .unwrap(),
-            None
-        );
+        assert_eq!(at(&mut w, p), Some((true, ActorId::NONE)));
+        assert_eq!(at(&mut w, Pos::new(64, 0)), None);
         chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::Rock;
         let e = w.resource::<Stage>().entity(cc).unwrap();
         assert!(w.get::<ChunkMeta>(e).unwrap().dirty);
-        assert_eq!(walkable(&mut w, p), Some(false));
+        assert_eq!(at(&mut w, p), Some((false, ActorId::NONE)));
         chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::None;
         chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
-        assert_eq!(walkable(&mut w, p), Some(false));
+        assert_eq!(at(&mut w, p), Some((false, ActorId::NONE)));
         chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Soil;
         chunk_mut(&mut w, cc).unwrap().occupant[i] = ActorId(7);
-        assert_eq!(
-            (walkable(&mut w, p), free(&mut w, p)),
-            (Some(true), Some(false))
-        );
-        let got = w.run_system_once(move |s: StageCells| s.get(p)).unwrap();
-        assert_eq!(got.unwrap().occupant, ActorId(7));
+        assert_eq!(at(&mut w, p), Some((true, ActorId(7))));
         assert_eq!(chunk(&w, cc).unwrap().occupant[i], ActorId(7));
         assert!(chunk(&w, ChunkCoord::new(5, 5)).is_none());
     }

@@ -332,10 +332,6 @@ impl Store {
         write_atomic(&self.meta_path(), &w.buf)
     }
 
-    pub fn has_chunk(&self, c: ChunkCoord) -> bool {
-        self.chunk_path(c).is_file()
-    }
-
     /// `Ok(None)` if the chunk was never saved (regenerate it). Row *shape*
     /// is checked here (counts, sizes); the invariants that need the kind
     /// table (`ChunkData::validate`) are the caller's.
@@ -731,11 +727,9 @@ mod tests {
         let slot = data.actors_mut().push(cell, SEED, mind);
         data.actors.rows[usize::from(slot)].signal = -300;
         data.actors.rows[usize::from(slot)].look = 2;
-        assert!(!s.has_chunk(c));
         assert_eq!(s.read_chunk(c).unwrap(), None);
         s.write_chunk(c, &data.cells, &data.actors, &data.minds, 4242)
             .unwrap();
-        assert!(s.has_chunk(c));
         let back = s.read_chunk(c).unwrap().unwrap();
         assert_eq!(back.last_ticked, 4242);
         assert_eq!(back.data, data);

@@ -1388,11 +1388,6 @@ pub fn offset_cell(cell: usize, dx: i8, dy: i8) -> ((i32, i32), usize) {
     ((x >> CHUNK_BITS, y >> CHUNK_BITS), local)
 }
 
-/// Is a live occupant of `kind` here? (Convenience for tests and tools.)
-pub fn occupant_kind(id: ActorId) -> Option<u16> {
-    id.unpack().map(|(k, _)| k)
-}
-
 // Ground/Feature discriminants are what `pred::ground`/`pred::feature` take.
 const _: () = assert!(Ground::Soil as u8 == 0 && Ground::Water as u8 == 1);
 const _: () = assert!(Feature::None as u8 == 0 && Feature::Rock as u8 == 1);

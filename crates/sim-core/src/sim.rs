@@ -783,9 +783,18 @@ mod tests {
         Store::open(dir).unwrap()
     }
 
-    fn get(world: &World, p: Pos) -> Option<crate::stage::Cell> {
+    /// Everything a cell holds, copied out.
+    struct Cell {
+        ground: Ground,
+        feature: Feature,
+        occupant: crate::stage::ActorId,
+        cover: crate::stage::ActorId,
+        scent: [u8; crate::stage::SCENT_CHANNELS],
+    }
+
+    fn get(world: &World, p: Pos) -> Option<Cell> {
         let (cc, i) = p.split();
-        stage::chunk(world, cc).map(|c| crate::stage::Cell {
+        stage::chunk(world, cc).map(|c| Cell {
             ground: c.ground[i],
             feature: c.feature[i],
             occupant: c.occupant[i],

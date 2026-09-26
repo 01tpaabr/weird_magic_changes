@@ -52,18 +52,6 @@ impl Default for SimClock {
 }
 
 impl SimClock {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn paused(&self) -> bool {
-        self.paused
-    }
-
-    pub fn running(&self) -> bool {
-        !self.paused
-    }
-
     pub fn speed(&self) -> Speed {
         MULTIPLIERS
             .get(self.level)
@@ -136,7 +124,7 @@ mod tests {
 
     #[test]
     fn one_second_at_1x_is_base_tps_ticks() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         assert_eq!(total(&mut c, 8, 0.125, NO_LIMIT), BASE_TPS);
         // Frames shorter than a tick still add up (1/16 s is exact in binary).
         assert_eq!(total(&mut c, 16, 1.0 / 16.0, NO_LIMIT), BASE_TPS);
@@ -148,7 +136,7 @@ mod tests {
 
     #[test]
     fn fraction_carries_between_frames() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         // 1/8 s at 1x is exactly one tick; 3/32 s is 0.75 of one.
         assert_eq!(c.run(3.0 / 32.0, NO_LIMIT, || {}), 0);
         assert_eq!(c.run(3.0 / 32.0, NO_LIMIT, || {}), 1);
@@ -159,7 +147,7 @@ mod tests {
 
     #[test]
     fn debt_beyond_the_budget_is_dropped() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         // A whole second owed but no budget: one tick runs, the rest is forgotten.
         assert_eq!(c.run(1.0, Duration::ZERO, || {}), 1);
         assert_eq!(c.run(0.0, NO_LIMIT, || {}), 0);
@@ -168,7 +156,7 @@ mod tests {
 
     #[test]
     fn a_stall_is_clamped() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         assert_eq!(
             c.run(10.0, NO_LIMIT, || {}),
             (MAX_DT * f64::from(BASE_TPS)) as u32
@@ -177,7 +165,7 @@ mod tests {
 
     #[test]
     fn max_speed_ticks_until_the_budget_is_spent() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         for _ in 0..MULTIPLIERS.len() {
             c.faster();
         }
@@ -194,21 +182,21 @@ mod tests {
 
     #[test]
     fn paused_runs_nothing_and_forgets_debt() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         c.run(3.0 / 32.0, NO_LIMIT, || {});
         c.toggle_pause();
-        assert!(c.paused());
+        assert!(c.paused);
         assert_eq!(c.run(5.0, NO_LIMIT, || {}), 0);
         c.toggle_pause();
         assert_eq!(c.run(0.0, NO_LIMIT, || {}), 0);
         assert_eq!(c.run(0.125, NO_LIMIT, || {}), 1);
         c.pause();
-        assert!(c.paused());
+        assert!(c.paused);
     }
 
     #[test]
     fn labels() {
-        let mut c = SimClock::new();
+        let mut c = SimClock::default();
         assert_eq!(c.label(), "1x");
         c.slower();
         assert_eq!(c.label(), "1x");

@@ -54,10 +54,6 @@ impl ViewCamera {
         Pos::new(self.x.floor() as i32, self.y.floor() as i32)
     }
 
-    pub fn moving(&self) -> bool {
-        self.vx != 0.0 || self.vy != 0.0
-    }
-
     /// Advance by `dt` seconds under `input`. Diagonals move at the same
     /// speed as axes; speed eases in and out over [`SMOOTHING`].
     pub fn update(&mut self, dt: f64, input: Input) {
@@ -151,7 +147,7 @@ mod tests {
                 fast: false,
             },
         );
-        assert!(c.moving());
+        assert!(c.vy < 0.0);
         assert!(
             c.y < 0.5 && c.y > 0.5 - SPEED / 120.0,
             "first frame is eased, not full speed"
@@ -166,7 +162,7 @@ mod tests {
             },
         );
         run(&mut c, 1.0, Input::default());
-        assert!(!c.moving());
+        assert_eq!((c.vx, c.vy), (0.0, 0.0));
         let y_rest = c.y;
         run(&mut c, 1.0, Input::default());
         assert_eq!(c.y, y_rest);
@@ -206,7 +202,7 @@ mod tests {
         c.save(&dir).unwrap();
         let back = ViewCamera::load(&dir).unwrap();
         assert_eq!((back.x, back.y), (c.x, c.y));
-        assert!(!back.moving());
+        assert_eq!((back.vx, back.vy), (0.0, 0.0));
         fs::write(dir.join("camera.txt"), "10 -4\n").unwrap();
         assert_eq!(ViewCamera::load(&dir).unwrap().cell(), Pos::new(10, -4));
         fs::remove_dir_all(&dir).unwrap();

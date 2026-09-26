@@ -91,7 +91,7 @@ Rules that keep it deterministic and fast:
    in `docs/PERF.md`.
 
 Read-only convenience inside systems: `StageCells` (`SystemParam`: `Stage` + `Query<&ChunkCells>`)
-gives `chunk(coord)`, `get(pos)`, `walkable`, `free`. Hot loops iterate `Query<&ChunkCells>`.
+gives `chunk(coord)` and `loaded_count()`. Hot loops iterate `Query<&ChunkCells>`.
 From `&mut World` (streaming, saves, tests): `stage::chunk`, `stage::chunk_mut` (marks dirty),
 `stage::insert`, `stage::remove`, `stage::checksum`.
 
