@@ -143,6 +143,7 @@ const SYMS: [&str; 23] = [
 
 struct Lexer<'a> {
     file: &'a str,
+    text: &'a str,
     src: &'a [u8],
     at: usize,
     line: u32,
@@ -153,6 +154,7 @@ impl<'a> Lexer<'a> {
     fn new(file: &'a str, text: &'a str) -> Self {
         Self {
             file,
+            text,
             src: text.as_bytes(),
             at: 0,
             line: 1,
@@ -169,17 +171,24 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// The byte `k` ahead, 0 past the end (a real NUL byte is also 0:
+    /// only [`Self::end`] says where the file ends).
     fn peek(&self, k: usize) -> u8 {
         self.src.get(self.at + k).copied().unwrap_or(0)
     }
 
+    fn end(&self) -> bool {
+        self.at >= self.src.len()
+    }
+
+    /// Columns count characters: a UTF-8 continuation byte adds none.
     fn bump(&mut self) -> u8 {
         let b = self.peek(0);
         self.at += 1;
         if b == b'\n' {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if b & 0xC0 != 0x80 {
             self.col += 1;
         }
         b
@@ -195,7 +204,7 @@ impl<'a> Lexer<'a> {
                         self.bump();
                     }
                     b'#' => {
-                        while !matches!(self.peek(0), b'\n' | 0) {
+                        while !self.end() && self.peek(0) != b'\n' {
                             self.bump();
                         }
                     }
@@ -204,7 +213,7 @@ impl<'a> Lexer<'a> {
             }
             let (line, col) = (self.line, self.col);
             let b = self.peek(0);
-            let tok = if b == 0 {
+            let tok = if self.end() {
                 Tok::Eof
             } else if b.is_ascii_digit() {
                 let mut v: i64 = 0;
@@ -247,7 +256,8 @@ impl<'a> Lexer<'a> {
                             self.bump();
                             break;
                         }
-                        0 | b'\n' => return Err(self.err("unterminated string")),
+                        _ if self.end() => return Err(self.err("unterminated string")),
+                        b'\n' => return Err(self.err("unterminated string")),
                         _ => s.push(char::from(self.bump())),
                     }
                 }
@@ -259,7 +269,11 @@ impl<'a> Lexer<'a> {
                     .find(|s| s.len() == 2 && s.as_bytes() == two)
                     .or_else(|| SYMS.iter().find(|s| s.len() == 1 && s.as_bytes()[0] == b))
                     .copied()
-                    .ok_or_else(|| self.err(format!("unexpected character `{}`", char::from(b))))?;
+                    .ok_or_else(|| {
+                        let c = self.text.get(self.at..).and_then(|t| t.chars().next());
+                        let c = c.unwrap_or('?');
+                        self.err(format!("unexpected character `{}`", c.escape_debug()))
+                    })?;
                 for _ in 0..sym.len() {
                     self.bump();
                 }
@@ -4104,6 +4118,19 @@ mod tests {
         assert!(compile_err("kind a { glyph \"ab\" }").contains("one printable"));
         assert!(
             compile_err("kind a { glyph \"a\" when 1 => x = $ }").contains("unexpected character")
+        );
+        // A NUL byte is a character like any other, not the end of the file.
+        assert_eq!(
+            compile_err("kind a { glyph \"a\" }\n\0kind b { garbage garbage }"),
+            "t.rules:2:1: unexpected character `\\0`"
+        );
+        assert!(
+            compile_err("kind a { when true => idle  é }").contains("unexpected character `é`")
+        );
+        // Columns count characters, not bytes.
+        assert_eq!(
+            compile_err("# é\nkind a { glyph \"é\" $ }"),
+            "t.rules:2:20: unexpected character `$`"
         );
     }
 
