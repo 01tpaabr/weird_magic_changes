@@ -396,8 +396,9 @@ shares would have put there. A cover kind starts in the cover layer. Everyone st
 needs full, but for what `with` sets.
 
 **A drawn map.** A scenario can draw its ground instead of rolling it. The map's size is the
-scenario's `size` (leave `size` out, or make it match), shares still apply to its walkable
-cells, and every kind character becomes a `start K at (x, y)`. This is the fox and the
+scenario's `size` unless you give a larger one (leave `size` out to use the map's; a smaller
+one is an error), shares still apply to its walkable cells, and every kind character becomes
+a `start K at (x, y)`. This is the fox and the
 cornered hen of `scenarios/tests/fox_pen.scenario`, with the pen drawn:
 
 ```

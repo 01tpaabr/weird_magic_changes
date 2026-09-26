@@ -1516,6 +1516,10 @@ legend {
         // A size that matches is fine; the terrain under a map is the map.
         let sized = Scenario::parse("t", &format!("size 7 4\n{PEN}")).unwrap();
         assert_eq!(sized.map, s.map);
+        // So is a larger one: the rest is `outside` (or noise).
+        let larger = Scenario::parse("t", &format!("size 200 200\n{PEN}")).unwrap();
+        assert_eq!((larger.width, larger.height), (200, 200));
+        assert_eq!(larger.map, s.map);
         let p = GenParams::default();
         let t = s.terrain();
         assert_eq!(t.cell(3, 1), (Ground::Soil, Feature::Rock));
