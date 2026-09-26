@@ -510,6 +510,19 @@ fn reload(world: &mut World) -> String {
         Err(e) => format!("reload refused: {e}"),
         Ok(r) => {
             let mut text = format!("reloaded {what} (rules {:016x})", r.hash);
+            let warnings: Vec<_> = world
+                .resource::<Kinds>()
+                .debug
+                .diagnostics
+                .iter()
+                .filter(|d| d.level == sim_core::rules::Level::Warning)
+                .collect();
+            if !warnings.is_empty() {
+                text.push_str(&format!(" | {} warnings (log)", warnings.len()));
+                for d in warnings {
+                    warn!("rules: {d}");
+                }
+            }
             if !r.added.is_empty() {
                 text.push_str(&format!(" | new {}", r.added.join(", ")));
             }

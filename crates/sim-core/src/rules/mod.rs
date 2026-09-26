@@ -147,6 +147,11 @@ pub struct DebugInfo {
     /// The packs these rules were compiled from, as absolute paths in
     /// order (empty: the built-in rules). A save remembers them.
     pub packs: Vec<String>,
+    /// Per kind: the kinds its code may `spawn` or `become` (the author
+    /// lint's "never appears", `Scenario::unseen`).
+    pub makes: Vec<Vec<u16>>,
+    /// Per kind: where it is declared, as `(file index, line, column)`.
+    pub kind_at: Vec<(u16, u32, u32)>,
 }
 
 /// Colour of a kind that declares none: the palette's old actor yellow.

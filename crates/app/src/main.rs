@@ -51,6 +51,13 @@ struct Setup {
     name: String,
 }
 
+/// Take `--flag` out of `args`: was it there?
+fn take_switch(args: &mut Vec<String>, flag: &str) -> bool {
+    let before = args.len();
+    args.retain(|a| a != flag);
+    args.len() != before
+}
+
 /// Take every `--flag value` pair out of `args`.
 fn take_flag(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Vec<String>> {
     let mut values = Vec::new();
@@ -69,6 +76,7 @@ fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
+    let strict = take_switch(&mut args, "--strict");
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
@@ -115,13 +123,13 @@ fn main() -> anyhow::Result<()> {
             if packs.is_empty() {
                 bail!("lint needs a rules directory or file");
             }
-            lint(&packs, file)
+            lint(&packs, file, strict)
         }
         Some(other) => {
             bail!("unknown command {other:?}; use `show`, `play`, `run`, `why` or `lint`")
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint <pack>...; any takes --rules <pack> (repeatable) and --scenario <file>"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint [--strict] <pack>...; any takes --rules <pack> (repeatable) and --scenario <file>"
         ),
     }
 }
@@ -177,6 +185,7 @@ fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
 
 fn show(setup: &Setup) -> anyhow::Result<()> {
     let kinds = app::compile(&app::packs(&setup.packs))?;
+    app::warn(&kinds);
     let t0 = Instant::now();
     let mut world = new_world(setup, kinds)?;
     let gen_time = t0.elapsed();
@@ -357,12 +366,26 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Compile rule packs and print their kind table: the fast way to check a
-/// rules file before a world runs it. With a scenario, check that its
-/// starts fit the rules too.
-fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
+/// Compile rule packs and print their kind table and the author lint: the
+/// fast way to check a rules file before a world runs it. With a scenario,
+/// check that its starts fit the rules too, and which kinds never appear.
+/// `strict`: any warning fails (for CI).
+fn lint(packs: &[String], scenario_file: Option<&str>, strict: bool) -> anyhow::Result<()> {
     let paths: Vec<std::path::PathBuf> = packs.iter().map(Into::into).collect();
     let kinds = app::compile(&paths)?;
+    let scenario = match scenario_file {
+        Some(f) => {
+            let s = scenario(Some(f))?;
+            Placement::resolve(&s.starts, &kinds, &s.terrain())
+                .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+            Some((f, s))
+        }
+        None => None,
+    };
+    let mut diagnostics = kinds.debug.diagnostics.clone();
+    if let Some((_, s)) = &scenario {
+        diagnostics.extend(s.unseen(&kinds));
+    }
     let mut out = std::io::stdout().lock();
     if !kinds.debug.traits.is_empty() {
         writeln!(out, "traits {}", kinds.debug.traits.join(", "))?;
@@ -413,12 +436,10 @@ fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
             writeln!(out, "{line}")?;
         }
     }
-    for d in &kinds.debug.diagnostics {
+    for d in &diagnostics {
         writeln!(out, "{d}")?;
     }
-    let warnings = kinds
-        .debug
-        .diagnostics
+    let warnings = diagnostics
         .iter()
         .filter(|d| d.level == sim_core::rules::Level::Warning)
         .count();
@@ -432,10 +453,7 @@ fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
         kinds.subs.len(),
         kinds.hash
     )?;
-    if let Some(f) = scenario_file {
-        let s = scenario(Some(f))?;
-        Placement::resolve(&s.starts, &kinds, &s.terrain())
-            .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+    if let Some((f, s)) = &scenario {
         let (mut share, mut at) = (0.0, 0);
         for st in &s.starts {
             match st {
@@ -466,6 +484,9 @@ fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
             s.starts.len() - at,
             share * 100.0
         )?;
+    }
+    if strict && warnings > 0 {
+        bail!("{warnings} warnings (--strict)");
     }
     Ok(())
 }

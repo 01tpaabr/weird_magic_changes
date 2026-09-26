@@ -32,7 +32,7 @@
 
 use std::fmt;
 
-use crate::rules::Kinds;
+use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
 use crate::stage::{ChunkCoord, Feature, Ground, Pos};
 
@@ -223,6 +223,46 @@ impl Scenario {
 
     pub fn builtin() -> Scenario {
         Self::parse("default.scenario", Self::BUILTIN).expect("the built-in scenario parses")
+    }
+
+    /// The author lint's scenario check: the kinds that never appear in a
+    /// world of this scenario under `kinds`. Nothing here starts them, and
+    /// nothing that appears spawns or becomes them.
+    pub fn unseen(&self, kinds: &Kinds) -> Vec<Diagnostic> {
+        let mut seen = vec![false; kinds.len()];
+        let mut stack: Vec<u16> = self
+            .starts
+            .iter()
+            .filter_map(|s| kinds.by_name(s.kind()).map(|d| d.id))
+            .collect();
+        while let Some(k) = stack.pop() {
+            if !std::mem::replace(&mut seen[usize::from(k)], true)
+                && let Some(made) = kinds.debug.makes.get(usize::from(k))
+            {
+                stack.extend(made);
+            }
+        }
+        (0..kinds.len())
+            .filter(|&k| !seen[k])
+            .map(|k| {
+                let (file, line, col) = kinds.debug.kind_at.get(k).copied().unwrap_or_default();
+                Diagnostic {
+                    level: Level::Warning,
+                    file: kinds
+                        .debug
+                        .files
+                        .get(usize::from(file))
+                        .cloned()
+                        .unwrap_or_default(),
+                    line,
+                    col,
+                    msg: format!(
+                        "`{}` never appears: the scenario starts none, and nothing that appears spawns or becomes one",
+                        kinds.defs[k].name
+                    ),
+                }
+            })
+            .collect()
     }
 
     /// The world's ground: its seed's noise under its drawn map.
@@ -1187,6 +1227,25 @@ legend {
             Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain())
                 .unwrap_or_else(|e| panic!("{e}"));
         }
+    }
+
+    /// Every built-in kind appears in the default world; the fox pen starts
+    /// hens and foxes, which lay eggs that hatch into chicks, and nothing
+    /// else.
+    #[test]
+    fn unseen_kinds_follow_starts_spawns_and_becomes() {
+        let k = Kinds::builtin();
+        assert!(Scenario::builtin().unseen(&k).is_empty());
+        let pen = Scenario::parse(
+            "p",
+            include_str!("../../../scenarios/tests/fox_pen.scenario"),
+        )
+        .unwrap();
+        let never: Vec<String> = pen.unseen(&k).iter().map(|d| d.msg.clone()).collect();
+        let names: Vec<&str> = never.iter().map(|m| m.split('`').nth(1).unwrap()).collect();
+        assert_eq!(names, ["flower", "hive", "bee", "grass", "seed", "tree"]);
+        let d = &pen.unseen(&k)[0];
+        assert_eq!((d.file.as_str(), d.line), ("bees.rules", 18));
     }
 
     #[test]

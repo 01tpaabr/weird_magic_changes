@@ -67,6 +67,7 @@ pub fn rules_for(store: &Store, cli: &[String]) -> anyhow::Result<Kinds> {
         }
     }
     let kinds = compile(&packs)?;
+    warn(&kinds);
     if let Some(m) = meta.filter(|m| m.rules_hash != kinds.hash) {
         eprintln!(
             "rules: changed since this save was last played (hash {:016x}, was {:016x})",
@@ -74,6 +75,26 @@ pub fn rules_for(store: &Store, cli: &[String]) -> anyhow::Result<Kinds> {
         );
     }
     Ok(kinds)
+}
+
+/// The author lint's warnings about `kinds`, once on stderr (`wmc lint`
+/// prints them with the notes).
+pub fn warn(kinds: &Kinds) {
+    let warnings: Vec<_> = kinds
+        .debug
+        .diagnostics
+        .iter()
+        .filter(|d| d.level == sim_core::rules::Level::Warning)
+        .collect();
+    if !warnings.is_empty() {
+        eprintln!(
+            "rules: {} warnings (wmc lint shows them with notes)",
+            warnings.len()
+        );
+        for d in warnings {
+            eprintln!("  {d}");
+        }
+    }
 }
 
 /// Paths for a message: `a, b`.

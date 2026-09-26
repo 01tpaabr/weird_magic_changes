@@ -534,6 +534,12 @@ where it touches the tick.
    header; `start ... with (need = v)` and legend `with` set a start's needs and memory
    (a new start tag, still format 9). `scenarios/tests/fox_pen.scenario` is the cornered
    chicken as data.
+   8f done: the author lint (`rules/compile/lint.rs`, run with every compile): tags no kind
+   carries, scents nobody marks, signals and looks nobody sets, eaten kinds without
+   health (targets followed back to their `nearest` or a sub's `pred` argument), radii
+   beyond sight, needs that empty before the first think, actions in `for each`, what is
+   never used; with a scenario, kinds that never appear. `wmc lint --strict` for CI;
+   warnings on stderr when a world opens, and on the status row after `r`.
    8d done: the built-in kinds rewritten on a trait library (`rules/lib.rules`: `walker`,
    `drinker`, `rooted`, `mortal` and the shared subs; `fowl` in animals.rules), `chick
    extends chicken` (kinds renumbered in pre-order: chicken 0, chick 1, egg 2), `only

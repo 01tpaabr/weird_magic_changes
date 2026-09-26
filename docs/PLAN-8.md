@@ -83,7 +83,7 @@ no rules hash), and every gate below compares **`state:`** and the population li
 | 8c | identical to 8b when the packs match. **Done:** built-in rules at 1 and 8 threads, and `--rules rules` at 8, all `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`, populations unchanged. |
 | 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. **Done:** full gate `checksum 745e63078789e157`, `state ef03c4b25feb7529` at 1 and 8 threads (`332685 actors: chicken 1885, chick 1550, egg 0, fox 160, flower 8659, hive 52, bee 1079, grass 317802, seed 1029, tree 469`); quick gate `73c2cc51bbaff126` / `170530c04b9a192b`, the same counts as 8c; day-16 means over seeds 12-16 within a few percent of 8c (PERF.md actors-8d). |
 | 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. **Done:** `scenarios/tests/fox_pen.scenario`, checked by `the_fox_pen_scenario_reproduces_the_cornered_chicken`: both hens bitten and eaten, both foxes fed, the second pen across x = 64. |
-| 8f | `make ci`; `wmc lint rules/` on the built-in content reports no warnings (fix the content if it does, those are real). |
+| 8f | `make ci`; `wmc lint rules/` on the built-in content reports no warnings (fix the content if it does, those are real). **Done:** 0 warnings (notes: the chick's skipped rules, tags `animal` and `plant` named by no predicate); checksums unchanged. |
 | 8g | every `scenarios/tests/*.scenario` passes at 1 and 8 threads. |
 
 ## 3. Commit 8a: traits, `extends`, `inherit`, family matching, `only`, diagnostics
@@ -557,6 +557,21 @@ Tests: one fixture per check, positive and negative, in `lint.rs`; `wmc lint rul
 built-in content is clean. Docs: `RULES.md` "Debugging" lists the checks; `CLAUDE.md`
 mentions `--strict`.
 
+### 8.1 As built (deviations from the text above)
+
+- The lint is a child module of the compiler, `rules/compile/lint.rs`, not `rules/lint.rs`,
+  so it reads the compiler's private AST and per-kind resolved rule lists directly. It
+  runs at the end of every compile; its diagnostics join `debug.diagnostics`.
+- Targets are followed through sub calls for `target` parameters too, and `int`
+  parameters with constant arguments fold into radii (`scan(12)` inside a kind of sight 8
+  is reported).
+- "Never used" is by name across the rule set (a name used anywhere counts). A library
+  pack linted alone reports its unused subs and traits; lint it with the packs that use it.
+- The scenario check is `Scenario::unseen(kinds)`: reachable from the scenario's starts
+  through each kind's `spawn` and `become` (`debug.makes`), reported at the kind's
+  declaration (`debug.kind_at`).
+- `StateAst` has its position again (for the never-entered state).
+
 ## 9. Commit 8g: scenario tests
 
 Scenario files gain two statements, after the world description:
@@ -614,6 +629,6 @@ closing paragraph. Then delete this file.
 - [x] 8c packs, open by name, rewrite on save (see §5.4)
 - [x] 8d content on traits, vocabulary in RULES.md (see §6.1)
 - [x] 8e drawn maps (see §7.1)
-- [ ] 8f author lint, --strict, reload surfacing
+- [x] 8f author lint, --strict, reload surfacing (see §8.1)
 - [ ] 8g scenario tests, make test runs them, content tests moved
 - [ ] ACTORS.md §11 step 8 written from this plan; ARCHITECTURE decisions 35, 36 (and 34 amended); this file deleted

@@ -152,6 +152,7 @@ trait grazer(hungry) {                    # a parameter: a constant inside the t
 
 kind sheep extends grazer(20h), drinker(6, 2h, 3), mortal(8d, 5) {   # the last two: lib.rules
   glyph "S"
+  sight 6                                 # its searches reach 6 cells
   tags animal meat
   need health max 30 decay 0 vital
   inherit mortal
@@ -482,8 +483,25 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 
 - **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
   points, each kind's parents and family. Errors come as `file:line:col: message`, and
-  stop the compile. Warnings and notes come as `file:line:col: warning: message` and don't:
-  a rule that can never run, or an ancestor whose rules no `inherit` splices.
+  stop the compile. Warnings and notes come as `file:line:col: warning: message` and don't.
+  `wmc lint --strict` fails on any warning, for CI. A world prints its rules' warnings once
+  on stderr when it opens, and a hot reload says `N warnings (log)`. What the lint checks:
+  - a rule that can never run; an ancestor whose rules no `inherit` splices (a note);
+  - a predicate tag no kind carries (`wolf looks for meat, but no kind ... is tagged meat`);
+  - a `sniff` or `scent()` of a channel nothing marks, `signal_of` when no rule sets
+    `signal`, `K:n` when no rule of K's family sets `look`;
+  - `eat`, `hit` or `graze` of a target whose predicate the lint can follow (the `nearest`
+    that bound it, or a sub's `pred` argument at each call) where a matching kind has no
+    `health`; an eater with no `food` need; a drinker with no `water` need;
+  - a search radius that is a constant above the kind's `sight` (it is clamped);
+  - a decaying vital need whose max is below the kind's cadence (it empties before the
+    first think);
+  - an action inside `for each` (a second cell means a second action: a trap);
+  - what is never used: a mem, a need the engine does not read (it reads `health`,
+    `water`, `food`), a sub, a const, a state no `next` reaches (the first is where actors
+    start), a tag no predicate names (a note);
+  - with `--scenario`, a kind that never appears: the scenario starts none, and nothing
+    that appears spawns or becomes one.
 - **Two actions in a row** are a compile error when the compiler can see both: a statement
   that acts on every path, then another action in the same block.
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at

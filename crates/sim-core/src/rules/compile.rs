@@ -22,6 +22,8 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
 
+mod lint;
+
 /// A compile error with its position.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompileError {
@@ -382,6 +384,7 @@ struct ConstAst {
 /// actor is in this state.
 #[derive(Debug, Clone)]
 struct StateAst {
+    at: Pos,
     name: String,
     rules: Vec<RuleItem>,
 }
@@ -977,6 +980,7 @@ impl Parser<'_> {
             }
             self.expect_sym("}")?;
             states.push(StateAst {
+                at: sat,
                 name: sname,
                 rules: srules,
             });
@@ -2201,9 +2205,11 @@ impl<'a> Gen<'a> {
                     .collect()
             })
             .collect();
-        Ok(Kinds::from_parts(defs, code, self.pool, sub_entries)
-            .with_scents(self.scents)
-            .with_debug(self.debug))
+        let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
+            .with_scents(std::mem::take(&mut self.scents));
+        let lint = self.lint(&kinds);
+        self.debug.diagnostics.extend(lint);
+        Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
 
     // ---- inheritance ------------------------------------------------------------------

@@ -60,7 +60,7 @@ make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, 
 make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (WMC_THREADS=1 must match)
                                    # show/play/run/why take --scenario <file> for a new world ([w h seed] override it)
                                    # and --rules <pack> (repeatable; a dir of *.rules or a file; else WMC_RULES=a:b, else the save's packs)
-make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table (--scenario f: check it fits)
+make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table and the author lint (--scenario f: check it fits; --strict: warnings fail)
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
