@@ -709,7 +709,7 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             let got = match agg {
                 Agg::Min => vals.iter().min().copied(),
                 Agg::Max => vals.iter().max().copied(),
-                Agg::Sum => Some(vals.iter().sum()),
+                Agg::Sum => (!vals.is_empty()).then(|| vals.iter().sum()),
             };
             match got {
                 Some(g) => (op.holds(g, *v), g.to_string()),
@@ -2810,7 +2810,8 @@ mod tests {
              expect at (9, 9) nobody
              expect count wolf == 0
              expect max sleep of chicken == 0
-             expect max nectar of hive == 0",
+             expect max nectar of hive == 0
+             expect sum food of fox == 0",
         )
         .unwrap();
         let mut w = new_world(&s);
@@ -2839,6 +2840,7 @@ mod tests {
                 Err("the rules have no kind `wolf`".into()),
                 Err("`chicken` has no need or memory `sleep`".into()),
                 ok(false, "no `hive` alive"),
+                ok(false, "no `fox` alive"),
             ]
         );
         let c = checksum(&mut w);

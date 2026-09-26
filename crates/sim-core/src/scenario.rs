@@ -176,7 +176,7 @@ pub enum Expect {
         n: i64,
     },
     /// `min|max|sum NAME of [only] K OP V`: a need or memory over every
-    /// actor of the kind.
+    /// actor of the kind. With none alive it fails, whatever `OP V` says.
     Value {
         agg: Agg,
         name: String,
