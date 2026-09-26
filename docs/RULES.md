@@ -597,7 +597,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | fuel per think | 4096 |
 | sub call depth | 8 |
 | parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5) |
-| nesting in one rule or sub | 128 levels: a block, parentheses, `-`, `not`, `toward` and `away` are one each, and so is each operator in a chain (`a + b + c` is two) |
+| nesting in one rule or sub | 128 levels: each nested statement, parenthesis, call argument, `-`, `not`, `toward` and `away` is one, and so is each operator in a chain (`a + b + c` is two) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
