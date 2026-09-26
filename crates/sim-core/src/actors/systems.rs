@@ -38,7 +38,7 @@ use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
 use crate::rules::{Kinds, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::STREAM_UID;
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Stage};
+use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, Stage};
 
 /// One actor's decision this tick, waiting for the resolve phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1027,14 +1027,14 @@ pub fn apply(
                                 if actors.cells.walkable(cell)
                                     && actors.cells.cover[cell].is_none() =>
                             {
-                                let pos = coord.cell(cell);
-                                let mut child = newborn(
+                                let child = spawn_mind(
                                     kinds,
-                                    it.kind,
-                                    hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
+                                    seed,
                                     tick,
+                                    coord.cell(cell),
+                                    it.kind,
+                                    it.with,
                                 );
-                                child.mem[..2].copy_from_slice(&it.with);
                                 actors.push_cover(cell, it.kind, child);
                                 scratch.count(it.kind, life::BORN);
                                 result::OK
@@ -1057,14 +1057,8 @@ pub fn apply(
                     }
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
-                            let pos = coord.cell(cell);
-                            let mut child = newborn(
-                                kinds,
-                                it.kind,
-                                hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
-                                tick,
-                            );
-                            child.mem[..2].copy_from_slice(&it.with);
+                            let child =
+                                spawn_mind(kinds, seed, tick, coord.cell(cell), it.kind, it.with);
                             actors.push(cell, it.kind, child);
                             scratch.touch(cell);
                             scratch.count(it.kind, life::BORN);
@@ -1152,6 +1146,23 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
         hurt_dir: 0,
         _pad: 0,
     }
+}
+
+/// The mind of a child `spawn`ed at `pos` this tick: its uid (every later
+/// key, stagger and dice stream derive from it), a [`newborn`], and the
+/// `with` memory. Every run-time birth goes through here.
+fn spawn_mind(
+    kinds: &Kinds,
+    seed: u64,
+    tick: u64,
+    pos: Pos,
+    kind: u16,
+    with: [i32; 2],
+) -> ActorMind {
+    let uid = hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick);
+    let mut child = newborn(kinds, kind, uid, tick);
+    child.mem[..2].copy_from_slice(&with);
+    child
 }
 
 /// Change a row's kind in place: consumable needs carry over by name
@@ -1278,14 +1289,7 @@ pub fn migrate(
                 src_scratch.touch(usize::from(row.cell));
             }
             EffectKind::Spawn { kind, with } => {
-                let pos = fx.to.cell(cell);
-                let mut child = newborn(
-                    &kinds,
-                    kind,
-                    hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
-                    tick,
-                );
-                child.mem[..2].copy_from_slice(&with);
+                let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with);
                 if cover {
                     to.push_cover(cell, kind, child);
                 } else {
