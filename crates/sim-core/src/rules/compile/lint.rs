@@ -11,6 +11,10 @@ use super::*;
 /// The needs the engine reads by name.
 const ENGINE_NEEDS: [&str; 3] = ["health", "water", "food"];
 
+/// Sub bodies walked per kind before the lint stops following calls: a sub
+/// that calls itself k times would otherwise cost k^8 walks.
+const WALKS: u32 = 1 << 16;
+
 /// Diagnostics without repeats, in the order found.
 #[derive(Default)]
 struct Out(Vec<Diagnostic>);
@@ -286,6 +290,8 @@ struct Walk {
     each: u32,
     /// The outermost call made inside a `for each`, and where.
     each_call: Option<(String, Pos)>,
+    /// Sub bodies walked so far (see [`WALKS`]).
+    walks: u32,
 }
 
 impl Walk {
@@ -396,6 +402,7 @@ impl<'a> Gen<'a> {
                 becomes: BTreeSet::new(),
                 each: 0,
                 each_call: None,
+                walks: 0,
             };
             for list in [&inst.reflex].into_iter().chain(&inst.state_lists) {
                 for rr in &list.rules {
@@ -918,6 +925,21 @@ impl<'a> Gen<'a> {
         if w.depth >= 8 {
             return;
         }
+        if w.walks >= WALKS {
+            if w.walks == WALKS {
+                w.walks += 1;
+                out.push(
+                    Level::Note,
+                    at,
+                    format!(
+                        "`{}`: the lint stopped following calls after {WALKS} sub walks",
+                        kinds.defs[usize::from(w.kind)].name
+                    ),
+                );
+            }
+            return;
+        }
+        w.walks += 1;
         let ki = self.kind_insts[usize::from(w.kind)];
         let (sub, owner): (&'a SubAst, Option<usize>) =
             match self.insts[ki].members.iter().find(|(n, ..)| n == name) {
@@ -1284,6 +1306,22 @@ mod tests {
             "kind ant { mem n  state A { when true => for each free within 1 as c { n += 1  next B } }  state B { when true => idle } }",
             "inside `for each`"
         ));
+    }
+
+    #[test]
+    fn a_sub_that_calls_itself_many_times_lints_quickly() {
+        // 16 calls a level, 8 levels deep: 16^8 walks, unless budgeted.
+        let text = format!(
+            "sub f(n) {{ if n > 0 {{ {} }} }}
+             kind r {{ mem m  when m == 0 => {{ f(1)  m = 1 }} }}",
+            "f(n - 1) ".repeat(16)
+        );
+        let got = lint(&text);
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`r`: the lint stopped following calls after 65536 sub walks")),
+            "{got:?}"
+        );
     }
 
     #[test]
