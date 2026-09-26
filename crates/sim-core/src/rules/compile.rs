@@ -1660,8 +1660,11 @@ impl Parser<'_> {
             self.bump();
             let mut cond_err = None;
             match self.nested(Self::cond) {
-                Ok(c) if self.eat_sym(")") && !self.starts_binop() => return Ok(c),
-                Ok(_) => {}
+                Ok(c) => match self.expect_sym(")") {
+                    Ok(()) if !self.starts_binop() => return Ok(c),
+                    Ok(()) => {}
+                    Err(e) => cond_err = Some((self.at, e)),
+                },
                 Err(e) => cond_err = Some((self.at, e)),
             }
             (self.at, self.deepest) = save;
@@ -4651,6 +4654,11 @@ mod tests {
         assert_eq!(
             compile_err("kind a { when (nearest a within 3 as) => idle }"),
             "t.rules:1:37: expected a binding name, found `)`"
+        );
+        // Likewise a condition that parses but lacks its `)`.
+        assert_eq!(
+            compile_err("kind a { when (nearest a within 3 as b => idle }"),
+            "t.rules:1:40: expected `)`, found `=>`"
         );
         // An expression error still wins when it is the further one.
         assert!(
