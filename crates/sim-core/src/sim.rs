@@ -1655,6 +1655,44 @@ mod tests {
         assert_eq!(at(tuft), p);
     }
 
+    /// A standing child and a cover child born on one cell in one tick
+    /// are two actors: two uids.
+    #[test]
+    fn children_on_one_cell_get_their_own_uids() {
+        use crate::actors::systems::newborn;
+        let kinds = crate::rules::compile(
+            "t.rules",
+            "kind hen { cadence 1 mem done when done == 0 => { done = 1  spawn egg at east } }
+             kind grass { cover cadence 1 mem done when done == 0 => { done = 1  spawn tuft at west } }
+             kind egg { cadence 1024 }
+             kind tuft { cover cadence 1024 }",
+        )
+        .unwrap();
+        let (hen, grass, egg, tuft) = (0, 1, 2, 3);
+        let mut w = new_world_with(&cfg(11), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(10, 10),
+            hen,
+            newborn(&kinds, hen, 0x51, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(12, 10),
+            grass,
+            newborn(&kinds, grass, 0x52, now)
+        ));
+        step(&mut w);
+        check_invariants(&mut w);
+        let all = rows(&mut w);
+        let born = |k: u16| all.iter().find(|r| r.1 == k).map(|r| (r.0, r.2)).unwrap();
+        let (e, t) = (born(egg), born(tuft));
+        assert_eq!((e.1, t.1), (Pos::new(11, 10), Pos::new(11, 10)));
+        assert_ne!(e.0, t.0, "twin uids");
+    }
+
     /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
     /// step later `sniff` finds it (in the chunk and across a border); the
     /// scent is saved with the chunk and fades to nothing in two hours; a

@@ -27,6 +27,8 @@ pub const STREAM_ROCK: u64 = 0x0002;
 // 0x0003 and 0x0005 were per-kind placement streams; retired, never reuse.
 pub const STREAM_UID: u64 = 0x0004;
 pub const STREAM_PLACE: u64 = 0x0006;
+/// Run-time ground-cover births; never reuse.
+pub const STREAM_UID_COVER: u64 = 0x0007;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.

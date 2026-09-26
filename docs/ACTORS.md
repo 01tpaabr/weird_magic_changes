@@ -51,7 +51,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     _pad: u16,
 }
 #[repr(C)] pub struct ActorMind {  // 88 B, Pod. Only the owning chunk touches it.
-    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time]
+    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
     mem: [i32; 12],           // the program's whole persistent memory, named per kind
@@ -70,7 +70,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   within a tick; identity across ticks is `uid` or a position (unique: one standing and one cover actor
   per cell).
 - **Worldgen rows** get a tick-free `uid`, so regenerating a chunk equals reloading it.
-  Run-time spawns fold in the tick. Which kind starts where is the **scenario's**, not the
+  Run-time spawns fold in the tick, and a cover child hashes on its own stream, so the
+  standing and the cover child a cell can get in one tick differ. Which kind starts where is the **scenario's**, not the
   rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
   placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
   one cell (`with (food = 2h)` sets its needs or memory by name). A scenario may also draw

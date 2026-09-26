@@ -37,7 +37,7 @@ use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
 use crate::rules::{Kinds, Remap};
 use crate::sim::{SimConfig, Tick};
-use crate::stage::worldgen::STREAM_UID;
+use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
 use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, Stage};
 
 /// One actor's decision this tick, waiting for the resolve phases.
@@ -1150,7 +1150,8 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
 
 /// The mind of a child `spawn`ed at `pos` this tick: its uid (every later
 /// key, stagger and dice stream derive from it), a [`newborn`], and the
-/// `with` memory. Every run-time birth goes through here.
+/// `with` memory. Every run-time birth goes through here. A cell takes one
+/// standing and one cover birth a tick, so the two layers hash apart.
 fn spawn_mind(
     kinds: &Kinds,
     seed: u64,
@@ -1159,7 +1160,12 @@ fn spawn_mind(
     kind: u16,
     with: [i32; 2],
 ) -> ActorMind {
-    let uid = hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick);
+    let stream = if is_cover(kinds, kind) {
+        STREAM_UID_COVER
+    } else {
+        STREAM_UID
+    };
+    let uid = hash_cell(seed, stream, pos.x, pos.y) ^ splitmix64(tick);
     let mut child = newborn(kinds, kind, uid, tick);
     child.mem[..2].copy_from_slice(&with);
     child

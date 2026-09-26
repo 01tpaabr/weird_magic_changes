@@ -70,7 +70,8 @@ pub struct ActorPub {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 pub struct ActorMind {
     /// Identity across ticks and chunks. Worldgen rows: `hash_cell(seed,
-    /// STREAM_UID, x, y)`; run-time spawns fold in the tick.
+    /// STREAM_UID, x, y)`; run-time spawns fold in the tick, and cover
+    /// children hash with `STREAM_UID_COVER` instead.
     pub uid: u64,
     /// Tick the actor came to be (wrapping); `age = tick - born`.
     pub born: u32,
