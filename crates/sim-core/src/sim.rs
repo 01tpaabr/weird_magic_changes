@@ -472,6 +472,15 @@ fn load_chunks(
                     let d = &mut saved.data;
                     plan.apply(&mut d.cells, &mut d.actors.rows, &mut d.minds.rows, &mut []);
                 }
+                // The save records need names, not maxes: rules that only
+                // lowered a max need no plan, so clamp here as a plan would.
+                let kinds = world.resource::<Kinds>();
+                let d = &mut saved.data;
+                for (p, m) in d.actors.rows.iter().zip(&mut d.minds.rows) {
+                    for (i, n) in kinds.def(p.kind).needs.iter().enumerate() {
+                        m.needs[i] = m.needs[i].clamp(0, n.max);
+                    }
+                }
                 let frozen = now.wrapping_sub(saved.last_ticked) as u32;
                 for m in &mut saved.data.minds.rows {
                     m.last_think = m.last_think.wrapping_add(frozen);
@@ -2276,6 +2285,46 @@ mod tests {
         save(&mut w, &store).unwrap();
         assert!(open_world_with(&store, b).unwrap().is_some());
         assert!(open_world_with(&store, a).is_err());
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A save reopened under rules that only lowered a need's max loads its
+    /// rows clamped to the new max, as a hot reload to those rules does.
+    #[test]
+    fn a_save_reopened_under_a_lower_max_clamps_needs() {
+        use crate::actors::systems::newborn;
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let a = compile(
+            "a.rules",
+            "kind pool { cadence 1024  need water max 1000 decay 0  when true => idle }",
+        )
+        .unwrap();
+        let b = compile(
+            "b.rules",
+            "kind pool { cadence 1024  need water max 100 decay 0  when true => idle }",
+        )
+        .unwrap();
+        let store = tmp_store("lower-max");
+        let mut w = new_world_with(&cfg(2), a.clone()).unwrap();
+        flatten(&mut w);
+        let p = Pos::new(10, 10);
+        let m = newborn(&a, 0, 0xA1, tick(&w));
+        assert!(place_actor(&mut w, p, 0, m));
+        save(&mut w, &store).unwrap();
+        let water = |w: &mut World| rows(w)[0].3.needs[0];
+        assert_eq!(water(&mut w), 1000);
+
+        let mut reopened = open_world_with(&store, b.clone()).unwrap().unwrap();
+        let focus = LoadPolicy { load: 0, unload: 0 };
+        ensure_loaded(&mut reopened, p, focus, Some(&store)).unwrap();
+        assert_eq!(water(&mut reopened), 100, "clamped to the new max");
+
+        let mut reloaded = open_world_with(&store, a).unwrap().unwrap();
+        ensure_loaded(&mut reloaded, p, focus, Some(&store)).unwrap();
+        reload_rules(&mut reloaded, None, b).unwrap();
+        assert_eq!(water(&mut reloaded), 100, "as a hot reload clamps");
+        assert_eq!(checksum(&mut reopened), checksum(&mut reloaded));
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

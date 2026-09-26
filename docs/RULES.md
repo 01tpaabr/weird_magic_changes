@@ -498,10 +498,10 @@ a blinker, a block and a glider.
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
-keeps its kind, cell, needs and memory. The first time the world writes to the save, the
-whole directory moves over to the new numbering, and from then on it belongs to the new set
-of packs. Rules that lack one of the save's kinds are refused with the list, and so is a kind
-that turned from standing into ground cover, or back.
+keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
+writes to the save, the whole directory moves over to the new numbering, and from then on it
+belongs to the new set of packs. Rules that lack one of the save's kinds are refused with the
+list, and so is a kind that turned from standing into ground cover, or back.
 
 ## 16. The vocabulary
 
