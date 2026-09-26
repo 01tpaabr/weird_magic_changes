@@ -312,14 +312,11 @@ impl ChunkData {
 /// Bookkeeping for one chunk entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkMeta {
-    /// Modified since it was generated or loaded from disk. Clean chunks are
-    /// never written: they can be regenerated from the seed.
+    /// Must be written before it is dropped: changed since it was generated
+    /// or read, or inhabited (rows carry clocks, which a save file stamps
+    /// with the tick it was written at). A clean chunk is empty and
+    /// unchanged: the seed or its file brings it back as it is.
     pub dirty: bool,
-    /// World tick the chunk's state was current at when it was spawned (the
-    /// tick it was generated, or `last_ticked` from its save file). While
-    /// loaded the live value is `Tick`; `sim::save` refreshes this whenever
-    /// the chunk is written. Not part of the checksum.
-    pub last_ticked: u64,
 }
 
 /// The set of loaded chunks: coordinate -> entity, plus the canonical order.
@@ -389,18 +386,12 @@ impl Stage {
 
 /// Spawn a chunk entity. Panics if `coord` is already loaded. The world must
 /// have a [`Stage`] resource (`sim::install`).
-pub fn insert(
-    world: &mut World,
-    coord: ChunkCoord,
-    data: ChunkData,
-    dirty: bool,
-    last_ticked: u64,
-) -> Entity {
+pub fn insert(world: &mut World, coord: ChunkCoord, data: ChunkData, dirty: bool) -> Entity {
     let e = world
         .spawn((
             coord,
             data,
-            ChunkMeta { dirty, last_ticked },
+            ChunkMeta { dirty },
             Intents::default(),
             Scratch::default(),
             Outbox::default(),
@@ -543,21 +534,9 @@ mod tests {
     #[test]
     fn insert_remove_keeps_active_sorted_and_entities_die() {
         let mut w = world();
-        let a = insert(
-            &mut w,
-            ChunkCoord::new(1, 1),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        let b = insert(
-            &mut w,
-            ChunkCoord::new(-3, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        let c = insert(&mut w, ChunkCoord::new(0, 1), ChunkData::default(), true, 0);
+        let a = insert(&mut w, ChunkCoord::new(1, 1), ChunkData::default(), false);
+        let b = insert(&mut w, ChunkCoord::new(-3, 0), ChunkData::default(), false);
+        let c = insert(&mut w, ChunkCoord::new(0, 1), ChunkData::default(), true);
         assert!(a != b && b != c);
         let order: Vec<_> = w.resource::<Stage>().loaded_coords().collect();
         assert_eq!(
@@ -583,68 +562,26 @@ mod tests {
         let mut cells = ChunkData::default();
         cells.cells.ground[5] = Ground::Water;
         let mut a = world();
-        insert(&mut a, ChunkCoord::new(0, 0), cells.clone(), false, 0);
-        insert(
-            &mut a,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut a, ChunkCoord::new(0, 0), cells.clone(), false);
+        insert(&mut a, ChunkCoord::new(1, 0), ChunkData::default(), false);
         let mut b = world();
-        insert(
-            &mut b,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(&mut b, ChunkCoord::new(0, 0), cells, false, 0);
+        insert(&mut b, ChunkCoord::new(1, 0), ChunkData::default(), false);
+        insert(&mut b, ChunkCoord::new(0, 0), cells, false);
         assert_eq!(checksum(&mut a), checksum(&mut b));
         // But it does see position and content.
         let mut c = world();
-        insert(
-            &mut c,
-            ChunkCoord::new(0, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(
-            &mut c,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut c, ChunkCoord::new(0, 0), ChunkData::default(), false);
+        insert(&mut c, ChunkCoord::new(1, 0), ChunkData::default(), false);
         assert_ne!(checksum(&mut a), checksum(&mut c));
         let mut d = world();
-        insert(
-            &mut d,
-            ChunkCoord::new(0, 1),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(
-            &mut d,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut d, ChunkCoord::new(0, 1), ChunkData::default(), false);
+        insert(&mut d, ChunkCoord::new(1, 0), ChunkData::default(), false);
         assert_ne!(checksum(&mut c), checksum(&mut d));
         // Many chunks: exercises the batched parallel path.
         let mut e = world();
         for y in 0..10 {
             for x in 0..10 {
-                insert(
-                    &mut e,
-                    ChunkCoord::new(x, y),
-                    ChunkData::default(),
-                    false,
-                    0,
-                );
+                insert(&mut e, ChunkCoord::new(x, y), ChunkData::default(), false);
             }
         }
         let first = checksum(&mut e);
@@ -655,7 +592,7 @@ mod tests {
     fn cell_queries_and_dirty_tracking() {
         let mut w = world();
         let cc = ChunkCoord::new(0, 0);
-        insert(&mut w, cc, ChunkData::default(), false, 0);
+        insert(&mut w, cc, ChunkData::default(), false);
         let p = Pos::new(3, 4);
         let (_, i) = p.split();
         // (walkable, occupant) at `p` through the system param; None if not loaded.

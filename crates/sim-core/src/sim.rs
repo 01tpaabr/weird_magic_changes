@@ -15,7 +15,8 @@
 //!
 //! Time is the integer [`Tick`] (see [`crate::time`]). A chunk that is not
 //! loaded is frozen: its save file records the tick it was last simulated
-//! (`last_ticked`), which is all a future catch-up-on-load needs.
+//! (`last_ticked`), and loading shifts its rows' clocks by the time it was
+//! away (decision 29): nothing decays or ages while frozen.
 //!
 //! There is no engine here: no `App`, no `Time`, no assets. `app` wraps these
 //! functions in a plugin; tests and the headless `wmc run` call them directly.
@@ -356,7 +357,9 @@ fn write_chunk(
 
 // ---- persistence ------------------------------------------------------------------------
 
-/// Write metadata and every dirty chunk; dirty flags are cleared.
+/// Write metadata and every dirty chunk, stamped now. Dirty flags are
+/// cleared, but for inhabited chunks: their rows' clocks run on, so every
+/// save writes them again (see [`ChunkMeta::dirty`]).
 pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
     settle(world, store)?;
     store.write_meta(&meta(world))?;
@@ -369,9 +372,12 @@ pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
             continue;
         }
         write_chunk(world, store, coord, e, now)?;
-        let mut m = world.get_mut::<ChunkMeta>(e).expect("chunk has meta");
-        m.dirty = false;
-        m.last_ticked = now;
+        let inhabited = !world
+            .get::<ChunkMinds>(e)
+            .expect("chunk has minds")
+            .rows
+            .is_empty();
+        world.get_mut::<ChunkMeta>(e).expect("chunk has meta").dirty = inhabited;
         written += 1;
     }
     Ok(written)
@@ -444,10 +450,11 @@ pub fn ensure_loaded(
 /// was written (`last_ticked`) until now: its rows' `last_think` and `born`
 /// shift forward by that interval, so no need decays and nobody ages while
 /// off screen (decision 29), and a reopen at the save tick is bit-identical
-/// to never stopping. A generated chunk's rows are born now, needs full,
-/// and the chunk is **dirty** from the start: its rows are state (their
-/// birth tick, and every think from now on), so it is saved on unload,
-/// never regenerated.
+/// to never stopping. A generated chunk's rows are born now, needs full.
+/// Either way an inhabited chunk is **dirty** from the start: its rows are
+/// state (their birth tick, and every think from now on), and their clocks
+/// are current only as of now, so it is written on every save and unload
+/// (restamped), never regenerated or left with an older file.
 fn load_chunks(
     world: &mut World,
     coords: &[ChunkCoord],
@@ -486,7 +493,8 @@ fn load_chunks(
                     m.last_think = m.last_think.wrapping_add(frozen);
                     m.born = m.born.wrapping_add(frozen);
                 }
-                stage::insert(world, c, saved.data, false, saved.last_ticked);
+                let inhabited = !saved.data.minds.rows.is_empty();
+                stage::insert(world, c, saved.data, inhabited);
                 read += 1;
             }
             None => to_gen.push(c),
@@ -522,7 +530,7 @@ fn load_chunks(
     };
     for (c, data) in to_gen.iter().zip(chunks) {
         let inhabited = !data.actors.rows.is_empty();
-        stage::insert(world, *c, data, inhabited, now);
+        stage::insert(world, *c, data, inhabited);
     }
     Ok((to_gen.len(), read))
 }
@@ -820,12 +828,9 @@ mod tests {
 
     #[test]
     fn new_world_starts_at_dawn() {
-        let mut w = new_world(&cfg(5));
+        let w = new_world(&cfg(5));
         assert_eq!(tick(&w), START_TICK);
         assert_eq!(crate::time::Clock::at(tick(&w)).to_string(), "day 0 06:00");
-        for m in w.query::<&ChunkMeta>().iter(&w) {
-            assert_eq!(m.last_ticked, START_TICK);
-        }
     }
 
     #[test]
@@ -921,6 +926,13 @@ mod tests {
         let mut back = open_world(&store).unwrap().unwrap();
         let s = ensure_loaded(&mut back, Pos::new(64, 64), policy, Some(&store)).unwrap();
         assert_eq!((s.read, s.generated), (6, 3));
+        for (m, meta) in back.query::<(&ChunkMinds, &ChunkMeta)>().iter(&back) {
+            assert_eq!(
+                meta.dirty,
+                !m.rows.is_empty(),
+                "read back: dirty iff inhabited"
+            );
+        }
         prune(&mut back);
         assert_eq!(checksum(&mut back), expect);
         // Reopened later: the rows were frozen meanwhile, so their clocks
@@ -1074,6 +1086,82 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    /// An inhabited chunk whose actors are not due between two saves is
+    /// written by both: its rows' clocks are current as of each save, so a
+    /// reopen shifts them by the frozen time only.
+    #[test]
+    fn a_save_between_thinks_reopens_identically() {
+        let slow = crate::rules::compile(
+            "t.rules",
+            "kind slow { cadence 65536  need food max 2d vital  when true => idle }",
+        )
+        .unwrap();
+        let sc = Scenario::parse(
+            "t.scenario",
+            "seed 1\nsize 64 64\noutside soil\nmap {\n.\n}\nlegend {\n. soil\n}\n\
+             start slow at (10, 10)\n",
+        )
+        .unwrap();
+        let store = tmp_store("between-thinks");
+        let mut w = new_world_with(&sc, slow.clone()).unwrap();
+        for _ in 0..5 {
+            step(&mut w);
+        }
+        assert_eq!(save(&mut w, &store).unwrap(), 1);
+        for _ in 0..100 {
+            step(&mut w);
+        }
+        assert_eq!(save(&mut w, &store).unwrap(), 1, "inhabited: written again");
+        for _ in 0..50 {
+            step(&mut w);
+        }
+        let mut back = open_world_with(&store, slow).unwrap().unwrap();
+        let focus = LoadPolicy { load: 0, unload: 0 };
+        ensure_loaded(&mut back, Pos::new(10, 10), focus, Some(&store)).unwrap();
+        for _ in 0..50 {
+            step(&mut back);
+        }
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A chunk that streams out, back in, and is saved: its file is
+    /// rewritten at the save, so the reopen matches never stopping.
+    #[test]
+    fn streaming_away_and_back_then_saving_reopens_identically() {
+        let sc = Scenario::parse(
+            "t.scenario",
+            "seed 3\nsize 128 64\nterrain water_level 0 rock_on_soil 0 rock_on_water 0\n\
+             start tree at (100, 30)\n",
+        )
+        .unwrap();
+        let store = tmp_store("away-and-back");
+        let mut w = new_world(&sc);
+        let p = LoadPolicy { load: 1, unload: 1 };
+        let home = Pos::new(32, 32);
+        for _ in 0..10 {
+            step(&mut w);
+        }
+        ensure_loaded(&mut w, Pos::new(64 * 20, 32), p, Some(&store)).unwrap();
+        for _ in 0..100 {
+            step(&mut w);
+        }
+        ensure_loaded(&mut w, home, p, Some(&store)).unwrap();
+        for _ in 0..20 {
+            step(&mut w);
+        }
+        save(&mut w, &store).unwrap();
+        let mut back = open_world(&store).unwrap().unwrap();
+        ensure_loaded(&mut back, home, p, Some(&store)).unwrap();
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        for _ in 0..200 {
+            step(&mut w);
+            step(&mut back);
+        }
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
     fn check_invariants(w: &mut World) {
         let kinds = w.resource::<Kinds>().len();
         for (cells, a, m) in w
@@ -1197,8 +1285,8 @@ mod tests {
             west.actors_mut()
                 .push(30 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 300, 0));
         stage::remove(&mut w, ChunkCoord::new(0, 0));
-        let west_e = stage::insert(&mut w, ChunkCoord::new(0, 0), west, true, 0);
-        let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), ChunkData::default(), true, 0);
+        let west_e = stage::insert(&mut w, ChunkCoord::new(0, 0), west, true);
+        let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), ChunkData::default(), true);
         let tick = tick(&w);
         let key = |uid| intent_key(uid, tick);
         let mut ob = w.get_mut::<Outbox>(west_e).unwrap();
@@ -2495,6 +2583,10 @@ mod tests {
         let s = ensure_loaded(&mut w, Pos::new(1000, 1000), policy, Some(&store)).unwrap();
         assert_eq!((s.written, s.unloaded), (1, 1));
         assert!(!w.resource::<Stage>().is_loaded(cc));
+        assert_eq!(
+            store.read_chunk(cc).unwrap().unwrap().last_ticked,
+            frozen_at
+        );
         step(&mut w);
         let s = ensure_loaded(&mut w, p, policy, Some(&store)).unwrap();
         assert_eq!((s.read, s.generated), (1, 0));
@@ -2502,7 +2594,6 @@ mod tests {
         let e = w.resource::<Stage>().entity(cc).unwrap();
         let m = *w.get::<ChunkMeta>(e).unwrap();
         assert!(!m.dirty);
-        assert_eq!(m.last_ticked, frozen_at);
         assert_eq!(tick(&w), frozen_at + 1);
         std::fs::remove_dir_all(store.dir()).unwrap();
     }

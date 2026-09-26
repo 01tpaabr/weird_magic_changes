@@ -107,7 +107,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Save**: chunk file v9 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
-  holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
+  holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
+  clocks run on, so every save and unload writes it again, stamped with the tick.
   `world.wmc` carries the scenario (seed, initial size, terrain, starts, a drawn map from
   step 8e) and the kind table with each kind's need, mem and state names and the scent
   channel names, and the rule packs it was played with. A save opens under any rules that

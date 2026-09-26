@@ -7,9 +7,9 @@
 //! - **tick**: the atomic sim step (`World::tick`). Everything happens at tick
 //!   boundaries; the sim never sees a wall clock.
 //! - **cadence**: how often a system or entity does work: every `k` ticks with
-//!   `k` a power of two, staggered by a hash of a stable id (the chunk
-//!   coordinate for cell systems such as scent decay, the actor `uid` for
-//!   actors), never a slab slot or `Entity`, so each tick touches `1/k` of them.
+//!   `k` a power of two, staggered by a stable id, never the slab slot: a hash
+//!   of the chunk coordinate for cell systems (`stage::scent::chunk_due`), the
+//!   actor's uid for actors (`systems::due`, `ActorPub.stagger`).
 //! - **speed**: real ticks per second. An `app` concern (`app::clock`); the sim
 //!   is identical at every speed.
 //!

@@ -3,11 +3,11 @@
 //! of an unexplored world is a few dozen bytes.
 //!
 //! ```text
-//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params,
-//!                              starts, drawn map, kinds (names, cover, slot names), scent
-//!                              channels, packs, rules hash
-//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
-//!                              (ground, feature, occupant, cover, scent channels),
+//! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
+//!                              gen params, starts, drawn map, kinds (names, cover, slot
+//!                              names), scent channels, packs, rules hash
+//! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
+//!                              as raw bytes (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
 //!
@@ -106,9 +106,10 @@ impl SavedKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedChunk {
     pub data: ChunkData,
-    /// World tick the cells correspond to: the tick at which the chunk was
-    /// last simulated (i.e. written). A future catch-up on load reads
-    /// `world.tick - last_ticked`; today it is only recorded.
+    /// World tick the cells and rows are current as of. On load, rows'
+    /// `last_think`/`born` shift forward by `world.tick - last_ticked` (the
+    /// freeze of decision 29, `sim::load_chunks`), so this must be the tick
+    /// the rows were written at.
     pub last_ticked: u64,
 }
 
