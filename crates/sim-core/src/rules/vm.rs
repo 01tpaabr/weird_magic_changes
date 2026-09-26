@@ -597,11 +597,15 @@ pub struct Ctx<'a> {
 }
 
 const STACK: usize = 64;
-const LOCALS: usize = 64;
+/// Sub frames on top of the rule's own: calls nest this deep (RULES.md §12).
 const FRAMES: usize = 8;
 
 /// Locals per call frame (a sub's arguments and `let`s).
 pub const FRAME_LOCALS: usize = 16;
+
+/// The rule's frame and `FRAMES` sub frames: a call runs out of frames,
+/// never of locals.
+const LOCALS: usize = (FRAMES + 1) * FRAME_LOCALS;
 
 /// Per-op fuel; a search costs `cells / SEARCH_DIV` extra.
 const SEARCH_DIV: u32 = 8;
@@ -1008,10 +1012,9 @@ impl Machine<'_> {
                         if args > FRAME_LOCALS || self.sp < args {
                             return Err(Trap::StackUnderflow);
                         }
+                        // Frame d's locals start at d * FRAME_LOCALS (the
+                        // rule's at 0), and LOCALS holds FRAMES + 1 frames.
                         let new_base = self.base + FRAME_LOCALS;
-                        if new_base + FRAME_LOCALS > LOCALS {
-                            return Err(Trap::CallDepth);
-                        }
                         self.frames[self.depth] = (self.pc, self.base);
                         self.depth += 1;
                         self.sp -= args;
@@ -1403,6 +1406,14 @@ mod tests {
     }
 
     fn run(code: Vec<Op>, consts: Vec<i32>, needs: Vec<NeedDef>, mind: &mut ActorMind) -> Outcome {
+        run_kinds(
+            &Kinds::from_parts(vec![kind(needs, 0)], code, consts, vec![]),
+            mind,
+        )
+    }
+
+    /// One think of kind 0 at (11, 10) on [`stage`].
+    fn run_kinds(kinds: &Kinds, mind: &mut ActorMind) -> Outcome {
         let (cells, actors) = stage();
         let halo = Halo {
             chunks: [
@@ -1419,8 +1430,6 @@ mod tests {
             tags: &[],
             family_end: &[],
         };
-        let k = kind(needs, 0);
-        let kinds = Kinds::from_parts(vec![k], code, consts, vec![]);
         let ctx = Ctx {
             halo: &halo,
             kind: &kinds.defs[0],
@@ -1431,7 +1440,7 @@ mod tests {
             look: 0,
             signal: 0,
         };
-        think(&kinds, ctx, mind)
+        think(kinds, ctx, mind)
     }
 
     fn mind() -> ActorMind {
@@ -1680,50 +1689,49 @@ mod tests {
         a.push(21).call(0, 1).set_mem(0).halt();
         let twice = a.here();
         a.load(0).push(2).op(OpCode::Mul).ret(true);
-        let code = a.finish();
-        let k = kind(vec![], 0);
-        let kinds = Kinds::from_parts(vec![k], code, vec![], vec![twice]);
-        let (cells, actors) = stage();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &[],
-            family_end: &[],
-        };
-        let ctx = Ctx {
-            halo: &halo,
-            kind: &kinds.defs[0],
-            cell: 10 * 64 + 11,
-            pos: Pos::new(11, 10),
-            tick: 5,
-            rng: 0,
-            look: 0,
-            signal: 0,
-        };
+        let kinds = Kinds::from_parts(vec![kind(vec![], 0)], a.finish(), vec![], vec![twice]);
         let mut m = mind();
-        let out = think(&kinds, ctx, &mut m);
+        let out = run_kinds(&kinds, &mut m);
         assert_eq!(out.trap, None);
         assert_eq!(m.mem[0], 42);
-        // Unbounded recursion trips the depth limit, not the stack.
+        // Unbounded recursion trips the depth limit, not the stack or the
+        // locals: f(d) writes d to mem1 before it calls f(d + 1), so mem1
+        // is the deepest frame that ran.
         let mut a = Asm::new();
-        a.call(0, 0).halt();
+        a.push(1).call(0, 1).halt();
         let f = a.here();
-        a.call(0, 0).ret(false);
+        a.load(0).set_mem(1);
+        a.load(0).push(1).op(OpCode::Add).call(0, 1).ret(false);
         let kinds = Kinds::from_parts(vec![kind(vec![], 0)], a.finish(), vec![], vec![f]);
-        let ctx = Ctx {
-            kind: &kinds.defs[0],
-            ..ctx
+        assert_eq!(run_kinds(&kinds, &mut m).trap, Some(Trap::CallDepth));
+        assert_eq!(m.mem[1], FRAMES as i32);
+    }
+
+    /// RULES.md §12 and §18: calls nest up to 8 deep. `sum(n)` runs n + 1
+    /// nested frames and reads its own `n` after the calls above it return,
+    /// so every frame needs locals of its own.
+    #[test]
+    fn calls_nest_eight_deep_and_the_ninth_traps() {
+        // entry: mem0 = sum(n); halt.
+        // sum(n): if n == 0 { return 0 }  return sum(n - 1) + n
+        let sum = |n: i32| {
+            let mut a = Asm::new();
+            a.push(n).call(0, 1).set_mem(0).halt();
+            let sub = a.here();
+            let zero = a.label();
+            a.load(0).jz(zero);
+            a.load(0).push(1).op(OpCode::Sub).call(0, 1);
+            a.load(0).op(OpCode::Add).ret(true);
+            a.bind(zero);
+            a.push(0).ret(true);
+            let kinds = Kinds::from_parts(vec![kind(vec![], 0)], a.finish(), vec![], vec![sub]);
+            let mut m = mind();
+            let out = run_kinds(&kinds, &mut m);
+            (out.trap, m.mem[0])
         };
-        assert_eq!(think(&kinds, ctx, &mut m).trap, Some(Trap::CallDepth));
+        assert_eq!(sum(2), (None, 3), "3 nested calls");
+        assert_eq!(sum(7), (None, 28), "8 nested calls");
+        assert_eq!(sum(8), (Some(Trap::CallDepth), 0), "a 9th traps");
     }
 
     #[test]
