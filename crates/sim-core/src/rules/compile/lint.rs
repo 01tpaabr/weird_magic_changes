@@ -459,11 +459,11 @@ impl<'a> Gen<'a> {
             }
             let cadence = def.cadence();
             for n in &def.needs {
-                if n.decays && n.vital && (n.max as u64) < cadence {
+                if n.decays && n.vital && (n.max as u64) <= cadence {
                     out.warn(
                         &it.at,
                         format!(
-                            "`{}`: need `{}` (max {}) empties before its first think (cadence {})",
+                            "`{}`: need `{}` (max {}) empties by its next think, even when refilled (cadence {})",
                             def.name,
                             n.name,
                             shown_ticks(n.max as u64),
@@ -1059,10 +1059,18 @@ mod tests {
     }
 
     #[test]
-    fn a_need_that_empties_before_the_first_think() {
+    fn a_need_that_empties_between_thinks() {
         assert!(has(
             "kind moth { cadence 1024  need water max 30min vital }",
-            "`moth`: need `water` (max 30min) empties before its first think (cadence 1024 ticks)"
+            "`moth`: need `water` (max 30min) empties by its next think, even when refilled (cadence 1024 ticks)"
+        ));
+        assert!(has(
+            "kind moth { cadence 64  need water max 64 vital }",
+            "`moth`: need `water` (max 64 ticks) empties by its next think"
+        ));
+        assert!(!has(
+            "kind moth { cadence 64  need water max 65 vital }",
+            "empties"
         ));
         assert!(!has(
             "kind moth { cadence 64  need water max 30min vital }",

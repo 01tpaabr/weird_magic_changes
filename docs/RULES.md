@@ -549,8 +549,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
     that bound it, or a sub's `pred` argument at each call) where a matching kind has no
     `health`; an eater with no `food` need; a drinker with no `water` need;
   - a search radius that is a constant above the kind's `sight` (it is clamped);
-  - a decaying vital need whose max is below the kind's cadence (it empties before the
-    first think);
+  - a decaying vital need whose max is at most the kind's cadence (it empties by the next
+    think, even when refilled);
   - an action inside `for each` (a second cell means a second action: a trap);
   - what is never used: a mem, a need the engine does not read (it reads `health`,
     `water`, `food`), a sub, a const, a state no `next` reaches (the first is where actors
