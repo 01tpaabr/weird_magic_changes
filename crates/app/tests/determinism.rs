@@ -5,8 +5,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// `wmc args` on `threads` threads with no `WMC_RULES`: its stdout.
 fn wmc(threads: &str, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+        .env_remove("WMC_RULES")
         .env("WMC_THREADS", threads)
         .args(args)
         .output()
