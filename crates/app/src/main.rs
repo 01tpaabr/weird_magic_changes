@@ -235,21 +235,14 @@ fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Re
     Ok(Setup {
         packs,
         scenario: s,
-        name: file.unwrap_or("default.scenario").to_string(),
+        name: file.unwrap_or(app::DEFAULT_SCENARIO).to_string(),
     })
 }
 
 /// A new world of the setup's scenario under `kinds`; says which file does
 /// not fit.
 fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
-    sim::new_world_with(&setup.scenario, kinds).map_err(|e| {
-        let hint = if setup.name == "default.scenario" {
-            " (these rules need their own scenario: --scenario <file>)"
-        } else {
-            ""
-        };
-        anyhow::anyhow!("{}: {e}{hint}", setup.name)
-    })
+    sim::new_world_with(&setup.scenario, kinds).map_err(|e| app::new_world_error(&setup.name, e))
 }
 
 fn show(setup: &Setup) -> anyhow::Result<()> {

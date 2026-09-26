@@ -117,6 +117,21 @@ pub fn warn(kinds: &Kinds) {
     }
 }
 
+/// The name of the built-in scenario, for messages.
+pub const DEFAULT_SCENARIO: &str = "default.scenario";
+
+/// A new world from the scenario `name` failed with `e`: say which file
+/// does not fit, and when it is the built-in one, that the rules need
+/// their own.
+pub fn new_world_error(name: &str, e: impl std::fmt::Display) -> anyhow::Error {
+    let hint = if name == DEFAULT_SCENARIO {
+        " (these rules need their own scenario: --scenario <file>)"
+    } else {
+        ""
+    };
+    anyhow::anyhow!("{name}: {e}{hint}")
+}
+
 /// Paths for a message: `a, b`.
 pub fn shown(paths: &[PathBuf]) -> String {
     paths
@@ -124,4 +139,24 @@ pub fn shown(paths: &[PathBuf]) -> String {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rules that do not fit the built-in scenario are told to bring their
+    /// own; a scenario file that does not fit is only named.
+    #[test]
+    fn a_new_world_error_hints_at_a_scenario_for_the_default_one() {
+        let e = new_world_error(DEFAULT_SCENARIO, "x").to_string();
+        assert!(
+            e.starts_with("default.scenario: x") && e.contains("--scenario <file>"),
+            "{e}"
+        );
+        assert_eq!(
+            new_world_error("a.scenario", "x").to_string(),
+            "a.scenario: x"
+        );
+    }
 }
