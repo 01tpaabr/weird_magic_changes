@@ -225,10 +225,13 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     if !writes.is_empty() {
         let _ = writeln!(s, "writes  {}", writes.join(" | "));
     }
+    // Ops and fuel differ: a search costs fuel beyond its op (RULES.md §13).
+    let left = e.trace.last().map_or(def.fuel, |st| st.fuel);
     let _ = writeln!(
         s,
-        "cost    {} ops of {} fuel{}",
+        "cost    {} ops, {} of {} fuel{}",
         e.outcome.used,
+        def.fuel - left,
         def.fuel,
         e.outcome.trap.map_or(String::new(), |t| format!(
             " | TRAPPED: {t:?} (the think became idle)"
@@ -462,5 +465,38 @@ mod tests {
         assert!(line.contains("TRAPPED when count"), "{r}");
         let last = r.lines().last().unwrap();
         assert!(last.contains("Count"), "{r}");
+    }
+
+    /// The cost line gives ops and fuel apart: a search costs fuel beyond
+    /// its op (a radius-8 search, 289 / 8 = 36 more).
+    #[test]
+    fn the_cost_line_counts_ops_and_fuel() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind k { glyph \"k\"  sight 8\n  when count free within 8 >= 0 => idle\n}",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0xCA, now)))
+            .expect("a walkable cell");
+        let r = report(&w, at, false).expect("a k there");
+        let cost = r.lines().find(|l| l.starts_with("cost")).unwrap();
+        let num = |w: &str| {
+            let i = cost.find(w).unwrap_or_else(|| panic!("{cost}"));
+            let n = cost[..i].split_whitespace().last().unwrap();
+            n.parse::<u32>().unwrap()
+        };
+        let (ops, spent) = (num(" ops, "), num(" of 512 fuel"));
+        assert!(spent >= ops + 36, "{cost}");
     }
 }

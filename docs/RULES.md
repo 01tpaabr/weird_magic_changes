@@ -338,8 +338,9 @@ subs.
 
 Each op costs 1 fuel, and a search costs `(2r + 1)² / 8` more. A think that runs out of fuel
 becomes `idle`, sets `trapped`, and counts under `TRAPS` on the status bar and in
-`wmc run`. The `ops/think` column of `wmc run` shows what each kind costs; a chicken runs
-about 110 ops a think, grass about 20.
+`wmc run`. The `ops/think` column of `wmc run` counts ops, not fuel: a search's extra
+`(2r + 1)² / 8` is not in it, so a kind that searches a lot costs more than the column
+shows. `wmc why` prints both. A chicken runs about 110 ops a think, grass about 20.
 
 Ways to keep a kind cheap:
 - **Think less often.** A higher `cadence` is the biggest lever. Plants think every 256 to
