@@ -12,8 +12,10 @@
 //!
 //! Modules:
 //! - [`stage`]: the chunked, unbounded 2D grid every actor stands on.
-//! - [`actors`]: actor rows inside chunks and the Think/Apply/Compact phases.
+//! - [`actors`]: actor rows inside chunks and the actor phases (Think,
+//!   Resolve, Exchange, Apply, Migrate, Compact).
 //! - [`rules`]: the kind table, the rules VM and the built-in programs (`docs/ACTORS.md`).
+//! - [`reload`]: rule swaps and save remapping ([`reload::Plan`]).
 //! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
 //! - [`scenario`]: the world a save is made from (seed, size, terrain,
 //!   where kinds start), and its resolution against the rules.

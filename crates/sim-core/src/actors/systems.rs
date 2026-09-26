@@ -4,7 +4,8 @@
 //! Think     par  every due actor runs its program against the tick-start world;
 //!                writes its own mind and one Intent per actor into the chunk's Intents
 //! Resolve   par  own chunk: sort intents by key, clear WAKE of every thinker, record
-//!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites -> Outbox
+//!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites and every
+//!                take/give -> Outbox
 //! Exchange  seq  cross-chunk bites recorded on their victims; then, chunk by chunk in
 //!                stage.active() order: bites per victim in key order, hurt + WAKE,
 //!                deaths; food by share to the eaters; last every take/give in key order
@@ -113,9 +114,9 @@ pub enum EffectKind {
     },
 }
 
-/// Cross-chunk effects a chunk's actors asked for this tick: bites (filled
-/// by Resolve, drained by Exchange), then moves and spawns (filled by
-/// Apply, drained by Migrate).
+/// Effects a chunk's actors asked for this tick: bites that cross a chunk and
+/// every take/give (filled by Resolve, drained by Exchange), then cross-chunk
+/// moves and spawns (filled by Apply, drained by Migrate).
 #[derive(Component, Debug, Default)]
 pub struct Outbox {
     pub list: Vec<Effect>,

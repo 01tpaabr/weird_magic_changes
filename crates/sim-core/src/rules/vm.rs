@@ -7,7 +7,7 @@
 //! read the tick-start world through a [`Halo`] (own chunk and the eight
 //! around it), read and write its own row, draw from a counter-based RNG,
 //! and emit at most one [`Action`] plus a `next` state. Every op costs one
-//! unit of fuel, a search costs the square it scans; fuel out, a bad jump, a
+//! unit of fuel, a search costs `(2r+1)^2 / 8` more; fuel out, a bad jump, a
 //! stack fault or a second action end the think with `idle` and a
 //! [`Trap`]. The VM never panics on a program.
 //!
@@ -350,7 +350,8 @@ pub struct Outcome {
     pub action: Action,
     /// Operand kind for `Become` / `Spawn`.
     pub kind: u16,
-    /// Operand offset for `Spawn`.
+    /// Operand offset of every targeted action (`Spawn`, `Move`, `Drink`,
+    /// `Eat`, `Hit`, `Graze`, `Take`, `Give`).
     pub dx: i8,
     pub dy: i8,
     /// Own need slot of `Take` / `Give`.
@@ -769,8 +770,8 @@ impl Machine<'_> {
         Ok(n)
     }
 
-    /// Nearest matching cell in rings `1..=r`: row-major inside a ring,
-    /// the ring's start rotated by one draw so equidistant ties do not
+    /// Nearest matching cell in rings `1..=r`: each ring clockwise from its
+    /// top-left corner ([`ring_cell`]), the ring's start rotated by one draw so equidistant ties do not
     /// lock a flock onto one target.
     fn nearest(&mut self, pred: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
         let r = r.clamp(0, i32::from(self.ctx.kind.sight));

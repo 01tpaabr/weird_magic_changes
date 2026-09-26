@@ -1,9 +1,9 @@
 //! The built-in kinds: `rules/animals.rules`, `rules/bees.rules`,
 //! `rules/grass.rules`, `rules/lib.rules` (the shared subs and traits) and
-//! `rules/plants.rules`, compiled at first use in file-name order (the same
+//! `rules/plants.rules`, compiled on each call in file-name order (the same
 //! order `compile_packs` uses, so `--rules rules` gives the same table). The hand-assembled
 //! version below is kept as the test oracle for the compiler: what it must
-//! produce for the plants file on its own
+//! produce for the plants file on its own:
 //!
 //! ```text
 //! kind seed {

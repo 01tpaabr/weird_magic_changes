@@ -4,7 +4,7 @@
 //! [`Kinds`] is one shared, read-only resource: every kind's properties
 //! ([`KindDef`]), all bytecode in one `Vec<Op>`, the constant pool and the
 //! sub table. [`compile`] builds it from rules text; [`builtin`] is the
-//! rules text every build carries (`rules/plants.rules`). Its hash is part
+//! rules text every build carries (`rules/*.rules`, see `builtin::FILES`). Its hash is part
 //! of the world's checksum: the rules are an input.
 
 pub mod asm;
