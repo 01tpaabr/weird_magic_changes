@@ -572,6 +572,19 @@ enum Pred {
     Bare,
 }
 
+/// The words that are a predicate by themselves: the ground, a feature,
+/// `free`, `bare`.
+fn pred_word(n: &str) -> Option<Pred> {
+    Some(match n {
+        "free" => Pred::Free,
+        "bare" => Pred::Bare,
+        "water" => Pred::Ground(Ground::Water),
+        "soil" => Pred::Ground(Ground::Soil),
+        "rock" => Pred::Feature(Feature::Rock),
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone)]
 enum Expr {
     Int(i32),
@@ -1464,6 +1477,11 @@ impl Parser<'_> {
                         && matches!(self.peek2(), Tok::Sym(":")))
                 {
                     Arg::Pred(self.pred()?)
+                } else if self.is_kw("free")
+                    && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
+                {
+                    self.bump();
+                    Arg::Pred(Pred::Free)
                 } else if let Tok::Name(n) = self.peek().clone()
                     && !is_reserved(&n)
                     && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
@@ -1611,20 +1629,14 @@ impl Parser<'_> {
     fn pred(&mut self) -> Result<Pred> {
         let at = self.pos();
         let only = self.eat_kw("only");
-        let not_a_kind = |what: &str| format!("`only` applies to a kind, not `{what}`");
-        for (word, p) in [
-            ("free", Pred::Free),
-            ("bare", Pred::Bare),
-            ("water", Pred::Ground(Ground::Water)),
-            ("soil", Pred::Ground(Ground::Soil)),
-            ("rock", Pred::Feature(Feature::Rock)),
-        ] {
-            if self.eat_kw(word) {
-                if only {
-                    return Err(self.err_at(&at, not_a_kind(word)));
-                }
-                return Ok(p);
+        if let Tok::Name(word) = self.peek().clone()
+            && let Some(p) = pred_word(&word)
+        {
+            self.bump();
+            if only {
+                return Err(self.err_at(&at, format!("`only` applies to a kind, not `{word}`")));
             }
+            return Ok(p);
         }
         let (name, ..) =
             self.ident("predicate (a kind, a tag, water, soil, rock, free or bare)")?;
@@ -3795,13 +3807,15 @@ impl<'a> Gen<'a> {
                 (Ty::Target, Arg::Name(n, p)) => {
                     self.target(&Target::Named(n.clone(), p.clone()))?;
                 }
-                (Ty::Pred, Arg::Name(n, p)) => {
-                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?
+                (Ty::Pred, Arg::Name(n, p) | Arg::Expr(Expr::Name(n, p))) => {
+                    // `water` is the ground, unless a local shadows it.
+                    let pr = match pred_word(n) {
+                        Some(pr) if self.local(n).is_none() => pr,
+                        _ => Pred::Kind(n.clone(), false, p.clone()),
+                    };
+                    self.pred(&pr)?;
                 }
                 (Ty::Pred, Arg::Pred(pr)) => self.pred(pr)?,
-                (Ty::Pred, Arg::Expr(Expr::Name(n, p))) => {
-                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?;
-                }
                 (ty, _) => {
                     return Err(self.err(
                         at,
@@ -3810,7 +3824,9 @@ impl<'a> Gen<'a> {
                             match ty {
                                 Ty::Int => "an integer",
                                 Ty::Target => "a target",
-                                Ty::Pred => "a predicate (a kind or tag name)",
+                                Ty::Pred => {
+                                    "a predicate (a kind, a tag, water, soil, rock, free or bare)"
+                                }
                             }
                         ),
                     ));
@@ -4398,6 +4414,36 @@ mod tests {
         // Still built-ins, and the contextual words still name needs.
         compile_ok(
             "kind a { glyph \"a\" need water max 1d need soil max 1d mem m\n when water < 1h and soil > 0 and chance(50) and free(here) and is(here, water) => m = min(abs(sign(-5)), clamp(rand(3), 0, dist(here))) }",
+        );
+    }
+
+    #[test]
+    fn a_pred_parameter_takes_the_ground_feature_free_and_bare_words() {
+        use bytemuck::Zeroable;
+        for w in ["water", "soil", "rock", "free", "bare"] {
+            compile_ok(&format!(
+                "sub near(p: pred) {{ if count p within 2 > 0 {{ idle }} }}\n kind a {{ when true => near({w}) }}"
+            ));
+        }
+        // The word is the ground, not a kind or tag lookup.
+        let k = compile_ok(
+            "sub f(p: pred) { if is(here, p) { return 1 }  return 0 }
+             kind a { mem m  when true => { m = f(soil) + 2 * f(water) + 4 * f(rock)  idle } }",
+        );
+        let mut mind = crate::actors::ActorMind::zeroed();
+        run_think(&k, "a", &mut mind);
+        assert_eq!(
+            mind.mem[0], 1,
+            "only the soil test holds on a bare soil cell"
+        );
+        // An int parameter still reads the need of that name.
+        compile_ok(
+            "sub low(v) { return v < 100 }
+             kind a { glyph \"a\" need water max 1d  when low(water) => idle }",
+        );
+        assert!(
+            compile_err("sub f(n) { return n } kind a { when f(free) == 1 => idle }")
+                .contains("argument `n` of `f` must be an integer")
         );
     }
 

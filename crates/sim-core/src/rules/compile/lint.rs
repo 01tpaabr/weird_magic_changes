@@ -235,6 +235,10 @@ impl Seen<'_> {
             Arg::Pred(p) => self.pred(p),
             Arg::Name(n, at) => {
                 self.names.all.insert(n.clone());
+                // `water` passed to a pred parameter is the ground.
+                if pred_word(n).is_some() {
+                    return;
+                }
                 self.names.preds.insert(n.clone());
                 self.names
                     .pred_uses
@@ -957,7 +961,10 @@ impl<'a> Gen<'a> {
                     binds.push((p.clone(), self.matcher(kinds, w, pred)))
                 }
                 (Ty::Pred, Arg::Name(n, at)) => {
-                    let pred = Pred::Kind(n.clone(), false, at.clone());
+                    let pred = match pred_word(n) {
+                        Some(p) if w.bound(n).is_none() => p,
+                        _ => Pred::Kind(n.clone(), false, at.clone()),
+                    };
                     binds.push((p.clone(), self.matcher(kinds, w, &pred)));
                 }
                 (Ty::Target, Arg::Name(n, _) | Arg::Target(Target::Named(n, _))) => {
