@@ -2349,7 +2349,7 @@ impl<'a> Gen<'a> {
             if let Some(msg) = taken {
                 return Err(self.err(&c.at, msg));
             }
-            let v = self.fold(&c.value)?;
+            let v = self.fold(&c.value, &c.at)?;
             self.const_vals.push((c.name.clone(), v));
         }
         for it in items {
@@ -2522,7 +2522,7 @@ impl<'a> Gen<'a> {
                 concrete = Some(&parent.name);
             }
             let saved = std::mem::replace(&mut self.params, scope.clone());
-            let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a)).collect();
+            let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a, &p.at)).collect();
             self.params = saved;
             let pinst = self.inst(pi, folded?, stack)?;
             parents.push(pinst);
@@ -2582,7 +2582,7 @@ impl<'a> Gen<'a> {
         let Some((e, at)) = v else {
             return Ok(None);
         };
-        let x = self.fold(e)?;
+        let x = self.fold(e, at)?;
         if ok(x) {
             Ok(Some(x))
         } else if self.checking {
@@ -2706,7 +2706,7 @@ impl<'a> Gen<'a> {
             }
         }
         for na in &d.needs {
-            let max = self.fold(&na.max)?;
+            let max = self.fold(&na.max, &na.at)?;
             if max < 1 && !self.checking {
                 return Err(self.err(&na.at, "a need's max is at least 1"));
             }
@@ -3235,7 +3235,7 @@ impl<'a> Gen<'a> {
                 for (i, rr) in list.rules.iter().enumerate() {
                     self.owner = Some(rr.owner);
                     self.params = self.scope_of(rr.owner);
-                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold(e).is_ok_and(|v| v != 0));
+                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold(e, &rr.rule.at).is_ok_and(|v| v != 0));
                     if always && self.ends_all(&rr.rule.body, false, 0) {
                         if let Some(next) = list.rules.get(i + 1) {
                             push(
@@ -3295,7 +3295,8 @@ impl<'a> Gen<'a> {
             Stmt::Choose(arms) => {
                 !arms.is_empty()
                     && arms.iter().all(|(w, body)| {
-                        self.fold(w).is_ok_and(|w| w > 0) && self.ends_all(body, acts_only, depth)
+                        self.fold(w, &self.here).is_ok_and(|w| w > 0)
+                            && self.ends_all(body, acts_only, depth)
                     })
             }
             Stmt::Call { name, .. } => {
@@ -3410,17 +3411,18 @@ impl<'a> Gen<'a> {
     }
 
     /// Fold a `const` expression: numbers, other constants, arithmetic,
-    /// comparisons and the pure functions. Same results as the VM.
-    fn fold(&self, e: &Expr) -> Result<i32> {
+    /// comparisons and the pure functions. Same results as the VM. `at`:
+    /// where to report anything else.
+    fn fold(&self, e: &Expr, at: &Pos) -> Result<i32> {
         Ok(match e {
             Expr::Int(v) => *v,
             Expr::Name(n, at) => self
                 .param(n)
                 .or_else(|| self.const_value(n))
                 .ok_or_else(|| self.err(at, format!("`{n}` is not a constant declared above")))?,
-            Expr::Neg(a) => self.fold(a)?.wrapping_neg(),
+            Expr::Neg(a) => self.fold(a, at)?.wrapping_neg(),
             Expr::Bin(op, a, b) => {
-                let (x, y) = (self.fold(a)?, self.fold(b)?);
+                let (x, y) = (self.fold(a, at)?, self.fold(b, at)?);
                 match op {
                     OpCode::Add => x.wrapping_add(y),
                     OpCode::Sub => x.wrapping_sub(y),
@@ -3440,7 +3442,7 @@ impl<'a> Gen<'a> {
             Expr::Fn(op, args) => {
                 let v = args
                     .iter()
-                    .map(|a| self.fold(a))
+                    .map(|a| self.fold(a, at))
                     .collect::<Result<Vec<_>>>()?;
                 match op {
                     OpCode::Min => v[0].min(v[1]),
@@ -3455,9 +3457,8 @@ impl<'a> Gen<'a> {
                 }
             }
             _ => {
-                let at = self.here.clone();
                 return Err(self.err(
-                    &at,
+                    at,
                     "a constant must be a number, other constants and arithmetic",
                 ));
             }
@@ -5483,6 +5484,24 @@ mod tests {
             "trait p { need w max 1h } trait q { need w max 2h } kind a extends p, q { need w max 3h }",
         );
         compile_ok("trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { cadence 8 }");
+    }
+
+    #[test]
+    fn a_constant_that_is_not_one_is_reported_where_it_stands() {
+        let kind = "kind a { glyph \"a\" when true => idle }";
+        for (text, line) in [
+            (format!("const C = rand(3)\n{kind}"), 1),
+            (format!("{kind}\ntrait t {{ sight age }}"), 2),
+            (format!("{kind}\nkind b {{\n need thirst max hour }}"), 3),
+            (
+                format!("{kind}\ntrait t(n) {{ }}\nkind k extends t(age) {{ }}"),
+                3,
+            ),
+        ] {
+            let e = compile_err(&text);
+            assert!(e.starts_with(&format!("t.rules:{line}:")), "{text}: {e}");
+            assert!(e.contains("must be a number"), "{text}: {e}");
+        }
     }
 
     #[test]

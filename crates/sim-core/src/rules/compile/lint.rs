@@ -631,7 +631,7 @@ impl<'a> Gen<'a> {
     /// A search radius folded where it stands: beyond the kind's sight it
     /// is clamped.
     fn radius(&self, w: &Walk, r: &Expr, at: &Pos, out: &mut Out) {
-        if let Ok(v) = self.fold(r)
+        if let Ok(v) = self.fold(r, at)
             && v > w.sight
         {
             let kind = &self.items[self.insts[self.kind_insts[usize::from(w.kind)]].item].name;
@@ -971,12 +971,12 @@ impl<'a> Gen<'a> {
                     binds.push((p.clone(), w.bound(n).cloned().flatten()));
                 }
                 (Ty::Int, Arg::Expr(e)) => {
-                    if let Ok(v) = self.fold(e) {
+                    if let Ok(v) = self.fold(e, &self.here) {
                         ints.push((p.clone(), v));
                     }
                 }
                 (Ty::Int, Arg::Name(n, at)) => {
-                    if let Ok(v) = self.fold(&Expr::Name(n.clone(), at.clone())) {
+                    if let Ok(v) = self.fold(&Expr::Name(n.clone(), at.clone()), at) {
                         ints.push((p.clone(), v));
                     }
                 }
