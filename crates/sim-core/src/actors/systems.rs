@@ -460,7 +460,7 @@ fn think_one<const TRACE: bool>(
     }
     intent.trapped = out.trap.is_some();
     intent.used = u16::try_from(out.used).unwrap_or(u16::MAX);
-    let (lx, ly) = local_xy(cell);
+    let (lx, ly) = (vm::lx(cell), vm::ly(cell));
     match out.action {
         Action::Move => {
             let (dx, dy) = step_toward(halo, lx, ly, i32::from(out.dx), i32::from(out.dy));
@@ -484,11 +484,6 @@ fn clear_events(mind: &mut ActorMind) {
     mind.events = 0;
     mind.hurt = 0;
     mind.hurt_dir = 0;
-}
-
-#[inline]
-fn local_xy(cell: usize) -> (i32, i32) {
-    ((cell as i32) & 63, (cell as i32) >> 6)
 }
 
 /// Reduce a move to one step: `(sign dx, sign dy)`, and if that cell is not

@@ -1246,12 +1246,12 @@ fn jump(pc: usize, imm: i16) -> Result<usize, Trap> {
 }
 
 #[inline]
-fn lx(cell: usize) -> i32 {
+pub(crate) fn lx(cell: usize) -> i32 {
     (cell as i32) & (CHUNK_SIZE - 1)
 }
 
 #[inline]
-fn ly(cell: usize) -> i32 {
+pub(crate) fn ly(cell: usize) -> i32 {
     (cell as i32) >> CHUNK_BITS
 }
 
@@ -1862,6 +1862,21 @@ mod tests {
         let out = run(a.finish(), vec![i32::MAX, i32::MIN], vec![], &mut m);
         assert_eq!(out.trap, None);
         assert_eq!(&m.mem[..11], &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    }
+
+    /// The local-index helpers agree with `ChunkCoord::cell` and
+    /// `Pos::split`, whatever `CHUNK_BITS` is.
+    #[test]
+    fn local_index_helpers_follow_chunk_bits() {
+        use crate::stage::ChunkCoord;
+        let c0 = ChunkCoord::new(0, 0);
+        for i in 0..CHUNK_CELLS {
+            assert_eq!(c0.cell(i), Pos::new(lx(i), ly(i)), "cell {i}");
+            for (dx, dy) in [(-70i8, -70i8), (-1, 0), (0, 1), (1, 1), (37, -5), (70, 70)] {
+                let (c, local) = Pos::new(lx(i) + i32::from(dx), ly(i) + i32::from(dy)).split();
+                assert_eq!(offset_cell(i, dx, dy), ((c.x, c.y), local), "{i} {dx} {dy}");
+            }
+        }
     }
 
     #[test]
