@@ -1018,7 +1018,6 @@ pub fn apply(
                             result::NONE // Migrate decides
                         }
                     }),
-                    Action::Spawn if usize::from(it.kind) >= kinds.len() => Some(result::REFUSED),
                     // Ground cover: the first spawn in key order onto a
                     // walkable cell with no cover gets it.
                     Action::Spawn if is_cover(kinds, it.kind) => {
