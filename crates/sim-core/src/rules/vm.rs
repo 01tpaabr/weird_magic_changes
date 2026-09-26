@@ -838,7 +838,7 @@ impl Machine<'_> {
     }
 
     fn act(&mut self, a: u8) -> Result<(), Trap> {
-        if self.out.action != Action::Idle || self.out.trap.is_some() {
+        if self.acted {
             return Err(Trap::SecondAction);
         }
         let action = Action::from_u8(a).ok_or(Trap::BadAction)?;
@@ -1523,6 +1523,12 @@ mod tests {
     fn a_second_action_traps_to_idle() {
         let mut a = Asm::new();
         a.act(Action::Die).push(1).act(Action::Become).halt();
+        let out = run(a.finish(), vec![], vec![], &mut mind());
+        assert_eq!(out.trap, Some(Trap::SecondAction));
+        assert_eq!(out.action, Action::Idle);
+        // An explicit `idle` is the think's action too (RULES.md §2).
+        let mut a = Asm::new();
+        a.act(Action::Idle).push(1).push(0).act(Action::Move).halt();
         let out = run(a.finish(), vec![], vec![], &mut mind());
         assert_eq!(out.trap, Some(Trap::SecondAction));
         assert_eq!(out.action, Action::Idle);

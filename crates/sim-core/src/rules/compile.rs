@@ -5319,6 +5319,18 @@ mod tests {
             .collect()
     }
 
+    /// An `idle` the compiler cannot see next to a later action (behind an
+    /// `if`) is still the think's one action: the move traps.
+    #[test]
+    fn a_conditional_idle_then_an_action_traps() {
+        use bytemuck::Zeroable;
+        let k = compile_ok("kind k { mem go  when true => { if go == 0 { idle }  move east } }");
+        let mut m = crate::actors::ActorMind::zeroed();
+        let out = run_think(&k, "k", &mut m);
+        assert_eq!(out.trap, Some(crate::rules::vm::Trap::SecondAction));
+        assert_eq!(out.action, Action::Idle);
+    }
+
     /// A constant folds to what the VM computes for the same expression
     /// (lets are not folded), for every operator and pure function on
     /// edge operands.
