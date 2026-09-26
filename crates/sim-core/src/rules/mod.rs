@@ -102,7 +102,8 @@ pub enum Level {
 }
 
 /// A warning or note about a rule set that compiled (`wmc lint` prints
-/// them as `file:line:col: warning: message`).
+/// them as `file:line:col: warning: message`, or `file: warning: message`
+/// when `line` is 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub level: Level,
@@ -118,6 +119,10 @@ impl std::fmt::Display for Diagnostic {
             Level::Warning => "warning",
             Level::Note => "note",
         };
+        if self.line == 0 {
+            // Not about a line (a whole file, or a scenario start).
+            return write!(f, "{}: {level}: {}", self.file, self.msg);
+        }
         write!(
             f,
             "{}:{}:{}: {level}: {}",

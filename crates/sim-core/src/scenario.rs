@@ -1820,6 +1820,14 @@ legend {
         assert_eq!(msgs.len(), 2, "{msgs:?}");
         assert!(msgs[0].starts_with("`start fox at (-1, 3)` is outside the initial region 128x64"));
         assert!(msgs[1].starts_with("`start hive at (200, 10)`"));
+        // No line to point at: `file: note:`, not `file:0:0: note:`.
+        assert!(
+            notes[0]
+                .to_string()
+                .starts_with("g: note: `start fox at (-1, 3)` is outside"),
+            "{}",
+            notes[0]
+        );
         assert!(
             notes
                 .iter()
