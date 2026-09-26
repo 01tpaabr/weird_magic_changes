@@ -3669,7 +3669,7 @@ impl<'a> Gen<'a> {
             Expr::Name(n, at) => {
                 if let Some(l) = self.local(n) {
                     match l.ty {
-                        Ty::Int | Ty::Pred => {
+                        Ty::Int => {
                             let slot = l.slot;
                             self.asm.load(slot);
                         }
@@ -3677,6 +3677,14 @@ impl<'a> Gen<'a> {
                             return Err(self.err(
                                 at,
                                 format!("`{n}` is a target: use `{n}.dx`, `{n}.dy` or `dist({n})`"),
+                            ));
+                        }
+                        Ty::Pred => {
+                            return Err(self.err(
+                                at,
+                                format!(
+                                    "`{n}` is a predicate: use it in count, nearest, is or for each"
+                                ),
                             ));
                         }
                     }
@@ -4474,6 +4482,19 @@ mod tests {
             "trait water { need water max 1d vital }
              kind a extends water { mem soil  when true => { let rock = 1  soil = rock  idle } }",
         );
+    }
+
+    #[test]
+    fn a_pred_parameter_is_not_an_integer() {
+        let want = "`p` is a predicate: use it in count, nearest, is or for each";
+        let e =
+            compile_err("sub f(p: pred) { return p * 2 } kind c { mem m  when true => m = f(c) }");
+        assert!(e.contains(want), "{e}");
+        let e = compile_err(
+            "sub g(n) { return n } sub h(p: pred) { return g(p) }
+             kind c { mem m  when true => m = h(c) }",
+        );
+        assert!(e.contains(want), "{e}");
     }
 
     #[test]
