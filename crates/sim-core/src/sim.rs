@@ -527,14 +527,22 @@ fn load_chunks(
 /// it decide (`wmc why`). Changes nothing. `None` if nobody is there or the
 /// chunk is not loaded.
 pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
+    let (cc, i) = p.split();
+    let e = world.resource::<Stage>().entity(cc)?;
+    let cells = world.get::<ChunkCells>(e)?;
+    let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
+    explain_slot(world, cc, slot)
+}
+
+/// [`explain`] for the actor in row `slot` of chunk `cc` (from
+/// [`find_uid`]), so a tool can follow one actor whoever shares its cell.
+/// `None` if the chunk is not loaded or has no such row.
+pub fn explain_slot(world: &World, cc: ChunkCoord, slot: u16) -> Option<systems::Explained> {
     let kinds = world.resource::<Kinds>();
     let stage = world.resource::<Stage>();
     let tick = world.resource::<Tick>().0;
     let seed = world.resource::<SimConfig>().seed;
-    let (cc, i) = p.split();
     let e = stage.entity(cc)?;
-    let cells = world.get::<ChunkCells>(e)?;
-    let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
     let row = *world.get::<ChunkActors>(e)?.rows.get(usize::from(slot))?;
     let mind = *world.get::<ChunkMinds>(e)?.rows.get(usize::from(slot))?;
     let mut chunks = [None; 9];
@@ -556,9 +564,9 @@ pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
     ))
 }
 
-/// Where the actor with this `uid` is, if it is loaded. A scan of every
-/// row: for tools, not for the tick.
-pub fn find_uid(world: &mut World, uid: u64) -> Option<Pos> {
+/// Where the actor with this `uid` is, if it is loaded: its cell, chunk
+/// and row. A scan of every row: for tools, not for the tick.
+pub fn find_uid(world: &mut World, uid: u64) -> Option<(Pos, ChunkCoord, u16)> {
     world
         .query::<(&ChunkCoord, &ChunkActors, &ChunkMinds)>()
         .iter(world)
@@ -566,7 +574,7 @@ pub fn find_uid(world: &mut World, uid: u64) -> Option<Pos> {
             m.rows
                 .iter()
                 .position(|m| m.uid == uid)
-                .map(|i| c.cell(usize::from(a.rows[i].cell)))
+                .map(|i| (c.cell(usize::from(a.rows[i].cell)), *c, i as u16))
         })
 }
 
@@ -1833,7 +1841,42 @@ mod tests {
             "it drank"
         );
         assert_eq!(c.3.events & result::MASK, result::OK);
-        assert_eq!(find_uid(&mut w, 0xC1), Some(at));
+        assert_eq!(find_uid(&mut w, 0xC1).map(|f| f.0), Some(at));
+    }
+
+    /// By cell, `explain` finds whoever stands there; by uid, `find_uid`
+    /// and `explain_slot` find the ground cover under it.
+    #[test]
+    fn explain_slot_follows_the_cover_under_a_walker() {
+        use crate::actors::systems::newborn;
+        use crate::rules::{CHICKEN, GRASS};
+        let kinds = Kinds::builtin();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            starts: Vec::new(),
+            ..cfg(8)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let (now, at) = (tick(&w), Pos::new(21, 20));
+        assert!(place_actor(
+            &mut w,
+            at,
+            GRASS,
+            newborn(&kinds, GRASS, 0x6A, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            at,
+            CHICKEN,
+            newborn(&kinds, CHICKEN, 0xC1, now)
+        ));
+        assert_eq!(explain(&w, at).unwrap().row.kind, CHICKEN);
+        let (p, cc, slot) = find_uid(&mut w, 0x6A).unwrap();
+        assert_eq!(p, at);
+        let e = explain_slot(&w, cc, slot).unwrap();
+        assert_eq!((e.row.kind, e.before.uid), (GRASS, 0x6A));
     }
 
     /// Hot reload maps rows by name: kinds renumbered, a kind gone (its rows

@@ -2,7 +2,8 @@
 //! whoever stands on a cell (else its ground cover) against the world as it
 //! is, with a trace, and prints its state, every rule the think checked and
 //! whether it fired, what it decided and what it wrote. Nothing in the
-//! world changes (`sim::explain`).
+//! world changes (`sim::explain`). `wmc why` then follows the actor it
+//! found by uid, whoever else steps onto its cell.
 
 use std::fmt::Write;
 
@@ -16,9 +17,15 @@ use sim_core::{Kinds, Pos, sim};
 /// adds every executed op, with the rule it belongs to.
 pub fn report(world: &World, p: Pos, ops: bool) -> Option<String> {
     let e = sim::explain(world, p)?;
+    Some(report_of(world, p, &e, ops))
+}
+
+/// The report for `e`, a think already explained (`sim::explain_slot`) of
+/// the actor at `p`.
+pub fn report_of(world: &World, p: Pos, e: &Explained, ops: bool) -> String {
     let kinds = world.resource::<Kinds>();
     let tick = world.resource::<sim_core::Tick>().0;
-    Some(format(kinds, tick, p, &e, ops))
+    format(kinds, tick, p, e, ops)
 }
 
 /// Ticks as `1d 2h 03m` (whole minutes; `0m` for less).
@@ -355,8 +362,8 @@ fn decision(kinds: &Kinds, e: &Explained) -> String {
 pub fn after(world: &mut World, uid: u64) -> String {
     match sim::find_uid(world, uid) {
         None => "gone: it died or was eaten this tick".to_string(),
-        Some(p) => {
-            let e = sim::explain(world, p).expect("found it there");
+        Some((p, cc, slot)) => {
+            let e = sim::explain_slot(world, cc, slot).expect("found it there");
             format!(
                 "at ({}, {}), result {}",
                 p.x,

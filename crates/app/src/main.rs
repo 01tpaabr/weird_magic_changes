@@ -295,26 +295,25 @@ fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Resul
         );
     };
     let uid = first.before.uid;
-    let mut at = p;
     let mut waited = 0u64;
-    while !sim::explain(&world, at).is_some_and(|e| e.due) {
+    let (at, e) = loop {
+        let (at, cc, slot) =
+            sim::find_uid(&mut world, uid).context("it died or was eaten before its next think")?;
+        let e = sim::explain_slot(&world, cc, slot).expect("a loaded row");
+        if e.due {
+            break (at, e);
+        }
         if waited == sim_core::TICKS_PER_DAY {
             bail!("it did not think within a day");
         }
         sim::step(&mut world);
         waited += 1;
-        at =
-            sim::find_uid(&mut world, uid).context("it died or was eaten before its next think")?;
-    }
+    };
     let mut out = std::io::stdout().lock();
     if waited > 0 {
         writeln!(out, "(stepped {waited} ticks to its next think)")?;
     }
-    write!(
-        out,
-        "{}",
-        app::why::report(&world, at, ops).expect("found it there")
-    )?;
+    write!(out, "{}", app::why::report_of(&world, at, &e, ops))?;
     sim::step(&mut world);
     writeln!(out, "after   {}", app::why::after(&mut world, uid))?;
     Ok(())
