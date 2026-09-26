@@ -2094,6 +2094,20 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
     }
 }
 
+/// Is this statement a `return`, or does it hold one? (Not through a call:
+/// a callee's `return` leaves only the callee.)
+fn may_return(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return { .. } => true,
+        Stmt::If { then, els, .. } => then.iter().chain(els).any(may_return),
+        Stmt::Choose(arms) => arms.iter().any(|(_, body)| body.iter().any(may_return)),
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
+            body.iter().any(may_return)
+        }
+        _ => false,
+    }
+}
+
 /// A statement's line, where it has one.
 fn stmt_line(s: &Stmt) -> Option<u32> {
     match s {
@@ -3309,8 +3323,18 @@ impl<'a> Gen<'a> {
         }
     }
 
+    /// In order: a statement that ends the think before any that may
+    /// `return` out of the sub.
     fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32) -> bool {
-        body.iter().any(|s| self.ends(s, acts_only, depth))
+        for s in body {
+            if self.ends(s, acts_only, depth) {
+                return true;
+            }
+            if may_return(s) {
+                return false;
+            }
+        }
+        false
     }
 
     /// The sub a call named `name` reaches here: a member sub of the
@@ -5522,6 +5546,21 @@ mod tests {
         compile_ok("kind a { when 1 => { if hour > 1 { idle }  move north } }");
         compile_ok("kind a { when 1 => { next S  move north } state S { } }");
         compile_ok("kind a { when 1 => { choose { 1: idle  0: look = 1 }  move north } }");
+        // A sub that may return before it acts.
+        compile_ok(
+            "sub maybe(h) { if h == 0 { return }  move dir(h) }\n\
+             kind k { mem heading  when true => { maybe(heading)  move random free } }",
+        );
+        compile_ok(
+            "sub f(c) { if c { return; move east } else { move west } }\n\
+             kind k { when true => { f(hour)  move north } }",
+        );
+        // A return inside a sub it calls leaves only that sub.
+        let e = compile_err(
+            "sub g() { return }\nsub f() { g()  move east }\n\
+             kind k { when true => { f()  move north } }",
+        );
+        assert!(e.contains("a second action"), "{e}");
     }
 
     #[test]
@@ -5575,6 +5614,13 @@ mod tests {
         assert!(warnings("kind a { when hour > 1 => idle\n when true => die }").is_empty());
         assert!(
             warnings("kind a { when true => { if hour > 1 { idle } }\n when 1 => die }").is_empty()
+        );
+        assert!(
+            warnings(
+                "sub maybe(h) { if h == 0 { return }  move dir(h) }\n\
+                 kind a { mem heading  when true => maybe(heading)\n when 1 => die }"
+            )
+            .is_empty()
         );
         assert_eq!(
             warnings("kind a { when true => idle\n state S { when 1 => die } }"),
