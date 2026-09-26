@@ -592,6 +592,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | nesting in one rule or sub | 128 levels: a block, parentheses, `-`, `not`, `toward` and `away` are one each, and so is each operator in a chain (`a + b + c` is two) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
-in this document plus the sense names (`x`, `y`, `age`, `light`, `hour`, `day`, `kind`,
-`look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`, `ground`, `feature`, `taken`,
-`trapped`). `wmc lint` says so when you hit one.
+in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
+`rand`, `chance`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
+`light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
+`ground`, `feature`, `taken`, `trapped`). `wmc lint` says so when you hit one. `water`,
+`soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`.

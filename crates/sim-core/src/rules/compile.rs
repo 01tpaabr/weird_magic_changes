@@ -642,10 +642,11 @@ fn sense_named(name: &str) -> Option<Sense> {
     })
 }
 
-// `water`, `soil`, `rock` and `free` are contextual: predicates after
+// `water`, `soil`, `rock` and `bare` are contextual: predicates after
 // `count`/`nearest`/`is`/`random`, plain names elsewhere (so a kind may
 // declare `need water`). `food` likewise: a declaration where a declaration
-// starts, a need name everywhere else (`need food`, `food < 12h`).
+// starts, a need name everywhere else (`need food`, `food < 12h`). The
+// built-in functions, `free` among them, are reserved.
 const KEYWORDS: &[&str] = &[
     "kind",
     "sub",
@@ -723,6 +724,15 @@ const KEYWORDS: &[&str] = &[
     "extends",
     "inherit",
     "only",
+    "min",
+    "abs",
+    "sign",
+    "clamp",
+    "rand",
+    "chance",
+    "dist",
+    "is",
+    "free",
 ];
 /// Words that start a declaration in a kind or trait body.
 const DECL_WORDS: [&str; 12] = [
@@ -4372,6 +4382,23 @@ mod tests {
         assert_eq!(b.mems, vec!["p", "q"]);
         assert_eq!(b.entry, 1); // kind a's program is one Halt
         assert_eq!(k.code[0].code, OpCode::Halt);
+    }
+
+    #[test]
+    fn built_in_function_names_are_reserved() {
+        for w in [
+            "min", "abs", "sign", "clamp", "rand", "chance", "dist", "is", "free",
+        ] {
+            let want = format!("`{w}` is a reserved word");
+            let e = compile_err(&format!("kind a {{ mem {w} }}"));
+            assert!(e.contains(&want), "{e}");
+            let e = compile_err(&format!("sub {w}() {{ idle }} kind a {{ }}"));
+            assert!(e.contains(&want), "{e}");
+        }
+        // Still built-ins, and the contextual words still name needs.
+        compile_ok(
+            "kind a { glyph \"a\" need water max 1d need soil max 1d mem m\n when water < 1h and soil > 0 and chance(50) and free(here) and is(here, water) => m = min(abs(sign(-5)), clamp(rand(3), 0, dist(here))) }",
+        );
     }
 
     #[test]
