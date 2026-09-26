@@ -291,7 +291,8 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
 /// Move a save opened under other rules over to the loaded ones (see
 /// [`open`]): every chunk file through the pending plan, then the world
 /// file with the loaded kind table. Runs before the first write to the
-/// store, so the directory never mixes two numberings. Returns the chunk
+/// store, so the directory never mixes two numberings: a bad chunk file
+/// refuses it with nothing written, and it stays pending. Returns the chunk
 /// files rewritten (none when nothing was pending).
 pub fn settle(world: &mut World, store: &Store) -> io::Result<usize> {
     let Some(plan) = world
@@ -3055,6 +3056,54 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             assert!(e.ends_with("do not define: ant"), "{e}");
             std::fs::remove_dir_all(store.dir()).unwrap();
         }
+    }
+
+    /// A bad chunk file refuses the migration before any file is written,
+    /// so the directory stays in one numbering (on save, and on reload).
+    #[test]
+    fn a_bad_chunk_file_refuses_the_migration_with_nothing_written() {
+        let (hen, fox) = (
+            ("p/hen.rules", "kind hen { glyph \"h\"  when true => idle }"),
+            ("p/fox.rules", "kind fox { glyph \"f\"  when true => idle }"),
+        );
+        let hf = crate::rules::compile_files(&[hen, fox]).unwrap();
+        let fh = crate::rules::compile_files(&[fox, hen]).unwrap();
+        let store = tmp_store("bad-migration");
+        let mut w = new_world_with(
+            &Scenario {
+                width: 128,
+                height: 64,
+                ..cfg(2)
+            },
+            hf.clone(),
+        )
+        .unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let mind = |kind, uid| systems::newborn(&hf, kind, uid, now);
+        assert!(place_actor(&mut w, Pos::new(5, 5), 0, mind(0, 0xA1)));
+        assert!(place_actor(&mut w, Pos::new(70, 5), 1, mind(1, 0xB1)));
+        save(&mut w, &store).unwrap();
+        let chunks = store.dir().join("chunks");
+        std::fs::write(chunks.join("1_0.wmcc"), b"WMCC").unwrap();
+        let before = std::fs::read(chunks.join("0_0.wmcc")).unwrap();
+
+        let mut w = open_world_with(&store, fh.clone()).unwrap().unwrap();
+        let e = save(&mut w, &store).unwrap_err().to_string();
+        assert!(e.contains("(1, 0)") || e.contains("x: 1"), "{e}");
+        assert!(
+            std::fs::read(chunks.join("0_0.wmcc")).unwrap() == before,
+            "(0, 0) rewritten"
+        );
+        assert!(w.resource::<PendingRemap>().0.is_some(), "still pending");
+
+        let mut w = open_world_with(&store, hf).unwrap().unwrap();
+        assert!(crate::reload::reload_rules(&mut w, Some(&store), fh).is_err());
+        assert!(
+            std::fs::read(chunks.join("0_0.wmcc")).unwrap() == before,
+            "(0, 0) rewritten"
+        );
+        std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
     #[test]

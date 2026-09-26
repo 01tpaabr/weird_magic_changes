@@ -13,8 +13,9 @@
 //!
 //! Saved chunks are rewritten on disk, every file, before the world file
 //! gets the new kind table, so a save directory never mixes two numberings.
-//! A crash in the middle of that rewrite leaves it mixed; it is not
-//! journalled.
+//! Every file is read and checked before the first is written: a bad one
+//! refuses the move with nothing written. An I/O error or a crash in the
+//! middle of the writes leaves it mixed; it is not journalled.
 //!
 //! Reload is a dev tool. It is an input the replay log does not record: a
 //! world that was reloaded is not reproducible from its seed alone.
@@ -189,6 +190,8 @@ impl Plan {
 }
 
 /// Rewrite every chunk file in `store` through `plan`, in coordinate order.
+/// Every file is read and checked first, so a bad one refuses the whole
+/// rewrite with nothing written; then each is read again and written.
 /// Dropped rows are counted per old kind, except in the chunks `loaded`
 /// (their rows in memory are the ones that count). Returns the files
 /// rewritten.
@@ -198,21 +201,30 @@ pub fn rewrite_saved(
     loaded: &[ChunkCoord],
     dropped: &mut [usize],
 ) -> Result<usize, String> {
+    let coords = store
+        .saved_chunks()
+        .map_err(|e| format!("listing saved chunks: {e}"))?;
+    let read = |c: ChunkCoord| {
+        let saved = store
+            .read_chunk(c)
+            .map_err(|e| format!("reading saved chunk {c:?}: {e}"))?;
+        if let Some(s) = &saved {
+            s.data
+                .validate(plan.old_kinds())
+                .map_err(|e| format!("saved chunk {c:?}: {e}"))?;
+        }
+        Ok::<_, String>(saved)
+    };
+    for &c in &coords {
+        read(c)?;
+    }
     let mut scratch = vec![0usize; plan.old_kinds()];
     let mut rewritten = 0;
-    for c in store
-        .saved_chunks()
-        .map_err(|e| format!("listing saved chunks: {e}"))?
-    {
-        let Some(mut saved) = store
-            .read_chunk(c)
-            .map_err(|e| format!("reading saved chunk {c:?}: {e}"))?
-        else {
+    for c in coords {
+        let Some(mut saved) = read(c)? else {
             continue;
         };
         let d = &mut saved.data;
-        d.validate(plan.old_kinds())
-            .map_err(|e| format!("saved chunk {c:?}: {e}"))?;
         let counts = if loaded.contains(&c) {
             &mut scratch[..]
         } else {
@@ -229,7 +241,8 @@ pub fn rewrite_saved(
 
 /// Swap in `new` rules (see the module doc). With a `store`, every saved
 /// chunk is rewritten and the world file updated. On an error nothing in
-/// the world has changed yet, except for a failed disk rewrite part-way
+/// the world or the store has changed yet (a bad chunk file refuses the
+/// rewrite before any is written), except for a write that fails part-way
 /// (reported; the chunks already rewritten are consistent with the new
 /// rules, which are then not installed).
 pub fn reload_rules(
