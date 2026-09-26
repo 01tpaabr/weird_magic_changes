@@ -2550,7 +2550,7 @@ impl<'a> Gen<'a> {
                 "fuel is 1 to 4096 ops per think",
             )?
             .map(|f| f as u32);
-        let food = self.decl_num(&d.food, |_| true, "")?;
+        let food = self.decl_num(&d.food, |f| f >= 0, "food is 0 or more ticks")?;
         let bite = self
             .decl_num(&d.bite, |b| (0..=255).contains(&b), "bite is 0 to 255")?
             .map(|b| b as u8);
@@ -4372,6 +4372,16 @@ mod tests {
         assert_eq!(b.mems, vec!["p", "q"]);
         assert_eq!(b.entry, 1); // kind a's program is one Halt
         assert_eq!(k.code[0].code, OpCode::Halt);
+    }
+
+    #[test]
+    fn food_is_zero_or_more() {
+        assert!(compile_err("kind a { food -2h }").contains("food is 0 or more ticks"));
+        assert_eq!(compile_ok("kind a { food 0 }").defs[0].food, 0);
+        assert_eq!(
+            compile_ok("kind a { food 3h }").defs[0].food,
+            hours(3) as i32
+        );
     }
 
     #[test]
