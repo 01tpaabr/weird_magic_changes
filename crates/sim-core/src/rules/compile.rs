@@ -503,8 +503,9 @@ enum Stmt {
         kind: String,
         at: Target,
         pos: Pos,
-        /// `with (a, b)`: the child's first two `mem` values.
-        with: Option<(Expr, Expr)>,
+        /// `with (m = a, n = b)`: the child's memory slots it sets (at
+        /// most two), by name.
+        with: Vec<(String, Expr, Pos)>,
     },
     /// `take t NEED amount` / `give t NEED amount`.
     Transfer {
@@ -1230,16 +1231,33 @@ impl Parser<'_> {
             let (kind, pos) = self.ident("kind name")?;
             self.expect_kw("at")?;
             let at = self.target()?;
-            let with = if self.eat_kw("with") {
+            let mut with: Vec<(String, Expr, Pos)> = Vec::new();
+            if self.eat_kw("with") {
                 self.expect_sym("(")?;
-                let a = self.expr()?;
-                self.expect_sym(",")?;
-                let b = self.expr()?;
+                loop {
+                    let named = matches!(self.peek(), Tok::Name(_))
+                        && matches!(self.peek2(), Tok::Sym("="));
+                    if !named {
+                        return Err(self.err(
+                            "`with` names the memory it sets: `with (home_x = x, home_y = y)`",
+                        ));
+                    }
+                    let (name, npos) = self.ident("memory name")?;
+                    self.expect_sym("=")?;
+                    let value = self.expr()?;
+                    if with.iter().any(|(n, ..)| *n == name) {
+                        return Err(self.err_at(&npos, format!("`with` sets `{name}` twice")));
+                    }
+                    with.push((name, value, npos));
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
                 self.expect_sym(")")?;
-                Some((a, b))
-            } else {
-                None
-            };
+                if with.len() > 2 {
+                    return Err(self.err_at(&with[2].2, "`with` sets at most two memory slots"));
+                }
+            }
             return Ok(Stmt::Spawn {
                 kind,
                 at,
@@ -1719,6 +1737,24 @@ fn returns_value(body: &[Stmt]) -> bool {
     })
 }
 
+/// Every `spawn K ... with (...)` in `body`: the kind, and the names set.
+fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr, Pos)])>) {
+    for s in body {
+        match s {
+            Stmt::Spawn { kind, with, .. } if !with.is_empty() => out.push((kind, with)),
+            Stmt::If { then, els, .. } => {
+                spawn_withs(then, out);
+                spawn_withs(els, out);
+            }
+            Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
+                spawn_withs(body, out)
+            }
+            Stmt::Choose(arms) => arms.iter().for_each(|(_, b)| spawn_withs(b, out)),
+            _ => {}
+        }
+    }
+}
+
 // ---- code generation ------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
@@ -1825,6 +1861,11 @@ struct Gen<'a> {
     tags: Vec<String>,
     /// Scent channel names, in first-appearance order in the code.
     scents: Vec<String>,
+    /// Per kind named by a `spawn ... with`: the memory slots those spawns
+    /// set, in first-appearance order (at most two), each with where it
+    /// was first named. They take the kind's first slots, which is where
+    /// a spawn's two values land.
+    withs: Vec<(String, Vec<(String, Pos)>)>,
     /// The source texts, for the rule table in [`DebugInfo`].
     files: &'a [(&'a str, &'a str)],
     debug: DebugInfo,
@@ -1876,6 +1917,7 @@ impl<'a> Gen<'a> {
             member_index: Vec::new(),
             tags: Vec::new(),
             scents: Vec::new(),
+            withs: Vec::new(),
             asm: Asm::new(),
             pool: Vec::new(),
             kind: None,
@@ -1969,6 +2011,51 @@ impl<'a> Gen<'a> {
                         s.name, o.at.file, o.at.line
                     ),
                 ));
+            }
+        }
+        // `spawn K ... with (m = a, n = b)`: the names each kind's spawns set.
+        let mut sites = Vec::new();
+        for it in items {
+            let lists = it
+                .rules
+                .iter()
+                .chain(it.states.iter().flat_map(|st| st.rules.iter()));
+            for r in lists {
+                if let RuleItem::When(rule) = r {
+                    spawn_withs(&rule.body, &mut sites);
+                }
+            }
+            for m in &it.members {
+                spawn_withs(&m.body, &mut sites);
+            }
+        }
+        for s in self.subs {
+            spawn_withs(&s.body, &mut sites);
+        }
+        for (kind, with) in sites {
+            let i = match self.withs.iter().position(|(k, _)| k == kind) {
+                Some(i) => i,
+                None => {
+                    self.withs.push((kind.to_string(), Vec::new()));
+                    self.withs.len() - 1
+                }
+            };
+            for (name, _, at) in with {
+                let names = &self.withs[i].1;
+                if names.iter().any(|(n, _)| n == name) {
+                    continue;
+                }
+                if names.len() == 2 {
+                    let all: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "spawns of `{kind}` set three memory slots with `with` ({}, {name}): at most two per kind",
+                            all.join(", ")
+                        ),
+                    ));
+                }
+                self.withs[i].1.push((name.clone(), at.clone()));
             }
         }
         let member_subs = items.iter().flat_map(|it| it.members.iter());
@@ -2459,6 +2546,25 @@ impl<'a> Gen<'a> {
                     mems.join(", ")
                 ),
             ));
+        }
+        // The slots a `spawn ... with` sets come first: a spawn's two values
+        // land in slots 0 and 1, whatever the kind inherits.
+        if !it.is_trait
+            && let Some((_, names)) = self.withs.iter().find(|(k, _)| *k == it.name)
+        {
+            for (i, (name, at)) in names.iter().enumerate() {
+                let Some(from) = mems.iter().position(|m| m == name) else {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "`spawn {} ... with`: `{}` has no memory `{name}`",
+                            it.name, it.name
+                        ),
+                    ));
+                };
+                let m = mems.remove(from);
+                mems.insert(i, m);
+            }
         }
         for (pn, pat) in &it.params {
             if needs.iter().any(|n| n.name == *pn) || mems.contains(pn) {
@@ -3752,9 +3858,23 @@ impl<'a> Gen<'a> {
                 let id = self.concrete(kind, pos)?;
                 self.push_int(i32::from(id));
                 self.target(at)?;
-                if let Some((a, b)) = with {
-                    self.expr(a)?;
-                    self.expr(b)?;
+                if !with.is_empty() {
+                    // The kind's first two slots, in its layout order.
+                    let slots = self
+                        .withs
+                        .iter()
+                        .find(|(k, _)| k == kind)
+                        .map(|(_, n)| n.clone())
+                        .expect("collected before codegen");
+                    for i in 0..2 {
+                        match slots
+                            .get(i)
+                            .and_then(|(n, _)| with.iter().find(|w| w.0 == *n))
+                        {
+                            Some((_, e, _)) => self.expr(e)?,
+                            None => self.push_int(0),
+                        }
+                    }
                     self.asm.op(OpCode::SpawnWith);
                 }
                 self.asm.act(Action::Spawn);
@@ -4463,6 +4583,53 @@ mod tests {
             signal: 0,
         };
         vm::think(k, ctx, mind)
+    }
+
+    /// `spawn K ... with` names the memory it sets. Those names take K's
+    /// first slots, where a spawn's two values land, whatever K inherits.
+    #[test]
+    fn spawn_with_names_the_memory_it_sets() {
+        use bytemuck::Zeroable;
+        let k = compile_ok(
+            "trait walker { mem heading, detour }
+             kind bee extends walker { mem trip, home_x, home_y  when true => idle }
+             kind hive { when true => spawn bee at random free with (home_y = 5, home_x = x) }
+             kind queen { when true => spawn bee at random free with (home_x = 9) }",
+        );
+        let bee = k.by_name("bee").unwrap();
+        assert_eq!(bee.mems, ["home_y", "home_x", "heading", "detour", "trip"]);
+        let mut m = crate::actors::ActorMind::zeroed();
+        let out = run_think(&k, "hive", &mut m);
+        assert_eq!((out.action, out.with), (Action::Spawn, [5, 36]));
+        let out = run_think(&k, "queen", &mut m);
+        assert_eq!(out.with, [0, 9], "home_x is slot 1; home_y stays zero");
+        for (text, want) in [
+            (
+                "kind b { } kind h { when true => spawn b at random free with (7, x) }",
+                "`with` names the memory it sets: `with (home_x = x, home_y = y)`",
+            ),
+            (
+                "kind b { mem m } kind h { when true => spawn b at random free with (n = 1) }",
+                "`spawn b ... with`: `b` has no memory `n`",
+            ),
+            (
+                "kind b { mem m } kind h { when true => spawn b at random free with (m = 1, m = 2) }",
+                "`with` sets `m` twice",
+            ),
+            (
+                "kind b { mem p, q, r }
+                 kind h { when true => spawn b at random free with (p = 1, q = 2) }
+                 kind g { when true => spawn b at random free with (r = 3) }",
+                "spawns of `b` set three memory slots with `with` (p, q, r): at most two per kind",
+            ),
+            (
+                "kind b { mem p, q, r } kind h { when true => spawn b at random free with (p = 1, q = 2, r = 3) }",
+                "`with` sets at most two memory slots",
+            ),
+        ] {
+            let e = compile_err(text);
+            assert!(e.contains(want), "{text}: {e}");
+        }
     }
 
     #[test]

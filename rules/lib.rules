@@ -1,0 +1,75 @@
+# The shared vocabulary: subs and traits any kind can use, in any pack
+# (docs/RULES.md, "The vocabulary"). A sub sees only its parameters and
+# locals; a trait's member subs see its needs and memory. No kinds here, so
+# this file does not change the kind numbering.
+#
+# Headings are 1..8 clockwise from north (0 = none yet) and `dir(h)` is that
+# step.
+
+sub flee(t: target) {                     # away from t, else anywhere free
+  if free(away t) { move away t } else { move random free }
+}
+
+sub peck(what: pred, r) {                 # eat the nearest `what` that stands (a seed), walking up to it
+  if nearest what within r as s {
+    if dist(s) == 1 { eat s } else { move toward s }
+  }
+}
+
+sub forage(what: pred, r) {               # graze ground cover `what`: underfoot if there is some, else walk onto the nearest
+  if is(here, what) { graze here }
+  else if nearest what within r as s { move toward s }
+}
+
+sub turn(h) {                             # the heading for the next step: mostly straight on
+  if h == 0 { return rand(8) + 1 }
+  choose {
+    80: return h
+     8: return h % 8 + 1                  # veer right
+     8: return (h + 6) % 8 + 1            # veer left
+     4: return rand(8) + 1                # something new
+  }
+}
+
+# walker(steps): walks instead of jittering. `wander()` is one step of it: it
+# keeps its heading and turns now and then. When a step comes back `blocked`
+# it picks a new heading and walks that for `steps` steps (a detour) before
+# going back to what it wanted, which gets it round lakes and rocks: put
+# `inherit walker` above the rules that move toward something.
+trait walker(steps) {
+  mem heading, detour
+  sub wander() { heading = turn(heading)  move dir(heading) }
+
+  when blocked    => { heading = rand(8) + 1  detour = steps }   # falls through
+  when detour > 0 => { detour -= 1  move dir(heading) }
+}
+
+# drinker(seen, thirsty, steps): finds water and drinks it. It remembers the
+# nearest water it sees within `seen` cells; below `thirsty` it drinks water
+# next to it, or walks back to the water it remembers, round what blocks it
+# (a drinker is a walker, with detours of `steps`). Its `water` holds 4h
+# unless the kind declares its own.
+trait drinker(seen, thirsty, steps) extends walker(steps) {
+  need water max 4h vital
+  mem knows_water, water_x, water_y
+
+  when nearest water within seen as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }   # falls through
+  inherit walker
+  when water < thirsty and nearest water within 1 as w => drink w
+  when water < thirsty and knows_water == 1 => move toward at(water_x, water_y)
+}
+
+# rooted(reach, low, full): draws water through its roots. Below `low`, water
+# within `reach` cells fills it to `full`; out of reach it dries out, and dies
+# `full` ticks later.
+trait rooted(reach, low, full) {
+  need water max full vital
+
+  when water < low and count water within reach > 0 => water = full   # falls through
+}
+
+# mortal(after, odds): dies of old age. Past `after`, each think is its last
+# with `odds` chances in 100 000, so a cohort does not die all at once.
+trait mortal(after, odds) {
+  when age > after and rand(100000) < odds => die
+}

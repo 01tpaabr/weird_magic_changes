@@ -202,7 +202,7 @@ stmt     := action | effect
 action   := "idle" | "die" | "become" NAME
           | "move" target | "eat" target | "hit" target | "graze" target | "drink" target
           | "take" target NAME expr | "give" target NAME expr
-          | "spawn" NAME "at" target [ "with" "(" expr "," expr ")" ]
+          | "spawn" NAME "at" target [ "with" "(" NAME "=" expr [ "," NAME "=" expr ] ")" ]   # the named mems take the kind's first slots
 effect   := "signal" "=" expr | "look" "=" expr | "mark" NAME expr
 cond     := expr | "nearest" pred "within" expr "as" NAME | "sniff" NAME "within" expr "as" NAME
           | cond "and" cond | cond "or" cond | "not" cond | "(" cond ")"
@@ -302,40 +302,59 @@ TIME     := INT ("min" | "h" | "d")
   rule table in `Kinds::debug`), the decision and effects, the writes, the ops spent, and
   after one real step where it is and its result; `-v` lists every op.
 
-**Example** (abridged; `rules/animals.rules` has the full one).
+**Example** (abridged; `rules/lib.rules` and `rules/animals.rules` have the full ones).
 
 ```
-sub flee(t: target) { if free(away t) { move away t } else { move random free } }
-sub forage(what: pred, r) {                # graze cover `what` underfoot, else walk onto the nearest
-  if is(here, what) { graze here }
-  else if nearest what within r as s { move toward s }
-}
 sub turn(h) {                              # mostly straight on
   if h == 0 { return rand(8) + 1 }
   choose { 80: return h   8: return h % 8 + 1   8: return (h + 6) % 8 + 1   4: return rand(8) + 1 }
 }
 
-kind chicken {
+trait walker(steps) {                      # lib.rules
+  mem heading, detour
+  sub wander() { heading = turn(heading)  move dir(heading) }
+  when blocked    => { heading = rand(8) + 1  detour = steps }   # walk round it
+  when detour > 0 => { detour -= 1  move dir(heading) }
+}
+
+trait drinker(seen, thirsty, steps) extends walker(steps) {
+  need water max 4h vital
+  mem knows_water, water_x, water_y
+  when nearest water within seen as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
+  inherit walker                           # the detours, exactly here
+  when water < thirsty and nearest water within 1 as w => drink w
+  when water < thirsty and knows_water == 1 => move toward at(water_x, water_y)
+}
+
+trait fowl extends drinker(6, 90min, 3) {  # animals.rules: what hens and chicks share
+  need food max 1d vital
+  when hurt > 0                  => { detour = 0  flee(attacker) }
+  when nearest fox within 5 as f => flee(f)
+  inherit drinker
+  when food < 20h                => forage(grass, 6)
+}
+
+kind chicken extends mortal(5d, 6), fowl {
   glyph "C"   color "#f2ead8"
   tags animal meat
   cadence 4   sight 6   food 1d
-  need food   max 1d vital
-  need water  max 4h vital
   need health max 20 decay 0 vital
-  mem knows_water, water_x, water_y, heading, detour, last_egg
-  when hurt > 0                    => { detour = 0  flee(attacker) }
-  when nearest fox within 5 as f   => flee(f)
-  when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
-  when blocked                     => { heading = rand(8) + 1  detour = 3 }   # walk round it
-  when detour > 0                  => { detour -= 1  move dir(heading) }
-  when water < 90min and nearest water within 1 as w => drink w
-  when water < 90min and knows_water == 1 => move toward at(water_x, water_y)
-  when food < 20h                  => forage(grass, 6)
+  mem last_egg
+  inherit mortal
+  inherit fowl
   when hour >= 6 and hour < 18 and food > 20h and day + 1 > last_egg and rand(1000) < 2
        and count meat within 6 < 3 and nearest free within 1 as c
        => { last_egg = day + 3  spawn egg at c }       # dice before the count: it short-circuits
-  when hour >= 20 or hour < 5      => { look = 1  idle }
-  when true                        => { look = 0  heading = turn(heading)  move dir(heading) }
+  when hour >= 20 or hour < 5    => { look = 1  idle }
+  when true                      => { look = 0  wander() }
+}
+
+kind chick extends chicken {               # fowl's rules, none of a hen's own
+  glyph "c"
+  when age > 2d => become chicken
+  inherit fowl
+  when nearest only chicken within 6 as m and dist(m) > 1 => move toward m
+  when true => wander()
 }
 ```
 
@@ -507,3 +526,8 @@ where it touches the tick.
    namespace, pack order then file names), a save remembers its packs and reopens with them,
    saves open by name under other packs (remapped as read, the directory rewritten at the
    first write), `r` reloads the world's packs.
+   8d done: the built-in kinds rewritten on a trait library (`rules/lib.rules`: `walker`,
+   `drinker`, `rooted`, `mortal` and the shared subs; `fowl` in animals.rules), `chick
+   extends chicken` (kinds renumbered in pre-order: chicken 0, chick 1, egg 2), `only
+   chicken` where the family would change behaviour, `spawn ... with` naming the memory it
+   sets (those slots come first in the spawned kind), and the vocabulary in RULES.md §16.

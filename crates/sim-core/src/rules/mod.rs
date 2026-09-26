@@ -379,14 +379,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn builtin_table_is_in_file_name_order_with_a_stable_hash() {
+    fn builtin_table_is_in_preorder_with_a_stable_hash() {
         let k = Kinds::builtin();
+        // File-name order, a chick right after the chicken it extends.
         let names = [
-            "chicken", "egg", "chick", "fox", "flower", "hive", "bee", "grass", "seed", "tree",
+            "chicken", "chick", "egg", "fox", "flower", "hive", "bee", "grass", "seed", "tree",
         ];
         assert_eq!(k.names().collect::<Vec<_>>(), names);
         for (id, kind) in [
-            CHICKEN, EGG, CHICK, FOX, FLOWER, HIVE, BEE, GRASS, SEED, TREE,
+            CHICKEN, CHICK, EGG, FOX, FLOWER, HIVE, BEE, GRASS, SEED, TREE,
         ]
         .into_iter()
         .enumerate()
@@ -394,18 +395,28 @@ mod tests {
             assert_eq!(usize::from(kind), id);
             assert_eq!(k.def(kind).name, names[id]);
         }
-        assert_eq!(k.glyphs, b"Coc\x46*Hb',T".to_vec());
+        assert_eq!(k.glyphs, b"Cco\x46*Hb',T".to_vec());
+        assert_eq!(k.def(CHICK).parent, Some(CHICKEN));
+        assert_eq!(k.family_end[usize::from(CHICKEN)], CHICK + 1);
+        assert_eq!(
+            k.debug.traits,
+            ["fowl", "walker", "drinker", "rooted", "mortal"]
+        );
         assert_eq!(k.scents, vec!["trail".to_string()]);
         assert_eq!(k.def(BEE).states, 4);
         assert_eq!(k.colors[usize::from(FOX)], 0x00E8_792B);
         assert_eq!(k.hash, Kinds::builtin().hash);
-        assert_eq!(k.def(CHICKEN).need_named("water"), Some(1));
+        assert_eq!(
+            k.def(CHICKEN).need_named("water"),
+            Some(0),
+            "the drinker's, first"
+        );
         assert_eq!(k.def(TREE).need_named("food"), None);
         // Tags in first-appearance order: animal, meat, plant, feed.
         assert_eq!(
             k.tag_bits,
             vec![
-                0b0011, 0b0010, 0b0011, 0b0001, 0b0100, 0, 0b0001, 0b1100, 0b1100, 0b0100
+                0b0011, 0b0011, 0b0010, 0b0001, 0b0100, 0, 0b0001, 0b1100, 0b1100, 0b0100
             ]
         );
         let mut other = Kinds::builtin();
@@ -413,6 +424,29 @@ mod tests {
         assert_ne!(
             hash_all(&other.defs, &other.code, &other.consts, &other.subs),
             k.hash
+        );
+    }
+
+    /// The trait example in docs/RULES.md §6 compiles as a pack on top of
+    /// the built-in rules, so the reference cannot drift from the language.
+    #[test]
+    fn the_rules_md_trait_example_compiles_on_the_builtin_rules() {
+        let doc = include_str!("../../../../docs/RULES.md");
+        let section = &doc[doc.find("## 6. Traits").unwrap()..];
+        let start = section.find("```\n").unwrap() + 4;
+        let end = start + section[start..].find("```").unwrap();
+        let mut files = builtin::FILES.to_vec();
+        files.push(("example.rules", &section[start..end]));
+        let k = compile::compile_files(&files).unwrap_or_else(|e| panic!("{e}"));
+        let lamb = k.by_name("lamb").unwrap();
+        assert_eq!(k.def(lamb.parent.unwrap()).name, "sheep");
+        assert!(
+            k.debug
+                .diagnostics
+                .iter()
+                .all(|d| d.level != Level::Warning),
+            "{:?}",
+            k.debug.diagnostics
         );
     }
 

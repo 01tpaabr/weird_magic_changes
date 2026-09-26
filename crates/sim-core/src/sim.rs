@@ -606,6 +606,11 @@ mod tests {
         Scenario::parse("t.scenario", text).unwrap().starts
     }
 
+    /// A need's slot in `kind`, by name: slots follow the kind's traits.
+    fn slot(kinds: &Kinds, kind: u16, need: &str) -> usize {
+        kinds.def(kind).need_named(need).unwrap()
+    }
+
     fn tmp_store(name: &str) -> Store {
         let dir =
             std::env::temp_dir().join(format!("wmc-world-test-{name}-{}", std::process::id()));
@@ -783,16 +788,14 @@ mod tests {
     /// only onto free walkable cells, with every row invariant intact.
     #[test]
     fn a_forest_grows_and_spreads() {
+        // The plants and the trait library they are written with.
         let plants = || {
-            crate::rules::compile(
-                "plants.rules",
-                crate::rules::builtin::FILES
-                    .iter()
-                    .find(|f| f.0 == "plants.rules")
-                    .unwrap()
-                    .1,
-            )
-            .unwrap()
+            let files: Vec<(&str, &str)> = crate::rules::builtin::FILES
+                .iter()
+                .copied()
+                .filter(|f| f.0 == "plants.rules" || f.0 == "lib.rules")
+                .collect();
+            crate::rules::compile_files(&files).unwrap()
         };
         let (seed_kind, tree_kind) = (
             plants().by_name("seed").unwrap().id,
@@ -1282,7 +1285,7 @@ mod tests {
             // Starving: a chicken is a day's food (12h a bite), so it takes
             // both bites before the fox is fed.
             let mut hungry = newborn(&kinds, FOX, fuid, now);
-            hungry.needs[0] = hours(2) as i32;
+            hungry.needs[slot(&kinds, FOX, "food")] = hours(2) as i32;
             assert!(place_actor(&mut w, fox, FOX, hungry));
         }
         let mut wounded = false;
@@ -1291,7 +1294,7 @@ mod tests {
             check_invariants(&mut w);
             wounded |= rows(&mut w)
                 .iter()
-                .any(|r| r.1 == CHICKEN && r.3.needs[2] == 10);
+                .any(|r| r.1 == CHICKEN && r.3.needs[slot(&kinds, CHICKEN, "health")] == 10);
         }
         let all = rows(&mut w);
         assert!(wounded, "a chicken was bitten once before it died");
@@ -1303,10 +1306,10 @@ mod tests {
         assert_eq!(foxes.len(), 2);
         for f in foxes {
             assert!(
-                f.3.needs[0] > hours(23) as i32,
-                "fox {:x} ate a whole chicken: {}",
+                f.3.needs[slot(&kinds, FOX, "food")] > hours(23) as i32,
+                "fox {:x} ate a whole chicken: {:?}",
                 f.0,
-                f.3.needs[0]
+                f.3.needs
             );
         }
     }
@@ -1335,7 +1338,7 @@ mod tests {
                when mode == 1 => { mode = 2  got = honey  r1 = result }
                when mode == 2 and nearest store within 1 as p => { mode = 3  give p honey 5h }
                when mode == 3 => { mode = 4  gave = honey  r2 = result }
-               when mode == 4 and nearest free within 1 as c => { mode = 5  spawn bee at c with (7, x) }
+               when mode == 4 and nearest free within 1 as c => { mode = 5  spawn bee at c with (mode = 7, got = x) }
                when true => idle }",
         )
         .unwrap();
@@ -1645,7 +1648,7 @@ mod tests {
         }
         let now = tick(&w);
         let mut thirsty = newborn(&kinds, CHICKEN, 0xC1, now);
-        thirsty.needs[1] = minutes(20) as i32; // water
+        thirsty.needs[slot(&kinds, CHICKEN, "water")] = minutes(20) as i32;
         let at = Pos::new(21, 20);
         assert!(place_actor(&mut w, at, CHICKEN, thirsty));
         assert!(explain(&w, Pos::new(30, 30)).is_none(), "nobody there");
@@ -1675,7 +1678,11 @@ mod tests {
         );
         step(&mut w);
         let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC1).unwrap();
-        assert_eq!(c.3.needs[1], hours(4) as i32, "it drank");
+        assert_eq!(
+            c.3.needs[slot(&kinds, CHICKEN, "water")],
+            hours(4) as i32,
+            "it drank"
+        );
         assert_eq!(c.3.events & result::MASK, result::OK);
         assert_eq!(find_uid(&mut w, 0xC1), Some(at));
     }
@@ -1918,12 +1925,12 @@ mod tests {
         for y in 20..25 {
             for x in 20..25 {
                 let mut tuft = newborn(&kinds, GRASS, (x * 100 + y) as u64, now);
-                tuft.needs[0] = hours(40) as i32; // no water here: keep it alive for the test
+                tuft.needs[slot(&kinds, GRASS, "water")] = hours(40) as i32; // no water here: keep it alive
                 assert!(place_actor(&mut w, Pos::new(x, y), GRASS, tuft));
             }
         }
         let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
-        hungry.needs[0] = hours(6) as i32;
+        hungry.needs[slot(&kinds, CHICKEN, "food")] = hours(6) as i32;
         assert!(place_actor(&mut w, Pos::new(17, 22), CHICKEN, hungry));
         check_invariants(&mut w);
         let mut stood_on_grass = false;
@@ -1938,9 +1945,9 @@ mod tests {
         assert!(stood_on_grass, "the chicken walked onto the patch");
         let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC0).unwrap();
         assert!(
-            c.3.needs[0] > hours(7) as i32,
-            "grazing fed it: {}",
-            c.3.needs[0]
+            c.3.needs[slot(&kinds, CHICKEN, "food")] > hours(7) as i32,
+            "grazing fed it: {:?}",
+            c.3.needs
         );
         let tally = w.resource::<Tally>();
         assert!(
@@ -1967,7 +1974,7 @@ mod tests {
         flatten(&mut w);
         let now = tick(&w);
         let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
-        hungry.needs[0] = hours(6) as i32;
+        hungry.needs[slot(&kinds, CHICKEN, "food")] = hours(6) as i32;
         assert!(place_actor(&mut w, Pos::new(30, 30), CHICKEN, hungry));
         for (x, uid) in [(31, 0x51), (33, 0x53)] {
             assert!(place_actor(
@@ -1990,9 +1997,9 @@ mod tests {
         assert!(all.iter().all(|r| r.1 != SEED), "both seeds eaten");
         let grazer = all.iter().find(|r| r.0 == 0xC0).unwrap();
         assert!(
-            grazer.3.needs[0] > (hours(12) - minutes(10)) as i32,
+            grazer.3.needs[slot(&kinds, CHICKEN, "food")] > (hours(12) - minutes(10)) as i32,
             "6h + two seeds of 3h: {}",
-            grazer.3.needs[0]
+            grazer.3.needs[slot(&kinds, CHICKEN, "food")]
         );
         let mut hatched_at = None;
         while tick(&w) < now + hours(9) {

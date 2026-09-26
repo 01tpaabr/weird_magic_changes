@@ -5,7 +5,7 @@
 # a quarter of its food, and a tuft that is left alone grows back, so a
 # meadow feeds a flock unless it is grazed to the ground.
 
-kind grass {
+kind grass extends rooted(8, 1d, 2d) {
   glyph "'"
   color "#6fbf3f"
   cover                             # walkable: animals stand on it and graze it
@@ -13,11 +13,10 @@ kind grass {
   cadence 256                       # ~84 thinks a day
   sight 8                           # roots reach water 8 cells away
   food 2h                           # a whole tuft's worth: each bite gets its share
-  need water  max 2d vital          # a tuft out of reach of water dries up in two days
   need health max 4 decay 0 vital   # four bites
   mem growth
 
-  when water < 1d and count water within 8 > 0  => water = 2d   # deep roots
+  inherit rooted                                 # deep roots: below a day, water within 8 fills it; two days out of reach and it dries up
   when health < 4 and hurt == 0 and chance(50)   => health += 1  # grows back while left alone; falls through
   when light > 0                                 => growth += 1  # bookkeeping: falls through
   when growth >= 12 and count grass within 2 < 8 and nearest bare within 1 as c

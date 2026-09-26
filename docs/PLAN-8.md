@@ -81,7 +81,7 @@ no rules hash), and every gate below compares **`state:`** and the population li
 | 8a | `state:` and populations identical to baseline (no built-in kind extends anything yet, so family = exact). `step/16x16` A/B: the family range check replaces an equality; expect no change, record it. |
 | 8b | identical to 8a (the default scenario carries exactly today's shares, cut in kind-id order as today). **Done**, in two local stages: with 2 scent channels, `state:` and populations identical to 8a at 1 and 8 threads (`b4d70180c11c4739`, `9be341adc187c931`); with 4 channels the scent layers hash differently, populations identical, 1 = 8 threads. **New reference for 8c:** full gate `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`; quick gate `checksum 2a242e3e8362499b`, `state c11c0f6d5a472758`; population lines unchanged from the baseline. |
 | 8c | identical to 8b when the packs match. **Done:** built-in rules at 1 and 8 threads, and `--rules rules` at 8, all `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`, populations unchanged. |
-| 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. |
+| 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. **Done:** full gate `checksum 745e63078789e157`, `state ef03c4b25feb7529` at 1 and 8 threads (`332685 actors: chicken 1885, chick 1550, egg 0, fox 160, flower 8659, hive 52, bee 1079, grass 317802, seed 1029, tree 469`); quick gate `73c2cc51bbaff126` / `170530c04b9a192b`, the same counts as 8c; day-16 means over seeds 12-16 within a few percent of 8c (PERF.md actors-8d). |
 | 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. |
 | 8f | `make ci`; `wmc lint rules/` on the built-in content reports no warnings (fix the content if it does, those are real). |
 | 8g | every `scenarios/tests/*.scenario` passes at 1 and 8 threads. |
@@ -448,6 +448,40 @@ the trait library with each parameter's meaning. `ACTORS.md` §11 8d, `PERF.md` 
 (`run 43200 1024 1024 12` at 1 and 8 threads, `step/16x16` A/B). Gate per §2; also run
 `wmc why` on a chick and confirm `via drinker` lines.
 
+### 6.1 As built (deviations from the text above)
+
+- `drinker(seen, thirsty, steps) extends walker(steps)`, not `drinker(thirsty,
+  desperate)` beside a parameterless `walker`. Today's rule order puts the walker's
+  detours between remembering water and walking back to it. A drinker that contains
+  `inherit walker` keeps that order in every kind, so an author cannot put them the wrong
+  way round. `seen` is the remembering radius (chicken 6, fox 8). `steps` keeps the
+  detour lengths (chicken 3, fox 2, bee `walker(2)`).
+- The desperate drink stays with the hens, before their fox check as today, in a trait
+  `fowl` in animals.rules. It holds everything a chicken and a chick share, so the chick
+  is `inherit fowl` plus three rules of its own instead of restating the hen's. The fox
+  has no desperate rule, as today.
+- `rooted(reach, low, full)`, not `(reach, sip, full)`. Grass looks for water only below
+  a day. Without that guard it would scan within 8 cells on every think, about 85 times
+  as often. Filling to `full` gives the same values as today's `min(water + sip, full)`
+  for seeds, trees and flowers, since their sip exceeds what one think drains.
+- `mortal(after, odds)` draws `rand(100000)`. The flower's `rand(1000) < 3` and the bee's
+  `rand(10000) < 4` keep their probabilities (300 and 40) but make different draws,
+  because `rand(n)` is `draw % n`.
+- Language: `spawn ... with` names the memory it sets (`with (home_x = x, home_y = y)`).
+  The bee extends `walker`, whose mems would otherwise take the first two slots, which
+  are where a spawn's two values land. The named slots now come first in the spawned
+  kind; all of a kind's spawns together may name at most two. Runtime unchanged.
+- The fox's litter rule uses `count only chicken`. The text above let it count chicks. On
+  `256 256 12` that made foxes boom and the flock crash: at day 16, 114 hens against 8c's
+  1004, and 28 foxes against 13. `only chicken` gives 978 hens. The hen's drift and the
+  chick's follow use `only chicken` too, so neither chases chicks.
+- Side effects of sharing: a chick detours 3 steps (it inherits the hen's walker; it was
+  2) and resets its detour when hurt, and a fox shows `look 0` when it litters. Otherwise
+  every kind scans the same rules in the same order as before (`wmc why` on a chick lists
+  them, `[via fowl]`, `[via drinker]`, `[via walker]`).
+- A test compiles the RULES.md §6 example on the built-in rules, so the reference
+  cannot drift.
+
 ## 7. Commit 8e: drawn maps in scenarios
 
 ```
@@ -560,7 +594,7 @@ closing paragraph. Then delete this file.
 - [x] 8a traits, extends, inherit, family, only, member subs, diagnostics (also: `vm::Want`, a predicate decoded once per search, -12% on the tick)
 - [x] 8b scenario file, place removed, store v9, four scent channels (see §4.6)
 - [x] 8c packs, open by name, rewrite on save (see §5.4)
-- [ ] 8d content on traits, vocabulary in RULES.md
+- [x] 8d content on traits, vocabulary in RULES.md (see §6.1)
 - [ ] 8e drawn maps
 - [ ] 8f author lint, --strict, reload surfacing
 - [ ] 8g scenario tests, make test runs them, content tests moved

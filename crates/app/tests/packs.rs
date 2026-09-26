@@ -84,12 +84,14 @@ fn a_save_remembers_its_packs_and_opens_by_name() {
     // Rules without most of its kinds: refused, with the list.
     let plants = root.join("plants");
     std::fs::create_dir_all(&plants).unwrap();
-    std::fs::copy(base.join("plants.rules"), plants.join("plants.rules")).unwrap();
+    for f in ["plants.rules", "lib.rules"] {
+        std::fs::copy(base.join(f), plants.join(f)).unwrap();
+    }
     let (ok, _, err) = wmc(&["run", dir, "1", "--rules", plants.to_str().unwrap()]);
     assert!(!ok);
     assert!(
         err.contains(
-            "the save has kinds the loaded rules do not define: chicken, egg, chick, fox, flower, hive, bee, grass"
+            "the save has kinds the loaded rules do not define: chicken, chick, egg, fox, flower, hive, bee, grass"
         ),
         "{err}"
     );

@@ -1,7 +1,7 @@
 //! The built-in kinds: `rules/animals.rules`, `rules/bees.rules`,
-//! `rules/grass.rules` and `rules/plants.rules`,
-//! compiled at first use in file-name order (the same order `compile_dir`
-//! uses, so `WMC_RULES=rules/` gives the same table). The hand-assembled
+//! `rules/grass.rules`, `rules/lib.rules` (the shared subs and traits) and
+//! `rules/plants.rules`, compiled at first use in file-name order (the same
+//! order `compile_packs` uses, so `--rules rules` gives the same table). The hand-assembled
 //! version below is kept as the test oracle for the compiler: what it must
 //! produce for the plants file on its own
 //!
@@ -34,22 +34,25 @@
 use super::Kinds;
 
 /// The rules text every build carries, in file-name order.
-pub const FILES: [(&str, &str); 4] = [
+pub const FILES: [(&str, &str); 5] = [
     (
         "animals.rules",
         include_str!("../../../../rules/animals.rules"),
     ),
     ("bees.rules", include_str!("../../../../rules/bees.rules")),
     ("grass.rules", include_str!("../../../../rules/grass.rules")),
+    ("lib.rules", include_str!("../../../../rules/lib.rules")),
     (
         "plants.rules",
         include_str!("../../../../rules/plants.rules"),
     ),
 ];
 
+// Pre-order over the inheritance forest: a chick is a chicken, so it comes
+// right after it.
 pub const CHICKEN: u16 = 0;
-pub const EGG: u16 = 1;
-pub const CHICK: u16 = 2;
+pub const CHICK: u16 = 1;
+pub const EGG: u16 = 2;
 pub const FOX: u16 = 3;
 pub const FLOWER: u16 = 4;
 pub const HIVE: u16 = 5;

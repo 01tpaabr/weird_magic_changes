@@ -138,41 +138,38 @@ like an action; it can be combined with one action (`{ next FORAGE  move toward 
 
 A **trait** is a reusable piece of a kind: declarations, rules, states and subs, but no
 glyph, no colour, and no actors of its own. A kind **extends** traits to include them, and
-may extend one other kind.
+may extend one other kind. The built-in kinds are written this way, on the traits of
+`rules/lib.rules` (§16); any pack can use them.
 
 ```
-trait drinker(thirsty) {                    # a parameter: a constant inside the trait
-  need water max 4h vital
-  mem knows_water, water_x, water_y
-  when water < 30min and nearest water within 1 as w => drink w
-  when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx  water_y = y + w.dy }
-  when water < thirsty and knows_water == 1 => move toward at(water_x, water_y)
-}
-
-trait walker {
-  mem heading, detour
-  sub wander() { heading = turn(heading)  move dir(heading) }   # a member sub: sees heading
-  when blocked    => { heading = rand(8) + 1  detour = 3 }
-  when detour > 0 => { detour -= 1  move dir(heading) }
-}
-
-kind hen extends drinker(90min), walker {
-  glyph "C"
+trait grazer(hungry) {                    # a parameter: a constant inside the trait
   need food max 1d vital
-  when nearest fox within 5 as f => flee(f)
-  inherit drinker                           # the trait's rules run exactly here
-  when food < 20h => forage(grass, 6)
-  inherit walker
-  when true => wander()
+  mem meals
+  sub munch() { meals += 1  graze here }  # a member sub: sees `food` and `meals`
+  when food < hungry and is(here, grass) => munch()
+  when food < hungry and nearest grass within 6 as g => move toward g
 }
 
-kind chick extends hen {                    # everything a hen is, except what it changes
-  glyph "c"
-  need food max 8h vital                    # redeclared: same slot, new max
-  when age > 2d => become hen
-  inherit drinker                           # takes the hen's drinking and walking,
-  inherit walker                            # but not the hen's own rules
-  when nearest only hen within 6 as m => move toward m
+kind sheep extends grazer(20h), drinker(6, 2h, 3), mortal(8d, 5) {   # the last two: lib.rules
+  glyph "S"
+  tags animal meat
+  need health max 30 decay 0 vital
+  inherit mortal
+  when nearest fox within 6 as f => flee(f)
+  inherit drinker                         # its rules run exactly here: water, detours
+  inherit grazer
+  when true => wander()                   # walker's member sub (a drinker is a walker)
+}
+
+kind lamb extends sheep {                 # everything a sheep is, except what it changes
+  glyph "s"
+  need health max 8 decay 0 vital         # redeclared: same slot, new max
+  when age > 3d => become sheep
+  when nearest fox within 6 as f => flee(f)
+  inherit drinker                         # takes the sheep's drinking and grazing,
+  inherit grazer                          # but not the sheep's own rules
+  when nearest only sheep within 6 as m => move toward m
+  when true => wander()
 }
 ```
 
@@ -201,7 +198,8 @@ Every trait is compiled on its own to check this, even if no kind uses it yet, s
 that compiles works in any kind.
 
 **Families.** A kind's name in a predicate matches that kind **and every kind that extends
-it**: `nearest hen` sees chicks too. `only hen` matches hens alone. `spawn` and `become`
+it**: `nearest sheep` sees lambs too, and the built-in `nearest chicken` sees chicks. `only
+sheep` matches sheep alone. `spawn` and `become`
 always name one exact kind. A trait is never matched: to find "anything that drinks", give
 the trait a tag (`tags drinker`) and match the tag.
 
@@ -229,7 +227,7 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 | `idle` | nothing; ends the rule |
 | `die` | the actor is removed |
 | `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, state reset, age from now; not between standing and cover kinds |
-| `spawn K at t [with (a, b)]` | a new K on cell t, needs full, mem zero or `a, b` in its first two slots. A standing kind needs a free cell; a cover kind needs a walkable cell without cover |
+| `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover |
 | `move t` | one step toward t; slides past a blocked cell by 45 degrees. Contested cells go to the actor with the lowest key this tick; a cell someone left or died on this tick can't be entered until the next. `BLOCKED` if it didn't move |
 | `drink t` | t must be adjacent water: the need named `water` refills to max; else `REFUSED` |
 | `eat t` | bites the standing actor at adjacent cell t, which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
@@ -406,7 +404,53 @@ whole directory moves over to the new numbering, and from then on it belongs to 
 of packs. Rules that lack one of the save's kinds are refused with the list, and so is a kind
 that turned from standing into ground cover, or back.
 
-## 16. Debugging
+## 16. The vocabulary
+
+The built-in rules define names that other packs can build on: a fox from another pack
+hunts the same `meat`, a mod's flower feeds the same bees. Only the three needs below mean
+anything to the engine; the rest are conventions, which is what lets kinds from different
+authors meet.
+
+**Needs the engine reads.** `water` is what `drink` fills, to its max. `health` is what bites
+take (`eat`, `hit`, `graze` take `bite` points each), and a `vital` health at 0 kills. `food`
+is what an eater gains: the victim's `food` declaration, by the share of its health the bite
+took. Any other need belongs to the rules, like `nectar`, which flowers, hives and bees move
+with `take` and `give`.
+
+**Tags.** `animal` (chickens, chicks, foxes, bees), `meat` (what foxes hunt: chickens, chicks,
+eggs), `plant` (flowers, grass, seeds, trees), `feed` (what hens eat: grass and seeds).
+
+**Looks.** `chicken:1` roosting, `fox:1` asleep, `flower:1` rich in nectar, `bee:2` dancing (its
+`signal` packs the offset to the flowers, read with `hi` and `lo`), `hive:1` has stores,
+`hive:2` full.
+
+**Scents.** `trail`, laid by laden bees on their way home, strongest near the flowers.
+
+**Families.** `chick extends chicken`: `nearest chicken` finds chicks too, `only chicken` does
+not.
+
+**Subs** (`rules/lib.rules`): `flee(t)` away from a target, else anywhere free; `peck(what,
+r)` walks to the nearest standing `what` within `r` and eats it; `forage(what, r)` grazes
+cover `what` underfoot, else walks onto the nearest; `turn(h)` the next heading of a
+meandering walk.
+
+**Traits** (`rules/lib.rules`, and `fowl` in `rules/animals.rules`):
+
+| trait | what a kind gets |
+|---|---|
+| `walker(steps)` | `mem heading, detour` and the member sub `wander()`, one step of a walk that keeps its heading and turns now and then. Rules: a `blocked` step picks a new heading for `steps` steps (a detour), and a detour runs before anything else. `inherit walker` above the rules that move toward something |
+| `drinker(seen, thirsty, steps)` | a walker (`walker(steps)`), `need water max 4h vital` unless the kind declares its own, `mem knows_water, water_x, water_y`. Rules: remember the nearest water within `seen`; the walker's; below `thirsty` drink water next to it, else walk back to the water it remembers |
+| `rooted(reach, low, full)` | `need water max full vital`. Rule: below `low`, water within `reach` fills it to `full` |
+| `mortal(after, odds)` | Rule: past age `after`, each think is its last with `odds` chances in 100 000 |
+| `fowl` | a `drinker(6, 90min, 3)` with `need food max 1d vital`. Rules: flee when hurt, drink when desperate (below 30 minutes, fox or not), flee a fox within 5, the drinker's, eat seeds and grass when below 20 hours |
+
+The built-in kinds, as a reading list: `chicken extends mortal(5d, 6), fowl`; `chick extends
+chicken` (fowl's rules, not a hen's); `fox extends mortal(6d, 3), drinker(8, 6h, 2)`; `flower
+extends rooted(6, 1d, 1d), mortal(4d, 300)`; `bee extends mortal(3d, 40), walker(2)`; `grass
+extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends rooted(2, 3d,
+3d)`; `egg` and `hive` stand alone.
+
+## 17. Debugging
 
 - **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
   points, each kind's parents and family. Errors come as `file:line:col: message`, and
@@ -426,7 +470,7 @@ that turned from standing into ground cover, or back.
   you removed are dropped: the one way to take a kind out of a save. Saved chunks are
   rewritten to match.
 
-## 17. Limits
+## 18. Limits
 
 | | |
 |---|---|
