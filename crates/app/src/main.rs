@@ -87,6 +87,13 @@ fn main() -> anyhow::Result<()> {
             .context("--threads needs a count")?;
         par::init_task_pool_with(Some(n));
     }
+    // `-v` and negative coordinates start with one `-`, a flag with two.
+    if let Some(f) = args.iter().find(|a| a.starts_with("--")) {
+        bail!("unknown flag {f}");
+    }
+    if strict && args.first().map(String::as_str) != Some("lint") {
+        bail!("--strict is only for lint");
+    }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
@@ -130,6 +137,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("scenario") => {
             let f = args.get(1).context("scenario needs a scenario file")?;
+            if let Some(a) = args.get(2) {
+                bail!("scenario takes one file; unexpected {a:?}");
+            }
             scenario_test(f, &packs)
         }
         Some("lint") => {
@@ -194,6 +204,9 @@ fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Re
     }
     if let Some(seed) = num(2, "seed")? {
         s.seed = seed;
+    }
+    if let Some(a) = args.get(3) {
+        bail!("unexpected argument {a:?} after [width height seed]");
     }
     // What a `size` line is held to (the scenario's own already was).
     if s.width == 0 || s.height == 0 {

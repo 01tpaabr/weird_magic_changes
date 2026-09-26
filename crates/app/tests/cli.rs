@@ -98,3 +98,35 @@ fn a_size_from_the_command_line_is_checked() {
     let (ok, out, err) = wmc(&["show", "20", "5", "42"]);
     assert!(ok, "{out}{err}");
 }
+
+/// What the command line does not use is an error, not dropped: an unknown
+/// flag, an argument past the last one a command reads, `--strict` off
+/// `lint`.
+#[test]
+fn unused_arguments_are_refused() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fox_pen = repo.join("scenarios/tests/fox_pen.scenario");
+    let fox_pen = fox_pen.to_str().unwrap();
+    let dir = std::env::temp_dir().join(format!("wmc-cli-args-{}", std::process::id()));
+    let dir = dir.to_str().unwrap();
+    let (ok, _, err) = wmc(&["show", "20", "5", "42", "--seed", "7"]);
+    assert!(!ok && err.contains("unknown flag --seed"), "{err}");
+    let (ok, _, err) = wmc(&["show", "20", "5", "42", "7"]);
+    assert!(!ok && err.contains("unexpected argument \"7\""), "{err}");
+    let (ok, _, err) = wmc(&["run", dir, "10", "30", "20", "7", "extra"]);
+    assert!(
+        !ok && err.contains("unexpected argument \"extra\""),
+        "{err}"
+    );
+    let (ok, _, err) = wmc(&["scenario", fox_pen, fox_pen]);
+    assert!(!ok && err.contains("scenario takes one file"), "{err}");
+    let (ok, _, err) = wmc(&["run", dir, "1", "--strict"]);
+    assert!(!ok && err.contains("--strict is only for lint"), "{err}");
+    // What they do use still works.
+    let (ok, out, err) = wmc(&["scenario", fox_pen, "--threads", "1"]);
+    assert!(ok, "{out}{err}");
+    let rules = repo.join("rules");
+    let (ok, out, err) = wmc(&["lint", rules.to_str().unwrap(), "--strict"]);
+    assert!(ok, "{out}{err}");
+    assert!(!Path::new(dir).exists(), "run never saves");
+}
