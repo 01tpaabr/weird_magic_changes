@@ -5,12 +5,14 @@
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
 //! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
 //! wmc lint <pack>...                           compile rule packs and print what they hold
+//! wmc scenario <file>                          a scenario test: make its world, then its
+//!                                              `run` and `expect` lines; exit 1 if one fails
 //! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
 //!                                              step `ticks`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
 //! ```
-//! Any command takes `--rules <pack>` (repeatable) and `--scenario <file>`,
-//! anywhere after its name. A pack is a directory of `*.rules` files or one
+//! Any command takes `--rules <pack>` (repeatable), `--scenario <file>` and
+//! `--threads N`, anywhere after its name. A pack is a directory of `*.rules` files or one
 //! file; packs compile as one rule set, in the order given. Without
 //! `--rules`, `WMC_RULES=<pack>:<pack>...` names them, else a saved world
 //! uses the packs it was last played with, else the built-in rules.
@@ -29,7 +31,7 @@ use std::time::Instant;
 
 use anyhow::{Context, bail};
 use sim_core::actors::{Tally, life};
-use sim_core::scenario::{Placement, Start};
+use sim_core::scenario::{Check, Placement, Start};
 use sim_core::time::Clock;
 use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
 use sim_core::{Scenario, par, sim, stage};
@@ -77,6 +79,14 @@ fn main() -> anyhow::Result<()> {
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
     let strict = take_switch(&mut args, "--strict");
+    if let Some(n) = take_flag(&mut args, "--threads")?.pop() {
+        let n: usize = n
+            .parse()
+            .ok()
+            .filter(|&n| n >= 1)
+            .context("--threads needs a count")?;
+        par::init_task_pool_with(Some(n));
+    }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
@@ -118,6 +128,10 @@ fn main() -> anyhow::Result<()> {
                 &setup(a.get(4..).unwrap_or(&[]))?,
             )
         }
+        Some("scenario") => {
+            let f = args.get(1).context("scenario needs a scenario file")?;
+            scenario_test(f, &packs)
+        }
         Some("lint") => {
             let packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
             if packs.is_empty() {
@@ -126,10 +140,12 @@ fn main() -> anyhow::Result<()> {
             lint(&packs, file, strict)
         }
         Some(other) => {
-            bail!("unknown command {other:?}; use `show`, `play`, `run`, `why` or `lint`")
+            bail!(
+                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `scenario` or `lint`"
+            )
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint [--strict] <pack>...; any takes --rules <pack> (repeatable) and --scenario <file>"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint [--strict] <pack>... | wmc scenario <file>; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
         ),
     }
 }
@@ -362,6 +378,54 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
             tally.get(k, life::OPS) as f64 / thinks.max(1) as f64,
             tally.get(k, life::TRAPS),
         )?;
+    }
+    Ok(())
+}
+
+/// `wmc scenario`: make the scenario's world (no save), then its `run` and
+/// `expect` lines in order. Prints every expectation with what it found,
+/// and the checksums at the end (equal at any thread count); fails if any
+/// expectation does.
+fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
+    let s = scenario(Some(file))?;
+    let kinds = app::compile(&app::packs(packs))?;
+    app::warn(&kinds);
+    let mut world = sim::new_world_with(&s, kinds).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+    let mut out = std::io::stdout().lock();
+    let (mut checked, mut failed) = (0, 0);
+    for c in &s.checks {
+        match c {
+            Check::Run(t) => {
+                for _ in 0..*t {
+                    sim::step(&mut world);
+                }
+                writeln!(
+                    out,
+                    "      run {t} ticks, to {}",
+                    Clock::at(sim::tick(&world))
+                )?;
+            }
+            Check::Expect { line, text, what } => {
+                checked += 1;
+                let (ok, got) = match sim::expect(&mut world, what) {
+                    Ok(r) => r,
+                    Err(e) => (false, e),
+                };
+                failed += usize::from(!ok);
+                let mark = if ok { "ok  " } else { "FAIL" };
+                writeln!(out, "{mark}  {file}:{line}: {text}  ({got})")?;
+            }
+        }
+    }
+    writeln!(out, "checksum:  {:016x}", sim::checksum(&mut world))?;
+    writeln!(out, "state:     {:016x}", stage::checksum(&mut world))?;
+    writeln!(
+        out,
+        "{checked} expectations, {failed} failed ({} threads)",
+        par::thread_count()
+    )?;
+    if failed > 0 {
+        bail!("{file}: {failed} of {checked} expectations failed");
     }
     Ok(())
 }

@@ -403,6 +403,41 @@ legend {
 In a legend, the first character on the line is the one it defines, so `#` can stand for
 rock; after it, `#` starts a comment as usual.
 
+**Testing a kind.** A scenario can end in a test: `run` steps the world, `expect` checks
+it, as many times as you like, in the order written. `wmc scenario <file>` makes the world
+(nowhere on disk), runs the lines, prints each expectation with what it found and the final
+checksums, and fails if an expectation does. Every file in `scenarios/tests/` runs in
+`make test`, at 1 and 8 threads, and must end with the same checksum at both.
+
+```
+# scenarios/tests/eggs_hatch.scenario
+seed 4
+terrain water_level 0 rock_on_soil 0 rock_on_water 0   # flat soil
+start chicken at (30, 30) with (food = 6h)
+start seed at (31, 30)
+start seed at (33, 30)
+start egg at (10, 10)
+run 64
+expect count seed == 0                  # both eaten
+expect max food of chicken > 710min
+run 7h
+expect count egg == 1                   # not yet: an egg hatches past eight hours
+run 2h
+expect became chick == 1
+```
+
+| line | |
+|---|---|
+| `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
+| `expect count K OP N` | actors of K alive now |
+| `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
+| `expect min\|max\|sum NAME of K OP V` | a need or memory over every actor of K (no actor: the check fails) |
+| `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell |
+| `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
+
+`OP` is one of `== != < <= > >=`. A kind means its family, as in the rules; `only K` means
+K alone (`expect count only chick == 1`).
+
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
 define, or a trait, refuses the world. `wmc lint <rules> --scenario <file>` checks that
 without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create

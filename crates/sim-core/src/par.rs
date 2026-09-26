@@ -28,9 +28,15 @@ pub fn threads_from_env() -> Option<usize> {
 /// [`par_map`] needs this to have run once (an `App` with `TaskPoolPlugin`
 /// does it for you).
 pub fn init_task_pool() -> usize {
+    init_task_pool_with(threads_from_env())
+}
+
+/// [`init_task_pool`] with this many threads (`None`: all cores); the
+/// first initialiser in a process wins (`wmc ... --threads N`).
+pub fn init_task_pool_with(threads: Option<usize>) -> usize {
     ComputeTaskPool::get_or_init(|| {
         let mut b = TaskPoolBuilder::new().thread_name("compute".into());
-        if let Some(n) = threads_from_env() {
+        if let Some(n) = threads {
             b = b.num_threads(n);
         }
         b.build()

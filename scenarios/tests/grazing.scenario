@@ -1,0 +1,23 @@
+# Grass is ground cover: a hungry hen walks onto a patch, stands on a tuft
+# and grazes it underfoot, a quarter tuft a bite, until the tuft is gone.
+seed 6
+size 32 16
+outside soil
+map {
+  ..........
+  .....'''''
+  .....'''''
+  .C...'''''
+  .....'''''
+  .....'''''
+}
+legend {
+  . soil
+  ' grass with (water = 40h)     # no water here: they would dry up in two days
+  C chicken with (food = 6h)
+}
+
+run 200
+expect eaten grass >= 1            # a tuft grazed to the ground
+expect max food of chicken > 7h    # and it fed her
+expect count chicken == 1

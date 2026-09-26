@@ -3,7 +3,8 @@
 #   make            -> build (dev profile: opt-level 1, deps at opt-level 3, Bevy dynamically linked)
 #   make run        -> build + run the app (ARGS="show 80 24 42" or ARGS="play saves/dev")
 #   make check      -> fmt-check + clippy          (fast, runs in pre-commit)
-#   make test       -> cargo test (includes the 1-thread vs N-thread determinism gate)
+#   make test       -> cargo test (includes the 1-thread vs N-thread determinism gate and every scenario test)
+#   make scenario-test -> run scenarios/tests/*.scenario at 1 and 8 threads, with their reports
 #   make ci         -> check + test (what "green" means for this repo)
 #   make bench      -> criterion benches
 #   make release    -> optimized build (LTO, static Bevy)
@@ -20,7 +21,7 @@ SHELL := /bin/bash
 ARGS ?=
 DEV := --features app/dev
 
-.PHONY: build run release check test ci bench fmt fmt-check lint setup hooks clean help
+.PHONY: build run release check test scenario-test ci bench fmt fmt-check lint setup hooks clean help
 
 build:
 	cargo build --workspace $(DEV)
@@ -48,6 +49,13 @@ lint:
 
 test:
 	cargo test --workspace $(DEV)
+
+scenario-test: build
+	@for f in scenarios/tests/*.scenario; do \
+		for t in 1 8; do \
+			cargo run -q -p app --bin wmc $(DEV) -- scenario $$f --threads $$t || exit 1; \
+		done; \
+	done
 
 ci: check test
 

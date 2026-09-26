@@ -48,7 +48,6 @@ crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors 
 rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
 scenarios/          *.scenario files: seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
-docs/PLAN-8.md      TEMPORARY: the step-8 build plan (traits, scenarios, packs, author tooling); delete when done
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
 ```
 
@@ -62,6 +61,8 @@ make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + ch
                                    # and --rules <pack> (repeatable; a dir of *.rules or a file; else WMC_RULES=a:b, else the save's packs)
 make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table and the author lint (--scenario f: check it fits; --strict: warnings fail)
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
+make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: its run/expect lines (--threads N)
+make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
 make ci         check + test  == "done"
@@ -84,7 +85,7 @@ make fmt
   `~/.cargo/registry/src/*/bevy_ecs-0.19.*/src`, or `cargo doc -p bevy --no-deps --open`.
   The skill's `references/` hold verified cheatsheets.
 - New sim system: a plain fn in `sim-core`, added to `SimTick` inside a `Phase` set, with a
-  checksum test. New actor kind: a `.rules` file (`docs/RULES.md`), `wmc lint` it, `wmc why` to debug it. New
+  checksum test. New actor kind: a `.rules` file (`docs/RULES.md`), `wmc lint` it, a test in `scenarios/tests/`, `wmc why` to debug it. New
   sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).

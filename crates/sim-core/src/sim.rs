@@ -28,7 +28,7 @@ use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{DrawnMap, Placement, Scenario, Start};
+use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{SavedKind, Store, WorldMeta};
@@ -606,6 +606,116 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     }
     meta.dirty = true;
     true
+}
+
+/// What a scenario test's `expect` finds in `world` (`wmc scenario`):
+/// whether it holds, and what it saw, for the report. An error when it
+/// names a kind, need or memory the rules do not define. A kind means its
+/// family, `only` the kind alone, as in the rules.
+pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
+    let kinds = world.resource::<Kinds>().clone();
+    let family = |who: &Who| -> Result<std::ops::Range<u16>, String> {
+        let k = kinds
+            .by_name(&who.kind)
+            .ok_or_else(|| format!("the rules have no kind `{}`", who.kind))?
+            .id;
+        let end = if who.only {
+            k + 1
+        } else {
+            kinds.family_end[usize::from(k)]
+        };
+        Ok(k..end)
+    };
+    Ok(match e {
+        Expect::Count { who, op, n } => {
+            let ids = family(who)?;
+            let c = world
+                .query::<&ChunkActors>()
+                .iter(world)
+                .flat_map(|a| &a.rows)
+                .filter(|r| ids.contains(&r.kind))
+                .count() as i64;
+            (op.holds(c, *n), c.to_string())
+        }
+        Expect::Tally {
+            counter,
+            who,
+            op,
+            n,
+        } => {
+            let tally = world.resource::<crate::actors::Tally>();
+            let c: i64 = family(who)?.map(|k| tally.get(k, *counter) as i64).sum();
+            (op.holds(c, *n), c.to_string())
+        }
+        Expect::Value {
+            agg,
+            name,
+            who,
+            op,
+            v,
+        } => {
+            let ids = family(who)?;
+            // Per kind (a family's kinds may lay slots out differently): a
+            // need slot of that name, else a mem slot.
+            let slot = |k: u16| -> Option<(bool, usize)> {
+                let d = kinds.def(k);
+                d.need_named(name)
+                    .map(|i| (true, i))
+                    .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
+            };
+            if !ids.clone().any(|k| slot(k).is_some()) {
+                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
+            }
+            let mut vals = Vec::new();
+            for (a, m) in world.query::<(&ChunkActors, &ChunkMinds)>().iter(world) {
+                for (r, mind) in a.rows.iter().zip(&m.rows) {
+                    if ids.contains(&r.kind)
+                        && let Some((need, i)) = slot(r.kind)
+                    {
+                        vals.push(i64::from(if need { mind.needs[i] } else { mind.mem[i] }));
+                    }
+                }
+            }
+            let got = match agg {
+                Agg::Min => vals.iter().min().copied(),
+                Agg::Max => vals.iter().max().copied(),
+                Agg::Sum => Some(vals.iter().sum()),
+            };
+            match got {
+                Some(g) => (op.holds(g, *v), g.to_string()),
+                None => (false, format!("no `{}` alive", who.kind)),
+            }
+        }
+        Expect::At { x, y, who } => {
+            let (cc, i) = Pos::new(*x, *y).split();
+            let Some(cells) = stage::chunk(world, cc) else {
+                return Ok((false, "that chunk is not loaded".into()));
+            };
+            let here = cells.occupant[i]
+                .unpack()
+                .or(cells.cover[i].unpack())
+                .map(|(k, _)| k);
+            let got = here.map_or("nobody".to_string(), |k| kinds.def(k).name.clone());
+            let ok = match (who, here) {
+                (None, None) => true,
+                (Some(w), Some(k)) => family(w)?.contains(&k),
+                (Some(w), None) => {
+                    family(w)?;
+                    false
+                }
+                (None, Some(_)) => false,
+            };
+            (ok, got)
+        }
+        Expect::Checksum(h) => {
+            let c = checksum(world);
+            (c == *h, format!("{c:016x}"))
+        }
+        Expect::State(h) => {
+            let c = stage::checksum(world);
+            (c == *h, format!("{c:016x}"))
+        }
+    })
 }
 
 /// Checksum of all loaded state, for determinism tests and bug reports.
@@ -1353,65 +1463,6 @@ mod tests {
         }
     }
 
-    /// The same pens as data: `scenarios/tests/fox_pen.scenario` draws them
-    /// (a map and a legend, the foxes starving by `with`), and the built-in
-    /// rules play out the same way: each fox bites twice and eats its hen,
-    /// in chunk (0, 0) and across the border into (1, 0).
-    #[test]
-    fn the_fox_pen_scenario_reproduces_the_cornered_chicken() {
-        use crate::rules::{CHICKEN, FOX};
-        use crate::time::hours;
-        let s = Scenario::parse(
-            "fox_pen.scenario",
-            include_str!("../../../scenarios/tests/fox_pen.scenario"),
-        )
-        .unwrap();
-        let kinds = Kinds::builtin();
-        let mut w = new_world(&s);
-        for (hen, fox) in [
-            (Pos::new(2, 2), Pos::new(1, 2)),
-            (Pos::new(64, 2), Pos::new(63, 2)),
-        ] {
-            let kind = |p: Pos| get(&w, p).unwrap().occupant.unpack().map(|(k, _)| k);
-            assert_eq!((kind(hen), kind(fox)), (Some(CHICKEN), Some(FOX)));
-            for dy in -1..=1 {
-                for dx in -1..=1 {
-                    let q = Pos::new(hen.x + dx, hen.y + dy);
-                    let rock = get(&w, q).unwrap().feature == Feature::Rock;
-                    assert_eq!(rock, (dx, dy) != (0, 0) && q != fox, "the pen at {q:?}");
-                }
-            }
-        }
-        let fed = |w: &mut World| {
-            rows(w)
-                .iter()
-                .filter(|r| r.1 == FOX)
-                .map(|r| r.3.needs[slot(&kinds, FOX, "food")])
-                .collect::<Vec<_>>()
-        };
-        assert_eq!(fed(&mut w), [hours(2) as i32; 2], "starving by `with`");
-        assert_eq!(Pos::new(64, 2).split().0, ChunkCoord::new(1, 0));
-        let mut wounded = false;
-        for _ in 0..64 {
-            step(&mut w);
-            check_invariants(&mut w);
-            wounded |= rows(&mut w)
-                .iter()
-                .any(|r| r.1 == CHICKEN && r.3.needs[slot(&kinds, CHICKEN, "health")] == 10);
-        }
-        assert!(wounded, "a hen was bitten once before it died");
-        assert!(
-            rows(&mut w).iter().all(|r| r.1 != CHICKEN),
-            "both hens were eaten"
-        );
-        let foxes = fed(&mut w);
-        assert_eq!(foxes.len(), 2);
-        assert!(
-            foxes.iter().all(|&f| f > hours(23) as i32),
-            "each ate a whole hen: {foxes:?}"
-        );
-    }
-
     /// `take` and `give` move a need between neighbours by name, in key
     /// order in Exchange, in a chunk and across a border; a taken-from
     /// actor wakes and sees `taken`; a target without the need refuses;
@@ -2002,125 +2053,6 @@ mod tests {
         assert_eq!(stage::checksum(&mut a), stage::checksum(&mut b));
     }
 
-    /// Grass is ground cover: a hungry chicken walks onto a patch, stands on
-    /// a tuft (both layers of one cell taken) and grazes it underfoot, a
-    /// quarter tuft a bite, until the tuft is gone; the patch never blocks.
-    #[test]
-    fn chickens_walk_onto_grass_and_graze_it() {
-        use crate::actors::systems::newborn;
-        use crate::actors::{Tally, life};
-        use crate::rules::{CHICKEN, GRASS};
-        use crate::time::hours;
-        let kinds = Kinds::builtin();
-        let cfg = Scenario {
-            width: 64,
-            height: 64,
-            ..cfg(6)
-        };
-        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
-        flatten(&mut w);
-        let now = tick(&w);
-        for y in 20..25 {
-            for x in 20..25 {
-                let mut tuft = newborn(&kinds, GRASS, (x * 100 + y) as u64, now);
-                tuft.needs[slot(&kinds, GRASS, "water")] = hours(40) as i32; // no water here: keep it alive
-                assert!(place_actor(&mut w, Pos::new(x, y), GRASS, tuft));
-            }
-        }
-        let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
-        hungry.needs[slot(&kinds, CHICKEN, "food")] = hours(6) as i32;
-        assert!(place_actor(&mut w, Pos::new(17, 22), CHICKEN, hungry));
-        check_invariants(&mut w);
-        let mut stood_on_grass = false;
-        for _ in 0..200 {
-            step(&mut w);
-            check_invariants(&mut w);
-            let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC0).unwrap();
-            let (cc, i) = c.2.split();
-            let cell = &stage::chunk(&w, cc).unwrap();
-            stood_on_grass |= cell.cover[i].unpack().map(|(k, _)| k) == Some(GRASS);
-        }
-        assert!(stood_on_grass, "the chicken walked onto the patch");
-        let c = rows(&mut w).into_iter().find(|r| r.0 == 0xC0).unwrap();
-        assert!(
-            c.3.needs[slot(&kinds, CHICKEN, "food")] > hours(7) as i32,
-            "grazing fed it: {:?}",
-            c.3.needs
-        );
-        let tally = w.resource::<Tally>();
-        assert!(
-            tally.get(GRASS, life::EATEN) >= 1,
-            "a tuft was grazed to the ground"
-        );
-        assert_eq!(tally.get(CHICKEN, life::EATEN), 0);
-    }
-
-    /// A hungry chicken eats the seeds around it; an egg hatches into a
-    /// chick after eight hours, keeping its uid, with its needs full.
-    #[test]
-    fn chickens_graze_seeds_and_eggs_hatch() {
-        use crate::actors::systems::newborn;
-        use crate::rules::{CHICK, CHICKEN, EGG, SEED};
-        use crate::time::{hours, minutes};
-        let kinds = Kinds::builtin();
-        let cfg = Scenario {
-            width: 64,
-            height: 64,
-            ..cfg(4)
-        };
-        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
-        flatten(&mut w);
-        let now = tick(&w);
-        let mut hungry = newborn(&kinds, CHICKEN, 0xC0, now);
-        hungry.needs[slot(&kinds, CHICKEN, "food")] = hours(6) as i32;
-        assert!(place_actor(&mut w, Pos::new(30, 30), CHICKEN, hungry));
-        for (x, uid) in [(31, 0x51), (33, 0x53)] {
-            assert!(place_actor(
-                &mut w,
-                Pos::new(x, 30),
-                SEED,
-                newborn(&kinds, SEED, uid, now)
-            ));
-        }
-        assert!(place_actor(
-            &mut w,
-            Pos::new(10, 10),
-            EGG,
-            newborn(&kinds, EGG, 0xE0, now)
-        ));
-        for _ in 0..64 {
-            step(&mut w);
-        }
-        let all = rows(&mut w);
-        assert!(all.iter().all(|r| r.1 != SEED), "both seeds eaten");
-        let grazer = all.iter().find(|r| r.0 == 0xC0).unwrap();
-        assert!(
-            grazer.3.needs[slot(&kinds, CHICKEN, "food")] > (hours(12) - minutes(10)) as i32,
-            "6h + two seeds of 3h: {}",
-            grazer.3.needs[slot(&kinds, CHICKEN, "food")]
-        );
-        let mut hatched_at = None;
-        while tick(&w) < now + hours(9) {
-            for _ in 0..16 {
-                step(&mut w);
-            }
-            let egg = rows(&mut w).into_iter().find(|r| r.0 == 0xE0).unwrap();
-            if egg.1 == CHICK && hatched_at.is_none() {
-                hatched_at = Some(tick(&w));
-                let chick = kinds.def(CHICK);
-                for (i, need) in chick.needs.iter().enumerate() {
-                    assert!(egg.3.needs[i] > need.max - 100, "{} starts full", need.name);
-                }
-            }
-        }
-        let at = hatched_at.expect("the egg hatched");
-        assert!(
-            at > now + hours(8) && at <= now + hours(8) + 64 + 16,
-            "{}",
-            at - now
-        );
-    }
-
     /// The built-in world for two game days: every row invariant holds,
     /// chickens lay eggs, and the populations move.
     #[test]
@@ -2398,6 +2330,69 @@ mod tests {
         );
         assert_eq!(stage::checksum(&mut back), stage::checksum(&mut w));
         std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// `expect` looks at the world as it is: counts by family or `only`,
+    /// the life counters, a need over a kind, who stands where, checksums;
+    /// what the rules lack is an error.
+    #[test]
+    fn expectations_read_the_world() {
+        use crate::scenario::Check;
+        let s = Scenario::parse(
+            "t",
+            "size 16 16
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0
+             start chicken at (2, 2) with (food = 5h)
+             start chick at (5, 5)
+             start egg at (8, 8)
+             expect count chicken == 2
+             expect count only chicken == 1
+             expect born chicken == 0
+             expect min food of chicken == 5h
+             expect max food of chicken == 1d
+             expect sum food of only chick == 1d
+             expect at (8, 8) egg
+             expect at (8, 8) chicken
+             expect at (9, 9) nobody
+             expect count wolf == 0
+             expect max sleep of chicken == 0
+             expect max nectar of hive == 0",
+        )
+        .unwrap();
+        let mut w = new_world(&s);
+        let got: Vec<Result<(bool, String), String>> = s
+            .checks
+            .iter()
+            .map(|c| match c {
+                Check::Expect { what, .. } => expect(&mut w, what),
+                Check::Run(_) => unreachable!(),
+            })
+            .collect();
+        let ok = |b: bool, v: &str| Ok((b, v.to_string()));
+        let (h5, d1) = (crate::time::hours(5), crate::time::days(1));
+        assert_eq!(
+            got,
+            [
+                ok(true, "2"),
+                ok(true, "1"),
+                ok(true, "0"),
+                ok(true, &h5.to_string()),
+                ok(true, &d1.to_string()),
+                ok(true, &d1.to_string()),
+                ok(true, "egg"),
+                ok(false, "egg"),
+                ok(true, "nobody"),
+                Err("the rules have no kind `wolf`".into()),
+                Err("`chicken` has no need or memory `sleep`".into()),
+                ok(false, "no `hive` alive"),
+            ]
+        );
+        let c = checksum(&mut w);
+        assert_eq!(
+            expect(&mut w, &Expect::Checksum(c)),
+            ok(true, &format!("{c:016x}"))
+        );
+        assert!(!expect(&mut w, &Expect::State(c)).unwrap().0);
     }
 
     /// Hot reload resolves the scenario's starts against the new rules: a

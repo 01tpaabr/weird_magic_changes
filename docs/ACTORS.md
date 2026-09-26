@@ -515,33 +515,33 @@ where it touches the tick.
    that costs nothing when off, `sim::explain`); hot reload on `r` with rows and saved chunks
    remapped by name (decision 34); `docs/RULES.md`, the author's reference. `drink` now needs
    adjacent water, like every other action on a neighbour.
-8. **Rules as input: traits, scenarios, packs, author tooling** (plan: `docs/PLAN-8.md`).
-   8a done: `trait`, `extends` with arguments, `inherit`, member subs, family matching and
-   `only`, pre-order numbering, the straight-line second-action error, unreachable-rule
-   warnings and inheritance notes in `wmc lint`, `via` in `wmc why`. The built-in rules
-   compile to the same programs and hash.
-   8b done: scenario files (`scenarios/*.scenario`: seed, size, terrain, `start K n / d`,
-   `start K at (x, y)`; `--scenario` on every command, `wmc lint --scenario`), `place`
-   removed from the rules, placement resolved per world (`Placement`), store v9 (starts,
-   kinds with slot names, scent names, pack and drawn-map fields for 8c and 8e), four scent
-   channels. The built-in world starts exactly as before.
-   8c done: rule packs (`--rules`, repeatable; `WMC_RULES` with `:`; `compile_packs`, one
-   namespace, pack order then file names), a save remembers its packs and reopens with them,
-   saves open by name under other packs (remapped as read, the directory rewritten at the
-   first write), `r` reloads the world's packs.
-   8e done: drawn maps in scenarios (`map { }` rows from (0, 0), `legend { }` one entry
-   per line: soil, water, rock or a kind; `outside` noise or a fill), kept in the save
-   header; `start ... with (need = v)` and legend `with` set a start's needs and memory
-   (a new start tag, still format 9). `scenarios/tests/fox_pen.scenario` is the cornered
-   chicken as data.
-   8f done: the author lint (`rules/compile/lint.rs`, run with every compile): tags no kind
-   carries, scents nobody marks, signals and looks nobody sets, eaten kinds without
-   health (targets followed back to their `nearest` or a sub's `pred` argument), radii
-   beyond sight, needs that empty before the first think, actions in `for each`, what is
-   never used; with a scenario, kinds that never appear. `wmc lint --strict` for CI;
-   warnings on stderr when a world opens, and on the status row after `r`.
-   8d done: the built-in kinds rewritten on a trait library (`rules/lib.rules`: `walker`,
-   `drinker`, `rooted`, `mortal` and the shared subs; `fowl` in animals.rules), `chick
-   extends chicken` (kinds renumbered in pre-order: chicken 0, chick 1, egg 2), `only
-   chicken` where the family would change behaviour, `spawn ... with` naming the memory it
-   sets (those slots come first in the spawned kind), and the vocabulary in RULES.md §16.
+8. **Rules as input: traits, scenarios, packs, author tooling.** The goal: other people write
+   kinds in their own files, and a world is only terrain and who starts where, both given as
+   input, so one engine can hold very different simulations.
+   8a: `trait`, `extends` with arguments, `inherit` (where the ancestors' rules run),
+   member subs, family matching and `only`, pre-order numbering, the straight-line
+   second-action error, unreachable-rule warnings and inheritance notes, `via` in `wmc why`
+   (decision 35). A predicate decodes once per search (`vm::Want`): -12% on the tick.
+   8b: scenario files (`scenarios/*.scenario`: seed, size, terrain, `start K n / d` in the
+   order written, `start K at (x, y)`), `place` out of the rules, placement resolved per
+   world, store v9, four scent channels (decision 36).
+   8c: rule packs (`--rules`, `WMC_RULES` with `:`, one namespace, pack order then file
+   names); a save remembers its packs, and opens by name under any rules that define its
+   kinds, remapped as read and rewritten whole at the first write (decisions 34, 37).
+   8d: the built-in kinds on a trait library (`rules/lib.rules`: `walker`, `drinker`,
+   `rooted`, `mortal`; `fowl` in animals.rules), `chick extends chicken`, `only chicken`
+   where the family would change behaviour (counting chicks in the fox's litter rule made
+   foxes boom), `spawn ... with (m = v)` naming the memory it sets, the vocabulary in
+   RULES.md §16.
+   8e: drawn maps in scenarios (`map`, `legend`, `outside`), kept in the save header; a
+   start's needs and memory set by name (`with (food = 2h)`).
+   8f: the author lint (`rules/compile/lint.rs`, every compile; `wmc lint --strict`): tags
+   no kind carries, scents nobody marks, signals and looks nobody sets, eaten kinds
+   without health, radii beyond sight, needs that empty before the first think, actions in
+   `for each`, what is never used, and with a scenario, kinds that never appear.
+   8g: scenario tests (`run`, `expect count|born|became|eaten|died|min|max|sum|at|checksum|
+   state`; `wmc scenario <file>`); `scenarios/tests/` runs in `make test` at 1 and 8
+   threads with equal checksums. The fox pen, grazing and hatching tests moved from Rust
+   to text; the Rust tests left are engine mechanics.
+   What a new author needs is in `docs/RULES.md`: the language, traits, scenarios and their
+   tests, packs, the vocabulary, the lint.

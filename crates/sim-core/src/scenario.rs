@@ -1,5 +1,5 @@
 //! Scenarios: the physical world a save is generated from, and where each
-//! kind starts (`docs/PLAN-8.md` §4, §7). Everything else a world needs is
+//! kind starts (`docs/RULES.md` §14, decision 36). Everything else a world needs is
 //! its rules. A scenario is a small text file:
 //!
 //! ```text
@@ -21,6 +21,8 @@
 //!   F fox with (food = 2h)
 //! }
 //! outside soil                                  # beyond the map: noise (the default), soil, rock, water
+//! run 2d                                        # a test: step, then check what happened
+//! expect count chicken >= 10
 //! ```
 //!
 //! A scenario names kinds; resolved against a rule set it becomes a
@@ -103,6 +105,221 @@ impl fmt::Display for Start {
     }
 }
 
+/// A comparison in an `expect`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Op {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl Op {
+    fn parse(w: &str) -> Option<Op> {
+        Some(match w {
+            "==" => Op::Eq,
+            "!=" => Op::Ne,
+            "<" => Op::Lt,
+            "<=" => Op::Le,
+            ">" => Op::Gt,
+            ">=" => Op::Ge,
+            _ => return None,
+        })
+    }
+
+    /// Does `a OP b` hold?
+    pub fn holds(self, a: i64, b: i64) -> bool {
+        match self {
+            Op::Eq => a == b,
+            Op::Ne => a != b,
+            Op::Lt => a < b,
+            Op::Le => a <= b,
+            Op::Gt => a > b,
+            Op::Ge => a >= b,
+        }
+    }
+}
+
+/// Which actors an `expect` looks at: a kind's family, or `only` it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Who {
+    pub kind: String,
+    pub only: bool,
+}
+
+/// How `min|max|sum` folds a need or memory over a kind's actors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Agg {
+    Min,
+    Max,
+    Sum,
+}
+
+/// What an `expect` checks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Expect {
+    /// `count [only] K OP N`: actors alive now.
+    Count {
+        who: Who,
+        op: Op,
+        n: i64,
+    },
+    /// `born|became|eaten|died [only] K OP N`: the life counters so far
+    /// (`counter` is an `actors::life` index).
+    Tally {
+        counter: usize,
+        who: Who,
+        op: Op,
+        n: i64,
+    },
+    /// `min|max|sum NAME of [only] K OP V`: a need or memory over every
+    /// actor of the kind.
+    Value {
+        agg: Agg,
+        name: String,
+        who: Who,
+        op: Op,
+        v: i64,
+    },
+    /// `at (X, Y) [only] K` or `nobody`: the standing actor there, else the
+    /// cover.
+    At {
+        x: i32,
+        y: i32,
+        who: Option<Who>,
+    },
+    /// `checksum HEX`: the world with the rules hash; `state HEX`: without.
+    Checksum(u64),
+    State(u64),
+}
+
+/// A scenario test's statements, in the order written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Check {
+    /// `run T`: step T ticks.
+    Run(u64),
+    /// `expect ...`, with its line and text for the report.
+    Expect {
+        line: u32,
+        text: String,
+        what: Expect,
+    },
+}
+
+/// `[only] K` at `words[i..]`: who, and the next index.
+fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
+    let who = |kind: &str, only| Who {
+        kind: kind.to_string(),
+        only,
+    };
+    match *words.get(i)? {
+        "only" => {
+            let k = words.get(i + 1).filter(|w| is_name(w))?;
+            Some((who(k, true), i + 2))
+        }
+        k if is_name(k) => Some((who(k, false), i + 1)),
+        _ => None,
+    }
+}
+
+/// The words after `expect`.
+fn expectation(rest: &str) -> Result<Expect, String> {
+    const FORMS: &str = "expected `expect count|born|became|eaten|died [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    // `OP V` ending the line at `words[i..]`.
+    let op_value = |i: usize| -> Result<(Op, i64), String> {
+        match words[i.min(words.len())..] {
+            [op, v] => Ok((
+                Op::parse(op).ok_or_else(|| format!("`{op}` is not ==, !=, <, <=, > or >="))?,
+                value(v).map(i64::from).ok_or_else(|| {
+                    format!("`{v}` is not a number or a time (12, 90min, 2h, 1d)")
+                })?,
+            )),
+            _ => Err(FORMS.into()),
+        }
+    };
+    let counter = |w: &str| match w {
+        "born" => Some(crate::actors::life::BORN),
+        "became" => Some(crate::actors::life::BECAME),
+        "eaten" => Some(crate::actors::life::EATEN),
+        "died" => Some(crate::actors::life::DIED),
+        _ => None,
+    };
+    let agg = |w: &str| match w {
+        "min" => Some(Agg::Min),
+        "max" => Some(Agg::Max),
+        "sum" => Some(Agg::Sum),
+        _ => None,
+    };
+    let first = *words.first().ok_or(FORMS)?;
+    if first == "count" {
+        let (who, i) = who_at(&words, 1).ok_or(FORMS)?;
+        let (op, n) = op_value(i)?;
+        return Ok(Expect::Count { who, op, n });
+    }
+    if let Some(counter) = counter(first) {
+        let (who, i) = who_at(&words, 1).ok_or(FORMS)?;
+        let (op, n) = op_value(i)?;
+        return Ok(Expect::Tally {
+            counter,
+            who,
+            op,
+            n,
+        });
+    }
+    if let Some(agg) = agg(first) {
+        let name = words.get(1).filter(|w| is_name(w)).ok_or(FORMS)?;
+        if words.get(2) != Some(&"of") {
+            return Err(FORMS.into());
+        }
+        let (who, i) = who_at(&words, 3).ok_or(FORMS)?;
+        let (op, v) = op_value(i)?;
+        return Ok(Expect::Value {
+            agg,
+            name: name.to_string(),
+            who,
+            op,
+            v,
+        });
+    }
+    if first == "at" {
+        let tail = rest.trim_start().strip_prefix("at").unwrap_or("").trim();
+        let close = tail.find(')').ok_or(FORMS)?;
+        let nums: Vec<&str> = tail[..close]
+            .trim_start_matches('(')
+            .split(',')
+            .map(str::trim)
+            .collect();
+        let (Ok(x), Ok(y)) = (
+            nums.first().copied().unwrap_or("").parse::<i32>(),
+            nums.get(1).copied().unwrap_or("").parse::<i32>(),
+        ) else {
+            return Err(FORMS.into());
+        };
+        let after: Vec<&str> = tail[close + 1..].split_whitespace().collect();
+        let who = match after[..] {
+            ["nobody"] => None,
+            _ => match who_at(&after, 0) {
+                Some((who, i)) if i == after.len() => Some(who),
+                _ => return Err(FORMS.into()),
+            },
+        };
+        return Ok(Expect::At { x, y, who });
+    }
+    if let ("checksum" | "state", [hex]) = (first, &words[1..]) {
+        let v =
+            u64::from_str_radix(hex, 16).map_err(|_| format!("`{hex}` is not a hex checksum"))?;
+        return Ok(if first == "checksum" {
+            Expect::Checksum(v)
+        } else {
+            Expect::State(v)
+        });
+    }
+    Err(FORMS.into())
+}
+
 /// A world's description: seed, initial size, terrain, starts, and maybe a
 /// drawn map.
 #[derive(Debug, Clone, PartialEq)]
@@ -115,6 +332,9 @@ pub struct Scenario {
     pub starts: Vec<Start>,
     /// Drawn cells from `(0, 0)`, and what lies beyond them.
     pub map: Option<DrawnMap>,
+    /// A scenario test's `run` and `expect` lines (`wmc scenario`); nothing
+    /// a world keeps.
+    pub checks: Vec<Check>,
 }
 
 /// A scenario that does not parse: where and why.
@@ -143,6 +363,7 @@ impl Default for Scenario {
             params: GenParams::default(),
             starts: Vec::new(),
             map: None,
+            checks: Vec::new(),
         }
     }
 }
@@ -557,11 +778,32 @@ impl Scenario {
                     };
                     outside = Some((line_no, fill));
                 }
+                "run" => {
+                    let t = match rest[..] {
+                        [t] => value(t).filter(|&t| t > 0),
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        err(
+                            line_no,
+                            "expected `run T`: ticks, or a time (90min, 2h, 1d)".into(),
+                        )
+                    })?;
+                    s.checks.push(Check::Run(t as u64));
+                }
+                "expect" => {
+                    let what = expectation(&rest.join(" ")).map_err(|m| err(line_no, m))?;
+                    s.checks.push(Check::Expect {
+                        line: line_no,
+                        text: line.to_string(),
+                        what,
+                    });
+                }
                 other => {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (seed, size, terrain, start, map, legend, outside)"
+                            "unknown statement `{other}` (seed, size, terrain, start, map, legend, outside, run, expect)"
                         ),
                     ));
                 }
@@ -602,12 +844,12 @@ impl Scenario {
         }
         let (w, h) = (width as u32, height as u32);
         if let Some(at) = size_line
-            && (s.width, s.height) != (w, h)
+            && (s.width < w || s.height < h)
         {
             return Err(err(
                 at,
                 format!(
-                    "`size {} {}` does not match the map, which is {w} x {h} (leave `size` out)",
+                    "`size {} {}` is smaller than the map, which is {w} x {h} (leave `size` out)",
                     s.width, s.height
                 ),
             ));
@@ -638,7 +880,9 @@ impl Scenario {
                 }
             }
         }
-        (s.width, s.height) = (w, h);
+        if size_line.is_none() {
+            (s.width, s.height) = (w, h);
+        }
         s.map = Some(DrawnMap {
             width: w,
             height: h,
@@ -926,6 +1170,102 @@ mod tests {
         assert_eq!(Scenario::parse("e", "").unwrap(), Scenario::default());
     }
 
+    /// A scenario test's lines, every form, in the order written.
+    #[test]
+    fn run_and_expect_lines_parse_in_order() {
+        let s = Scenario::parse(
+            "t",
+            "run 2d
+             expect count chicken == 0
+             expect eaten only chick >= 2      # the tally
+             run 90
+             expect max food of fox > 23h
+             expect at (77, -3) hive
+             expect at (1, 2) nobody
+             expect checksum 8e1fd4fd7f84a868
+             expect state 00ff",
+        )
+        .unwrap();
+        let who = |kind: &str, only| Who {
+            kind: kind.into(),
+            only,
+        };
+        let whats: Vec<&Expect> = s
+            .checks
+            .iter()
+            .filter_map(|c| match c {
+                Check::Expect { what, .. } => Some(what),
+                Check::Run(_) => None,
+            })
+            .collect();
+        assert_eq!(s.checks[0], Check::Run(crate::time::days(2)));
+        assert_eq!(s.checks[3], Check::Run(90));
+        assert_eq!(
+            whats,
+            [
+                &Expect::Count {
+                    who: who("chicken", false),
+                    op: Op::Eq,
+                    n: 0
+                },
+                &Expect::Tally {
+                    counter: crate::actors::life::EATEN,
+                    who: who("chick", true),
+                    op: Op::Ge,
+                    n: 2
+                },
+                &Expect::Value {
+                    agg: Agg::Max,
+                    name: "food".into(),
+                    who: who("fox", false),
+                    op: Op::Gt,
+                    v: crate::time::hours(23) as i64
+                },
+                &Expect::At {
+                    x: 77,
+                    y: -3,
+                    who: Some(who("hive", false))
+                },
+                &Expect::At {
+                    x: 1,
+                    y: 2,
+                    who: None
+                },
+                &Expect::Checksum(0x8e1f_d4fd_7f84_a868),
+                &Expect::State(0xff),
+            ]
+        );
+        match &s.checks[2] {
+            Check::Expect { line, text, .. } => {
+                assert_eq!((*line, text.as_str()), (3, "expect eaten only chick >= 2"));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(Op::Le.holds(3, 3) && !Op::Lt.holds(3, 3) && Op::Ne.holds(1, 2));
+        for (text, want) in [
+            ("run", "expected `run T`"),
+            ("run 0", "expected `run T`"),
+            ("expect", "expected `expect count"),
+            ("expect count chicken", "expected `expect count"),
+            (
+                "expect count chicken = 3",
+                "`=` is not ==, !=, <, <=, > or >=",
+            ),
+            (
+                "expect count chicken == lots",
+                "`lots` is not a number or a time",
+            ),
+            ("expect max food chicken > 1", "expected `expect count"),
+            ("expect at 3 chicken", "expected `expect count"),
+            ("expect at (1, 2) hen fox", "expected `expect count"),
+            ("expect checksum zz", "`zz` is not a hex checksum"),
+            ("expect nothing", "expected `expect count"),
+        ] {
+            let e = Scenario::parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+    }
+
     #[test]
     fn scenario_errors_name_the_line_and_the_problem() {
         for (text, want) in [
@@ -1049,8 +1389,8 @@ legend {
                 "t:2: `x` at (1, 0) is not in the legend",
             ),
             (
-                format!("size 5 5\nmap {{\n..\n}}\n{legend}"),
-                "t:1: `size 5 5` does not match the map, which is 2 x 1",
+                format!("size 1 1\nmap {{\n..\n}}\n{legend}"),
+                "t:1: `size 1 1` is smaller than the map, which is 2 x 1",
             ),
             ("map {\n..\n}\n".to_string(), "t:1: a map needs a legend"),
             (legend.to_string(), "t:1: a legend without a map"),
@@ -1221,7 +1561,7 @@ legend {
         let from = doc.find("## 14. Scenarios").unwrap();
         let to = doc.find("## 15. Packs").unwrap();
         let blocks: Vec<&str> = doc[from..to].split("```").skip(1).step_by(2).collect();
-        assert_eq!(blocks.len(), 2);
+        assert_eq!(blocks.len(), 3);
         for text in blocks {
             let s = Scenario::parse("RULES.md", text).unwrap_or_else(|e| panic!("{e}"));
             Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain())

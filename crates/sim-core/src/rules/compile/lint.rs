@@ -1,4 +1,4 @@
-//! The author lint (`docs/PLAN-8.md` §8, `docs/RULES.md` "Debugging"):
+//! The author lint (`docs/RULES.md` "Debugging"):
 //! structural checks over the parsed rules and the compiled kind table.
 //! Each points at a likely mistake without refusing the rule set. None
 //! names the built-in content; `health`, `water` and `food` are the needs

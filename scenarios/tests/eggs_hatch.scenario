@@ -1,0 +1,21 @@
+# A hungry hen eats the seeds beside her; an egg hatches into a chick after
+# eight hours.
+seed 4
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0   # flat soil everywhere
+start chicken at (30, 30) with (food = 6h)
+start seed at (31, 30)
+start seed at (33, 30)
+start egg at (10, 10)
+
+run 64
+expect count seed == 0                  # both eaten
+expect eaten seed == 2
+expect max food of chicken > 710min     # 6h and two seeds of 3h, less what 64 ticks took
+run 7h
+expect count egg == 1                   # not yet: an egg hatches past eight hours
+expect count only chick == 0
+run 2h
+expect count egg == 0
+expect became chick == 1
+expect count only chick == 1
