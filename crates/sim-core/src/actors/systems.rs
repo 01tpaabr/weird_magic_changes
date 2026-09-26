@@ -270,32 +270,6 @@ pub fn due(tick: u64, row: &ActorPub, cadence: u64) -> bool {
     row.flags & flags::WAKE != 0 || tick.wrapping_add(u64::from(row.stagger)) & (cadence - 1) == 0
 }
 
-/// The 3x3 halo around `c`, from the read-only queries of the Think phase.
-fn halo_of<'a>(
-    stage: &Stage,
-    cells: &'a Query<&ChunkCells>,
-    pubs: &'a Query<&ChunkActors>,
-    kinds: &'a Kinds,
-    c: ChunkCoord,
-) -> Halo<'a> {
-    let (tags, family_end) = (&kinds.tag_bits[..], &kinds.family_end[..]);
-    let mut chunks = [None; 9];
-    for (i, slot) in chunks.iter_mut().enumerate() {
-        let (ox, oy) = ((i % 3) as i32 - 1, (i / 3) as i32 - 1);
-        let Some(e) = stage.entity(ChunkCoord::new(c.x + ox, c.y + oy)) else {
-            continue;
-        };
-        if let (Ok(cells), Ok(pubs)) = (cells.get(e), pubs.get(e)) {
-            *slot = Some((cells, pubs));
-        }
-    }
-    Halo {
-        chunks,
-        tags,
-        family_end,
-    }
-}
-
 // ---- Think ------------------------------------------------------------------------------
 
 pub fn think(
@@ -331,7 +305,12 @@ pub fn think(
                 if !due(tick, row, kind.cadence()) {
                     continue;
                 }
-                let halo = halo.get_or_insert_with(|| halo_of(stage, cells, pubs, kinds, *coord));
+                let halo = halo.get_or_insert_with(|| {
+                    Halo::around(*coord, kinds, |c| {
+                        let e = stage.entity(c)?;
+                        Some((cells.get(e).ok()?, pubs.get(e).ok()?))
+                    })
+                });
                 let mind = &mut minds.rows[slot];
                 let (intent, _) = think_one::<false>(
                     kinds,

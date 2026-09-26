@@ -18,11 +18,11 @@
 use crate::actors::{ActorMind, ActorPub, ChunkActors, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use crate::stage::{
-    ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, Feature, Ground, Pos, SCENT_CHANNELS,
+    ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos, SCENT_CHANNELS,
 };
 use crate::time::{Clock, daylight};
 
-use super::KindDef;
+use super::{KindDef, Kinds};
 
 /// One instruction: opcode, a small operand, a 16-bit immediate. Larger
 /// constants go through the constant pool (`PushK`).
@@ -536,6 +536,26 @@ pub struct Halo<'a> {
 }
 
 impl<'a> Halo<'a> {
+    /// The halo around chunk `c`, each chunk from `get` (`None`: not
+    /// loaded). The Think phase and `sim::explain` both build it here.
+    #[inline]
+    pub fn around(
+        c: ChunkCoord,
+        kinds: &'a Kinds,
+        get: impl Fn(ChunkCoord) -> Option<(&'a ChunkCells, &'a ChunkActors)>,
+    ) -> Halo<'a> {
+        let mut chunks = [None; 9];
+        for (i, slot) in chunks.iter_mut().enumerate() {
+            let (ox, oy) = ((i % 3) as i32 - 1, (i / 3) as i32 - 1);
+            *slot = get(ChunkCoord::new(c.x + ox, c.y + oy));
+        }
+        Halo {
+            chunks,
+            tags: &kinds.tag_bits,
+            family_end: &kinds.family_end,
+        }
+    }
+
     /// The chunk and local index at `(lx + dx, ly + dy)` from the centre
     /// chunk's local cell `(lx, ly)`. `None` if it falls outside the halo
     /// (however far: a rule computes `dx`/`dy`) or the chunk there is not

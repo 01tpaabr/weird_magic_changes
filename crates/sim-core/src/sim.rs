@@ -545,20 +545,10 @@ pub fn explain_slot(world: &World, cc: ChunkCoord, slot: u16) -> Option<systems:
     let e = stage.entity(cc)?;
     let row = *world.get::<ChunkActors>(e)?.rows.get(usize::from(slot))?;
     let mind = *world.get::<ChunkMinds>(e)?.rows.get(usize::from(slot))?;
-    let mut chunks = [None; 9];
-    for (k, s) in chunks.iter_mut().enumerate() {
-        let (ox, oy) = ((k % 3) as i32 - 1, (k / 3) as i32 - 1);
-        if let Some(e) = stage.entity(ChunkCoord::new(cc.x + ox, cc.y + oy))
-            && let (Some(c), Some(a)) = (world.get::<ChunkCells>(e), world.get::<ChunkActors>(e))
-        {
-            *s = Some((c, a));
-        }
-    }
-    let halo = crate::rules::vm::Halo {
-        chunks,
-        tags: &kinds.tag_bits,
-        family_end: &kinds.family_end,
-    };
+    let halo = crate::rules::vm::Halo::around(cc, kinds, |c| {
+        let e = stage.entity(c)?;
+        Some((world.get::<ChunkCells>(e)?, world.get::<ChunkActors>(e)?))
+    });
     Some(systems::explain(
         kinds, tick, seed, &halo, cc, slot, &row, &mind,
     ))
