@@ -59,8 +59,8 @@ struct Names {
 /// One pass over one item's or sub's code, filling [`Names`].
 struct Seen<'n> {
     names: &'n mut Names,
+    /// As messages name it: "`ant`", "sub `helper`".
     who: String,
-    here: Pos,
 }
 
 impl Seen<'_> {
@@ -190,10 +190,8 @@ impl Seen<'_> {
                 self.target(t);
                 self.pred(p);
             }
-            Expr::SignalOf(t) => {
-                self.names
-                    .signal_reads
-                    .push((self.here.clone(), self.who.clone()));
+            Expr::SignalOf(t, at) => {
+                self.names.signal_reads.push((at.clone(), self.who.clone()));
                 self.target(t);
             }
             Expr::Scent(ch, t, at) => {
@@ -314,8 +312,7 @@ impl<'a> Gen<'a> {
             // expressions too.
             let mut seen = Seen {
                 names: &mut names,
-                who: it.name.clone(),
-                here: it.at.clone(),
+                who: format!("`{}`", it.name),
             };
             for p in &it.parents {
                 for a in &p.args {
@@ -340,8 +337,7 @@ impl<'a> Gen<'a> {
                 if let RuleItem::When(rule) = r {
                     let mut seen = Seen {
                         names: &mut names,
-                        who: it.name.clone(),
-                        here: rule.at.clone(),
+                        who: format!("`{}`", it.name),
                     };
                     seen.cond(&rule.cond);
                     seen.stmts(&rule.body);
@@ -350,8 +346,7 @@ impl<'a> Gen<'a> {
             for m in &it.members {
                 let mut seen = Seen {
                     names: &mut names,
-                    who: it.name.clone(),
-                    here: m.at.clone(),
+                    who: format!("`{}`", it.name),
                 };
                 seen.stmts(&m.body);
             }
@@ -359,16 +354,14 @@ impl<'a> Gen<'a> {
         for s in self.subs {
             let mut seen = Seen {
                 names: &mut names,
-                who: s.name.clone(),
-                here: s.at.clone(),
+                who: format!("sub `{}`", s.name),
             };
             seen.stmts(&s.body);
         }
         for c in self.consts {
             let mut seen = Seen {
                 names: &mut names,
-                who: c.name.clone(),
-                here: c.at.clone(),
+                who: format!("const `{}`", c.name),
             };
             seen.expr(&c.value);
         }
@@ -466,7 +459,7 @@ impl<'a> Gen<'a> {
                 out.warn(
                     at,
                     format!(
-                        "`{who}` looks for `{tag}`, but no kind in this rule set is tagged `{tag}`"
+                        "{who} looks for `{tag}`, but no kind in this rule set is tagged `{tag}`"
                     ),
                 );
             }
@@ -499,22 +492,20 @@ impl<'a> Gen<'a> {
             if !(k..end).any(|f| sets_look_by_kind[usize::from(f)]) {
                 out.warn(
                     at,
-                    format!(
-                        "`{who}` looks for `{kind}:{look}`, but no rule of `{kind}` sets `look`"
-                    ),
+                    format!("{who} looks for `{kind}:{look}`, but no rule of `{kind}` sets `look`"),
                 );
             }
         }
         for (ch, at, who) in &names.smells {
             if !names.marks.contains(ch) {
-                out.warn(at, format!("`{who}` smells `{ch}`, but nothing marks it"));
+                out.warn(at, format!("{who} smells `{ch}`, but nothing marks it"));
             }
         }
         if !names.signal_set {
             for (at, who) in &names.signal_reads {
                 out.warn(
                     at,
-                    format!("`{who}` reads `signal_of`, but no rule sets `signal`"),
+                    format!("{who} reads `signal_of`, but no rule sets `signal`"),
                 );
             }
         }
@@ -886,7 +877,7 @@ impl<'a> Gen<'a> {
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
-            | Expr::SignalOf(t) => self.walk_target(kinds, w, t, out),
+            | Expr::SignalOf(t, _) => self.walk_target(kinds, w, t, out),
             Expr::Scent(_, t, _) => {
                 if let Some(t) = t {
                     self.walk_target(kinds, w, t, out);
@@ -1100,6 +1091,22 @@ mod tests {
         assert!(
             got.iter()
                 .any(|d| d.contains("`q` looks for `chick:3`, but no rule of `chick` sets `look`")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_file_sub_points_at_the_read() {
+        let got = lint(
+            "sub helper(t: target) {
+               return
+                 signal_of(t)
+             }
+             kind p { sight 4 mem n  when nearest p within 3 as t => { n = helper(t) } }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d == "3: sub `helper` reads `signal_of`, but no rule sets `signal`"),
             "{got:?}"
         );
     }

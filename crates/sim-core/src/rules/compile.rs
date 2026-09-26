@@ -573,7 +573,7 @@ enum Expr {
     IsAt(Target, Pred),
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
-    SignalOf(Target),
+    SignalOf(Target, Pos),
     /// `scent(ch)` at the actor's cell, `scent(ch, t)` at a target.
     Scent(String, Option<Target>, Pos),
     /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
@@ -1671,7 +1671,7 @@ impl Parser<'_> {
                         Ok(if n == "look_of" {
                             Expr::LookOf(t)
                         } else {
-                            Expr::SignalOf(t)
+                            Expr::SignalOf(t, at)
                         })
                     }
                     "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" => {
@@ -3600,7 +3600,7 @@ impl<'a> Gen<'a> {
                 }
                 self.asm.scent_at(c);
             }
-            Expr::SignalOf(t) => {
+            Expr::SignalOf(t, _) => {
                 self.target(t)?;
                 self.asm.op(OpCode::SignalAt);
             }
