@@ -133,14 +133,17 @@ fn main() -> anyhow::Result<()> {
             scenario_test(f, &packs)
         }
         Some("lint") => {
-            let mut packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
-            if packs.is_empty()
-                && let Some(f) = file
-            {
-                packs = scenario(Some(f))?.packs;
-            }
+            // As for a new world: these, else `WMC_RULES`, else the scenario's.
+            let cli: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            let from_scenario = match file {
+                Some(f) => scenario(Some(f))?.packs,
+                None => Vec::new(),
+            };
+            let packs = app::packs_or(&cli, &from_scenario);
             if packs.is_empty() {
-                bail!("lint needs a rules directory or file, or a scenario that names its rules");
+                bail!(
+                    "lint needs a rules directory or file (or WMC_RULES), or a scenario that names its rules"
+                );
             }
             lint(&packs, file, strict)
         }
@@ -478,9 +481,12 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
 /// check that its starts fit the rules too, which kinds never appear, and
 /// which starts lie outside the initial region.
 /// `strict`: any warning fails (for CI).
-fn lint(packs: &[String], scenario_file: Option<&str>, strict: bool) -> anyhow::Result<()> {
-    let paths: Vec<std::path::PathBuf> = packs.iter().map(Into::into).collect();
-    let kinds = app::compile(&paths)?;
+fn lint(
+    packs: &[std::path::PathBuf],
+    scenario_file: Option<&str>,
+    strict: bool,
+) -> anyhow::Result<()> {
+    let kinds = app::compile(packs)?;
     let scenario = match scenario_file {
         Some(f) => {
             let s = scenario(Some(f))?;

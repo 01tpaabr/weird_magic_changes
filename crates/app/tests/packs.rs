@@ -107,3 +107,31 @@ fn a_save_remembers_its_packs_and_opens_by_name() {
     assert_eq!(store.read_meta().unwrap().unwrap(), saved);
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// `lint` honours `WMC_RULES` like every command, and a pack on its command
+/// line wins over it as `--rules` does.
+#[test]
+fn lint_takes_its_packs_from_wmc_rules() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lint = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env("WMC_RULES", repo.join("packs/life"))
+            .args(args)
+            .output()
+            .expect("wmc runs");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        (out.status.success(), stdout, out.stderr)
+    };
+    let (ok, out, err) = lint(&["lint"]);
+    assert!(ok, "{}", String::from_utf8_lossy(&err));
+    assert!(
+        out.contains("kind dead") && out.contains("kind alive"),
+        "{out}"
+    );
+    let rules = repo.join("rules");
+    let (ok, out, _) = lint(&["lint", rules.to_str().unwrap()]);
+    assert!(
+        ok && out.contains("kind chicken") && !out.contains("kind dead"),
+        "{out}"
+    );
+}
