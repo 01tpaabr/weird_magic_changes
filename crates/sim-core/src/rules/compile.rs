@@ -1551,16 +1551,24 @@ impl Parser<'_> {
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
             // starting a comparison; parse as a cond and let expr-level
-            // parentheses handle the rest.
+            // parentheses handle the rest. If both fail, the error that got
+            // further into the tokens is the real one.
             let save = (self.at, self.deepest);
             self.bump();
-            if let Ok(c) = self.nested(Self::cond)
-                && self.eat_sym(")")
-                && !self.starts_binop()
-            {
-                return Ok(c);
+            let mut cond_err = None;
+            match self.nested(Self::cond) {
+                Ok(c) if self.eat_sym(")") && !self.starts_binop() => return Ok(c),
+                Ok(_) => {}
+                Err(e) => cond_err = Some((self.at, e)),
             }
             (self.at, self.deepest) = save;
+            return match self.expr() {
+                Ok(e) => Ok(Cond::Expr(e)),
+                Err(e) => match cond_err {
+                    Some((at, ce)) if at > self.at => Err(ce),
+                    _ => Err(e),
+                },
+            };
         }
         Ok(Cond::Expr(self.expr()?))
     }
@@ -4380,6 +4388,23 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    #[test]
+    fn a_parenthesised_condition_reports_its_own_error() {
+        // The error is the one that got further: the condition's, not the
+        // expression re-parse's at `nearest`.
+        assert_eq!(
+            compile_err("kind a { when (nearest a within 3 as) => idle }"),
+            "t.rules:1:37: expected a binding name, found `)`"
+        );
+        // An expression error still wins when it is the further one.
+        assert!(
+            compile_err("kind a { when (1 + 2) > => idle }").contains("expected an expression")
+        );
+        compile_ok("kind a { glyph \"a\" when (x > 1) => idle }");
+        compile_ok("kind a { glyph \"a\" when (x + 1) > 2 => idle }");
+        compile_ok("kind a { glyph \"a\" when (x > 1 and y > 1) or x > 2 => idle }");
     }
 
     #[test]
