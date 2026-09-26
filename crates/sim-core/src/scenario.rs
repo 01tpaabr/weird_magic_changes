@@ -946,6 +946,17 @@ impl Scenario {
                 ),
             ));
         }
+        if size_line.is_none()
+            && u64::from(w.div_ceil(64)) * u64::from(h.div_ceil(64)) > MAX_SIZE_CHUNKS
+        {
+            return Err(err(
+                map_line,
+                format!(
+                    "a map covers at most {MAX_SIZE_CHUNKS} chunks (4096 x 4096 cells); \
+                     this one is {w} x {h}"
+                ),
+            ));
+        }
         let mut cells = Vec::with_capacity(width * height);
         for (y, (at, row)) in drawn.iter().enumerate() {
             for (x, b) in row.bytes().enumerate() {
@@ -1623,6 +1634,10 @@ legend {
             (
                 format!("outside soil\noutside water\nmap {{\n..\n}}\n{legend}"),
                 "t:2: a second `outside` (first at line 1)",
+            ),
+            (
+                format!("map {{\n{}\n}}\n{legend}", ".".repeat(64 * 4096 + 1)),
+                "t:1: a map covers at most 4096 chunks",
             ),
         ] {
             let e = Scenario::parse("t", &text).unwrap_err().to_string();
