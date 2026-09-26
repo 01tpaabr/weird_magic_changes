@@ -67,9 +67,10 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
 }
 
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
-/// files, in sorted file-name order) or a single file; packs go in the
-/// order given, with one namespace across all of them (a name declared in
-/// two packs is an error naming both). A pack given twice loads once.
+/// files, in sorted file-name order; a directory with none is an error) or
+/// a single file; packs go in the order given, with one namespace across
+/// all of them (a name declared in two packs is an error naming both). A
+/// pack given twice loads once.
 /// With more than one pack, a directory's file is named `pack/file.rules`
 /// in positions, `pack` being the directory's own name; two files that
 /// would share a name take parent directories until they don't. The
@@ -95,6 +96,9 @@ pub fn compile_packs(
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|x| x == "rules"))
                 .collect();
+            if v.is_empty() {
+                return Err(format!("{}: holds no .rules files", pack.display()).into());
+            }
             v.sort();
             let k = if full_paths.len() > 1 { 2 } else { 1 };
             files.extend(v.into_iter().map(|p| (p, k)));
@@ -5518,6 +5522,17 @@ mod tests {
             err.starts_with("c.rules:1:6: kind `ant` declared twice (first at a.rules:1)"),
             "{err}"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_directory_with_no_rules_files_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("wmc-empty-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("life")).unwrap();
+        std::fs::write(dir.join("notes.txt"), "kind ignored { }").unwrap();
+        let err = compile_packs(&[&dir]).unwrap_err().to_string();
+        assert_eq!(err, format!("{}: holds no .rules files", dir.display()));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

@@ -452,8 +452,9 @@ they use `scenarios/default.scenario`, which starts the built-in kinds.
 
 ## 15. Packs
 
-A **pack** is a directory of `*.rules` files, or one file. A world's rules are one or more
-packs compiled together, in the order given, files sorted by name inside each. Every kind,
+A **pack** is a directory of `*.rules` files (one with none is an error), or one file. A
+world's rules are one or more packs compiled together, in the order given, files sorted by
+name inside each. Every kind,
 trait, file sub, const, tag and scent name is global across all of them: a kind in one pack
 can extend a kind or trait of another, call its subs and use its constants, and a name
 declared twice, in any two files, is an error naming both. A sub declared inside a kind or
