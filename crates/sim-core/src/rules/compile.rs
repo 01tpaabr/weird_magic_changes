@@ -1084,9 +1084,16 @@ impl Parser<'_> {
                     }
                 }
             } else if self.eat_kw("tags") {
+                // The list ends where the next thing in the body starts
+                // (`food` is not reserved but starts a declaration).
                 while let Tok::Name(n) = self.peek().clone() {
-                    if is_reserved(&n) {
+                    if DECL_WORDS.contains(&n.as_str())
+                        || ["when", "inherit", "state", "sub"].contains(&n.as_str())
+                    {
                         break;
+                    }
+                    if is_reserved(&n) {
+                        return Err(self.err(format!("`{n}` is a reserved word, not a tag")));
                     }
                     self.bump();
                     d.tags.push(n);
@@ -4340,6 +4347,22 @@ mod tests {
         assert_eq!(b.mems, vec!["p", "q"]);
         assert_eq!(b.entry, 1); // kind a's program is one Halt
         assert_eq!(k.code[0].code, OpCode::Halt);
+    }
+
+    #[test]
+    fn a_tags_list_ends_at_the_next_declaration() {
+        // `food` is not a keyword, but it starts a declaration: not a tag.
+        let k = compile_ok("trait t(f) { tags meat food f }\nkind k extends t(3h) { glyph \"k\" }");
+        let d = k.defs.iter().find(|d| d.name == "k").unwrap();
+        assert_eq!((d.tags, d.food), (1, hours(3) as i32));
+        let k = compile_ok("kind a { glyph \"a\" tags plant\n food 3h }");
+        assert_eq!((k.defs[0].tags, k.defs[0].food), (1, hours(3) as i32));
+        compile_ok("kind a { tags plant when true => idle }");
+        compile_ok("kind a { tags plant sub f() { idle } state S { when true => f() } }");
+        assert_eq!(
+            compile_err("kind a { tags plant x }"),
+            "t.rules:1:21: `x` is a reserved word, not a tag"
+        );
     }
 
     #[test]
