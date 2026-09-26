@@ -1004,6 +1004,10 @@ impl Parser<'_> {
                 "declarations come first, before subs and rules".to_string()
             } else if self.is_kw("sub") {
                 "member subs come before the rules".to_string()
+            } else if !states.is_empty() && (self.is_kw("when") || self.is_kw("inherit")) {
+                "reflex rules (`when`, `inherit`) come before the states".to_string()
+            } else if !states.is_empty() {
+                format!("expected `state` or `}}`, found {}", self.describe())
             } else {
                 format!(
                     "expected `when`, `inherit`, `state` or `}}`, found {}",
@@ -4169,6 +4173,16 @@ mod tests {
         assert!(
             compile_err("kind a { when 1 => idle\n glyph \"x\" }")
                 .contains("declarations come first")
+        );
+        assert_eq!(
+            compile_err(
+                "kind a { glyph \"a\"\n state S { when true => idle }\n when true => idle }"
+            ),
+            "t.rules:3:2: reflex rules (`when`, `inherit`) come before the states"
+        );
+        assert!(
+            compile_err("kind a { state S { when true => idle } 7 }")
+                .contains("expected `state` or `}`, found number 7")
         );
         assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
         // At the end of the file the error names the end, not the token before it.
