@@ -32,11 +32,11 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::resource::Resource;
 
-use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds};
+use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, Start};
 use crate::stage::worldgen::GenParams;
-use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
+use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS};
 use crate::time::TICKS_PER_DAY;
 
 pub const FORMAT_VERSION: u32 = 9;
@@ -171,6 +171,10 @@ impl Store {
         let mut r = Reader::new(&bytes, WORLD_MAGIC)?;
         let seed = r.u64()?;
         let tick = r.u64()?;
+        // Room for a world's lifetime of `+ 1`s and cadence offsets.
+        if tick > u64::MAX / 2 {
+            return Err(bad(format!("tick {tick}")));
+        }
         let ticks_per_day = r.u64()?;
         if ticks_per_day != TICKS_PER_DAY {
             return Err(bad(format!(
@@ -249,15 +253,31 @@ impl Store {
         let n = r.count(u32::from(u16::MAX), "kinds")?;
         let mut kinds = Vec::with_capacity(n);
         for _ in 0..n {
-            kinds.push(SavedKind {
+            let k = SavedKind {
                 name: r.str()?,
                 cover: r.u8()? != 0,
                 needs: r.strs()?,
                 mems: r.strs()?,
                 states: r.strs()?,
-            });
+            };
+            // Rows hold this many slots: `reload::Plan` indexes them.
+            if k.needs.len() > NEED_SLOTS || k.mems.len() > MEM_SLOTS {
+                return Err(bad(format!(
+                    "kind `{}`: {} needs, {} mems, this build holds {NEED_SLOTS}, {MEM_SLOTS}",
+                    k.name,
+                    k.needs.len(),
+                    k.mems.len()
+                )));
+            }
+            kinds.push(k);
         }
         let scents = r.strs()?;
+        if scents.len() > SCENT_CHANNELS {
+            return Err(bad(format!(
+                "{} scent channels, this build holds {SCENT_CHANNELS}",
+                scents.len()
+            )));
+        }
         let packs = r.strs()?;
         let rules_hash = r.u64()?;
         r.finish()?;
@@ -725,6 +745,57 @@ mod tests {
             .unwrap();
             let err = s.read_meta().unwrap_err().to_string();
             assert!(err.contains(&format!("share {num} / {den}")), "{err}");
+        }
+        // Slot names past this build's slot arrays, and a tick at the end
+        // of time, are refused; the arrays full are fine.
+        let slot = |n: usize| (0..n).map(|i| format!("s{i}")).collect::<Vec<_>>();
+        let kind = |needs: usize, mems: usize| SavedKind {
+            name: "seed".into(),
+            cover: false,
+            needs: slot(needs),
+            mems: slot(mems),
+            states: Vec::new(),
+        };
+        let full = WorldMeta {
+            kinds: vec![kind(NEED_SLOTS, MEM_SLOTS)],
+            scents: slot(SCENT_CHANNELS),
+            ..m.clone()
+        };
+        s.write_meta(&full).unwrap();
+        assert_eq!(s.read_meta().unwrap(), Some(full.clone()));
+        for (over, want) in [
+            (
+                WorldMeta {
+                    scents: slot(SCENT_CHANNELS + 1),
+                    ..full.clone()
+                },
+                "scent channels",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(NEED_SLOTS + 1, 0)],
+                    ..full.clone()
+                },
+                "needs",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(0, MEM_SLOTS + 1)],
+                    ..full.clone()
+                },
+                "mems",
+            ),
+            (
+                WorldMeta {
+                    tick: u64::MAX,
+                    ..full.clone()
+                },
+                "tick",
+            ),
+        ] {
+            s.write_meta(&over).unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
         }
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
