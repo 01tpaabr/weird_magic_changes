@@ -525,6 +525,8 @@ impl Scenario {
         let mut rows: Option<(u32, Vec<(u32, String)>)> = None;
         let mut legend: Option<(u32, Vec<(u8, Legend, u32)>)> = None;
         let mut outside: Option<(u32, Option<u8>)> = None;
+        // A byte-order mark is no part of the first statement.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut lines = text.lines().enumerate();
         while let Some((n, raw)) = lines.next() {
             let line_no = n as u32 + 1;
@@ -1437,6 +1439,12 @@ mod tests {
         // Different terrain fields on several lines add up.
         let t = Scenario::parse("t", "terrain water_level 0.1\nterrain rock_on_soil 0").unwrap();
         assert_eq!((t.params.water_level, t.params.rock_on_soil), (0.1, 0.0));
+    }
+
+    /// A byte-order mark (some editors write one) is not part of line 1.
+    #[test]
+    fn a_leading_bom_is_skipped() {
+        assert_eq!(Scenario::parse("t", "\u{feff}seed 3\n").unwrap().seed, 3);
     }
 
     /// A time too large for ticks is no value, not an overflow (a dev
