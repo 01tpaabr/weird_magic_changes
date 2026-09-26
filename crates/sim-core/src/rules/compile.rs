@@ -836,12 +836,12 @@ impl Parser<'_> {
     }
 
     fn int(&mut self, what: &str) -> Result<i32> {
-        match self.bump() {
-            Tok::Int(v) => Ok(v),
-            _ => {
-                self.at -= 1;
-                Err(self.err(format!("expected {what}, found {}", self.describe())))
+        match *self.peek() {
+            Tok::Int(v) => {
+                self.bump();
+                Ok(v)
             }
+            _ => Err(self.err(format!("expected {what}, found {}", self.describe()))),
         }
     }
 
@@ -1227,6 +1227,9 @@ impl Parser<'_> {
             self.expect_sym("{")?;
             let mut arms = Vec::new();
             while !self.is_sym("}") {
+                if *self.peek() == Tok::Eof {
+                    return Err(self.err_at(&at, "unclosed `choose`"));
+                }
                 let w = self.expr()?;
                 self.expect_sym(":")?;
                 let body = self.body()?;
@@ -1738,8 +1741,11 @@ impl Parser<'_> {
                     }
                 }
             }
-            _ => {
-                self.at -= 1;
+            t => {
+                // `bump` stays put at the end of the file.
+                if t != Tok::Eof {
+                    self.at -= 1;
+                }
                 Err(self.err(format!("expected an expression, found {}", self.describe())))
             }
         }
@@ -4165,6 +4171,19 @@ mod tests {
                 .contains("declarations come first")
         );
         assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
+        // At the end of the file the error names the end, not the token before it.
+        assert_eq!(
+            compile_err("kind a {\n need w max 5 decay"),
+            "t.rules:2:20: expected 0 (points) or 1 (per tick), found end of file"
+        );
+        assert_eq!(
+            compile_err("kind a {\n when food >"),
+            "t.rules:2:13: expected an expression, found end of file"
+        );
+        assert_eq!(
+            compile_err("kind a {\n when 1 => choose { 1: idle "),
+            "t.rules:2:12: unclosed `choose`"
+        );
         assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
         assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
         let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
