@@ -1071,6 +1071,20 @@ impl Parser<'_> {
         loop {
             let p = self.pos();
             let not_in_trait = |what: &str| format!("a trait has no {what}: only a kind does");
+            // A single-valued declaration is given once per body.
+            let given = [
+                ("glyph", d.glyph.is_some()),
+                ("color", d.color.is_some()),
+                ("cover", d.cover),
+                ("cadence", d.cadence.is_some()),
+                ("sight", d.sight.is_some()),
+                ("fuel", d.fuel.is_some()),
+                ("food", d.food.is_some()),
+                ("bite", d.bite.is_some()),
+            ];
+            if let Some((w, _)) = given.iter().find(|(w, set)| *set && self.is_kw(w)) {
+                return Err(self.err_at(&p, format!("`{w}` declared twice")));
+            }
             if self.eat_kw("glyph") {
                 if is_trait {
                     return Err(self.err_at(&p, not_in_trait("glyph")));
@@ -3802,6 +3816,8 @@ impl<'a> Gen<'a> {
         // same list: a second action, certain; refused here rather than
         // trapped at run time.
         let mut acted: Option<Option<u32>> = None;
+        // Likewise a second `next` in the list: the first one's line.
+        let mut chose: Option<u32> = None;
         for s in body {
             if let (Some(line), Some(at)) = (acted, action_at(s)) {
                 let earlier = line.map_or(String::new(), |l| format!(" at line {l}"));
@@ -3811,6 +3827,15 @@ impl<'a> Gen<'a> {
                         "a second action: the think already acted{earlier} (one action per think)"
                     ),
                 ));
+            }
+            if let Stmt::Next(_, at) = s {
+                if let Some(line) = chose {
+                    return Err(self.err(
+                        at,
+                        format!("a second `next`: the think already chose a state at line {line}"),
+                    ));
+                }
+                chose = Some(at.line);
             }
             self.stmt(s)?;
             if acted.is_none() && self.ends(s, true, 0) {
@@ -5207,6 +5232,38 @@ mod tests {
         compile_ok("kind a { when 1 => { if hour > 1 { idle }  move north } }");
         compile_ok("kind a { when 1 => { next S  move north } state S { } }");
         compile_ok("kind a { when 1 => { choose { 1: idle  0: look = 1 }  move north } }");
+    }
+
+    #[test]
+    fn a_declaration_or_a_next_given_twice_is_an_error() {
+        for (w, decl) in [
+            ("glyph", "glyph \"b\""),
+            ("color", "color \"#000000\""),
+            ("cover", "cover"),
+            ("cadence", "cadence 4"),
+            ("sight", "sight 8"),
+            ("fuel", "fuel 9"),
+            ("food", "food 1h"),
+            ("bite", "bite 2"),
+        ] {
+            let e = compile_err(&format!("kind a {{ {decl}\n {decl} }}"));
+            assert!(
+                e.starts_with("t.rules:2:2:") && e.contains(&format!("`{w}` declared twice")),
+                "{e}"
+            );
+        }
+        let e = compile_err(
+            "kind a {\n state A { when true => {\n next A\n next B } }\n state B { } }",
+        );
+        assert!(e.starts_with("t.rules:4:7:"), "{e}");
+        assert!(
+            e.contains("a second `next`: the think already chose a state at line 3"),
+            "{e}"
+        );
+        compile_ok("kind a { state A { when true => { next B  idle } } state B { } }");
+        compile_ok(
+            "kind a { state A { when true => { if x > 1 { next B }  next A } } state B { } }",
+        );
     }
 
     #[test]

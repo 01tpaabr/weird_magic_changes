@@ -69,7 +69,8 @@ transfers are settled afterwards, and the outcome is in `result` at the next thi
 
 ## 3. Declarations
 
-Declarations come first in a kind, then the reflex rules, then any `state` blocks.
+Declarations come first in a kind, then the reflex rules, then any `state` blocks. A body
+gives each declaration once; `tags`, `need` and `mem` may repeat, with different names.
 
 | declaration | default | meaning |
 |---|---|---|
@@ -131,7 +132,8 @@ kind bee {
 ```
 
 An actor starts in the first state. `next NAME` switches for the next think and ends this one
-like an action; it can be combined with one action (`{ next FORAGE  move toward f }`).
+like an action; it can be combined with one action (`{ next FORAGE  move toward f }`), and
+a second `next` in the same block is an error.
 `become` starts the new kind in its first state. `next` isn't allowed inside a sub.
 
 ## 6. Traits: sharing behaviour between kinds
