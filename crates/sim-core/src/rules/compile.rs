@@ -58,6 +58,8 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
             file: name,
             tokens,
             at: 0,
+            depth: 0,
+            deepest: 0,
         };
         p.file(&mut items)?;
     }
@@ -606,7 +608,16 @@ struct Parser<'a> {
     file: &'a str,
     tokens: Vec<Token>,
     at: usize,
+    /// How deep the tree being parsed is here, and the deepest level the
+    /// current operand reached: see [`Self::nested`] and [`Self::chained`].
+    depth: u32,
+    deepest: u32,
 }
+
+/// How deep one tree may be: a nesting and an operator in a chain are one
+/// level each (RULES §18). The parser, the code generator, lint and drop
+/// all recurse on the tree, so this is what keeps them on the stack.
+const MAX_DEPTH: u32 = 128;
 
 fn sense_named(name: &str) -> Option<Sense> {
     Some(match name {
@@ -833,6 +844,30 @@ impl Parser<'_> {
             Tok::Name(n) => Err(self.err(format!("`{n}` is a reserved word, not a {what}"))),
             _ => Err(self.err(format!("expected a {what}, found {}", self.describe()))),
         }
+    }
+
+    /// Parse with `f` one level deeper.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth == MAX_DEPTH {
+            return Err(self.err(format!("nested too deep (at most {MAX_DEPTH} levels)")));
+        }
+        self.depth += 1;
+        self.deepest = self.deepest.max(self.depth);
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
+    /// One more operator in a chain: `l op r` is a level above the deeper of
+    /// `l` (which reached `left`) and `r`, so `a + b + c` is two levels.
+    fn chained(&mut self, left: u32) -> Result<()> {
+        self.deepest = self.deepest.max(left) + 1;
+        if self.deepest > MAX_DEPTH {
+            return Err(self.err(format!(
+                "expression too long (at most {MAX_DEPTH} levels, an operator in a chain is one)"
+            )));
+        }
+        Ok(())
     }
 
     fn int(&mut self, what: &str) -> Result<i32> {
@@ -1169,7 +1204,7 @@ impl Parser<'_> {
         if self.is_sym("{") {
             self.block()
         } else {
-            Ok(vec![self.stmt()?])
+            Ok(vec![self.nested(Self::stmt)?])
         }
     }
 
@@ -1180,7 +1215,7 @@ impl Parser<'_> {
             if *self.peek() == Tok::Eof {
                 return Err(self.err("unclosed block"));
             }
-            stmts.push(self.stmt()?);
+            stmts.push(self.nested(Self::stmt)?);
             self.eat_sym(";");
         }
         self.expect_sym("}")?;
@@ -1194,7 +1229,7 @@ impl Parser<'_> {
             let then = self.block()?;
             let els = if self.eat_kw("else") {
                 if self.is_kw("if") {
-                    vec![self.stmt()?]
+                    vec![self.nested(Self::stmt)?]
                 } else {
                     self.block()?
                 }
@@ -1437,10 +1472,10 @@ impl Parser<'_> {
             return Ok(Target::Heading(Box::new(h)));
         }
         if self.eat_kw("toward") {
-            return Ok(Target::Toward(Box::new(self.target()?)));
+            return Ok(Target::Toward(Box::new(self.nested(Self::target)?)));
         }
         if self.eat_kw("away") {
-            return Ok(Target::Away(Box::new(self.target()?)));
+            return Ok(Target::Away(Box::new(self.nested(Self::target)?)));
         }
         if self.eat_kw("random") {
             self.expect_kw("free")?;
@@ -1467,26 +1502,34 @@ impl Parser<'_> {
 
     // cond := and_cond ("or" and_cond)*
     fn cond(&mut self) -> Result<Cond> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut c = self.and_cond()?;
         while self.eat_kw("or") {
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.and_cond()?;
+            self.chained(left)?;
             c = Cond::Or(Box::new(c), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
         Ok(c)
     }
 
     fn and_cond(&mut self) -> Result<Cond> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut c = self.not_cond()?;
         while self.eat_kw("and") {
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.not_cond()?;
+            self.chained(left)?;
             c = Cond::And(Box::new(c), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
         Ok(c)
     }
 
     fn not_cond(&mut self) -> Result<Cond> {
         if self.eat_kw("not") {
-            return Ok(Cond::Not(Box::new(self.not_cond()?)));
+            return Ok(Cond::Not(Box::new(self.nested(Self::not_cond)?)));
         }
         let at = self.pos();
         if self.eat_kw("nearest") {
@@ -1509,15 +1552,15 @@ impl Parser<'_> {
             // Either a parenthesised condition or a parenthesised expression
             // starting a comparison; parse as a cond and let expr-level
             // parentheses handle the rest.
-            let save = self.at;
+            let save = (self.at, self.deepest);
             self.bump();
-            if let Ok(c) = self.cond()
+            if let Ok(c) = self.nested(Self::cond)
                 && self.eat_sym(")")
                 && !self.starts_binop()
             {
                 return Ok(c);
             }
-            self.at = save;
+            (self.at, self.deepest) = save;
         }
         Ok(Cond::Expr(self.expr()?))
     }
@@ -1557,6 +1600,7 @@ impl Parser<'_> {
 
     // expr := cmp
     fn expr(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.additive()?;
         loop {
             let op = match self.peek() {
@@ -1566,51 +1610,65 @@ impl Parser<'_> {
                 Tok::Sym("!=") => OpCode::Ne,
                 Tok::Sym(">=") => OpCode::Ge,
                 Tok::Sym(">") => OpCode::Gt,
-                _ => return Ok(e),
+                _ => break,
             };
             self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.additive()?;
+            self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
     }
 
     fn additive(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.term()?;
         loop {
             let op = match self.peek() {
                 Tok::Sym("+") => OpCode::Add,
                 Tok::Sym("-") => OpCode::Sub,
-                _ => return Ok(e),
+                _ => break,
             };
             self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.term()?;
+            self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
     }
 
     fn term(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.unary()?;
         loop {
             let op = match self.peek() {
                 Tok::Sym("*") => OpCode::Mul,
                 Tok::Sym("/") => OpCode::Div,
                 Tok::Sym("%") => OpCode::Mod,
-                _ => return Ok(e),
+                _ => break,
             };
             self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.unary()?;
+            self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
     }
 
     fn unary(&mut self) -> Result<Expr> {
         if self.eat_sym("-") {
-            return Ok(match self.unary()? {
+            return Ok(match self.nested(Self::unary)? {
                 Expr::Int(v) => Expr::Int(v.wrapping_neg()),
                 e => Expr::Neg(Box::new(e)),
             });
         }
-        self.primary()
+        self.nested(Self::primary)
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -4274,6 +4332,41 @@ mod tests {
         assert_eq!(b.mems, vec!["p", "q"]);
         assert_eq!(b.entry, 1); // kind a's program is one Halt
         assert_eq!(k.code[0].code, OpCode::Halt);
+    }
+
+    #[test]
+    fn deep_nesting_and_long_chains_are_errors_not_stack_overflows() {
+        let rule = |e: String| format!("kind a {{ mem m\n when {e} > 0 => idle }}");
+        let deep = |text: String, want: &str| {
+            let e = compile_err(&text);
+            assert!(e.starts_with("t.rules:2:") && e.contains(want), "{e}");
+        };
+        deep(rule("(".repeat(5000)), "nested too deep");
+        deep(rule("-".repeat(20000) + "m"), "nested too deep");
+        deep(rule("not ".repeat(10000) + "m"), "nested too deep");
+        deep(rule("1 + ".repeat(70000) + "m"), "too long");
+        deep(rule("m > 0 and ".repeat(10000) + "m"), "too long");
+        // Parentheses that each hold a chain: the tree is as deep as the
+        // chains added up, so a chain's operators count as levels.
+        let mut e = "m".to_string();
+        for j in 0..100 {
+            e = format!("({e}{})", " + 1".repeat(j));
+        }
+        deep(rule(e), "too long");
+        deep(
+            format!("kind a {{\n when true => {}", "if true { ".repeat(1000)),
+            "nested too deep",
+        );
+        deep(
+            format!(
+                "kind a {{\n when true => move {}here }}",
+                "toward ".repeat(5000)
+            ),
+            "nested too deep",
+        );
+        // Real rules are nowhere near.
+        compile_ok(&rule("(".repeat(100) + "m" + &")".repeat(100)));
+        compile_ok(&rule("1 + ".repeat(100) + "m"));
     }
 
     #[test]
