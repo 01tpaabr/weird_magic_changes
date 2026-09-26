@@ -105,8 +105,12 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
   `world.wmc` carries the scenario (seed, initial size, terrain, starts, a drawn map from
   step 8e) and the kind table with each kind's need, mem and state names and the scent
-  channel names, so a save can be remapped by name to other rules (hot reload now, open in
-  step 8c).
+  channel names, and the rule packs it was played with. A save opens under any rules that
+  define its kinds (step 8c): `sim::open` matches kinds, needs, mems, states and scent
+  channels by name into a `reload::Plan`, every chunk read goes through it, and the first
+  write to the store (a save, an unload, a reload) first rewrites every chunk file and then
+  the header, so a directory never mixes two numberings. A kind the rules lack, or one that
+  moved between standing and ground cover, refuses the open.
 - **Cadence**: `cadence 2^k` per kind; an actor is due when `(tick + stagger) & (2^k - 1) ==
   0` or `WAKE` is set. Stagger is per actor (decision 28). Only `hurt` and being taken from
   set `WAKE`; the result of an action is read at the next scheduled think.
@@ -499,3 +503,7 @@ where it touches the tick.
    removed from the rules, placement resolved per world (`Placement`), store v9 (starts,
    kinds with slot names, scent names, pack and drawn-map fields for 8c and 8e), four scent
    channels. The built-in world starts exactly as before.
+   8c done: rule packs (`--rules`, repeatable; `WMC_RULES` with `:`; `compile_packs`, one
+   namespace, pack order then file names), a save remembers its packs and reopens with them,
+   saves open by name under other packs (remapped as read, the directory rewritten at the
+   first write), `r` reloads the world's packs.

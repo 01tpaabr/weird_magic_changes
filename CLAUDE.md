@@ -45,7 +45,7 @@ When two of these conflict, the higher one wins.
 ```
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), scenario, worldgen, store, rng, time, SimTick
-rules/              *.rules files: the kinds (all built into the binary; WMC_RULES=<dir> swaps them)
+rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
 scenarios/          *.scenario files: seed, size, terrain, where kinds start (default.scenario is built in)
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
 docs/PLAN-8.md      TEMPORARY: the step-8 build plan (traits, scenarios, packs, author tooling); delete when done
@@ -59,7 +59,8 @@ make            build (dev: opt-level 1, deps opt-level 3, Bevy dynamic_linking)
 make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=pause, .=step, [ ]=speed, p=save, r=reload rules, q=quit)
 make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (WMC_THREADS=1 must match)
                                    # show/play/run/why take --scenario <file> for a new world ([w h seed] override it)
-make run ARGS="lint rules/"        # compile a rules dir/file, print the kind table (--scenario f: check it fits); WMC_RULES=<dir> makes show/play/run use it
+                                   # and --rules <pack> (repeatable; a dir of *.rules or a file; else WMC_RULES=a:b, else the save's packs)
+make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table (--scenario f: check it fits)
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)

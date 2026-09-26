@@ -8,11 +8,12 @@ and the reasons behind it are in `ACTORS.md`.
 ```
 make run ARGS="lint rules/"                 # compile, print the kind table
 make run ARGS="why saves/dev 77 103"        # what the actor at (77, 103) is thinking
-WMC_RULES=my_rules make run ARGS="play saves/try --scenario my.scenario"
+make run ARGS="play saves/try --rules rules --rules my_pack --scenario my.scenario"
 ```
 
-In `wmc play`, `r` recompiles the rules directory (`WMC_RULES`, else `./rules`) and swaps it
-into the running world. Live actors keep their kind, needs, memory and state by name.
+In `wmc play`, `r` recompiles the world's packs (§15; with the built-in rules, `./rules`) and
+swaps them into the running world. Live actors keep their kind, needs, memory and state by
+name.
 
 ## 1. A first kind
 
@@ -381,7 +382,31 @@ without making one. `show`, `play`, `run` and `why` take `--scenario <file>` whe
 a world, and `[w h seed]` after the save directory override `size` and `seed`. Without one
 they use `scenarios/default.scenario`, which starts the built-in kinds.
 
-## 15. Debugging
+## 15. Packs
+
+A **pack** is a directory of `*.rules` files, or one file. A world's rules are one or more
+packs compiled together, in the order given, files sorted by name inside each. Every kind,
+trait, sub, const, tag and scent name is global across all of them: a kind in one pack can
+extend a kind or trait of another, call its subs and use its constants, and a name declared
+twice, in any two files, is an error naming both.
+
+```
+wmc play saves/zoo --rules rules --rules mods/wolves     # the built-in kinds, then a mod's
+WMC_RULES=rules:mods/wolves wmc run saves/zoo 1000       # the same, for any command
+wmc lint rules mods/wolves                               # check them together
+```
+
+A save remembers its packs, by absolute path, and reopens with them when neither `--rules`
+nor `WMC_RULES` names any. If one of them is gone it says so and uses the built-in rules.
+
+A save also opens under packs that number things differently, which is what adding a pack
+does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
+keeps its kind, cell, needs and memory. The first time the world writes to the save, the
+whole directory moves over to the new numbering, and from then on it belongs to the new set
+of packs. Rules that lack one of the save's kinds are refused with the list, and so is a kind
+that turned from standing into ground cover, or back.
+
+## 16. Debugging
 
 - **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
   points, each kind's parents and family. Errors come as `file:line:col: message`, and
@@ -398,10 +423,10 @@ they use `scenarios/default.scenario`, which starts the built-in kinds.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and
   changes nothing. Actors keep kind, needs, memory, state and scent by name. Rows of a kind
-  you removed are dropped. Saved chunks are rewritten to match, so reopen the save with the
-  same rules (`WMC_RULES=...`).
+  you removed are dropped: the one way to take a kind out of a save. Saved chunks are
+  rewritten to match.
 
-## 16. Limits
+## 17. Limits
 
 | | |
 |---|---|

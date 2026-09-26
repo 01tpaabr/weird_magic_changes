@@ -26,6 +26,7 @@ use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
+use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{Placement, Scenario, Start};
 use crate::stage::worldgen::{GenParams, generate_many};
@@ -119,6 +120,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<Tick>();
     world.init_resource::<CrossScratch>();
     world.init_resource::<crate::actors::Tally>();
+    world.init_resource::<PendingRemap>();
     world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
@@ -218,21 +220,38 @@ pub fn new_world_with(scenario: &Scenario, kinds: Kinds) -> Result<World, String
 
 /// Turn an installed world into the saved one in `store`. Nothing is loaded
 /// yet: call [`ensure_loaded`] around the camera. `Ok(false)` if the store
-/// holds no world; an error if it was written with a different kind table
-/// (its rows would mean something else here).
+/// holds no world.
+///
+/// The save's kinds are matched to the loaded rules **by name**. Rules
+/// that number kinds, needs, mems, states or scent channels differently
+/// (another set of packs, a newer version of one) are fine: every chunk
+/// read from the store is remapped as it loads ([`reload::Plan`]), and the
+/// first write to the store moves the whole directory over ([`settle`]).
+/// Opening never writes. A save with a kind the rules do not define, or
+/// one that moved between standing and ground cover, is refused.
 pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
     let Some(m) = store.read_meta()? else {
         return Ok(false);
     };
     let bad = |msg: String| io::Error::new(io::ErrorKind::InvalidData, msg);
     let kinds = world.resource::<Kinds>();
-    let ours: Vec<&str> = kinds.names().collect();
-    let theirs: Vec<&str> = m.kinds.iter().map(|k| k.name.as_str()).collect();
-    if theirs != ours {
+    let missing: Vec<&str> = m
+        .kinds
+        .iter()
+        .filter(|k| kinds.by_name(&k.name).is_none())
+        .map(|k| k.name.as_str())
+        .collect();
+    if !missing.is_empty() {
         return Err(bad(format!(
-            "save has kinds {theirs:?}, the rules have {ours:?}"
+            "the save has kinds the loaded rules do not define: {}",
+            missing.join(", ")
         )));
     }
+    let remap = if SavedKind::table(kinds) == m.kinds && kinds.scents == m.scents {
+        None
+    } else {
+        Some(Plan::between(&m.kinds, &m.scents, kinds).map_err(bad)?)
+    };
     let placement = Placement::resolve(&m.starts, kinds, m.seed, &m.params)
         .map_err(|e| bad(format!("the save's starts: {e}")))?;
     world.insert_resource(SimConfig {
@@ -244,7 +263,26 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         placement,
     });
     world.insert_resource(Tick(m.tick));
+    world.insert_resource(PendingRemap(remap));
     Ok(true)
+}
+
+/// Move a save opened under other rules over to the loaded ones (see
+/// [`open`]): every chunk file through the pending plan, then the world
+/// file with the loaded kind table. Runs before the first write to the
+/// store, so the directory never mixes two numberings. Returns the chunk
+/// files rewritten (none when nothing was pending).
+pub fn settle(world: &mut World, store: &Store) -> io::Result<usize> {
+    let Some(plan) = world
+        .get_resource::<PendingRemap>()
+        .and_then(|p| p.0.clone())
+    else {
+        return Ok(0);
+    };
+    let n = reload::rewrite_saved(store, &plan, &[], &mut []).map_err(io::Error::other)?;
+    store.write_meta(&meta(world))?;
+    world.resource_mut::<PendingRemap>().0 = None;
+    Ok(n)
 }
 
 /// A standalone world opened from `store`; `Ok(None)` if it holds no world.
@@ -274,7 +312,7 @@ pub fn meta(world: &World) -> WorldMeta {
         map: None,
         kinds: SavedKind::table(kinds),
         scents: kinds.scents.clone(),
-        packs: Vec::new(),
+        packs: kinds.debug.packs.clone(),
         rules_hash: kinds.hash,
     }
 }
@@ -300,6 +338,7 @@ fn write_chunk(
 
 /// Write metadata and every dirty chunk; dirty flags are cleared.
 pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
+    settle(world, store)?;
     store.write_meta(&meta(world))?;
     let now = tick(world);
     let active: Vec<(ChunkCoord, Entity)> = world.resource::<Stage>().active().to_vec();
@@ -365,6 +404,7 @@ pub fn ensure_loaded(
         let dirty = world.get::<ChunkMeta>(e).expect("chunk has meta").dirty;
         match (dirty, store) {
             (true, Some(st)) => {
+                settle(world, st)?;
                 write_chunk(world, st, c, e, now)?;
                 stats.written += 1;
             }
@@ -394,7 +434,12 @@ fn load_chunks(
     store: Option<&Store>,
 ) -> io::Result<(usize, usize)> {
     let now = tick(world);
-    let nkinds = world.resource::<Kinds>().len();
+    // A save opened under other rules: its rows are checked against the
+    // kind table they were written with, then remapped.
+    let remap = world.resource::<PendingRemap>().0.clone();
+    let nkinds = remap
+        .as_ref()
+        .map_or(world.resource::<Kinds>().len(), Plan::old_kinds);
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
     for &c in coords {
@@ -403,6 +448,10 @@ fn load_chunks(
                 saved.data.validate(nkinds).map_err(|e| {
                     io::Error::new(io::ErrorKind::InvalidData, format!("chunk {c:?}: {e}"))
                 })?;
+                if let Some(plan) = &remap {
+                    let d = &mut saved.data;
+                    plan.apply(&mut d.cells, &mut d.actors.rows, &mut d.minds.rows, &mut []);
+                }
                 let frozen = now.wrapping_sub(saved.last_ticked) as u32;
                 for m in &mut saved.data.minds.rows {
                     m.last_think = m.last_think.wrapping_add(frozen);
@@ -1712,7 +1761,7 @@ mod tests {
         let r = reload_rules(&mut w, Some(&store), b.clone()).unwrap();
         assert_eq!(r.added, vec!["d".to_string()]);
         assert_eq!(r.removed, vec![("b".to_string(), 1)]);
-        assert_eq!(r.rewritten, 1);
+        assert_eq!(r.rewritten, 2, "both chunk files, the loaded one's too");
         assert_eq!(r.hash, b.hash);
         check_invariants(&mut w);
         let all = rows(&mut w);
@@ -2230,6 +2279,183 @@ mod tests {
         let back = open_world_with(&store, b).unwrap().unwrap();
         assert_eq!(back.resource::<SimConfig>().starts, c.starts);
         std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    const HENS: &str = "kind hen {
+  glyph \"h\"  cadence 4
+  need food  max 1d vital
+  need water max 4h
+  mem steps, seen
+  when true => { steps += 1  mark trail 50  move random free }
+}
+kind fox   { glyph \"f\"  cadence 8  when true => idle }
+kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
+";
+
+    /// Pack A (hens, a fox, grass), and A after a pack B whose file sorts
+    /// first: `ant` takes kind 0 and `musk` scent channel 0, so every id
+    /// A's rows and scent layers hold moves.
+    fn packs_a_ab() -> (Kinds, Kinds) {
+        let b = "kind ant { glyph \"a\"  when true => mark musk 9 }";
+        let a = crate::rules::compile_files(&[("a/hens.rules", HENS)]).unwrap();
+        let ab =
+            crate::rules::compile_files(&[("b/ants.rules", b), ("a/hens.rules", HENS)]).unwrap();
+        (a, ab)
+    }
+
+    type Named = (u64, String, Pos, Vec<(String, i32)>, Vec<(String, i32)>);
+
+    /// Every loaded row by name: uid, kind, cell, needs and mems.
+    fn named(w: &mut World) -> Vec<Named> {
+        let kinds = w.resource::<Kinds>().clone();
+        rows(w)
+            .into_iter()
+            .map(|(uid, k, p, m)| {
+                let d = kinds.def(k);
+                let needs = d
+                    .needs
+                    .iter()
+                    .map(|n| n.name.clone())
+                    .zip(m.needs)
+                    .collect();
+                let mems = d.mems.iter().cloned().zip(m.mem).collect();
+                (uid, d.name.clone(), p, needs, mems)
+            })
+            .collect()
+    }
+
+    /// Every scented cell by channel name, in cell order.
+    fn scents_named(w: &mut World) -> Vec<(Pos, String, u8)> {
+        let names = w.resource::<Kinds>().scents.clone();
+        let mut v = Vec::new();
+        for (c, cells) in w.query::<(&ChunkCoord, &ChunkCells)>().iter(w) {
+            for (name, ch) in names.iter().zip(&cells.scent) {
+                for (i, &s) in ch.iter().enumerate().filter(|(_, s)| **s > 0) {
+                    v.push((c.cell(i), name.clone(), s));
+                }
+            }
+        }
+        v.sort_by_key(|(p, n, _)| (p.y, p.x, n.clone()));
+        v
+    }
+
+    /// Under pack A: two hens (one in chunk (1, 0)), a fox and a tuft, eight
+    /// ticks of marking trails, saved. Its rows and scent, by name.
+    fn saved_hens(store: &Store, a: &Kinds) -> (Vec<Named>, Vec<(Pos, String, u8)>) {
+        use crate::actors::systems::newborn;
+        let mut w = new_world_with(&cfg(3), a.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        for (x, kind, uid) in [(5, 0, 0x1), (6, 1, 0x2), (7, 2, 0x3), (70, 0, 0x4)] {
+            let m = newborn(a, kind, uid, now);
+            assert!(place_actor(&mut w, Pos::new(x, 5), kind, m));
+        }
+        for _ in 0..8 {
+            step(&mut w);
+        }
+        save(&mut w, store).unwrap();
+        (named(&mut w), scents_named(&mut w))
+    }
+
+    /// A save opens under a superset of its packs that numbers everything
+    /// differently: every actor keeps its cell, uid, needs and memory, every
+    /// trail its channel by name, and opening writes nothing.
+    #[test]
+    fn a_save_opens_with_a_superset_pack_and_keeps_every_actor() {
+        let (a, ab) = packs_a_ab();
+        assert_eq!(
+            (a.by_name("hen").unwrap().id, ab.by_name("hen").unwrap().id),
+            (0, 1)
+        );
+        assert_eq!(
+            (&a.scents[..], &ab.scents[..]),
+            (
+                &["trail".to_string()][..],
+                &["musk".to_string(), "trail".to_string()][..]
+            )
+        );
+        let store = tmp_store("superset");
+        let (rows_a, scent_a) = saved_hens(&store, &a);
+        assert_eq!(rows_a.len(), 4);
+        assert!(!scent_a.is_empty());
+        let mut w = open_world_with(&store, ab.clone()).unwrap().unwrap();
+        let around = LoadPolicy { load: 1, unload: 1 };
+        ensure_loaded(&mut w, Pos::new(64, 32), around, Some(&store)).unwrap();
+        check_invariants(&mut w);
+        assert_eq!(named(&mut w), rows_a);
+        assert_eq!(scents_named(&mut w), scent_a);
+        let meta = store.read_meta().unwrap().unwrap();
+        assert_eq!(meta.kinds, SavedKind::table(&a), "opening never writes");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_save_missing_a_kind_is_refused_with_the_list() {
+        let (a, _) = packs_a_ab();
+        let store = tmp_store("missing");
+        saved_hens(&store, &a);
+        let only_grass = crate::rules::compile("g.rules", "kind grass { cover }").unwrap();
+        let e = open_world_with(&store, only_grass).unwrap_err().to_string();
+        assert_eq!(
+            e,
+            "the save has kinds the loaded rules do not define: hen, fox"
+        );
+        let standing =
+            crate::rules::compile("g.rules", "kind hen { } kind fox { } kind grass { }").unwrap();
+        let e = open_world_with(&store, standing).unwrap_err().to_string();
+        assert!(
+            e.contains("`grass` moved between standing and ground cover"),
+            "{e}"
+        );
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// The first write to a save opened under other rules moves the whole
+    /// directory over, whether it is a `save` or an unload that writes: it
+    /// then reopens under the new rules with nothing left to remap, and no
+    /// longer under the old ones.
+    #[test]
+    fn a_remapped_save_is_rewritten_on_save_and_reopens_with_the_new_pack_only() {
+        let around = LoadPolicy { load: 1, unload: 1 };
+        for by_unload in [false, true] {
+            let (a, ab) = packs_a_ab();
+            let store = tmp_store(if by_unload {
+                "remap-unload"
+            } else {
+                "remap-save"
+            });
+            let (mut want, _) = saved_hens(&store, &a);
+            let mut w = open_world_with(&store, ab.clone()).unwrap().unwrap();
+            assert!(w.resource::<PendingRemap>().0.is_some());
+            ensure_loaded(&mut w, Pos::new(64, 32), around, Some(&store)).unwrap();
+            if by_unload {
+                for _ in 0..8 {
+                    step(&mut w); // the hens think: their chunks turn dirty
+                }
+                want = named(&mut w);
+                let s = ensure_loaded(&mut w, Pos::new(5000, 32), around, Some(&store)).unwrap();
+                assert!(s.written > 0);
+            } else {
+                save(&mut w, &store).unwrap();
+            }
+            assert!(w.resource::<PendingRemap>().0.is_none());
+            let meta = store.read_meta().unwrap().unwrap();
+            assert_eq!(
+                (meta.kinds, meta.scents),
+                (SavedKind::table(&ab), ab.scents.clone())
+            );
+            let mut back = open_world_with(&store, ab.clone()).unwrap().unwrap();
+            assert!(
+                back.resource::<PendingRemap>().0.is_none(),
+                "nothing left to remap"
+            );
+            ensure_loaded(&mut back, Pos::new(64, 32), around, Some(&store)).unwrap();
+            check_invariants(&mut back);
+            assert_eq!(named(&mut back), want, "by_unload: {by_unload}");
+            let e = open_world_with(&store, a).unwrap_err().to_string();
+            assert!(e.ends_with("do not define: ant"), "{e}");
+            std::fs::remove_dir_all(store.dir()).unwrap();
+        }
     }
 
     #[test]

@@ -20,7 +20,7 @@
 //! Keys: hold `w a s d` / arrows to glide (two keys = diagonal), Shift for
 //! x4 speed; `space` pauses/resumes the sim; `.` runs one tick and pauses;
 //! `[` / `]` slow down / speed up (1x .. 16x, max); `p` saves; `r` reloads the
-//! rules (`WMC_RULES`, else `./rules`), the status bar says what changed;
+//! rules (the world's packs, else `./rules`), the status bar says what changed;
 //! `+`/`-` zoom; `q` / `Esc` / close saves and quits.
 
 use std::time::{Duration, Instant};
@@ -63,8 +63,9 @@ pub const TICK_BUDGET: Duration = Duration::from_millis(10);
 const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | r reload rules | +/- zoom | q quit";
 
 /// Open the world in `dir`, else create it from `scenario` (read from
-/// `name`, for errors), and run the window until quit.
-pub fn run(dir: &str, scenario: &Scenario, name: &str) -> anyhow::Result<()> {
+/// `name`, for errors), under the rules of `packs` (`--rules` paths; see
+/// [`crate::rules_for`]), and run the window until quit.
+pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
     let mut app = App::new();
     let task_pool_options = par::threads_from_env()
@@ -90,7 +91,7 @@ pub fn run(dir: &str, scenario: &Scenario, name: &str) -> anyhow::Result<()> {
                 ..default()
             }),
     );
-    let kinds = crate::rules()?;
+    let kinds = crate::rules_for(&store, packs)?;
     let world = app.world_mut();
     sim::install_with(world, kinds);
     if !sim::open(world, &store).context("reading save")? {
@@ -475,19 +476,32 @@ fn stream_and_tick(world: &mut World) {
     }
 }
 
-/// `r`: recompile the rules directory and swap the rules in, rows and saved
-/// chunks remapped by name (`sim_core::reload`). Returns the line for the
-/// status bar: what changed, or why nothing did.
+/// `r`: recompile the packs the world runs (the built-in rules: `./rules`,
+/// when run from the repository) and swap them in, rows and saved chunks
+/// remapped by name (`sim_core::reload`). Returns the line for the status
+/// bar: what changed, or why nothing did.
 fn reload(world: &mut World) -> String {
-    let Some(dir) = crate::rules_dir() else {
-        return "reload: no rules directory (run from the repository, or set WMC_RULES)".into();
-    };
-    let kinds = match sim_core::rules::compile_dir(&dir) {
+    let mut packs: Vec<std::path::PathBuf> = world
+        .resource::<Kinds>()
+        .debug
+        .packs
+        .iter()
+        .map(Into::into)
+        .collect();
+    if packs.is_empty() {
+        let here = std::path::PathBuf::from("rules");
+        if !here.is_dir() {
+            return "reload: the built-in rules (run from the repository, or give --rules)".into();
+        }
+        packs.push(here);
+    }
+    let what = crate::shown(&packs);
+    let kinds = match crate::compile(&packs) {
         Ok(k) => k,
-        Err(e) => return format!("reload: {e}"),
+        Err(e) => return format!("reload: {e:#}"),
     };
     if kinds.hash == world.resource::<Kinds>().hash {
-        return format!("reload: {} unchanged", dir.display());
+        return format!("reload: {what} unchanged");
     }
     let r = world.resource_scope(|world, store: Mut<Store>| {
         sim_core::reload::reload_rules(world, Some(&store), kinds)
@@ -495,7 +509,7 @@ fn reload(world: &mut World) -> String {
     match r {
         Err(e) => format!("reload refused: {e}"),
         Ok(r) => {
-            let mut text = format!("reloaded {} (rules {:016x})", dir.display(), r.hash);
+            let mut text = format!("reloaded {what} (rules {:016x})", r.hash);
             if !r.added.is_empty() {
                 text.push_str(&format!(" | new {}", r.added.join(", ")));
             }

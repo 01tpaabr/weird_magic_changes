@@ -62,27 +62,55 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
     Gen::new(&items, files).generate()
 }
 
-/// Compile every `*.rules` file in `dir`, in sorted file-name order.
-pub fn compile_dir(
-    dir: &std::path::Path,
+/// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
+/// files, in sorted file-name order) or a single file; packs go in the
+/// order given, with one namespace across all of them (a name declared in
+/// two packs is an error naming both). With more than one pack, a file is
+/// named `pack/file.rules` in positions, `pack` being the directory's own
+/// name. The packs' absolute paths go in `debug.packs`: a save remembers
+/// them.
+pub fn compile_packs(
+    packs: &[&std::path::Path],
 ) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
-    let mut paths: Vec<_> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "rules"))
-        .collect();
-    paths.sort();
-    let mut texts = Vec::new();
-    for p in &paths {
-        let name = p
+    let mut texts: Vec<(String, String)> = Vec::new();
+    let mut abs = Vec::with_capacity(packs.len());
+    for pack in packs {
+        let full = std::fs::canonicalize(pack).map_err(|e| format!("{}: {e}", pack.display()))?;
+        let files = if full.is_dir() {
+            let mut v: Vec<_> = std::fs::read_dir(&full)
+                .map_err(|e| format!("{}: {e}", pack.display()))?
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().is_some_and(|x| x == "rules"))
+                .collect();
+            v.sort();
+            v
+        } else {
+            vec![full.clone()]
+        };
+        let dir_name = full
             .file_name()
-            .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-        texts.push((name, std::fs::read_to_string(p)?));
+            .filter(|_| full.is_dir() && packs.len() > 1)
+            .map(|n| n.to_string_lossy().into_owned());
+        for p in files {
+            let file = p
+                .file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+            let name = match &dir_name {
+                Some(d) => format!("{d}/{file}"),
+                None => file,
+            };
+            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+            texts.push((name, text));
+        }
+        abs.push(full.to_string_lossy().into_owned());
     }
     let files: Vec<(&str, &str)> = texts
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
         .collect();
-    Ok(compile_files(&files)?)
+    let mut kinds = compile_files(&files)?;
+    kinds.debug.packs = abs;
+    Ok(kinds)
 }
 
 // ---- lexer ----------------------------------------------------------------------------
@@ -1980,13 +2008,26 @@ impl<'a> Gen<'a> {
         }
         // Constants: global names, folded in declaration order (a constant
         // may use the ones above it).
-        for c in self.consts {
-            let taken = self.const_vals.iter().any(|(n, _)| *n == c.name)
-                || self.item_named(&c.name).is_some()
-                || self.tags.contains(&c.name)
-                || self.subs.iter().any(|s| s.name == c.name);
-            if taken {
-                return Err(self.err(&c.at, format!("`{}` is already a name", c.name)));
+        for (i, c) in self.consts.iter().enumerate() {
+            let first = |at: &Pos| format!(" (first at {}:{})", at.file, at.line);
+            let taken = if let Some(o) = self.consts[..i].iter().find(|o| o.name == c.name) {
+                Some(format!("const `{}` declared twice{}", c.name, first(&o.at)))
+            } else if let Some(o) = self.item_named(&c.name) {
+                let what = if items[o].is_trait { "trait" } else { "kind" };
+                Some(format!(
+                    "`{}` is already a {what}{}",
+                    c.name,
+                    first(&items[o].at)
+                ))
+            } else if let Some(o) = self.subs.iter().find(|s| s.name == c.name) {
+                Some(format!("`{}` is already a sub{}", c.name, first(&o.at)))
+            } else if self.tags.contains(&c.name) {
+                Some(format!("`{}` is already a tag", c.name))
+            } else {
+                None
+            };
+            if let Some(msg) = taken {
+                return Err(self.err(&c.at, msg));
             }
             let v = self.fold(&c.value)?;
             self.const_vals.push((c.name.clone(), v));
@@ -4303,7 +4344,10 @@ mod tests {
                 "kind a { mem m  when true => m = 1 }  const C = m",
                 "not a constant declared above",
             ),
-            ("const C = 1  const C = 2", "already a name"),
+            (
+                "const C = 1  const C = 2",
+                "const `C` declared twice (first at t.rules:1)",
+            ),
             (
                 "kind a { tags t  when nearest t:1 within 2 as v => idle }",
                 "`t` is not a kind",
@@ -4825,14 +4869,68 @@ mod tests {
         std::fs::write(dir.join("b.rules"), "kind bee { when 1 => become ant }").unwrap();
         std::fs::write(dir.join("a.rules"), "kind ant { }").unwrap();
         std::fs::write(dir.join("notes.txt"), "kind ignored { }").unwrap();
-        let k = compile_dir(&dir).unwrap();
+        let k = compile_packs(&[&dir]).unwrap();
         assert_eq!(k.names().collect::<Vec<_>>(), vec!["ant", "bee"]);
+        let abs = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(k.debug.packs, [abs.to_string_lossy()]);
         std::fs::write(dir.join("c.rules"), "kind ant { }").unwrap();
-        let err = compile_dir(&dir).unwrap_err().to_string();
+        let err = compile_packs(&[&dir]).unwrap_err().to_string();
         assert!(
             err.starts_with("c.rules:1:6: kind `ant` declared twice (first at a.rules:1)"),
             "{err}"
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Packs are file lists in the order given: a later pack's kinds come
+    /// after an earlier one's, may extend them and call their subs, and a
+    /// name declared in two packs is an error naming both files.
+    #[test]
+    fn packs_merge_in_order_and_duplicates_name_both_files() {
+        let root = std::env::temp_dir().join(format!("wmc-packs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let (base, wild) = (root.join("base"), root.join("wild"));
+        std::fs::create_dir_all(&base).unwrap();
+        std::fs::create_dir_all(&wild).unwrap();
+        std::fs::write(base.join("b.rules"), "kind hen { }\nsub rest() { idle }").unwrap();
+        std::fs::write(base.join("a.rules"), "trait walker { }").unwrap();
+        std::fs::write(
+            wild.join("a.rules"),
+            "kind wolf extends walker { when true => rest() }\nkind pup extends hen { }",
+        )
+        .unwrap();
+        let single = root.join("lone.rules");
+        std::fs::write(&single, "kind moth { }").unwrap();
+        let k = compile_packs(&[&base, &wild, &single]).unwrap();
+        // Pre-order: `pup` right after its parent `hen`.
+        assert_eq!(
+            k.names().collect::<Vec<_>>(),
+            ["hen", "pup", "wolf", "moth"]
+        );
+        assert_eq!(k.debug.packs.len(), 3);
+        assert_eq!(
+            k.debug.files,
+            ["base/a.rules", "base/b.rules", "wild/a.rules", "lone.rules"]
+        );
+        // Two packs, one name: both positions, pack-qualified.
+        std::fs::write(wild.join("b.rules"), "\nkind hen { }").unwrap();
+        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
+        assert!(
+            err.starts_with(
+                "wild/b.rules:2:6: kind `hen` declared twice (first at base/b.rules:1)"
+            ),
+            "{err}"
+        );
+        std::fs::write(wild.join("b.rules"), "const N = 1\nsub rest() { idle }").unwrap();
+        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
+        assert!(
+            err.contains("sub `rest` declared twice (first at base/b.rules:2)"),
+            "{err}"
+        );
+        let err = compile_packs(&[&base, &root.join("gone")])
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("gone"), "{err}");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

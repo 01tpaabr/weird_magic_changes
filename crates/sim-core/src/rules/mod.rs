@@ -19,7 +19,7 @@ use crate::rng::splitmix64;
 use vm::Op;
 
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
-pub use compile::{CompileError, compile, compile_dir, compile_files};
+pub use compile::{CompileError, compile, compile_files, compile_packs};
 
 /// One need of a kind: `need NAME max M [decay 0] [vital]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -144,6 +144,9 @@ pub struct DebugInfo {
     pub parents: Vec<Vec<String>>,
     /// Warnings and notes about the rule set, in kind order.
     pub diagnostics: Vec<Diagnostic>,
+    /// The packs these rules were compiled from, as absolute paths in
+    /// order (empty: the built-in rules). A save remembers them.
+    pub packs: Vec<String>,
 }
 
 /// Colour of a kind that declares none: the palette's old actor yellow.

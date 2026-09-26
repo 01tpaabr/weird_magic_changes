@@ -4,22 +4,26 @@
 //! wmc show [width] [height] [seed]             print the initial region once and exit
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
 //! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
-//! wmc lint <rules dir or file>                 compile a rule set and print what it holds
+//! wmc lint <pack>...                           compile rule packs and print what they hold
 //! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
 //!                                              step `ticks`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
 //! ```
-//! `--scenario <file>` (any command) makes a new world from that scenario
-//! (`scenarios/*.scenario`: seed, size, terrain, where kinds start) instead
-//! of the built-in `scenarios/default.scenario`; `[width height seed]`
-//! override its size and seed. `lint` checks the scenario against the rules.
-//! `WMC_RULES=<dir>` makes `show`, `play` and `run` use that directory's
-//! rules instead of the built-in ones.
+//! Any command takes `--rules <pack>` (repeatable) and `--scenario <file>`,
+//! anywhere after its name. A pack is a directory of `*.rules` files or one
+//! file; packs compile as one rule set, in the order given. Without
+//! `--rules`, `WMC_RULES=<pack>:<pack>...` names them, else a saved world
+//! uses the packs it was last played with, else the built-in rules.
+//! `--scenario` makes a new world from that scenario (seed, size, terrain,
+//! where kinds start) instead of the built-in `scenarios/default.scenario`;
+//! `[width height seed]` override its size and seed. `lint` checks the
+//! scenario against the rules.
 //! `play` and `run` open the world in `save_dir` if one exists (scenario and
-//! size/seed args are then ignored), otherwise create it. `run` never
-//! saves: run it twice, or with `WMC_THREADS=1` and again without, and the
-//! checksums must match. `show` and `run` are headless: a bare `bevy_ecs`
-//! world, no `App`.
+//! size/seed args are then ignored), otherwise create it. A save opens
+//! under rules that number its kinds differently (matched by name). `run`
+//! never saves: run it twice, or with `WMC_THREADS=1` and again without,
+//! and the checksums must match. `show` and `run` are headless: a bare
+//! `bevy_ecs` world, no `App`.
 use std::io::Write;
 use std::time::Instant;
 
@@ -36,24 +40,43 @@ use app::play;
 use app::render::ascii::render;
 use app::render::cells::Viewport;
 
+/// What the command line says about a world: its rule packs, and the
+/// scenario a new one is made from.
+struct Setup {
+    /// `--rules` paths, in order (none: `WMC_RULES`, a save's packs, or the
+    /// built-in rules).
+    packs: Vec<String>,
+    scenario: Scenario,
+    /// The scenario's file, for errors.
+    name: String,
+}
+
+/// Take every `--flag value` pair out of `args`.
+fn take_flag(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Vec<String>> {
+    let mut values = Vec::new();
+    while let Some(i) = args.iter().position(|a| a == flag) {
+        let v = args
+            .get(i + 1)
+            .with_context(|| format!("{flag} needs a value"))?
+            .clone();
+        args.drain(i..i + 2);
+        values.push(v);
+    }
+    Ok(values)
+}
+
 fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    // `--scenario <file>` may stand anywhere after the command.
-    let file = match args.iter().position(|a| a == "--scenario") {
-        Some(i) => {
-            let f = args.get(i + 1).context("--scenario needs a file")?.clone();
-            args.drain(i..i + 2);
-            Some(f)
-        }
-        None => None,
-    };
+    let packs = take_flag(&mut args, "--rules")?;
+    let file = take_flag(&mut args, "--scenario")?.pop();
     let file = file.as_deref();
+    let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
-        Some("show") => show(&config(file, &args[1..])?),
+        Some("show") => show(&setup(&args[1..])?),
         Some("play") => {
             let dir = args.get(1).context("play needs a save directory")?;
-            let (scenario, name) = config(file, &args[2..])?;
-            play::run(dir, &scenario, &name)
+            let s = setup(&args[2..])?;
+            play::run(dir, &s.scenario, &s.name, &s.packs)
         }
         Some("run") => {
             let dir = args.get(1).context("run needs a save directory")?;
@@ -62,7 +85,7 @@ fn main() -> anyhow::Result<()> {
                 .context("run needs a tick count")?
                 .parse()
                 .context("bad tick count")?;
-            run(dir, ticks, &config(file, &args[3..])?)
+            run(dir, ticks, &setup(&args[3..])?)
         }
         Some("why") => {
             let verbose = args.get(1).is_some_and(|a| a == "-v");
@@ -84,19 +107,21 @@ fn main() -> anyhow::Result<()> {
                 Pos::new(x, y),
                 ticks,
                 verbose,
-                &config(file, a.get(4..).unwrap_or(&[]))?,
+                &setup(a.get(4..).unwrap_or(&[]))?,
             )
         }
-        Some("lint") => lint(
-            args.get(1)
-                .context("lint needs a rules directory or file")?,
-            file,
-        ),
+        Some("lint") => {
+            let packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            if packs.is_empty() {
+                bail!("lint needs a rules directory or file");
+            }
+            lint(&packs, file)
+        }
         Some(other) => {
             bail!("unknown command {other:?}; use `show`, `play`, `run`, `why` or `lint`")
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint <rules>; any takes --scenario <file>"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint <pack>...; any takes --rules <pack> (repeatable) and --scenario <file>"
         ),
     }
 }
@@ -112,8 +137,9 @@ fn scenario(file: Option<&str>) -> anyhow::Result<Scenario> {
     }
 }
 
-/// The scenario for a new world, with `[width height seed]` over its own.
-fn config(file: Option<&str>, args: &[String]) -> anyhow::Result<(Scenario, String)> {
+/// The setup for a world: its packs, and its scenario with `[width height
+/// seed]` over the scenario's own.
+fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Result<Setup> {
     let mut s = scenario(file)?;
     let num = |i: usize, what: &str| -> anyhow::Result<Option<u64>> {
         args.get(i)
@@ -129,27 +155,32 @@ fn config(file: Option<&str>, args: &[String]) -> anyhow::Result<(Scenario, Stri
     if let Some(seed) = num(2, "seed")? {
         s.seed = seed;
     }
-    Ok((s, file.unwrap_or("default.scenario").to_string()))
+    Ok(Setup {
+        packs,
+        scenario: s,
+        name: file.unwrap_or("default.scenario").to_string(),
+    })
 }
 
-/// A new world of `scenario` under `kinds`; says which file does not fit.
-fn new_world(scenario: &(Scenario, String), kinds: Kinds) -> anyhow::Result<World> {
-    sim::new_world_with(&scenario.0, kinds).map_err(|e| {
-        let hint = if scenario.1 == "default.scenario" {
+/// A new world of the setup's scenario under `kinds`; says which file does
+/// not fit.
+fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
+    sim::new_world_with(&setup.scenario, kinds).map_err(|e| {
+        let hint = if setup.name == "default.scenario" {
             " (these rules need their own scenario: --scenario <file>)"
         } else {
             ""
         };
-        anyhow::anyhow!("{}: {e}{hint}", scenario.1)
+        anyhow::anyhow!("{}: {e}{hint}", setup.name)
     })
 }
 
-fn show(cfg: &(Scenario, String)) -> anyhow::Result<()> {
-    let kinds = app::rules()?;
+fn show(setup: &Setup) -> anyhow::Result<()> {
+    let kinds = app::compile(&app::packs(&setup.packs))?;
     let t0 = Instant::now();
-    let mut world = new_world(cfg, kinds)?;
+    let mut world = new_world(setup, kinds)?;
     let gen_time = t0.elapsed();
-    let cfg = &cfg.0;
+    let cfg = &setup.scenario;
 
     let (mut water, mut rocks, mut actors, mut n) = (0usize, 0usize, 0usize, 0usize);
     for (c, a) in world.query::<(&ChunkCells, &ChunkActors)>().iter(&world) {
@@ -193,10 +224,10 @@ fn show(cfg: &(Scenario, String)) -> anyhow::Result<()> {
 }
 
 /// The world saved in `dir` with the chunks around its camera, else a new
-/// one of `cfg` (its initial region loaded). Never saved by the caller.
-fn open_or_new(dir: &str, cfg: &(Scenario, String)) -> anyhow::Result<World> {
+/// one of the setup (its initial region loaded). Never saved by the caller.
+fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let kinds = app::rules()?;
+    let kinds = app::rules_for(&store, &setup.packs)?;
     Ok(
         match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
             Some(mut w) => {
@@ -205,15 +236,15 @@ fn open_or_new(dir: &str, cfg: &(Scenario, String)) -> anyhow::Result<World> {
                     .context("streaming chunks")?;
                 w
             }
-            None => new_world(cfg, kinds)?,
+            None => new_world(setup, kinds)?,
         },
     )
 }
 
 /// `wmc why`: step `ticks`, then wait (up to a day) for the actor at `p`
 /// to be due, explain that think, and run it to show where it went.
-fn why(dir: &str, p: Pos, ticks: u64, ops: bool, cfg: &(Scenario, String)) -> anyhow::Result<()> {
-    let mut world = open_or_new(dir, cfg)?;
+fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Result<()> {
+    let mut world = open_or_new(dir, setup)?;
     for _ in 0..ticks {
         sim::step(&mut world);
     }
@@ -253,8 +284,8 @@ fn why(dir: &str, p: Pos, ticks: u64, ops: bool, cfg: &(Scenario, String)) -> an
 
 /// Headless: the determinism check and the tick benchmark. A saved world
 /// loads the chunks around its camera; a new one keeps its initial region.
-fn run(dir: &str, ticks: u64, cfg: &(Scenario, String)) -> anyhow::Result<()> {
-    let mut world = open_or_new(dir, cfg)?;
+fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
+    let mut world = open_or_new(dir, setup)?;
     let from = sim::tick(&world);
     let t0 = Instant::now();
     for _ in 0..ticks {
@@ -326,20 +357,12 @@ fn run(dir: &str, ticks: u64, cfg: &(Scenario, String)) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Compile a rule set and print its kind table: the fast way to check a
+/// Compile rule packs and print their kind table: the fast way to check a
 /// rules file before a world runs it. With a scenario, check that its
 /// starts fit the rules too.
-fn lint(path: &str, scenario_file: Option<&str>) -> anyhow::Result<()> {
-    let p = std::path::Path::new(path);
-    let kinds = if p.is_dir() {
-        sim_core::rules::compile_dir(p).map_err(|e| anyhow::anyhow!("{e}"))?
-    } else {
-        let text = std::fs::read_to_string(p).with_context(|| format!("reading {path}"))?;
-        let name = p
-            .file_name()
-            .map_or(path.to_string(), |n| n.to_string_lossy().into_owned());
-        sim_core::rules::compile(&name, &text)?
-    };
+fn lint(packs: &[String], scenario_file: Option<&str>) -> anyhow::Result<()> {
+    let paths: Vec<std::path::PathBuf> = packs.iter().map(Into::into).collect();
+    let kinds = app::compile(&paths)?;
     let mut out = std::io::stdout().lock();
     if !kinds.debug.traits.is_empty() {
         writeln!(out, "traits {}", kinds.debug.traits.join(", "))?;

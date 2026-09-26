@@ -80,7 +80,7 @@ no rules hash), and every gate below compares **`state:`** and the population li
 |---|---|
 | 8a | `state:` and populations identical to baseline (no built-in kind extends anything yet, so family = exact). `step/16x16` A/B: the family range check replaces an equality; expect no change, record it. |
 | 8b | identical to 8a (the default scenario carries exactly today's shares, cut in kind-id order as today). **Done**, in two local stages: with 2 scent channels, `state:` and populations identical to 8a at 1 and 8 threads (`b4d70180c11c4739`, `9be341adc187c931`); with 4 channels the scent layers hash differently, populations identical, 1 = 8 threads. **New reference for 8c:** full gate `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`; quick gate `checksum 2a242e3e8362499b`, `state c11c0f6d5a472758`; population lines unchanged from the baseline. |
-| 8c | identical to 8b when the packs match. |
+| 8c | identical to 8b when the packs match. **Done:** built-in rules at 1 and 8 threads, and `--rules rules` at 8, all `checksum 9a55d72a7081adcb`, `state 4833c3a5f6dea6b2`, populations unchanged. |
 | 8d | `state:` moves (content rewritten). Gate: 1 vs 8 threads equal; 16-day populations on `256 256 12` comparable to `docs/PERF.md` actors-6d; `step/16x16` A/B against 8c. |
 | 8e | a drawn-map scenario reproduces `a_fox_eats_a_cornered_chicken_in_its_chunk_and_across_a_border` (sim.rs) as data. |
 | 8f | `make ci`; `wmc lint rules/` on the built-in content reports no warnings (fix the content if it does, those are real). |
@@ -391,6 +391,26 @@ name_both_files`. Docs: `ACTORS.md` §2 save paragraph and §11 8c; `ARCHITECTUR
 decision 34 amended (open by name, rewrite on save); `RULES.md` "Packs"; `CLAUDE.md`
 commands. Gate per §2.
 
+### 5.4 As built (deviations from the text above)
+
+- `compile_packs(&[&Path])` replaces `compile_dir`. A pack may also be a single file.
+  Positions read `pack/file.rules` only when there is more than one pack, so one pack
+  (and the built-in rules) name files as before. `Kinds.debug.packs` holds the packs'
+  canonical paths, and `sim::meta` writes them to the header.
+- The migration runs at the **first write** of any kind, not only at `save()`:
+  `sim::settle` runs before `save`, before an unload writes a dirty chunk, and before
+  `reload_rules`. It rewrites **every** chunk file on disk, loaded chunks included, and
+  only then the header. Hot reload now rewrites loaded chunks' files too. Before, their
+  old files could outlive the header change until the chunk was next written.
+- Refusal text: `the save has kinds the loaded rules do not define: a, b` (the table,
+  not a scan for rows).
+- Rules for an existing save come from the first of: `--rules`, then `WMC_RULES`, then
+  the save's packs (if all exist), then built in (`app::rules_for`). `r` in play
+  recompiles `kinds.debug.packs`, else `./rules`.
+- An extra test on the binary: `crates/app/tests/packs.rs` (saved packs, a superset pack
+  that moves ids with identical populations by name, the refusal, the fallback when
+  packs are gone, opening never writes).
+
 ## 6. Commit 8d: the built-in content on traits; the vocabulary
 
 `rules/lib.rules` (new; compiles before `plants.rules`, after `grass.rules`; names resolve
@@ -539,7 +559,7 @@ closing paragraph. Then delete this file.
 - [x] baseline recorded in §2
 - [x] 8a traits, extends, inherit, family, only, member subs, diagnostics (also: `vm::Want`, a predicate decoded once per search, -12% on the tick)
 - [x] 8b scenario file, place removed, store v9, four scent channels (see §4.6)
-- [ ] 8c packs, open by name, rewrite on save
+- [x] 8c packs, open by name, rewrite on save (see §5.4)
 - [ ] 8d content on traits, vocabulary in RULES.md
 - [ ] 8e drawn maps
 - [ ] 8f author lint, --strict, reload surfacing
