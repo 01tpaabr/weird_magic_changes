@@ -39,6 +39,9 @@ use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
 use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos};
 
+mod expect;
+pub use expect::{check_expect, expect, expect_family};
+
 /// A cell's placement draw is out of this: the top 24 bits of a cell hash,
 /// exact in integers. A share `n / d` is `n * PLACE_ONE / d` of it.
 pub const PLACE_ONE: u32 = 1 << 24;
