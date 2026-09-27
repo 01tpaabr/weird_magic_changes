@@ -2576,7 +2576,9 @@ impl<'a> Gen<'a> {
         }
         stack.pop();
         // Linearize: each parent's ancestors, then the parent; the first
-        // occurrence wins. One trait, two argument lists: ambiguous.
+        // occurrence wins. One trait, two argument lists: ambiguous (not
+        // while checking a trait with arguments: its 1s are placeholders,
+        // and a kind that really reaches both reports it).
         let mut ancestors: Vec<usize> = Vec::new();
         for &p in &parents {
             let chain: Vec<usize> = self.insts[p].ancestors.iter().copied().chain([p]).collect();
@@ -2588,6 +2590,9 @@ impl<'a> Gen<'a> {
                     .iter()
                     .find(|&&o| self.insts[o].item == self.insts[a].item)
                 {
+                    if self.checking && !args.is_empty() {
+                        continue;
+                    }
                     let fmt = |i: usize| -> String {
                         let v: Vec<String> =
                             self.insts[i].args.iter().map(i32::to_string).collect();
@@ -5604,6 +5609,36 @@ mod tests {
         assert!(
             compile_err("trait t(v) { when 1 => v = 2 } kind a extends t(1) { }")
                 .contains("cannot assign to `v`: it is a constant")
+        );
+    }
+
+    #[test]
+    fn the_trait_check_does_not_invent_a_diamond_from_its_placeholder_arguments() {
+        // Checked on its own, `t` gets n = 1 and reaches u(1) and u(2);
+        // its only real use, t(2), reaches u(2) once.
+        let pack = "trait u(a) { mem m }
+                    trait v extends u(2) { }
+                    trait t(n) extends u(n), v { }";
+        compile_ok(&format!(
+            "{pack} kind k extends t(2) {{ when true => idle }}"
+        ));
+        compile_ok(pack);
+        // A kind that reaches u(1) and u(2) for real is still an error.
+        let e = compile_err(&format!("{pack} kind k extends u(1), v {{ }}"));
+        assert!(
+            e.contains("`k` reaches trait `u` twice, with (1) and (2)"),
+            "{e}"
+        );
+        let e = compile_err(&format!("{pack} kind k extends t(1) {{ }}"));
+        assert!(
+            e.contains("`t` reaches trait `u` twice, with (1) and (2)"),
+            "{e}"
+        );
+        // So is a trait with no arguments, used or not.
+        let e = compile_err(&format!("{pack} trait w extends u(1), v {{ }}"));
+        assert!(
+            e.contains("`w` reaches trait `u` twice, with (1) and (2)"),
+            "{e}"
         );
     }
 

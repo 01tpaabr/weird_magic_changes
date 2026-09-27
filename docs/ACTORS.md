@@ -254,7 +254,8 @@ TIME     := INT ("min" | "h" | "d")
   a splice never brings the same rules twice. A state the kind does not declare is
   inherited whole. A trait's rules and subs may name only the needs, mems, states and subs
   it or its ancestors declare, so it compiles for any kind that includes it; every trait is
-  compiled on its own once (parameters bound to 1) to prove it, used or not.
+  compiled on its own once (parameters bound to 1) to prove it, used or not; a trait
+  reached with two argument lists only through those 1s is left to the kinds that use it.
 - **Families** (step 8a). A kind's name in a predicate matches the kind and every kind that
   extends it; `only NAME` the kind alone (also `kind:look` and `only kind:look`). Kinds are
   numbered in pre-order over the inheritance forest (roots in file then declaration order,
