@@ -717,6 +717,40 @@ fn a_semicolon_may_end_a_rule_a_declaration_and_a_const() {
     }
 }
 
+/// Comparisons don't chain: `a < b < c` would compare `a < b`, 0 or 1,
+/// with `c`. Parentheses say that is meant.
+#[test]
+fn a_chain_of_comparisons_is_an_error() {
+    let chain = "comparisons don't chain";
+    for (text, at) in [
+        ("kind a { mem m  when 0 < m < 9 => idle }", "1:28:"),
+        ("kind a { mem m  when m == 1 != 0 => idle }", "1:29:"),
+        (
+            "kind a { mem m  when m >= 1 > 0 and m > 0 => idle }",
+            "1:29:",
+        ),
+        ("kind a { mem m  when (0 < m <= 9) => idle }", "1:29:"),
+        (
+            "kind a { mem m  when true => { m = 1 < 2 == 1  idle } }",
+            "1:42:",
+        ),
+        ("const C = 1 < 2 < 3", "1:17:"),
+        ("kind a { mem m  when (m + 1) > 0 > 1 => idle }", "1:34:"),
+    ] {
+        let e = compile_err(text);
+        assert!(
+            e.starts_with(&format!("t.rules:{at}")) && e.contains(chain),
+            "{text}: {e}"
+        );
+    }
+    let e = compile_err("kind a { mem m  when 0 < m < 9 => idle }");
+    assert!(e.contains("`and`") && e.contains("parenthes"), "{e}");
+    compile_ok("kind a { mem m  when (0 < m) < 9 => idle }");
+    compile_ok("kind a { mem m  when 0 < (m < 9) => idle }");
+    compile_ok("kind a { mem m  when 0 < m and m < 9 => idle }");
+    compile_ok("const C = (1 < 2) == 1\nkind a { mem m  when m == C => idle }");
+}
+
 /// Only a file sub is refused `next`: a member sub is its kind's own.
 #[test]
 fn a_member_sub_may_next() {

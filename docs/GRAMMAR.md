@@ -187,7 +187,7 @@ c` groups conditions, and `(a + 1) * 2 > b` is a comparison.
 ## 6. Expressions
 
 ```
-expr     = additive { ( "<" | "<=" | "==" | "!=" | ">=" | ">" ) additive }
+expr     = additive [ ( "<" | "<=" | "==" | "!=" | ">=" | ">" ) additive ]
 additive = term { ( "+" | "-" ) term }
 term     = unary { ( "*" | "/" | "%" ) unary }
 unary    = "-" unary | primary
@@ -215,6 +215,9 @@ arg      = target        (if it starts with here, attacker, toward, away, random
          | expr
 ```
 
+- *Comparisons don't chain: a comparison operator right after `a < b` is an error
+  ("comparisons don't chain"). A parenthesised comparison is a primary, so `(a < b) < c`
+  and `a < (b < c)` are legal.*
 - *Function arity: `abs`, `sign`, `hi`, `lo` take 1 argument; `min`, `max`, `pack` 2;
   `clamp` 3.*
 - `blocked`, `missed` and `refused` read as `result == BLOCKED` (and so on).
@@ -224,14 +227,15 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   says; `water`, `soil`, `rock` and `bare` passed to a `pred` parameter are the predicates
   unless a local of that name is in scope.
 
-**Precedence**, loosest first; every binary operator is left-associative:
+**Precedence**, loosest first; `or`, `and` and the arithmetic operators are
+left-associative, the comparisons are not associative:
 
 | level | operators | |
 |---|---|---|
 | 1 | `or` | conditions only |
 | 2 | `and` | conditions only |
 | 3 | `not` | conditions only, prefix: `not a == b` is `not (a == b)`, `not a and b` is `(not a) and b` |
-| 4 | `< <= == != >= >` | chains: `a < b < c` is `(a < b) < c` |
+| 4 | `< <= == != >= >` | one per expression: `a < b < c` is an error; write `a < b and b < c`, or `(a < b) < c` |
 | 5 | `+ -` | |
 | 6 | `* / %` | |
 | 7 | `-` | prefix; `-5` is folded to the constant |

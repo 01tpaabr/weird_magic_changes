@@ -1264,6 +1264,8 @@ impl<'a> G<'a> {
         }
     }
 
+    /// At most one comparison: they don't chain. A parenthesised one may be
+    /// an operand (`(a < b) < c`), through `primary`.
     fn expr(&mut self, d: u32) -> String {
         let mut s = self.additive(d);
         if d > 0 && self.maybe(30) {

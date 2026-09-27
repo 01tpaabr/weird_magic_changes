@@ -1770,25 +1770,34 @@ impl Parser<'_> {
         Ok(Pred::Kind(name, only, at))
     }
 
-    // expr := cmp
+    fn cmp_op(&self) -> Option<OpCode> {
+        match self.peek() {
+            Tok::Sym("<") => Some(OpCode::Lt),
+            Tok::Sym("<=") => Some(OpCode::Le),
+            Tok::Sym("==") => Some(OpCode::Eq),
+            Tok::Sym("!=") => Some(OpCode::Ne),
+            Tok::Sym(">=") => Some(OpCode::Ge),
+            Tok::Sym(">") => Some(OpCode::Gt),
+            _ => None,
+        }
+    }
+
+    // expr := additive [cmp additive]: comparisons don't chain.
     fn expr(&mut self) -> Result<Expr> {
         let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.additive()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Sym("<") => OpCode::Lt,
-                Tok::Sym("<=") => OpCode::Le,
-                Tok::Sym("==") => OpCode::Eq,
-                Tok::Sym("!=") => OpCode::Ne,
-                Tok::Sym(">=") => OpCode::Ge,
-                Tok::Sym(">") => OpCode::Gt,
-                _ => break,
-            };
+        if let Some(op) = self.cmp_op() {
             self.bump();
             let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.additive()?;
             self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
+            if self.cmp_op().is_some() {
+                return Err(self.err(
+                    "comparisons don't chain: join two with `and` (`a < b and b < c`), \
+                     or parenthesise the first (`(a < b) < c` compares 0 or 1 with c)",
+                ));
+            }
         }
         self.deepest = self.deepest.max(outer);
         Ok(e)

@@ -351,7 +351,8 @@ A **predicate** says what a cell must hold:
 ## 12. Expressions, subs and constants
 
 Every value is a 32-bit integer; there are no floats, and `true` is 1, `false` 0. Arithmetic wraps, `x / 0` and
-`x % 0` are 0. Operators: `+ - * / %` and `< <= == != >= >` (1 if it holds, else 0).
+`x % 0` are 0. Operators: `+ - * / %` and `< <= == != >= >` (1 if it holds, else 0). Comparisons don't
+chain: `0 < v < 9` is an error; write `0 < v and v < 9`, or `(0 < v) < 9` if that is meant.
 `and`, `or` and `not` are not operators on values: they join conditions, after `when`, `if`
 and `while` only (§4). So `let both = x > 0 and y > 0` is an error; write
 `let both = (x > 0) * (y > 0)`, or test it in an `if`. Functions:
