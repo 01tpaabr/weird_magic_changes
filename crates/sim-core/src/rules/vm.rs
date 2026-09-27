@@ -76,17 +76,12 @@ pub enum OpCode {
     /// `x y -> x % y`, `0` when `y == 0`
     Mod,
     Neg,
-    /// `x -> !x` (1 if zero)
-    Not,
     Lt,
     Le,
     Eq,
     Ne,
     Ge,
     Gt,
-    /// `x y -> x && y` (both nonzero)
-    And,
-    Or,
     Min,
     Max,
     Abs,
@@ -97,8 +92,6 @@ pub enum OpCode {
     Jmp,
     /// `x ->`; `pc += imm` if `x == 0`
     Jz,
-    /// `x ->`; `pc += imm` if `x != 0`
-    Jnz,
     /// Call `subs[imm]` with `a` arguments: the top `a` stack values become
     /// the callee's first locals (in order).
     Call,
@@ -175,12 +168,12 @@ impl OpCode {
         use OpCode as O;
         match self {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
-            O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz | O::Jnz => (1, 0),
+            O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
             O::SetLook | O::SetSignal | O::Mark => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
-            O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt | O::And | O::Or => (2, 1),
+            O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
             O::Min | O::Max | O::Pack => (2, 1),
-            O::Neg | O::Not | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
+            O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
             O::Count | O::Nearest | O::Sniff | O::Dist | O::FreeAt => (2, 1),
             O::LookAt | O::SignalAt | O::ScentAt => (2, 1),
@@ -969,8 +962,6 @@ impl Machine<'_> {
                     | O::Ne
                     | O::Ge
                     | O::Gt
-                    | O::And
-                    | O::Or
                     | O::Min
                     | O::Max => {
                         let y = self.pop()?;
@@ -999,8 +990,6 @@ impl Machine<'_> {
                             O::Ne => i32::from(x != y),
                             O::Ge => i32::from(x >= y),
                             O::Gt => i32::from(x > y),
-                            O::And => i32::from(x != 0 && y != 0),
-                            O::Or => i32::from(x != 0 || y != 0),
                             O::Min => x.min(y),
                             _ => x.max(y),
                         };
@@ -1009,10 +998,6 @@ impl Machine<'_> {
                     O::Neg => {
                         let x = self.pop()?;
                         self.push(x.wrapping_neg())?;
-                    }
-                    O::Not => {
-                        let x = self.pop()?;
-                        self.push(i32::from(x == 0))?;
                     }
                     O::Abs => {
                         let x = self.pop()?;
@@ -1031,11 +1016,6 @@ impl Machine<'_> {
                     O::Jmp => self.pc = jump(self.pc, op.imm)?,
                     O::Jz => {
                         if self.pop()? == 0 {
-                            self.pc = jump(self.pc, op.imm)?;
-                        }
-                    }
-                    O::Jnz => {
-                        if self.pop()? != 0 {
                             self.pc = jump(self.pc, op.imm)?;
                         }
                     }
@@ -1493,15 +1473,8 @@ mod tests {
         a.push_k(0).push(1).op(OpCode::Add).set_mem(3); // i32::MAX + 1 wraps
         a.push(-5).op(OpCode::Abs).set_mem(4);
         a.push(9).push(0).push(4).op(OpCode::Clamp).set_mem(5);
-        a.push(3)
-            .push(4)
-            .op(OpCode::Lt)
-            .push(4)
-            .push(3)
-            .op(OpCode::Ge)
-            .op(OpCode::And)
-            .set_mem(6);
-        a.push(0).op(OpCode::Not).set_mem(7);
+        a.push(3).push(4).op(OpCode::Lt).set_mem(6);
+        a.push(4).push(3).op(OpCode::Ge).set_mem(7);
         a.push(-3).op(OpCode::Sign).set_mem(8);
         a.halt();
         let mut m = mind();

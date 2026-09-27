@@ -128,10 +128,6 @@ impl Asm {
         self.jump(OpCode::Jz, l)
     }
 
-    pub fn jnz(&mut self, l: Label) -> &mut Self {
-        self.jump(OpCode::Jnz, l)
-    }
-
     /// A raw relative jump, for tests of bad targets.
     pub fn jmp_raw(&mut self, imm: i16) -> &mut Self {
         self.emit(OpCode::Jmp, 0, imm)
