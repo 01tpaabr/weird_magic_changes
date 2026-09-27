@@ -4623,19 +4623,6 @@ mod tests {
         assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
         let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
         assert!(compile_err(&format!("kind a {{ {many} }}")).contains("has 5 needs, at most 4"));
-        // The radius binds tighter than a comparison.
-        let k = compile_ok("kind a { when count water within 2 > 0 => idle }");
-        let ops: Vec<OpCode> = k.code.iter().map(|o| o.code).collect();
-        assert_eq!(
-            &ops[..5],
-            &[
-                OpCode::Push,
-                OpCode::Push,
-                OpCode::Count,
-                OpCode::Push,
-                OpCode::Gt
-            ]
-        );
         // Subs and targets.
         assert!(compile_err("kind a { when 1 => f(1) }").contains("unknown sub `f`"));
         assert!(
@@ -4961,6 +4948,19 @@ mod tests {
         );
         expect(&mut i, &[OpCode::Act, OpCode::EndRule, OpCode::Halt]);
         assert_eq!(i, ops.len());
+        // The radius binds tighter than a comparison.
+        let k = compile_ok("kind a { when count water within 2 > 0 => idle }");
+        let ops: Vec<OpCode> = k.code.iter().map(|o| o.code).collect();
+        assert_eq!(
+            &ops[..5],
+            &[
+                OpCode::Push,
+                OpCode::Push,
+                OpCode::Count,
+                OpCode::Push,
+                OpCode::Gt
+            ]
+        );
     }
 
     #[test]
@@ -5683,7 +5683,7 @@ mod tests {
     }
 
     #[test]
-    fn family_numbering_is_preorder_by_file_then_declaration() {
+    fn family_numbering_is_preorder_by_declaration() {
         let k = compile_ok(
             "kind hen extends bird { }
              kind animal { }

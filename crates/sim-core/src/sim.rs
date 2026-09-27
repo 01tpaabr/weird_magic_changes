@@ -791,6 +791,19 @@ mod tests {
         kinds.def(kind).need_named(need).unwrap()
     }
 
+    /// Unload row 2 of chunks, which `ensure_loaded` around (64, 64) adds
+    /// to the initial (0..=2, 0..=1) region.
+    fn prune_row2(w: &mut World) {
+        let row2: Vec<ChunkCoord> = w
+            .resource::<Stage>()
+            .loaded_coords()
+            .filter(|c| c.y == 2)
+            .collect();
+        for c in row2 {
+            stage::remove(w, c);
+        }
+    }
+
     fn tmp_store(name: &str) -> Store {
         let dir =
             std::env::temp_dir().join(format!("wmc-world-test-{name}-{}", std::process::id()));
@@ -914,16 +927,6 @@ mod tests {
         let n = save(&mut w, &store).unwrap();
         assert_eq!(n, 6, "every inhabited chunk is written");
         let policy = LoadPolicy { load: 1, unload: 1 };
-        let prune = |back: &mut World| {
-            let row2: Vec<ChunkCoord> = back
-                .resource::<Stage>()
-                .loaded_coords()
-                .filter(|c| c.y == 2)
-                .collect();
-            for c in row2 {
-                stage::remove(back, c);
-            }
-        };
         let mut back = open_world(&store).unwrap().unwrap();
         let s = ensure_loaded(&mut back, Pos::new(64, 64), policy, Some(&store)).unwrap();
         assert_eq!((s.read, s.generated), (6, 3));
@@ -934,7 +937,7 @@ mod tests {
                 "read back: dirty iff inhabited"
             );
         }
-        prune(&mut back);
+        prune_row2(&mut back);
         assert_eq!(checksum(&mut back), expect);
         // Reopened later: the rows were frozen meanwhile, so their clocks
         // shift by exactly the frozen interval (here: 3 ticks).
@@ -943,7 +946,7 @@ mod tests {
             step(&mut later);
         }
         ensure_loaded(&mut later, Pos::new(64, 64), policy, Some(&store)).unwrap();
-        prune(&mut later);
+        prune_row2(&mut later);
         let saved_at = tick(&w) as u32;
         for m in later.query::<&ChunkMinds>().iter(&later) {
             assert!(
@@ -1019,15 +1022,8 @@ mod tests {
                 != start[usize::from(seed_kind)],
             "seeds died away from water and trees dropped new ones: {start:?} -> {end:?}"
         );
-        let kinds = w.resource::<Kinds>().len();
-        for (cells, a, m) in w
-            .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
-            .iter(&w)
-        {
-            crate::actors::validate(cells, &a.rows, &m.rows, kinds).unwrap();
-            for r in &a.rows {
-                assert!(cells.walkable(usize::from(r.cell)));
-            }
+        check_invariants(&mut w);
+        for m in w.query::<&ChunkMinds>().iter(&w) {
             for mind in &m.rows {
                 assert!(mind.needs[0] > 0, "a living actor has water");
             }
@@ -1069,14 +1065,7 @@ mod tests {
             Some(&store),
         )
         .unwrap();
-        let row2: Vec<ChunkCoord> = back
-            .resource::<Stage>()
-            .loaded_coords()
-            .filter(|c| c.y == 2)
-            .collect();
-        for c in row2 {
-            stage::remove(&mut back, c);
-        }
+        prune_row2(&mut back);
         assert_eq!(checksum(&mut back), checksum(&mut w));
         for _ in 0..half {
             step(&mut w);
@@ -1285,6 +1274,9 @@ mod tests {
         let c_slot =
             west.actors_mut()
                 .push(30 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 300, 0));
+        let d_slot =
+            west.actors_mut()
+                .push(40 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 400, 0));
         stage::remove(&mut w, ChunkCoord::new(0, 0));
         let west_e = stage::insert(&mut w, ChunkCoord::new(0, 0), west, true);
         let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), ChunkData::default(), true);
@@ -1312,10 +1304,10 @@ mod tests {
             to: ChunkCoord::new(1, 0),
             cell: 25 * 64,
         });
-        // A fourth wants an unloaded chunk.
+        // A fourth spawns into an unloaded chunk.
         ob.list.push(Effect {
-            key: key(300),
-            slot: c_slot,
+            key: key(400),
+            slot: d_slot,
             what: EffectKind::Spawn {
                 kind: CHICKEN,
                 with: [0; 2],
@@ -1350,14 +1342,18 @@ mod tests {
         );
         assert!(west_pubs[usize::from(a_slot)].flags & crate::actors::flags::DEAD != 0);
         assert!(w.get::<ChunkCells>(west_e).unwrap().occupant[10 * 64 + 63].is_none());
+        assert_eq!(
+            west_minds[usize::from(d_slot)].events & crate::rules::vm::result::MASK,
+            crate::rules::vm::result::BLOCKED,
+            "an unloaded chunk is a wall"
+        );
         assert_eq!(w.get::<Scratch>(west_e).unwrap().deaths, 2);
         w.run_system_once(compact).unwrap();
         let west_pubs = w.get::<ChunkActors>(west_e).unwrap().rows.clone();
-        assert_eq!(west_pubs.len(), 1, "the loser stays");
+        assert_eq!(west_pubs.len(), 2, "the loser and the spawner stay");
         check_invariants(&mut w);
-        // Same tick again: the filled cells are touched, so a second mover
-        // into them is BLOCKED even though the cell looks free... it is
-        // not free (occupied), and a vacated one is touched: neither enterable.
+        // Again (compact has reset the touches): a mover into the cell `a`
+        // now holds is BLOCKED, because it is occupied.
         let mut ob = w.get_mut::<Outbox>(west_e).unwrap();
         ob.list.push(Effect {
             key: key(999),
@@ -1905,7 +1901,7 @@ mod tests {
     /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
     /// step later `sniff` finds it (in the chunk and across a border); the
     /// scent is saved with the chunk and fades to nothing in two hours; a
-    /// third channel does not compile.
+    /// fifth channel does not compile.
     #[test]
     fn marks_are_sniffed_saved_and_fade() {
         use crate::actors::systems::newborn;
@@ -2626,16 +2622,11 @@ mod tests {
         )
         .unwrap();
         // (0..=2, 0..=2) minus row 2, which the original never had: prune it.
-        let row2: Vec<ChunkCoord> = back
-            .resource::<Stage>()
-            .loaded_coords()
-            .filter(|c| c.y == 2)
-            .collect();
-        for c in row2 {
-            stage::remove(&mut back, c);
-        }
+        prune_row2(&mut back);
         assert_eq!(checksum(&mut back), expect);
-        assert_eq!(open_world(&tmp_store("empty")).unwrap().map(|_| ()), None);
+        let empty = tmp_store("empty");
+        assert_eq!(open_world(&empty).unwrap().map(|_| ()), None);
+        std::fs::remove_dir_all(empty.dir()).unwrap();
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

@@ -1481,6 +1481,10 @@ mod tests {
         assert_eq!((m.born, m.state, m.uid), (2000, 0, 42));
         assert_eq!(change_kind(&kinds, 2000, &mut a, 0, 99), result::REFUSED);
         assert_eq!(a.pubs[0].kind, TREE);
+    }
+
+    #[test]
+    fn a_target_off_the_chunk_is_in_the_neighbour() {
         assert_eq!(local_target(63, 1, 0), None);
         assert_eq!(local_target(63, -1, 1), Some(62 + 64));
         let c = ChunkCoord::new(2, 3);
@@ -1523,6 +1527,10 @@ mod tests {
         assert_eq!(step_toward(&halo, 10, 10, 0, 0), (0, 0));
         // Off the halo's edge counts as blocked.
         assert_eq!(step_toward(&halo, 0, 5, -1, 0), (-1, 0));
+    }
+
+    #[test]
+    fn dir_index_numbers_the_unit_steps_from_one() {
         assert_eq!(vm::dir_index(0, -1), 1);
         assert_eq!(vm::dir_index(-1, -1), 8);
         assert_eq!(vm::dir_index(0, 0), 0);
