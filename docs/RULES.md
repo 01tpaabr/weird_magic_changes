@@ -351,7 +351,10 @@ A **predicate** says what a cell must hold:
 ## 12. Expressions, subs and constants
 
 Every value is a 32-bit integer; there are no floats, and `true` is 1, `false` 0. Arithmetic wraps, `x / 0` and
-`x % 0` are 0. Operators: `+ - * / %`, `< <= == != >= >`, `and or not`. Functions:
+`x % 0` are 0. Operators: `+ - * / %` and `< <= == != >= >` (1 if it holds, else 0).
+`and`, `or` and `not` are not operators on values: they join conditions, after `when`, `if`
+and `while` only (§4). So `let both = x > 0 and y > 0` is an error; write
+`let both = (x > 0) * (y > 0)`, or test it in an `if`. Functions:
 `min`, `max`, `abs`, `sign`, `clamp(x, lo, hi)`, `rand(n)` (0 to n-1), `chance(p)`
 (p percent), `pack(a, b)` / `hi(v)` / `lo(v)` (two signed bytes in one value, for signals).
 Randomness is drawn per actor per tick from the world seed, so a replay draws the same.
