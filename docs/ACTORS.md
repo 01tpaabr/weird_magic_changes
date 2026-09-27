@@ -12,14 +12,14 @@ compiled once, run by every individual of that kind against its own state).
 ## 1. The shape
 
 An actor is a **row in the chunk it stands on**: a 12-byte public record (`ActorPub`) that
-any chunk may read while thinking, an 88-byte private record (`ActorMind`) that only its
+any chunk may read while thinking, a 120-byte private record (`ActorMind`) that only its
 own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. A
 **cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
-state is exactly needs + memory + a state byte: no saved program counter, so a think is a
-pure function of (own row, the world after this tick's Simulate phase (scent faded), tick,
-seed).
+state is exactly needs + memory + genes + a state byte: no saved program counter, so a
+think is a pure function of (own row, the world after this tick's Simulate phase (scent
+faded), tick, seed).
 
 ```text
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
@@ -50,13 +50,14 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     flags: u8,      // DEAD | WAKE
     _pad: u16,
 }
-#[repr(C)] pub struct ActorMind {  // 88 B, Pod. Only the owning chunk touches it.
+#[repr(C)] pub struct ActorMind {  // 120 B, Pod. Only the owning chunk touches it.
     uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
     mem: [i32; 12],           // the program's whole persistent memory, named per kind
     state: u8, events: u8, hurt: u8, hurt_dir: u8,
     _pad: u32,
+    genes: [i32; 8],          // inherited constants the program reads, never writes (step 9)
 }
 #[derive(Component)] pub struct ChunkActors { rows: Vec<ActorPub> }   // reserved capacity per chunk
 #[derive(Component)] pub struct ChunkMinds  { rows: Vec<ActorMind> }  // same length, same order
@@ -74,7 +75,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   standing and the cover child a cell can get in one tick differ. Which kind starts where is the **scenario's**, not the
   rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
   placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
-  one cell (`with (food = 2h)` sets its needs or memory by name). A scenario may also draw
+  one cell (`with (food = 2h)` sets its needs, memory or genes by name). A scenario may also draw
   its ground (`map`, `legend`, `outside`, step 8e): drawn cells replace the noise, kind
   characters become explicit starts. Resolved against the loaded kind table into a
   `Placement` at create and at every open; a start naming a kind the rules lack, a trait,
@@ -108,7 +109,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
   the code; a fifth name is a compile error. The renderer washes a scented cell toward the
   channel's colour.
-- **Save**: chunk file v9 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
+- **Save**: chunk file v11 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
@@ -128,7 +129,18 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   scheduled think.
 - **RNG**: counter-based, no stream state: draw `n` for `uid` at `tick` is
   `splitmix64(splitmix64(seed ^ STREAM_THINK ^ splitmix64(tick) ^ uid) + n)`. Claim key
-  `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`.
+  `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`. Gene `i` of a child at
+  birth draws `splitmix64(splitmix64(seed ^ splitmix64(STREAM_GENES) ^ uid ^
+  splitmix64(parent_uid)) + i)`: the child's uid already folds in its cell and tick, and the
+  parent's is there because a cover and a standing child of one cell and tick share a uid.
+- **Genes** (step 9): `genes[i]`, named per kind, read by `Gene i` and never written by a
+  rule. `newborn` sets each to its default (worldgen, scenario starts); `spawn` goes through
+  `offspring`, at the three places a child is made (Apply's cover and standing spawns,
+  Migrate's cross-chunk one), reading the parent's row, which stays in place until Compact:
+  the parent's genes by name, clamped to the child kind's range, then each moved with the
+  world's mutation chance (the scenario's `mutation N / D`, a part of `2^24` compared with
+  the draw's top 24 bits) by a nonzero step of at most `(hi - lo) / 16` (at least 1), turned
+  back if it would leave the range, in `i64`.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).
@@ -136,8 +148,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   was opened: `--rules`, `WMC_RULES`, the save's packs or the scenario's `rules`; `./rules`
   for the built-in set) are recompiled and swapped in between two ticks. Rows are remapped by
   name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
-  the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
-  channel by its name. Saved chunks that are not loaded are rewritten the same way and
+  the new max; new needs start full), mem (new ones 0) and gene (clamped to the new range;
+  new ones at their default), the state by its name, each scent channel by its name. Saved chunks that are not loaded are rewritten the same way and
   `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
   with the old). The starts stay whole: a removed kind's start places nobody (reported),
   its share keeping its interval, and starts again when the kind is back. Moving a kind
@@ -146,9 +158,10 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   world does not replay from its seed.
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
-  adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
+  adds start at max. Memory carries by name, the rest is zeroed; genes carry by name,
+  clamped to the new range (new ones at their default, never mutated); `state` resets.
 
-Per actor: 104 B persistent (12 + 88 + 4 occupant) + 40 B intent scratch.
+Per actor: 136 B persistent (12 + 120 + 4 occupant) + 40 B intent scratch.
 
 ## 3. Senses
 
@@ -158,7 +171,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 
 | group | senses | source |
 |---|---|---|
-| self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
+| self | each need, mem and gene by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
 | here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo (the reach of every target: at least 64 cells each way); unloaded or beyond the halo = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
@@ -200,6 +213,7 @@ decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+   # glyph, 
           | "cadence" num | "sight" num | "fuel" num | "bite" num | "food" num
           | "need" NAME "max" num [ "decay" INT ] [ "vital" ]
           | "mem" NAME ("," NAME)*
+          | "gene" NAME "=" num "from" num "to" num          # step 9: read, never written
 num      := expr                                             # constant: numbers, consts, trait parameters
 state    := "state" NAME "{" rule* "}"
 rule     := "when" cond "=>" body | "inherit" [ NAME ]
@@ -432,7 +446,8 @@ Thread count, batching and entity ids can reach a result only through a shared m
 write, an iteration order or a random source. Every parallel phase writes only the chunk it
 was handed; per-chunk order is sorted-key order; claims use `min` and damage uses `+`, both
 commutative; every sequential phase walks `stage.active()`; every random draw is
-`f(seed, tick, uid, n)`. Not promised: independence from chunk borders (`CHUNK_BITS` joins
+`f(seed, tick, uid, n)`, or at birth `f(seed, uid, parent uid, n)`, the child's uid holding
+the tick. Not promised: independence from chunk borders (`CHUNK_BITS` joins
 the world's identity) and from the rules text (its hash is part of the checksum).
 
 Tests per step: two-fresh-worlds checksum per new system; `crates/app/tests/determinism.rs`
@@ -570,3 +585,19 @@ where it touches the tick.
    to text; the Rust tests left are engine mechanics.
    What a new author needs is in `docs/RULES.md`: the language, traits, scenarios and their
    tests, packs, the vocabulary, the lint.
+9. **Genes: numbers that are inherited and mutate** (decision 39). The first way behaviour
+   changes across generations without a new rules file; rules that are themselves switched
+   on and off per actor come after.
+   9a: `ActorMind.genes` (8 `i32`, 88 -> 120 B), store v10.
+   9b: `gene NAME = D from LO to HI` (constant expressions, trait parameters allowed; lenient
+   while a trait is checked alone), merged by name like needs; `OpCode::Gene` appended;
+   `KindDef.genes` in the rules hash only when present; lint: genes never read, `within
+   GENE` against the gene's high end.
+   9c: `offspring` at Apply's and Migrate's spawns (by name, clamped, then mutated with the
+   scenario's `mutation N / D`, drawn from both uids), `become` by name, store v11 (the rate
+   and gene names in the header).
+   9d: genes by name through reload and reopening, scenario `with (gene = v)`, `expect mean`,
+   `wmc why` prints them. `packs/genes` (a `budder` that only buds) and two scenario tests:
+   without `mutation` every descendant keeps the founder's `reach`; with `mutation 1 / 1`
+   selection pulls it down (a budder that looks less far counts fewer neighbours and keeps
+   budding) and the world fills with short-sighted budders.

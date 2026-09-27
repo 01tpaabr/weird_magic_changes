@@ -136,7 +136,7 @@ fn lexer_handles_times_strings_symbols_and_comments() {
 fn errors_carry_positions_and_name_the_problem() {
     assert_eq!(
         compile_err("kind a {\n  need water max 1h\n  when watter > 0 => idle\n}"),
-        "t.rules:3:8: unknown name `watter` (not a need, mem slot or binding of this kind)"
+        "t.rules:3:8: unknown name `watter` (not a need, mem slot, gene or binding of this kind)"
     );
     assert!(compile_err("kind a { cadence 3 }").contains("power of two"));
     assert!(compile_err("kind a { sight 40 }").contains("0 to 16"));
@@ -1376,6 +1376,101 @@ fn the_trait_check_does_not_invent_a_diamond_from_its_placeholder_arguments() {
 }
 
 #[test]
+fn genes_are_read_by_name_merge_like_needs_and_are_never_written() {
+    use crate::actors::ActorMind;
+    use bytemuck::Zeroable;
+    // The trait's default and range come from its parameters; checked
+    // alone with every parameter bound to 1, the default is outside
+    // the range, which must not refuse the trait.
+    let k = compile_ok(
+        "trait drinker(thirsty) {
+           need water max 4h vital
+           gene thirst = thirsty from 30min to 6h
+           when water < thirst => water = thirst
+         }
+         kind a extends drinker(2h) { gene fear = -1 from -5 to 12 }
+         kind b extends drinker(1h) { gene thirst = 3h from 1h to 4h }",
+    );
+    let a = k.by_name("a").unwrap();
+    let g = |name: &str, default, lo, hi| GeneDef {
+        name: name.into(),
+        default,
+        lo,
+        hi,
+    };
+    assert_eq!(
+        a.genes,
+        [g("thirst", 1800, 450, 5400), g("fear", -1, -5, 12)]
+    );
+    assert_eq!(
+        k.by_name("b").unwrap().genes,
+        [g("thirst", 2700, 900, 3600)],
+        "a redeclaration overrides in place"
+    );
+    assert!(k.code.iter().any(|o| o.code == OpCode::Gene));
+    // Each actor reads its own value, whatever the default says.
+    let mut m = ActorMind::zeroed();
+    m.needs[0] = 1; // a vital need at 0 dies before any rule runs
+    m.genes[0] = 700;
+    assert_eq!(run_think(&k, "a", &mut m).trap, None);
+    assert_eq!(m.needs[0], 700);
+
+    let err = |t: &str| compile_err(t);
+    assert!(
+        err("kind a { gene g = 5 from 1 to 9  when 1 => g = 2 }")
+            .contains("cannot assign to `g`: it is a gene (inherited, never written)")
+    );
+    assert!(err("kind a { gene g = 5 from 9 to 1 }").contains("the low end comes first"));
+    assert!(err("kind a { gene g = 10 from 1 to 9 }").contains("starts at 10, outside 1 to 9"));
+    assert!(
+        err("kind a { gene g = 1 from 1 to 9  gene g = 2 from 1 to 9 }").contains("declared twice")
+    );
+    assert!(err("kind a { mem g  gene g = 1 from 1 to 9 }").contains("declared twice"));
+    assert!(err("kind a { gene g = 1 from 1 9 }").contains("expected `to`"));
+    assert!(
+        err("const G = 3 kind a { gene G = 1 from 1 to 9 }")
+            .contains("gene `G` has the name of a constant")
+    );
+    assert!(
+        err("trait t(v) { gene v = 1 from 1 to 9 } kind a extends t(1) { }")
+            .contains("gene `v` has the name of a parameter")
+    );
+    assert!(
+        err("kind a { gene b = 1 from 1 to 9 } kind b { }")
+            .contains("gene `b` has the name of a kind or trait")
+    );
+    assert!(
+        err("kind a { tags meat  gene meat = 1 from 1 to 9 }")
+            .contains("gene `meat` has the name of a tag")
+    );
+    assert!(
+        err("trait t { need g max 1h } kind a extends t { gene g = 1 from 1 to 9 }")
+            .contains("gene `g` has the name of a need")
+    );
+    assert!(
+        err(
+            "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
+                 kind a extends t, u { }"
+        )
+        .contains("inherits gene `g` from `t` and `u`, declared differently")
+    );
+    compile_ok(
+        "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
+         kind a extends t, u { gene g = 3 from 1 to 9 }",
+    );
+    let many: String = (0..9)
+        .map(|i| format!("gene g{i} = 0 from 0 to 1 "))
+        .collect();
+    assert!(err(&format!("kind a {{ {many} }}")).contains("has 9 genes, at most 8"));
+    // A trait reads only the genes it or its ancestors declare.
+    let e = err("trait t { when fear > 1 => idle } kind a extends t { gene fear = 1 from 0 to 9 }");
+    assert!(
+        e.contains("`t` uses `fear`, which it does not declare (a trait or parent kind sees only its own needs, mems and genes)"),
+        "{e}"
+    );
+}
+
+#[test]
 fn member_subs_see_their_kinds_needs_and_compile_per_kind() {
     use crate::actors::ActorMind;
     use bytemuck::Zeroable;
@@ -1767,37 +1862,41 @@ fn a_name_that_hides_a_constant_is_not_folded() {
 }
 
 #[test]
-fn a_local_that_hides_a_need_or_mem_is_an_error() {
+fn a_local_that_hides_a_need_mem_or_gene_is_an_error() {
     for (text, want) in [
         (
             "kind a { need food max 1d\n when true => { let food = 5  food += 1h } }",
-            "t.rules:2:21: local `food` has the name of a need or mem slot of `a`",
+            "t.rules:2:21: local `food` has the name of a need, mem slot or gene of `a`",
         ),
         (
             "kind a { mem m\n when nearest a within 3 as m => idle }",
-            "t.rules:2:7: binding `m` has the name of a need or mem slot of `a`",
+            "t.rules:2:7: binding `m` has the name of a need, mem slot or gene of `a`",
         ),
         (
             "kind a { mem m\n when sniff s within 3 as m => idle }",
-            "binding `m` has the name of a need or mem slot of `a`",
+            "binding `m` has the name of a need, mem slot or gene of `a`",
         ),
         (
             "kind a { mem m\n when true => for each a within 2 as m { look = 1 } }",
-            "binding `m` has the name of a need or mem slot of `a`",
+            "binding `m` has the name of a need, mem slot or gene of `a`",
         ),
         (
             "kind a { mem m\n sub f(m) { idle }\n when true => f(1) }",
-            "t.rules:2:6: parameter `m` of `f` has the name of a need or mem slot of `a`",
+            "t.rules:2:6: parameter `m` of `f` has the name of a need, mem slot or gene of `a`",
         ),
         // A trait's member sub, and a trait's own rule.
         (
             "trait t { need food max 1d  sub f(food: target) { move food } }\n\
                  kind a extends t { when true => f(here) }",
-            "parameter `food` of `f` has the name of a need or mem slot of `t`",
+            "parameter `food` of `f` has the name of a need, mem slot or gene of `t`",
         ),
         (
             "trait t { mem m  when true => { let m = 1  idle } }\nkind a extends t { }",
-            "local `m` has the name of a need or mem slot of `t`",
+            "local `m` has the name of a need, mem slot or gene of `t`",
+        ),
+        (
+            "kind a { gene g = 1 from 0 to 9\n when true => { let g = 5  idle } }",
+            "t.rules:2:21: local `g` has the name of a need, mem slot or gene of `a`",
         ),
     ] {
         let e = compile_err(text);

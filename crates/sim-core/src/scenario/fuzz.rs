@@ -209,7 +209,7 @@ fn check() -> impl Strategy<Value = String> {
                     } else {
                         b.get(&names)
                     };
-                    let agg = ["min", "max", "sum"][b.index(3)];
+                    let agg = ["min", "max", "sum", "mean"][b.index(4)];
                     format!("expect {agg} {name} of {who} {op} {}", time_text(n, only))
                 }
                 3 if n % 2 == 0 => format!("expect at ({n}, {}) nobody", n / 2),
@@ -239,11 +239,13 @@ fn valid() -> impl Strategy<Value = Valid> {
         prop::collection::vec(check(), 0..4),
         any::<bool>(),
         prop::collection::vec(0u8..4, 16),
+        prop::option::of((1u32..=8, 1u32..=8)),
     )
         .prop_flat_map(
-            |(seed, terrain, shares, ats, map, size, checks, rules, deco)| {
+            |(seed, terrain, shares, ats, map, size, checks, rules, deco, mutation)| {
                 let mut blocks: Vec<Vec<String>> = vec![vec![format!("seed {seed}")]];
                 blocks.extend(terrain.map(|t| vec![t]));
+                blocks.extend(mutation.map(|(n, d)| vec![format!("mutation {} / {d}", n.min(d))]));
                 let starts = shares.len() + ats.len() + map.as_ref().map_or(0, |m| m.1);
                 // A size fits the map; without one the map sets it.
                 let (with_size, dw, dh, w, h) = size;
@@ -400,6 +402,10 @@ const LINES: &[&str] = &[
     "outside",
     "outside lava",
     "rules",
+    "mutation",
+    "mutation 0 / 1",
+    "mutation 2 / 1",
+    "mutation 1 /",
     "run",
     "run 0",
     "run -1d",

@@ -119,10 +119,12 @@ struct Owner {
     /// Merged: what its code may name.
     needs: Vec<String>,
     mems: Vec<String>,
+    genes: Vec<String>,
     states: Vec<String>,
     /// Declared here.
     own_needs: Vec<String>,
     own_mems: Vec<String>,
+    own_genes: Vec<String>,
     own_states: Vec<String>,
     tags: Vec<String>,
     /// Member subs: its own, and the ones its ancestors define.
@@ -304,7 +306,7 @@ impl<'a> G<'a> {
             .collect();
         if let Some(o) = self.cur() {
             v.extend(o.needs.iter().chain(&o.mems).map(|n| (n.clone(), true)));
-            v.extend(o.params.iter().map(|n| (n.clone(), false)));
+            v.extend(o.genes.iter().chain(&o.params).map(|n| (n.clone(), false)));
         }
         v.extend(self.consts.iter().map(|n| (n.clone(), false)));
         v
@@ -420,9 +422,13 @@ impl<'a> G<'a> {
             for j in 0..self.n(4).min(12 - o.mems.len()) {
                 o.own_mems.push(format!("{n}m{j}"));
             }
+            for j in 0..self.n(3).min(8 - o.genes.len()) {
+                o.own_genes.push(format!("{n}g{j}"));
+            }
             o.own_states = (0..self.n(3)).map(|j| format!("{n}st{j}")).collect();
             o.needs.extend(o.own_needs.iter().cloned());
             o.mems.extend(o.own_mems.iter().cloned());
+            o.genes.extend(o.own_genes.iter().cloned());
             o.states.extend(o.own_states.iter().cloned());
             o.tags = self.subset(&tag_pool, 30);
             o.subs = self.sigs(n, 2);
@@ -445,6 +451,7 @@ impl<'a> G<'a> {
                 o.reached = p.reached.clone();
                 o.needs = p.needs.clone();
                 o.mems = p.mems.clone();
+                o.genes = p.genes.clone();
                 o.states = p.states.clone();
                 o.inherited = (p.inherited.iter().chain(&p.subs).chain(&p.overrides))
                     .cloned()
@@ -481,6 +488,10 @@ impl<'a> G<'a> {
                 o.own_mems.push(format!("k{i}m{j}"));
             }
             o.mems.extend(o.own_mems.iter().cloned());
+            for j in 0..self.n(3).min(8 - o.genes.len()) {
+                o.own_genes.push(format!("k{i}g{j}"));
+            }
+            o.genes.extend(o.own_genes.iter().cloned());
             o.extra_states = self.subset(&o.states, 30);
             o.own_states = (0..self.n(3)).map(|j| format!("k{i}st{j}")).collect();
             o.states.extend(o.own_states.iter().cloned());
@@ -510,11 +521,14 @@ impl<'a> G<'a> {
     }
 
     /// `o` extends trait `t`, sometimes, if that keeps it valid: no trait
-    /// reached twice (its arguments could differ), needs and mems in range.
+    /// reached twice (its arguments could differ), needs, mems and genes in
+    /// range.
     fn extend_trait(&mut self, o: &mut Owner, t: usize, pct: u32) {
         let tr = self.owners[t].clone();
         let twice = o.reached.contains(&t) || tr.reached.iter().any(|r| o.reached.contains(r));
-        let fits = o.needs.len() + tr.needs.len() <= 4 && o.mems.len() + tr.mems.len() <= 12;
+        let fits = o.needs.len() + tr.needs.len() <= 4
+            && o.mems.len() + tr.mems.len() <= 12
+            && o.genes.len() + tr.genes.len() <= 8;
         if twice || !fits || !self.maybe(pct) {
             return;
         }
@@ -530,6 +544,7 @@ impl<'a> G<'a> {
         o.reached.push(t);
         o.needs.extend(tr.needs.iter().cloned());
         o.mems.extend(tr.mems.iter().cloned());
+        o.genes.extend(tr.genes.iter().cloned());
         o.states.extend(tr.states.iter().cloned());
         o.inherited
             .extend(tr.inherited.iter().chain(&tr.subs).cloned());
@@ -671,6 +686,14 @@ impl<'a> G<'a> {
             let k = 1 + self.n(mems.len());
             let line: Vec<String> = mems.drain(..k).collect();
             d.push(format!("mem {}", line.join(", ")));
+        }
+        // `gene NAME = D from LO to HI`, `LO <= D <= HI`.
+        for g in &o.own_genes {
+            let mut small = |k| i32::try_from(self.n(k)).expect("below k");
+            let lo = small(200) - 100;
+            let def = lo + small(50);
+            let hi = def + small(50);
+            d.push(format!("gene {g} = {def} from {lo} to {hi}"));
         }
         d
     }

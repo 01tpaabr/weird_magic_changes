@@ -187,7 +187,7 @@ fn lint_checks_the_names_an_expect_uses() {
     );
     let (ok, _, err) = lint("nn.scenario", "expect max nn of egg == 0");
     assert!(
-        !ok && err.contains("nn.scenario:4: `egg` has no need or memory `nn`"),
+        !ok && err.contains("nn.scenario:4: `egg` has no need, memory or gene `nn`"),
         "{err}"
     );
     let (ok, out, err) = lint("egg.scenario", "expect count egg == 1");

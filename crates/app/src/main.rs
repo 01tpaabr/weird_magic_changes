@@ -567,9 +567,19 @@ fn lint(
                 )
             })
             .collect();
+        let genes: Vec<String> = k
+            .genes
+            .iter()
+            .map(|g| format!("{} = {} from {} to {}", g.name, g.default, g.lo, g.hi))
+            .collect();
+        let genes = if genes.is_empty() {
+            String::new()
+        } else {
+            format!(" genes [{}]", genes.join(", "))
+        };
         writeln!(
             out,
-            "kind {:<12} glyph {:?} cadence {:<5} sight {:<2} fuel {:<4} entry {:<5} needs [{}] mem [{}]",
+            "kind {:<12} glyph {:?} cadence {:<5} sight {:<2} fuel {:<4} entry {:<5} needs [{}] mem [{}]{}",
             k.name,
             char::from(k.glyph),
             k.cadence(),
@@ -578,6 +588,7 @@ fn lint(
             k.entry,
             needs.join(", "),
             k.mems.join(", "),
+            genes,
         )?;
         let parents = kinds
             .debug

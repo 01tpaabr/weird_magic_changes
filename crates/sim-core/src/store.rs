@@ -4,8 +4,9 @@
 //!
 //! ```text
 //! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
-//!                              gen params, starts, drawn map, kinds (names, cover, slot
-//!                              names), scent channels, packs, rules hash
+//!                              gen params, starts, drawn map, mutation rate, kinds (names,
+//!                              cover, slot names, genes with their ranges), scent channels,
+//!                              packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
 //!                              as raw bytes (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
@@ -35,7 +36,9 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::resource::Resource;
 
-use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
+use crate::actors::{
+    ActorMind, ActorPub, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
+};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, Start, in_world};
 use crate::stage::worldgen::GenParams;
@@ -45,7 +48,7 @@ use crate::stage::{
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 11;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -63,6 +66,8 @@ pub struct WorldMeta {
     pub starts: Vec<Start>,
     /// A drawn map's terrain (step 8e); `None`: noise everywhere.
     pub map: Option<DrawnMap>,
+    /// The scenario's `mutation N / D` (step 9); `None`: exact inheritance.
+    pub mutation: Option<(u32, u32)>,
     /// Kind table of the rules that wrote the save, by index.
     pub kinds: Vec<SavedKind>,
     /// Scent channel names of those rules, in channel order.
@@ -84,6 +89,8 @@ pub struct SavedKind {
     pub needs: Vec<String>,
     pub mems: Vec<String>,
     pub states: Vec<String>,
+    /// `(name, lo, hi)`: a range that changed must remap (clamp) the rows.
+    pub genes: Vec<(String, i32, i32)>,
 }
 
 impl SavedKind {
@@ -103,6 +110,11 @@ impl SavedKind {
                     .get(usize::from(d.id))
                     .cloned()
                     .unwrap_or_default(),
+                genes: d
+                    .genes
+                    .iter()
+                    .map(|g| (g.name.clone(), g.lo, g.hi))
+                    .collect(),
             })
             .collect()
     }
@@ -277,23 +289,43 @@ impl Store {
             }
             t => return Err(bad(format!("map tag {t}"))),
         };
+        let mutation = match r.u8()? {
+            0 => None,
+            1 => {
+                let (num, den) = (r.u32()?, r.u32()?);
+                if num == 0 || den == 0 || num > den {
+                    return Err(bad(format!("mutation {num} / {den}")));
+                }
+                Some((num, den))
+            }
+            t => return Err(bad(format!("mutation tag {t}"))),
+        };
         let n = r.count(u32::from(u16::MAX), "kinds")?;
         let mut kinds = Vec::with_capacity(n);
         for _ in 0..n {
+            let (name, cover) = (r.str()?, r.u8()? != 0);
+            let (needs, mems, states) = (r.strs()?, r.strs()?, r.strs()?);
+            let mut genes = Vec::new();
+            for _ in 0..r.count(u32::from(u8::MAX), "genes of a kind")? {
+                genes.push((r.str()?, r.i32()?, r.i32()?));
+            }
             let k = SavedKind {
-                name: r.str()?,
-                cover: r.u8()? != 0,
-                needs: r.strs()?,
-                mems: r.strs()?,
-                states: r.strs()?,
+                name,
+                cover,
+                needs,
+                mems,
+                states,
+                genes,
             };
             // Rows hold this many slots: `reload::Plan` indexes them.
-            if k.needs.len() > NEED_SLOTS || k.mems.len() > MEM_SLOTS {
+            if k.needs.len() > NEED_SLOTS || k.mems.len() > MEM_SLOTS || k.genes.len() > GENE_SLOTS
+            {
                 return Err(bad(format!(
-                    "kind `{}`: {} needs, {} mems, this build holds {NEED_SLOTS}, {MEM_SLOTS}",
+                    "kind `{}`: {} needs, {} mems, {} genes, this build holds {NEED_SLOTS}, {MEM_SLOTS}, {GENE_SLOTS}",
                     k.name,
                     k.needs.len(),
-                    k.mems.len()
+                    k.mems.len(),
+                    k.genes.len()
                 )));
             }
             kinds.push(k);
@@ -316,6 +348,7 @@ impl Store {
             params,
             starts,
             map,
+            mutation,
             kinds,
             scents,
             packs,
@@ -379,6 +412,14 @@ impl Store {
                 }
             }
         }
+        match m.mutation {
+            None => w.u8(0),
+            Some((num, den)) => {
+                w.u8(1);
+                w.u32(num);
+                w.u32(den);
+            }
+        }
         w.len(m.kinds.len());
         for k in &m.kinds {
             w.str(&k.name);
@@ -386,6 +427,12 @@ impl Store {
             w.strs(&k.needs);
             w.strs(&k.mems);
             w.strs(&k.states);
+            w.len(k.genes.len());
+            for (name, lo, hi) in &k.genes {
+                w.str(name);
+                w.i32(*lo);
+                w.i32(*hi);
+            }
         }
         w.strs(&m.scents);
         w.strs(&m.packs);
@@ -723,6 +770,7 @@ mod tests {
                 cells: vec![0, 1, 0x10, 0, 0, 1],
                 outside: Some(0x10),
             }),
+            mutation: Some((3, 40)),
             kinds: vec![
                 SavedKind {
                     name: "seed".into(),
@@ -730,6 +778,7 @@ mod tests {
                     needs: names(&["water", "health"]),
                     mems: names(&["lit"]),
                     states: Vec::new(),
+                    genes: vec![("reach".into(), 1, 10), ("fear".into(), -3, 3)],
                 },
                 SavedKind {
                     name: "árvore".into(),
@@ -737,6 +786,7 @@ mod tests {
                     needs: Vec::new(),
                     mems: Vec::new(),
                     states: names(&["grow", "rest"]),
+                    genes: Vec::new(),
                 },
             ],
             scents: names(&["trail"]),
@@ -751,6 +801,7 @@ mod tests {
                 outside: None,
                 ..m.map.clone().unwrap()
             }),
+            mutation: None,
             kinds: Vec::new(),
             scents: Vec::new(),
             packs: Vec::new(),
@@ -806,15 +857,16 @@ mod tests {
         // Slot names past this build's slot arrays, and a tick at the end
         // of time, are refused; the arrays full are fine.
         let slot = |n: usize| (0..n).map(|i| format!("s{i}")).collect::<Vec<_>>();
-        let kind = |needs: usize, mems: usize| SavedKind {
+        let kind = |needs: usize, mems: usize, genes: usize| SavedKind {
             name: "seed".into(),
             cover: false,
             needs: slot(needs),
             mems: slot(mems),
             states: Vec::new(),
+            genes: slot(genes).into_iter().map(|g| (g, 0, 1)).collect(),
         };
         let full = WorldMeta {
-            kinds: vec![kind(NEED_SLOTS, MEM_SLOTS)],
+            kinds: vec![kind(NEED_SLOTS, MEM_SLOTS, GENE_SLOTS)],
             scents: slot(SCENT_CHANNELS),
             ..m.clone()
         };
@@ -830,17 +882,24 @@ mod tests {
             ),
             (
                 WorldMeta {
-                    kinds: vec![kind(NEED_SLOTS + 1, 0)],
+                    kinds: vec![kind(NEED_SLOTS + 1, 0, 0)],
                     ..full.clone()
                 },
                 "needs",
             ),
             (
                 WorldMeta {
-                    kinds: vec![kind(0, MEM_SLOTS + 1)],
+                    kinds: vec![kind(0, MEM_SLOTS + 1, 0)],
                     ..full.clone()
                 },
                 "mems",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(0, 0, GENE_SLOTS + 1)],
+                    ..full.clone()
+                },
+                "genes",
             ),
             (
                 WorldMeta {
@@ -907,6 +966,7 @@ mod tests {
             hurt: 4,
             hurt_dir: 5,
             _pad: 0,
+            genes: [-7, 0, 1, i32::MAX, 0, 0, 0, 6],
         };
         let cell = (0..CHUNK_CELLS)
             .find(|&i| data.cells.occupant[i].is_none())
@@ -1025,6 +1085,7 @@ mod tests {
             params: GenParams::default(),
             starts: Vec::new(),
             map: None,
+            mutation: None,
             kinds: Vec::new(),
             scents: Vec::new(),
             packs: Vec::new(),

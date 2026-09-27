@@ -542,6 +542,14 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
+            for g in &it.decls.genes {
+                if !names.all.contains(&g.name) {
+                    out.warn(
+                        &g.at,
+                        format!("gene `{}` of {owner} `{}` is never read", g.name, it.name),
+                    );
+                }
+            }
             for n in &it.decls.needs {
                 if !ENGINE_NEEDS.contains(&n.name.as_str()) && !names.all.contains(&n.name) {
                     out.warn(
@@ -715,13 +723,25 @@ impl<'a> Gen<'a> {
         })
     }
 
-    /// A search radius folded where it stands: beyond the kind's sight it
-    /// is clamped.
+    /// A search radius folded where it stands, or a gene's highest value:
+    /// beyond the kind's sight it is clamped.
     fn radius(&self, w: &Walk, r: &Expr, at: &Pos, out: &mut Out) {
-        if let Some(v) = self.fold_known(r, at, |n| w.hidden.iter().any(|h| h == n))
-            && v > w.sight
-        {
-            let kind = &self.items[self.insts[self.kind_insts[usize::from(w.kind)]].item].name;
+        let inst = &self.insts[self.kind_insts[usize::from(w.kind)]];
+        let hidden = |n: &str| w.hidden.iter().any(|h| h == n);
+        let v = match self.fold_known(r, at, hidden) {
+            Some(v) => v,
+            None => match r {
+                Expr::Name(n, _) if w.bound(n).is_none() && !hidden(n) => {
+                    match inst.genes.iter().find(|g| g.name == *n) {
+                        Some(g) => g.hi,
+                        None => return,
+                    }
+                }
+                _ => return,
+            },
+        };
+        if v > w.sight {
+            let kind = &self.items[inst.item].name;
             out.warn(
                 at,
                 format!(
@@ -1355,6 +1375,13 @@ mod tests {
         let good = "trait looker(r) { when count water within r > 0 => idle }
                     kind owl extends looker(8) { sight 8  inherit looker }";
         assert!(!has(good, "exceeds its sight"));
+        // A gene radius is checked at the top of its range.
+        let far = "kind owl { sight 8  gene reach = 6 from 1 to 12
+                     when count water within reach > 0 => idle }";
+        assert!(has(far, "`owl`: radius 12 exceeds its sight 8: clamped"));
+        let near = "kind owl { sight 8  gene reach = 6 from 1 to 8
+                      when count water within reach > 0 => idle }";
+        assert!(!has(near, "exceeds its sight"));
         // A local or a sub's parameter hides a constant of the same name.
         for good in [
             "const w = 99 kind owl { when 1 => { let w = 2  let n = count owl within w  idle } }",
@@ -1449,6 +1476,7 @@ mod tests {
                    sub spare() { idle }
                    trait t { mem lost  sub unused() { idle } }
                    kind ant extends t { need hope max 1d  mem lost2  tags thing
+                     gene idle_gene = 1 from 0 to 2
                      inherit t
                      when true => idle
                      state A { when true => idle }
@@ -1461,6 +1489,7 @@ mod tests {
             "mem `lost` of trait `t` is never used",
             "mem `lost2` of kind `ant` is never used",
             "need `hope` of kind `ant` is never read or set",
+            "gene `idle_gene` of kind `ant` is never read",
             "state `B` of kind `ant` is never entered: no rule says `next B`",
             "tag `thing` is named by no predicate",
         ] {

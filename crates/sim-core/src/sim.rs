@@ -31,7 +31,9 @@ use crate::actors::{
 };
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
+use crate::scenario::{
+    DrawnMap, MAX_SIZE_CHUNKS, PLACE_ONE, Placement, Scenario, Start, StartError, present,
+};
 pub use crate::scenario::{check_expect, expect};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
@@ -56,9 +58,23 @@ pub struct SimConfig {
     pub map: Option<DrawnMap>,
     /// `starts` resolved against the loaded kind table: what worldgen places.
     pub placement: Placement,
+    /// The scenario's `mutation N / D`: the chance that each gene of a
+    /// child moves at birth. `None`: children inherit genes exactly.
+    pub mutation: Option<(u32, u32)>,
 }
 
 impl SimConfig {
+    /// [`SimConfig::mutation`] as a part of [`PLACE_ONE`], like a share.
+    pub fn mutation_share(&self) -> u32 {
+        match self.mutation {
+            Some((n, d)) => {
+                let share = u64::from(n) * u64::from(PLACE_ONE) / u64::from(d);
+                u32::try_from(share).expect("n <= d: parse and load refuse the rest")
+            }
+            None => 0,
+        }
+    }
+
     /// The world's ground: its seed's noise under its drawn map.
     pub fn terrain(&self) -> Terrain<'_> {
         Terrain {
@@ -230,6 +246,7 @@ pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), StartError> 
         starts: scenario.starts.clone(),
         map: scenario.map.clone(),
         placement,
+        mutation: scenario.mutation,
     });
     world.insert_resource(Tick(START_TICK));
     let cx = i32::try_from(scenario.width.div_ceil(CHUNK_SIZE as u32)).expect("width");
@@ -314,6 +331,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         starts,
         map: m.map,
         placement,
+        mutation: m.mutation,
     });
     world.insert_resource(Tick(m.tick));
     world.insert_resource(PendingRemap(remap));
@@ -364,6 +382,7 @@ pub fn meta(world: &World) -> WorldMeta {
         params: c.params,
         starts: c.starts.clone(),
         map: c.map.clone(),
+        mutation: c.mutation,
         kinds: SavedKind::table(kinds),
         scents: kinds.scents.clone(),
         packs: kinds.debug.packs.clone(),
@@ -580,7 +599,7 @@ fn load_chunks(
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
             }
             for e in c.placement.explicit_in(coord) {
-                if e.needs.is_empty() && e.mems.is_empty() {
+                if e.needs.is_empty() && e.mems.is_empty() && e.genes.is_empty() {
                     continue;
                 }
                 let (_, slot) = data.cells.layer(e.placed.cover)[usize::from(e.cell)]
@@ -592,6 +611,9 @@ fn load_chunks(
                 }
                 for &(i, v) in &e.mems {
                     m.mem[usize::from(i)] = v;
+                }
+                for &(i, v) in &e.genes {
+                    m.genes[usize::from(i)] = v;
                 }
             }
         }
@@ -720,11 +742,12 @@ pub fn checksum(world: &mut World) -> u64 {
 /// layer, each pointing back); every row stands on a walkable cell, in the
 /// layer its kind says, with only the flags a row may keep between ticks,
 /// the stagger of its uid, its needs in `0..=max` (unused slots 0), unused
-/// mem slots 0, a state of its kind, and clocks not past now. The first
+/// mem slots 0, its genes in their ranges (unused slots 0), a state of its
+/// kind, and clocks not past now. The first
 /// broken one, said. [`unique_uids`] is the other half.
 #[cfg(test)]
 pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
-    use crate::actors::{MEM_SLOTS, NEED_SLOTS, flags};
+    use crate::actors::{GENE_SLOTS, MEM_SLOTS, NEED_SLOTS, flags};
     let mut q = world.query::<(Entity, &ChunkCoord, &ChunkCells, &ChunkActors, &ChunkMinds)>();
     let world: &World = world;
     let (kinds, stage) = (world.resource::<Kinds>(), world.resource::<Stage>());
@@ -773,6 +796,15 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
                     mind.mem[i],
                     def.mems.len()
                 ));
+            }
+            for i in 0..GENE_SLOTS {
+                let (lo, hi) = def.genes.get(i).map_or((0, 0), |g| (g.lo, g.hi));
+                if !(lo..=hi).contains(&mind.genes[i]) {
+                    return bad(format!(
+                        "gene slot {i} is {}, out of {lo}..={hi}",
+                        mind.genes[i]
+                    ));
+                }
             }
             if mind.state >= def.states.max(1) {
                 return bad(format!("state {} of {}", mind.state, def.states));
@@ -1508,6 +1540,145 @@ mod tests {
             crate::rules::vm::result::BLOCKED
         );
         assert_eq!(w.get::<ChunkActors>(east_e).unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn children_inherit_genes_in_their_chunk_and_across_a_border() {
+        let kinds = crate::rules::compile(
+            "g.rules",
+            "kind budder { glyph \"b\"  cadence 1  gene g = 3 from 0 to 9  mem done
+               when done == 0 => { done = 1  spawn budder at east } }",
+        )
+        .unwrap();
+        // One parent spawns inside chunk (0, 0), the other into (1, 0):
+        // Apply makes the first child, Migrate the second.
+        let children = |mutation| {
+            let mut w = new_world_with(&Scenario { mutation, ..cfg(4) }, kinds.clone()).unwrap();
+            flatten(&mut w);
+            let now = tick(&w);
+            for (x, uid) in [(10, 0xA1), (63, 0xA2)] {
+                let mut m = systems::newborn(&kinds, 0, uid, now);
+                m.genes[0] = 7;
+                assert!(place_actor(&mut w, Pos::new(x, 10), 0, m));
+            }
+            step(&mut w);
+            let born: Vec<(Pos, i32)> = rows(&mut w)
+                .into_iter()
+                .filter(|r| r.0 != 0xA1 && r.0 != 0xA2)
+                .map(|r| (r.2, r.3.genes[0]))
+                .collect();
+            let mut born = born;
+            born.sort_by_key(|(p, _)| p.x);
+            born
+        };
+        assert_eq!(
+            children(None),
+            [(Pos::new(11, 10), 7), (Pos::new(64, 10), 7)],
+            "without `mutation`, exact copies"
+        );
+        let moved = children(Some((1, 1)));
+        assert_eq!(moved.len(), 2);
+        for (_, g) in &moved {
+            assert!(*g == 6 || *g == 8, "one step off 7: {g}");
+        }
+        assert_eq!(children(Some((1, 1))), moved, "and the same every run");
+    }
+
+    /// A scenario's `with` sets a gene by name (inside its range only), and
+    /// `expect` reads genes; a reload carries them by name, clamped to the
+    /// new range, and a gene the new rules add starts at its default.
+    #[test]
+    fn genes_start_by_name_and_reload_by_name() {
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let old = compile(
+            "a.rules",
+            "kind a { glyph \"a\"  gene g = 3 from 0 to 9  gene h = 1 from 0 to 9 }",
+        )
+        .unwrap();
+        let start = |v: i32| Scenario {
+            starts: vec![
+                Start::At {
+                    kind: "a".into(),
+                    x: 5,
+                    y: 5,
+                    with: vec![("h".into(), v)],
+                },
+                Start::at("a", 6, 5),
+            ],
+            params: crate::stage::worldgen::GenParams {
+                water_level: 0.0,
+                rock_on_soil: 0.0,
+                rock_on_water: 0.0,
+                ..Default::default()
+            },
+            ..cfg(3)
+        };
+        let e = new_world_with(&start(10), old.clone()).unwrap_err();
+        assert!(e.msg.contains("gene `h` runs from 0 to 9"), "{e}");
+        let mut w = new_world_with(&start(8), old).unwrap();
+        let genes = |w: &mut World| -> Vec<[i32; 3]> {
+            rows(w)
+                .into_iter()
+                .map(|r| [r.3.genes[0], r.3.genes[1], r.3.genes[2]])
+                .collect()
+        };
+        let mut g = genes(&mut w);
+        g.sort();
+        assert_eq!(g, [[3, 1, 0], [3, 8, 0]]);
+        let who = Who {
+            kind: "a".into(),
+            only: false,
+        };
+        let value = |agg, name: &str| Expect::Value {
+            agg,
+            name: name.into(),
+            who: who.clone(),
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        assert_eq!(expect(&mut w, &value(Agg::Mean, "h")).unwrap().1, "4");
+        assert_eq!(expect(&mut w, &value(Agg::Max, "h")).unwrap().1, "8");
+        assert!(
+            expect(&mut w, &value(Agg::Min, "nope"))
+                .unwrap_err()
+                .contains("no need, memory or gene `nope`")
+        );
+
+        // Reopened under rules where only `g`'s range changed: the save
+        // keeps each gene's range, so its rows are remapped and clamped.
+        let store = tmp_store("genes");
+        save(&mut w, &store).unwrap();
+        assert!(store.chunk_path(ChunkCoord::new(0, 0)).is_file());
+        let narrow = compile(
+            "n.rules",
+            "kind a { glyph \"a\"  gene g = 5 from 5 to 9  gene h = 1 from 0 to 9 }",
+        )
+        .unwrap();
+        let mut o = open_world_with(&store, narrow).unwrap().unwrap();
+        ensure_loaded(
+            &mut o,
+            Pos::new(5, 5),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap();
+        let mut g = genes(&mut o);
+        g.sort();
+        assert_eq!(g, [[5, 1, 0], [5, 8, 0]], "3 clamped up to 5");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+
+        // `h` narrows to 2..=8 and moves to slot 0 (a reload re-checks the
+        // starts: `with (h = 8)` must still fit); `k` is new.
+        let new = compile(
+            "b.rules",
+            "kind a { glyph \"a\"  gene h = 4 from 2 to 8  gene k = 7 from 0 to 9  gene g = 3 from 0 to 9 }",
+        )
+        .unwrap();
+        reload_rules(&mut w, None, new).unwrap();
+        let mut g = genes(&mut w);
+        g.sort();
+        assert_eq!(g, [[2, 7, 3], [8, 7, 3]], "1 clamped up to 2");
     }
 
     /// Every cell of the loaded chunks becomes plain soil: scenarios place

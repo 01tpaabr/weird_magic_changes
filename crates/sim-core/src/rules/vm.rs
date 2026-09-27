@@ -15,7 +15,7 @@
 //! `EndRule` halts if the body emitted an action or a `next`, otherwise
 //! execution falls through to the next rule. Falling off the end is `idle`.
 
-use crate::actors::{ActorMind, ActorPub, ChunkActors, MEM_SLOTS, NEED_SLOTS};
+use crate::actors::{ActorMind, ActorPub, ChunkActors, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use crate::stage::{
     ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos, SCENT_CHANNELS,
@@ -162,6 +162,8 @@ pub enum OpCode {
     /// neighbour (`random free`): ring 1 as `Nearest` scans it, start
     /// rotated by one draw, whatever the kind's `sight`
     RandomFree,
+    /// `-> genes[a]` (a gene: read, never written)
+    Gene,
 }
 
 impl OpCode {
@@ -172,7 +174,7 @@ impl OpCode {
         use OpCode as O;
         match self {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
-            O::RandomFree => (0, 1),
+            O::RandomFree | O::Gene => (0, 1),
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
             O::SetLook | O::SetSignal | O::Mark => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
@@ -335,6 +337,7 @@ pub enum Trap {
     BadLocal,
     BadNeed,
     BadMem,
+    BadGene,
     BadSense,
     BadAction,
     BadConst,
@@ -995,6 +998,13 @@ impl Machine<'_> {
                         }
                         self.mind.mem[i] = self.pop()?;
                     }
+                    O::Gene => {
+                        let i = usize::from(op.a);
+                        if i >= GENE_SLOTS {
+                            return Err(Trap::BadGene);
+                        }
+                        self.push(self.mind.genes[i])?;
+                    }
                     O::Sense => {
                         let s = Sense::from_u8(op.a).ok_or(Trap::BadSense)?;
                         let v = self.sense(s);
@@ -1465,6 +1475,7 @@ mod tests {
             bite: 1,
             needs,
             mems: vec![],
+            genes: vec![],
             states: 1,
             entry,
             color: 0,
@@ -1725,6 +1736,27 @@ mod tests {
             run(a.finish(), vec![], vec![], &mut mind()).trap,
             Some(Trap::BadNeed)
         );
+        let mut a = Asm::new();
+        a.gene(GENE_SLOTS as u8).halt();
+        assert_eq!(
+            run(a.finish(), vec![], vec![], &mut mind()).trap,
+            Some(Trap::BadGene)
+        );
+    }
+
+    #[test]
+    fn a_gene_reads_the_actors_own_value() {
+        let mut a = Asm::new();
+        a.gene(0).set_mem(0);
+        a.gene(7).push(1).op(OpCode::Add).set_mem(1);
+        a.halt();
+        let mut m = mind();
+        m.genes[0] = -3;
+        m.genes[7] = 41;
+        let out = run(a.finish(), vec![], vec![], &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(m.mem[..2], [-3, 42]);
+        assert_eq!(m.genes[0], -3, "reading leaves it as it was");
     }
 
     #[test]

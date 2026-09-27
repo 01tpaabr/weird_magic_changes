@@ -26,16 +26,30 @@ pub fn expect_family(kinds: &Kinds, who: &Who) -> Result<std::ops::Range<u16>, S
     Ok(k..end)
 }
 
-/// Kind `k`'s slot for `name`, per kind (a family's kinds may lay slots out
-/// differently): a need slot of that name, else a mem slot. `true`: a need.
-fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
-    let d = kinds.def(k);
-    d.need_named(name)
-        .map(|i| (true, i))
-        .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
+/// Which of an actor's slots an `expect` reads.
+#[derive(Clone, Copy)]
+enum Layer {
+    Need,
+    Mem,
+    Gene,
 }
 
-/// Whether the rules define every kind, need and memory `e` names, without
+/// Kind `k`'s slot for `name`, per kind (a family's kinds may lay slots out
+/// differently): a need slot of that name, else a mem slot, else a gene.
+fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(Layer, usize)> {
+    let d = kinds.def(k);
+    d.need_named(name)
+        .map(|i| (Layer::Need, i))
+        .or_else(|| {
+            d.mems
+                .iter()
+                .position(|m| m == name)
+                .map(|i| (Layer::Mem, i))
+        })
+        .or_else(|| d.gene_named(name).map(|i| (Layer::Gene, i)))
+}
+
+/// Whether the rules define every kind, need, memory and gene `e` names, without
 /// a world: `wmc lint --scenario` checks a test's `expect` lines with it.
 /// The same errors `expect` gives.
 pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
@@ -45,7 +59,10 @@ pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
         }
         Expect::Value { name, who, .. } => {
             if !expect_family(kinds, who)?.any(|k| expect_slot(kinds, k, name).is_some()) {
-                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
+                return Err(format!(
+                    "`{}` has no need, memory or gene `{name}`",
+                    who.kind
+                ));
             }
         }
         Expect::At { who: Some(w), .. } => {
@@ -58,7 +75,7 @@ pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
 
 /// What a scenario test's `expect` finds in `world` (`wmc scenario`):
 /// whether it holds, and what it saw, for the report. An error when it
-/// names a kind, need or memory the rules do not define (`check_expect`).
+/// names a kind, need, memory or gene the rules do not define (`check_expect`).
 /// A kind means its family, `only` the kind alone, as in the rules.
 pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
     let kinds = world.resource::<Kinds>().clone();
@@ -100,13 +117,20 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             for (a, m) in world.query::<(&ChunkActors, &ChunkMinds)>().iter(world) {
                 for (r, mind) in a.rows.iter().zip(&m.rows) {
                     if ids.contains(&r.kind)
-                        && let Some((need, i)) = slot(r.kind)
+                        && let Some((layer, i)) = slot(r.kind)
                     {
-                        vals.push(i64::from(if need {
-                            let decays = kinds.def(r.kind).needs[i].decays;
-                            crate::rules::vm::need_now(mind.needs[i], decays, now, mind.last_think)
-                        } else {
-                            mind.mem[i]
+                        vals.push(i64::from(match layer {
+                            Layer::Need => {
+                                let decays = kinds.def(r.kind).needs[i].decays;
+                                crate::rules::vm::need_now(
+                                    mind.needs[i],
+                                    decays,
+                                    now,
+                                    mind.last_think,
+                                )
+                            }
+                            Layer::Mem => mind.mem[i],
+                            Layer::Gene => mind.genes[i],
                         }));
                     }
                 }
@@ -115,6 +139,10 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
                 Agg::Min => vals.iter().min().copied(),
                 Agg::Max => vals.iter().max().copied(),
                 Agg::Sum => (!vals.is_empty()).then(|| vals.iter().sum()),
+                Agg::Mean => (!vals.is_empty()).then(|| {
+                    let n = i64::try_from(vals.len()).expect("fewer actors than i64::MAX");
+                    vals.iter().sum::<i64>().div_euclid(n)
+                }),
             };
             match got {
                 Some(g) => (op.holds(g, *v), g.to_string()),
@@ -211,7 +239,7 @@ mod tests {
                 ok(false, "egg"),
                 ok(true, "nobody"),
                 Err("the rules have no kind `wolf`".into()),
-                Err("`chicken` has no need or memory `sleep`".into()),
+                Err("`chicken` has no need, memory or gene `sleep`".into()),
                 ok(false, "no `hive` alive"),
                 ok(false, "no `fox` alive"),
             ]
@@ -253,7 +281,7 @@ mod tests {
         );
         assert_eq!(
             check_expect(&kinds, &value("nn", "fox")),
-            Err("`fox` has no need or memory `nn`".into())
+            Err("`fox` has no need, memory or gene `nn`".into())
         );
         let at = |w| Expect::At { x: 0, y: 0, who: w };
         assert_eq!(check_expect(&kinds, &at(None)), Ok(()));

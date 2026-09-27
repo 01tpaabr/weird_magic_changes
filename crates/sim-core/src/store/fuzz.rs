@@ -594,6 +594,7 @@ fn a_bad_world_header_never_panics() {
                         needs: vec![],
                         mems: vec![],
                         states: vec![],
+                        genes: vec![],
                     }],
                 ]
                 .concat(),

@@ -41,6 +41,8 @@ struct Knobs {
     /// is left out.
     ats: Vec<(Index, i32, i32, Option<(Index, u8, i32)>)>,
     ticks: u64,
+    /// `mutation N / D`, `N <= D`: children's genes drift.
+    mutation: Option<(u32, u32)>,
 }
 
 fn knobs() -> impl Strategy<Value = Knobs> {
@@ -64,9 +66,10 @@ fn knobs() -> impl Strategy<Value = Knobs> {
             0..=4,
         ),
         200u64..=400,
+        prop::option::of((1u32..=8, 1u32..=8)),
     )
         .prop_map(
-            |(seed, (cx, cy, dx, dy), terrain, shares, ats, ticks)| Knobs {
+            |(seed, (cx, cy, dx, dy), terrain, shares, ats, ticks, mutation)| Knobs {
                 seed,
                 width: cx * 64 - dx,
                 height: cy * 64 - dy,
@@ -74,6 +77,7 @@ fn knobs() -> impl Strategy<Value = Knobs> {
                 shares,
                 ats,
                 ticks,
+                mutation: mutation.map(|(n, d)| (n.min(d), d)),
             },
         )
 }
@@ -102,6 +106,9 @@ fn case(p: &Program, k: &Knobs) -> Case {
          rock_on_soil 0.{soil:02} rock_on_water 0.{water:02}\n",
         k.seed, k.width, k.height
     );
+    if let Some((n, d)) = k.mutation {
+        text += &format!("mutation {n} / {d}\n");
+    }
     let mut used: Vec<&str> = Vec::new();
     let mut whole = 0;
     for (i, d) in &k.shares {

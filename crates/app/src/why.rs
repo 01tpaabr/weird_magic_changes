@@ -144,6 +144,15 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             .collect();
         let _ = writeln!(s, "  mem    {}", mems.join(" | "));
     }
+    if !def.genes.is_empty() {
+        let genes: Vec<String> = def
+            .genes
+            .iter()
+            .enumerate()
+            .map(|(i, g)| format!("{} {} ({} to {})", g.name, b.genes[i], g.lo, g.hi))
+            .collect();
+        let _ = writeln!(s, "  genes  {}", genes.join(" | "));
+    }
 
     let visited = |pc: u32| e.trace.iter().any(|st| st.pc == pc);
     let rules: Vec<_> = kinds

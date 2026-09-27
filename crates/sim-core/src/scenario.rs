@@ -1,6 +1,7 @@
-//! Scenarios: the physical world a save is generated from, and where each
-//! kind starts (`docs/RULES.md` §14, decision 36). Everything else a world needs is
-//! its rules. A scenario is a small text file:
+//! Scenarios: the physical world a save is generated from, where each kind
+//! starts, and how fast genes mutate (`docs/RULES.md` §14, decisions 36 and
+//! 38). Everything else a world needs is its rules. A scenario is a small
+//! text file:
 //!
 //! ```text
 //! rules ../packs/life                           # the packs its world runs (else the built-in rules)
@@ -22,6 +23,7 @@
 //!   F fox with (food = 2h)
 //! }
 //! outside soil                                  # beyond the map: noise (the default), soil, rock, water
+//! mutation 1 / 20                               # each gene of a child moves with this chance (else: none)
 //! run 2d                                        # a test: step, then check what happened
 //! expect count chicken >= 10
 //! ```
@@ -165,12 +167,14 @@ pub struct Who {
     pub only: bool,
 }
 
-/// How `min|max|sum` folds a need or memory over a kind's actors.
+/// How `min|max|sum|mean` folds a need, memory or gene over a kind's
+/// actors. `mean` rounds down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agg {
     Min,
     Max,
     Sum,
+    Mean,
 }
 
 /// What an `expect` checks.
@@ -190,8 +194,9 @@ pub enum Expect {
         op: Op,
         n: i64,
     },
-    /// `min|max|sum NAME of [only] K OP V`: a need or memory over every
-    /// actor of the kind. With none alive it fails, whatever `OP V` says.
+    /// `min|max|sum|mean NAME of [only] K OP V`: a need, memory or gene
+    /// over every actor of the kind (`mean` rounds down). With none alive
+    /// it fails, whatever `OP V` says.
     Value {
         agg: Agg,
         name: String,
@@ -242,7 +247,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
 
 /// The words after `expect`.
 fn expectation(rest: &str) -> Result<Expect, String> {
-    const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
+    const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|mean NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
     let words: Vec<&str> = rest.split_whitespace().collect();
     // `OP V` ending the line at `words[i..]`.
     let op_value = |i: usize| -> Result<(Op, i64), String> {
@@ -269,6 +274,7 @@ fn expectation(rest: &str) -> Result<Expect, String> {
         "min" => Some(Agg::Min),
         "max" => Some(Agg::Max),
         "sum" => Some(Agg::Sum),
+        "mean" => Some(Agg::Mean),
         _ => None,
     };
     let first = *words.first().ok_or(FORMS)?;
@@ -350,6 +356,9 @@ pub struct Scenario {
     /// written; in a file, relative to it. `--rules` and `WMC_RULES` come
     /// first, and a saved world keeps its own.
     pub packs: Vec<String>,
+    /// `mutation N / D`: the chance that each gene of a child moves by a
+    /// step at birth. `None`: children inherit their genes exactly.
+    pub mutation: Option<(u32, u32)>,
 }
 
 /// A scenario that does not parse: where and why.
@@ -405,6 +414,7 @@ impl Default for Scenario {
             map: None,
             checks: Vec::new(),
             packs: Vec::new(),
+            mutation: None,
         }
     }
 }
@@ -741,6 +751,24 @@ impl Scenario {
                         *field = v;
                     }
                 }
+                "mutation" => {
+                    let tail = rest.join(" ");
+                    let parts: Vec<&str> = tail.split('/').map(str::trim).collect();
+                    let form = "expected `mutation N / D` with 0 < N <= D";
+                    let (Some(num), Some(den)) = (
+                        parts.first().and_then(|n| n.parse::<u32>().ok()),
+                        parts.get(1).and_then(|d| d.parse::<u32>().ok()),
+                    ) else {
+                        return Err(err(line_no, form.into()));
+                    };
+                    if parts.len() != 2 || num == 0 || den == 0 || num > den {
+                        return Err(err(line_no, form.into()));
+                    }
+                    if s.mutation.is_some() {
+                        return Err(err(line_no, "two `mutation` lines".into()));
+                    }
+                    s.mutation = Some((num, den));
+                }
                 "start" => {
                     let Some(kind) = rest.first() else {
                         return Err(err(
@@ -965,7 +993,7 @@ impl Scenario {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect)"
+                            "unknown statement `{other}` (rules, seed, size, terrain, start, mutation, map, legend, outside, run, expect)"
                         ),
                     ));
                 }
@@ -1207,9 +1235,11 @@ pub struct Explicit {
     /// Its local cell.
     pub cell: u16,
     pub placed: Placed,
-    /// What `with` sets, by slot: `(need, value)` and `(mem, value)`.
+    /// What `with` sets, by slot: `(need, value)`, `(mem, value)` and
+    /// `(gene, value)`.
     pub needs: Vec<(u8, i32)>,
     pub mems: Vec<(u8, i32)>,
+    pub genes: Vec<(u8, i32)>,
 }
 
 /// A scenario's starts resolved against a kind table: what worldgen places.
@@ -1299,7 +1329,7 @@ impl Placement {
                     if !g.walkable() {
                         return Err(err(format!("`{kind}` at ({x}, {y}) is on water")));
                     }
-                    let (mut needs, mut mems) = (Vec::new(), Vec::new());
+                    let (mut needs, mut mems, mut genes) = (Vec::new(), Vec::new(), Vec::new());
                     for (name, v) in with {
                         if let Some(i) = def.need_named(name) {
                             let max = def.needs[i].max;
@@ -1313,9 +1343,18 @@ impl Placement {
                             needs.push((u8::try_from(i).expect("at most NEED_SLOTS"), *v));
                         } else if let Some(i) = def.mems.iter().position(|m| m == name) {
                             mems.push((u8::try_from(i).expect("at most MEM_SLOTS"), *v));
+                        } else if let Some(i) = def.gene_named(name) {
+                            let g = &def.genes[i];
+                            if !(g.lo..=g.hi).contains(v) {
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `{name} = {v}`: gene `{name}` runs from {} to {}",
+                                    g.lo, g.hi
+                                )));
+                            }
+                            genes.push((u8::try_from(i).expect("at most GENE_SLOTS"), *v));
                         } else {
                             return Err(err(format!(
-                                "`{}` has no need or memory `{name}`",
+                                "`{}` has no need, memory or gene `{name}`",
                                 def.name
                             )));
                         }
@@ -1328,6 +1367,7 @@ impl Placement {
                             placed,
                             needs,
                             mems,
+                            genes,
                         },
                         at,
                     ));
@@ -1603,6 +1643,16 @@ mod tests {
             ),
             ("expect at (-1000000001, 0) hive", "is outside the world"),
             ("spawn fox", "unknown statement `spawn`"),
+            (
+                "mutation 0 / 5",
+                "expected `mutation N / D` with 0 < N <= D",
+            ),
+            (
+                "mutation 3 / 2",
+                "expected `mutation N / D` with 0 < N <= D",
+            ),
+            ("mutation 1", "expected `mutation N / D` with 0 < N <= D"),
+            ("mutation 1 / 2\nmutation 1 / 3", "two `mutation` lines"),
             ("terrain water_level nan", "`nan` is not a number"),
             ("terrain water_scale 0", "above 0"),
             (
@@ -1920,6 +1970,7 @@ legend {
             placed: b,
             needs: vec![],
             mems: vec![],
+            genes: vec![],
         };
         assert_eq!(pl.explicit_in(here), [only(here, local(dry))]);
         assert_eq!(pl.explicit_in(there), [only(there, local(far))]);
@@ -1979,7 +2030,7 @@ legend {
             ),
             (
                 "start fox at (5, 1) with (sleep = 1)",
-                "`fox` has no need or memory `sleep`",
+                "`fox` has no need, memory or gene `sleep`",
                 last,
             ),
             ("start chicken at (2, 2)", "two starts at (2, 2)", 6),

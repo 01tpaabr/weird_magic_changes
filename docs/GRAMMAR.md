@@ -43,7 +43,7 @@ SYMBOL   = "=>" | "==" | "!=" | "<=" | ">=" | "+=" | "-="
 
 ```
 kind trait sub const extends inherit state when
-glyph color cover tags cadence sight fuel bite place need max decay vital mem
+glyph color cover tags cadence sight fuel bite place need max decay vital mem gene
 if else while repeat for each choose let return
 and or not true false nearest sniff count within as only is free
 idle die become spawn with move drink eat hit graze take give next look signal mark
@@ -107,14 +107,18 @@ decl = "glyph" STRING
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
      | "mem" IDENT { "," IDENT }
+     | "gene" IDENT "=" additive "from" additive "to" additive
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 ```
 
 - *`glyph`: a string of one printable ASCII character (`!` to `~`). `color`: `"#rrggbb"`,
   six hex digits. Neither in a trait.*
 - *`glyph`, `color`, `cover`, `cadence`, `sight`, `fuel`, `food` and `bite` are given at
-  most once per body; `tags`, `need` and `mem` repeat, each name once (a mem may not repeat
-  a need of the same body).*
+  most once per body; `tags`, `need`, `mem` and `gene` repeat, each name once (a mem or gene
+  may not repeat a need, mem or gene of the same body).*
+- *`from` and `to` are words only in a `gene` declaration, like `max` in a need: not
+  reserved. A gene's three numbers fold to `LO <= D <= HI`, at most 8 genes per kind (a
+  trait checked alone, with its parameters bound to 1, is let off the range checks).*
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*
 - **Where a tag list ends.** It takes NAMEs until one that starts something else: a
   declaration word (`food` included), `sub`, `when`, `inherit`, `state`, or any non-NAME
@@ -273,19 +277,20 @@ A program that parses compiles only if it also keeps these. Each points at the s
 - *Global, across every file and pack* (§1, §15): kinds and traits share one namespace;
   file subs, consts and tags are global too, and none of them may reuse a kind's, trait's
   or each other's name. Scent names are a namespace of their own, at most 4 (§9).
-- *Per kind or trait:* needs and mems share one namespace (a name is a need or a mem, not
-  both); states and member subs have their own. A member sub may not share a name with a
+- *Per kind or trait:* needs, mems and genes share one namespace (a name is one of them);
+  a gene may also not share its name with a constant, a trait parameter in scope, a kind, a
+  trait or a tag; states and member subs have their own. A member sub may not share a name with a
   file sub, a kind or a trait (§15).
 - *Per rule or sub:* locals (`let`), bindings (`as v`, `for each ... as v`) and sub
   parameters. A local lives until the end of its block (§7). A local may not reuse the name
-  of another local in scope ("already bound"), nor of a need or mem the code can name, but
+  of another local in scope ("already bound"), nor of a need, mem or gene the code can name, but
   may hide a trait parameter or a constant.
-- *Lookup of a name in an expression* (§7): local, then need, then mem, then trait
+- *Lookup of a name in an expression* (§7): local, then need, then mem, then gene, then trait
   parameter, then constant. A file sub sees only its parameters, locals and constants
   (§12); a trait's rules and member subs only what the trait and its own parents declare
   (§6).
-- A trait parameter may not share a name with a constant, or with a need or mem of its
-  trait.
+- A trait parameter may not share a name with a constant, or with a need, mem or gene of
+  its trait. A gene is never assigned to.
 - Constants and every number in a declaration or an `extends` argument are folded at
   compile time: numbers, constants declared above, trait parameters in scope, arithmetic,
   comparisons and `min max abs sign clamp pack hi lo` (§12).

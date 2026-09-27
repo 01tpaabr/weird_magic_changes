@@ -403,15 +403,15 @@ fn scent_lifetime() -> u64 {
 /// new limit gets checked too.
 #[test]
 fn the_limits_table_is_the_codes() {
-    use sim_core::actors::{MEM_SLOTS, NEED_SLOTS};
+    use sim_core::actors::{GENE_SLOTS, MEM_SLOTS, NEED_SLOTS};
     use sim_core::rules::compile::*;
     use sim_core::rules::vm::{FRAME_LOCALS, FRAMES, STACK};
     use sim_core::scenario::MAX_SIZE_CHUNKS;
     let n = |v: usize| v as i64;
     let limits: Vec<(String, Vec<i64>)> = vec![
         (
-            "needs, mem slots per kind".into(),
-            vec![n(NEED_SLOTS), n(MEM_SLOTS)],
+            "needs, mem slots, genes per kind".into(),
+            vec![n(NEED_SLOTS), n(MEM_SLOTS), n(GENE_SLOTS)],
         ),
         (
             "tags, scent channels per rule set".into(),
@@ -537,6 +537,10 @@ fn the_numbers_in_the_prose_are_the_codes() {
                 "memory slots, at most {} per kind",
                 sim_core::actors::MEM_SLOTS
             ),
+            format!(
+                "own, at most {} per kind; read, never written",
+                sim_core::actors::GENE_SLOTS
+            ),
             format!("(at least {CHUNK_SIZE} cells each way, §11)"),
             format!(
                 "Scent fades by 1/32 every {SCENT_CADENCE} ticks: gone in about {hours} game hours"
@@ -592,7 +596,7 @@ fn the_numbers_in_the_prose_are_the_codes() {
         &actors,
         &[
             format!("a {row_pub}-byte public record (`ActorPub`)"),
-            format!("an {row_mind}-byte private record (`ActorMind`)"),
+            format!("a {row_mind}-byte private record (`ActorMind`)"),
             format!(
                 "Per actor: {} B persistent ({row_pub} + {row_mind} + {occupant} occupant) + {intent} B intent scratch",
                 row_pub + row_mind + occupant
@@ -951,7 +955,7 @@ fn the_rows_in_the_actors_design_are_the_codes() {
         .find(|b| b.info == "rust")
         .expect("ACTORS.md shows the rows in a rust block");
     let code = std::fs::read_to_string(repo().join("crates/sim-core/src/actors/mod.rs")).unwrap();
-    for (name, n) in [("ActorPub", 7), ("ActorMind", 10)] {
+    for (name, n) in [("ActorPub", 7), ("ActorMind", 11)] {
         let want = fields(&code, name);
         assert_eq!(want.len(), n, "{name}: {want:?}");
         assert_eq!(fields(&rust.text, name), want, "{name}");
