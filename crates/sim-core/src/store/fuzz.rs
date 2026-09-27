@@ -396,12 +396,24 @@ fn a_bad_world_header_never_panics() {
             true,
         ),
         (
-            "starts at the ends of the world",
+            "starts at the ends of i32",
             WorldMeta {
                 starts: vec![
                     at(i32::MIN, i32::MIN),
                     at(i32::MAX, i32::MAX),
                     at(i32::MIN, i32::MAX),
+                ],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "starts at the ends of the world",
+            WorldMeta {
+                starts: vec![
+                    at(-WORLD_EXTENT, -WORLD_EXTENT),
+                    at(WORLD_EXTENT - 1, WORLD_EXTENT - 1),
+                    at(-WORLD_EXTENT, WORLD_EXTENT - 1),
                 ],
                 ..meta.clone()
             },
@@ -465,10 +477,19 @@ fn a_bad_world_header_never_panics() {
             false,
         ),
         (
-            "the largest size",
+            "a size past the world",
             WorldMeta {
                 initial_width: u32::MAX,
                 initial_height: u32::MAX,
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "the largest size",
+            WorldMeta {
+                initial_width: WORLD_EXTENT.unsigned_abs(),
+                initial_height: WORLD_EXTENT.unsigned_abs(),
                 ..meta.clone()
             },
             false,

@@ -21,7 +21,10 @@
 //! length must not open it. Kinds travel by name, with the names of their
 //! need, mem and state slots and the scent channel names, so rows can be
 //! checked against (and remapped to) the loaded kind table on open
-//! (`sim::open`). The scenario's starts travel by kind name too.
+//! (`sim::open`). The scenario's starts travel by kind name too. Every
+//! position a save holds (a start, the initial region, a drawn map, a
+//! chunk file's coordinate) is inside the world's extent
+//! ([`WORLD_EXTENT`]); a save with one outside is refused.
 //!
 //! Revisit when a save directory grows past a few thousand chunk files:
 //! pack chunks into region files (32x32 chunks per file with an offset table).
@@ -34,9 +37,12 @@ use bevy_ecs::resource::Resource;
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
 use crate::rules::Kinds;
-use crate::scenario::{DrawnMap, Start};
+use crate::scenario::{DrawnMap, Start, in_world};
 use crate::stage::worldgen::GenParams;
-use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS};
+use crate::stage::{
+    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS,
+    WORLD_EXTENT,
+};
 use crate::time::TICKS_PER_DAY;
 
 pub const FORMAT_VERSION: u32 = 9;
@@ -144,7 +150,8 @@ impl Store {
     }
 
     /// Every chunk with a file in this store, in coordinate order (`y`, then
-    /// `x`). Files that are not `<x>_<y>.wmcc` are ignored.
+    /// `x`). Files that are not `<x>_<y>.wmcc` are ignored; one for a chunk
+    /// outside the world is an error.
     pub fn saved_chunks(&self) -> io::Result<Vec<ChunkCoord>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(self.dir.join("chunks"))? {
@@ -155,7 +162,11 @@ impl Store {
             if let Some((x, y)) = stem.split_once('_')
                 && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
             {
-                out.push(ChunkCoord::new(x, y));
+                let c = ChunkCoord::new(x, y);
+                outside(c).map_err(|e| {
+                    io::Error::new(e.kind(), format!("{}: {e}", self.chunk_path(c).display()))
+                })?;
+                out.push(c);
             }
         }
         out.sort_unstable_by_key(|c| (c.y, c.x));
@@ -189,6 +200,14 @@ impl Store {
             )));
         }
         let (initial_width, initial_height) = (r.u32()?, r.u32()?);
+        // The initial region is `[0, w) x [0, h)`.
+        let most = WORLD_EXTENT.unsigned_abs();
+        if initial_width > most || initial_height > most {
+            return Err(bad(format!(
+                "initial size {initial_width} x {initial_height} reaches outside the world \
+                 ({WORLD_EXTENT} cells each way)"
+            )));
+        }
         let params = GenParams {
             water_scale: r.f32()?,
             water_level: r.f32()?,
@@ -223,6 +242,7 @@ impl Store {
                 // saves without them read as before).
                 1 | 2 => {
                     let (x, y) = (r.i32()?, r.i32()?);
+                    in_world(x, y).map_err(|m| bad(format!("a start of `{kind}` at {m}")))?;
                     let mut with = Vec::new();
                     if tag == 2 {
                         for _ in 0..r.count(u32::from(u8::MAX), "values in a start")? {
@@ -376,10 +396,11 @@ impl Store {
     /// `Ok(None)` if the chunk was never saved (regenerate it). Row *shape*
     /// is checked here (counts, sizes); the invariants that need the kind
     /// table (`ChunkData::validate`) are the caller's. An error names the
-    /// file.
+    /// file; a chunk outside the world is one.
     pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<SavedChunk>> {
         let path = self.chunk_path(c);
         let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        outside(c).map_err(named)?;
         let bytes = match fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
@@ -481,6 +502,20 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
+}
+
+/// A chunk outside the world's extent is an error.
+fn outside(c: ChunkCoord) -> io::Result<()> {
+    if c.in_world() {
+        return Ok(());
+    }
+    Err(bad(format!(
+        "chunk ({}, {}) is outside the world: chunks run from {} to {} each way",
+        c.x,
+        c.y,
+        -CHUNK_EXTENT,
+        CHUNK_EXTENT - 1
+    )))
 }
 
 fn bad(msg: impl Into<String>) -> io::Error {
@@ -973,6 +1008,136 @@ mod tests {
         fs::write(s.chunk_path(c), &bytes).unwrap();
         let e = s.read_chunk(c).unwrap_err().to_string();
         assert!(e.contains("3_-2.wmcc") && e.contains("truncated"), "{e}");
+        fs::remove_dir_all(s.dir()).unwrap();
+    }
+
+    /// A save holds positions inside the world only: a start, an initial
+    /// region or a drawn map past its edge, or a chunk file for a chunk past
+    /// it, is refused with an error, never read. The last cells are fine.
+    #[test]
+    fn a_save_outside_the_world_is_refused() {
+        let s = tmp_store("outside");
+        let m = WorldMeta {
+            seed: 1,
+            tick: 5,
+            initial_width: 64,
+            initial_height: 64,
+            params: GenParams::default(),
+            starts: Vec::new(),
+            map: None,
+            kinds: Vec::new(),
+            scents: Vec::new(),
+            packs: Vec::new(),
+            rules_hash: 0,
+        };
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        let most = WORLD_EXTENT.unsigned_abs();
+        let map = |width, height| {
+            Some(DrawnMap {
+                width,
+                height,
+                cells: Vec::new(),
+                outside: None,
+            })
+        };
+        let fine = [
+            WorldMeta {
+                starts: vec![Start::at("hive", hi, lo), Start::at("hive", lo, hi)],
+                ..m.clone()
+            },
+            WorldMeta {
+                initial_width: most,
+                initial_height: most,
+                ..m.clone()
+            },
+            WorldMeta {
+                map: map(most, 0),
+                ..m.clone()
+            },
+        ];
+        for meta in fine {
+            s.write_meta(&meta).unwrap();
+            assert_eq!(s.read_meta().unwrap(), Some(meta));
+        }
+        let refused = [
+            (
+                WorldMeta {
+                    starts: vec![Start::at("hive", 0, WORLD_EXTENT)],
+                    ..m.clone()
+                },
+                "a start of `hive` at (0, 1000000000) is outside the world",
+            ),
+            (
+                WorldMeta {
+                    starts: vec![Start::At {
+                        kind: "fox".into(),
+                        x: i32::MIN,
+                        y: 0,
+                        with: vec![("food".into(), 1)],
+                    }],
+                    ..m.clone()
+                },
+                "a start of `fox` at (-2147483648, 0) is outside the world",
+            ),
+            (
+                WorldMeta {
+                    initial_width: most + 1,
+                    ..m.clone()
+                },
+                "initial size 1000000001 x 64 reaches outside the world",
+            ),
+            (
+                WorldMeta {
+                    initial_height: u32::MAX,
+                    ..m.clone()
+                },
+                "reaches outside the world",
+            ),
+            (
+                WorldMeta {
+                    map: map(0, most + 1),
+                    ..m.clone()
+                },
+                "a 0 x 1000000001 map reaches outside the world",
+            ),
+        ];
+        for (meta, want) in refused {
+            s.write_meta(&meta).unwrap();
+            let e = s.read_meta().unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert!(e.to_string().contains(want), "{want}: {e}");
+        }
+        // Chunk files: the edge chunks read, one past them is refused by
+        // name, and so is a directory that holds one.
+        let data = ChunkData::default();
+        let write = |c: ChunkCoord| {
+            s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
+                .unwrap();
+        };
+        let edge = [
+            ChunkCoord::new(CHUNK_EXTENT - 1, -CHUNK_EXTENT),
+            ChunkCoord::new(-CHUNK_EXTENT, CHUNK_EXTENT - 1),
+        ];
+        for c in edge {
+            write(c);
+            assert_eq!(s.read_chunk(c).unwrap().unwrap().data, data);
+        }
+        assert_eq!(s.saved_chunks().unwrap(), edge);
+        let past = ChunkCoord::new(CHUNK_EXTENT, 0);
+        write(past);
+        let e = s.read_chunk(past).unwrap_err().to_string();
+        assert!(
+            e.contains("15625000_0.wmcc: chunk (15625000, 0) is outside the world: chunks run from -15625000 to 15624999"),
+            "{e}"
+        );
+        let e = s.saved_chunks().unwrap_err().to_string();
+        assert!(
+            e.contains("15625000_0.wmcc") && e.contains("outside the world"),
+            "{e}"
+        );
+        fs::remove_file(s.chunk_path(past)).unwrap();
+        write(ChunkCoord::new(0, i32::MIN));
+        assert!(s.saved_chunks().is_err());
         fs::remove_dir_all(s.dir()).unwrap();
     }
 }
