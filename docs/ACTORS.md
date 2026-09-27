@@ -12,12 +12,12 @@ compiled once, run by every individual of that kind against its own state).
 ## 1. The shape
 
 An actor is a **row in the chunk it stands on**: a 12-byte public record (`ActorPub`) that
-any chunk may read while thinking, an 88-byte private record (`ActorMind`) that only its
+any chunk may read while thinking, a 120-byte private record (`ActorMind`) that only its
 own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. A
 **cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
-state is exactly needs + memory + a state byte: no saved program counter, so a think is a
+state is exactly needs + memory + genes + a state byte: no saved program counter, so a think is a
 pure function of (own row, tick-start world, tick, seed).
 
 ```
@@ -49,13 +49,14 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     flags: u8,      // DEAD | WAKE
     _pad: u16,
 }
-#[repr(C)] pub struct ActorMind {  // 88 B, Pod. Only the owning chunk touches it.
+#[repr(C)] pub struct ActorMind {  // 120 B, Pod. Only the owning chunk touches it.
     uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
     mem: [i32; 12],           // the program's whole persistent memory, named per kind
     state: u8, events: u8, hurt: u8, hurt_dir: u8,
     _pad: u32,
+    genes: [i32; 8],          // inherited constants the program reads, never writes (step 9)
 }
 #[derive(Component)] pub struct ChunkActors { rows: Vec<ActorPub> }   // reserved capacity per chunk
 #[derive(Component)] pub struct ChunkMinds  { rows: Vec<ActorMind> }  // same length, same order
@@ -102,7 +103,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
   the code; a fifth name is a compile error. The renderer washes a scented cell toward the
   channel's colour.
-- **Save**: chunk file v9 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
+- **Save**: chunk file v10 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
@@ -136,7 +137,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
 
-Per actor: 104 B persistent (12 + 88 + 4 occupant) + 32 B intent scratch.
+Per actor: 136 B persistent (12 + 120 + 4 occupant) + 32 B intent scratch.
 
 ## 3. Senses
 

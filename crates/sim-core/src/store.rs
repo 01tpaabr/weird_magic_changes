@@ -39,7 +39,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -678,13 +678,13 @@ mod tests {
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
-        // A v8 header is refused by version.
+        // A v9 header is refused by version.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
-        bytes[4] = 8;
+        bytes[4] = 9;
         fs::write(s.meta_path(), &bytes).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
-        assert!(err.contains("format 8, this build reads 9"), "{err}");
+        assert!(err.contains("format 9, this build reads 10"), "{err}");
         // A header written for a different day length is refused.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
@@ -724,6 +724,7 @@ mod tests {
             hurt: 4,
             hurt_dir: 5,
             _pad: 0,
+            genes: [-7, 0, 1, i32::MAX, 0, 0, 0, 6],
         };
         let cell = (0..CHUNK_CELLS)
             .find(|&i| data.cells.occupant[i].is_none())

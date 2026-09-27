@@ -2,7 +2,7 @@
 //!
 //! An actor is not an entity. It is row `i` of two parallel arrays on its
 //! chunk entity: [`ChunkActors`] holds the 12-byte public record every chunk
-//! may read while thinking, [`ChunkMinds`] the 88-byte private record only
+//! may read while thinking, [`ChunkMinds`] the 120-byte private record only
 //! the owning chunk touches. The chunk's `occupant` layer points back:
 //! `occupant[row.cell] == ActorId::pack(row.kind, i)`. [`ActorsMut`] is the
 //! one place that invariant is maintained; everything that adds, kills or
@@ -29,6 +29,9 @@ pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, T
 pub const NEED_SLOTS: usize = 4;
 /// Persistent memory slots per actor, named per kind by its rules file.
 pub const MEM_SLOTS: usize = 12;
+/// Genes per actor: per-individual constants the rules read and cannot
+/// write, set at birth from the parent. Named per kind by its rules file.
+pub const GENE_SLOTS: usize = 8;
 /// Rows reserved per chunk when it is loaded. Growth past this is chunk-level
 /// and amortised (a `Vec` doubling), never a per-actor allocation.
 pub const RESERVE: usize = 256;
@@ -89,10 +92,13 @@ pub struct ActorMind {
     /// Direction of the lowest-key attacker.
     pub hurt_dir: u8,
     pub _pad: u32,
+    /// Inherited constants the program reads (`gene`), never writes.
+    /// Named per kind.
+    pub genes: [i32; GENE_SLOTS],
 }
 
 const _: () = assert!(size_of::<ActorPub>() == 12);
-const _: () = assert!(size_of::<ActorMind>() == 88);
+const _: () = assert!(size_of::<ActorMind>() == 120);
 
 /// Public rows of one chunk. Same length and order as its [`ChunkMinds`].
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
@@ -282,11 +288,11 @@ mod tests {
     #[test]
     fn records_are_pod_sized_as_documented() {
         assert_eq!(size_of::<ActorPub>(), 12);
-        assert_eq!(size_of::<ActorMind>(), 88);
+        assert_eq!(size_of::<ActorMind>(), 120);
         assert_eq!(align_of::<ActorMind>(), 8);
         let m = mind(7);
         let bytes: &[u8] = bytemuck::bytes_of(&m);
-        assert_eq!(bytes.len(), 88);
+        assert_eq!(bytes.len(), 120);
         assert_eq!(bytes[0], 7);
     }
 
