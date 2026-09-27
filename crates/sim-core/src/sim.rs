@@ -26,7 +26,9 @@ use std::io;
 use bevy_ecs::prelude::*;
 use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 
-use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
+use crate::actors::{
+    ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, slot_u16, systems,
+};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
@@ -35,7 +37,7 @@ use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{SavedKind, Store, WorldMeta};
-use crate::time::START_TICK;
+use crate::time::{START_TICK, stamp};
 
 /// The facts a world is generated from: its [`Scenario`], with the starts
 /// resolved against the loaded rules. Saved in the world header (the
@@ -544,7 +546,8 @@ fn load_chunks(
                         m.needs[i] = m.needs[i].clamp(0, n.max);
                     }
                 }
-                let frozen = now.wrapping_sub(saved.last_ticked) as u32;
+                // On the 32-bit clock: the rows' clocks wrap too.
+                let frozen = stamp(now.wrapping_sub(saved.last_ticked));
                 for m in &mut saved.data.minds.rows {
                     m.last_think = m.last_think.wrapping_add(frozen);
                     m.born = m.born.wrapping_add(frozen);
@@ -650,7 +653,7 @@ pub fn find_uid(world: &mut World, uid: u64) -> Option<(Pos, ChunkCoord, u16)> {
             m.rows
                 .iter()
                 .position(|m| m.uid == uid)
-                .map(|i| (c.cell(usize::from(a.rows[i].cell)), *c, i as u16))
+                .map(|i| (c.cell(usize::from(a.rows[i].cell)), *c, slot_u16(i)))
         })
 }
 

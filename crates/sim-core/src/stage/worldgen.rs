@@ -200,6 +200,7 @@ fn value_noise(seed: u64, stream: u64, x: f32, y: f32) -> f32 {
     let fy = smoothstep(y - y0);
     // `as` saturates far out (a tiny `water_scale`); the lattice is only a
     // hash input, so its `+ 1` wraps rather than overflows.
+    #[allow(clippy::cast_possible_truncation)]
     let (ix, iy) = (x0 as i32, y0 as i32);
     let l = |dx: i32, dy: i32| {
         unit_f32(hash_cell(

@@ -31,7 +31,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::actors::{
-    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, flags,
+    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, flags, slot_u16,
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
@@ -40,7 +40,9 @@ use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
 use crate::stage::{
     ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, SCENT_CHANNELS, Stage,
+    cell_u16,
 };
+use crate::time::stamp;
 
 /// One actor's decision this tick, waiting for the resolve phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +221,7 @@ impl Scratch {
         match *c {
             TOUCHED => {}
             UNCLAIMED => {
-                self.touched.push(cell as u16);
+                self.touched.push(cell_u16(cell));
                 *c = key;
             }
             _ => *c = (*c).min(key),
@@ -229,7 +231,7 @@ impl Scratch {
     /// The cell's occupancy changed this tick: nobody else enters it.
     fn touch(&mut self, cell: usize) {
         if self.claim[cell] == UNCLAIMED {
-            self.touched.push(cell as u16);
+            self.touched.push(cell_u16(cell));
         }
         self.claim[cell] = TOUCHED;
     }
@@ -325,7 +327,7 @@ pub fn think(
                     seed,
                     halo,
                     *coord,
-                    slot as u16,
+                    slot_u16(slot),
                     row,
                     mind,
                     &mut Vec::new(),
@@ -470,8 +472,9 @@ fn think_one<const TRACE: bool>(
     match out.action {
         Action::Move => {
             let (dx, dy) = step_toward(halo, lx, ly, i32::from(out.dx), i32::from(out.dy));
-            intent.dx = dx as i8;
-            intent.dy = dy as i8;
+            #[allow(clippy::cast_possible_truncation)] // a unit step, -1..=1
+            let step = (dx as i8, dy as i8);
+            (intent.dx, intent.dy) = step;
         }
         Action::Drink => {
             // Adjacent water (or underfoot, which a standing actor never is).
@@ -549,6 +552,10 @@ pub fn resolve(
                     let res = if dx.abs() > 1 || dy.abs() > 1 || (dx, dy) == (0, 0) {
                         result::REFUSED
                     } else {
+                        // A take or give's kind is its need slot (Think
+                        // widened the u8).
+                        #[allow(clippy::cast_possible_truncation)]
+                        let need = it.kind as u8;
                         let (to, cell) = match target_of(
                             *coord,
                             usize::from(pubs.rows[slot].cell),
@@ -562,12 +569,12 @@ pub fn resolve(
                             key: it.key,
                             slot: it.slot,
                             what: EffectKind::Transfer {
-                                need: it.kind as u8,
+                                need,
                                 amount: it.amount,
                                 give: it.action == Action::Give,
                             },
                             to,
-                            cell: cell as u16,
+                            cell: cell_u16(cell),
                         });
                         result::NONE // Exchange decides
                     };
@@ -594,7 +601,7 @@ pub fn resolve(
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
                                 scratch.hits.push(Hit {
-                                    cell: cell as u16,
+                                    cell: cell_u16(cell),
                                     key: it.key,
                                     from: e,
                                     slot: it.slot,
@@ -617,7 +624,7 @@ pub fn resolve(
                                     cover,
                                 },
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE // Exchange decides
                         }
@@ -758,8 +765,11 @@ pub fn exchange(
                 let taken = i32::from(hit.bite).min(left);
                 left -= taken;
                 if hit.eat && taken > 0 && def.food > 0 {
-                    let food = i64::from(def.food) * i64::from(taken) / max;
-                    work.credits.push((hit.from, hit.slot, food as i32));
+                    // Health is in 0..=max (every write clamps it), so
+                    // taken <= max and food <= def.food, an i32.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let food = (i64::from(def.food) * i64::from(taken) / max) as i32;
+                    work.credits.push((hit.from, hit.slot, food));
                 }
             }
             let taken = m.needs[h].max(0) - left;
@@ -1010,7 +1020,7 @@ pub fn apply(
                             actors.cells.occupant[from] = ActorId::NONE;
                             scratch.touch(from);
                             actors.cells.occupant[cell] = ActorId::pack(kind, it.slot);
-                            actors.pubs[slot].cell = cell as u16;
+                            actors.pubs[slot].cell = cell_u16(cell);
                             scratch.touch(cell);
                             result::OK
                         }
@@ -1021,7 +1031,7 @@ pub fn apply(
                                 slot: it.slot,
                                 what: EffectKind::Move,
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE // Migrate decides
                         }
@@ -1058,7 +1068,7 @@ pub fn apply(
                                         with: it.with,
                                     },
                                     to,
-                                    cell: cell as u16,
+                                    cell: cell_u16(cell),
                                 });
                                 result::NONE
                             }
@@ -1083,7 +1093,7 @@ pub fn apply(
                                     with: it.with,
                                 },
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE
                         }
@@ -1155,8 +1165,8 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
     }
     ActorMind {
         uid,
-        born: tick as u32,
-        last_think: tick as u32,
+        born: stamp(tick),
+        last_think: stamp(tick),
         needs,
         mem: [0; MEM_SLOTS],
         state: 0,
@@ -1223,10 +1233,10 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
         };
     }
     m.state = 0;
-    m.born = tick as u32;
+    m.born = stamp(tick);
     actors.pubs[slot].kind = to;
     let cell = usize::from(actors.pubs[slot].cell);
-    actors.cells.layer_mut(cover)[cell] = ActorId::pack(to, slot as u16);
+    actors.cells.layer_mut(cover)[cell] = ActorId::pack(to, slot_u16(slot));
     result::OK
 }
 

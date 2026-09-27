@@ -26,6 +26,7 @@ use bevy_ecs::prelude::*;
 
 use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
+    slot_u16,
 };
 use crate::rules::Kinds;
 use crate::scenario::{Placement, absent, present};
@@ -120,7 +121,10 @@ impl Plan {
             t.states = od
                 .states
                 .iter()
-                .map(|s| ns.iter().position(|n| n == s).unwrap_or(0) as u8)
+                .map(|s| {
+                    let i = ns.iter().position(|n| n == s).unwrap_or(0);
+                    u8::try_from(i).expect("at most MAX_STATES states")
+                })
                 .collect();
             kinds.push(Some(t));
         }
@@ -167,7 +171,7 @@ impl Plan {
                     actors.pubs[slot].kind = t.kind;
                     let cover = row.flags & flags::COVER != 0;
                     actors.cells.layer_mut(cover)[usize::from(row.cell)] =
-                        ActorId::pack(t.kind, slot as u16);
+                        ActorId::pack(t.kind, slot_u16(slot));
                     let old = actors.minds[slot];
                     let m = &mut actors.minds[slot];
                     for i in 0..NEED_SLOTS {

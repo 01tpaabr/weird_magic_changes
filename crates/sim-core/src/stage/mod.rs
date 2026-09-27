@@ -61,6 +61,16 @@ pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
 /// Scent channels per cell (`mark`, `sniff`): named by the rules, numbered
 /// in first-appearance order.
 pub const SCENT_CHANNELS: usize = 4;
+const _: () = assert!(CHUNK_CELLS <= 1 << u16::BITS);
+
+/// A local cell index, `0..CHUNK_CELLS`, as the `u16` that rows, effects
+/// and hits keep.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // below CHUNK_CELLS, which fits
+pub fn cell_u16(cell: usize) -> u16 {
+    debug_assert!(cell < CHUNK_CELLS, "cell {cell} is outside the chunk");
+    cell as u16
+}
 const MASK: i32 = CHUNK_SIZE - 1;
 
 /// What a cell fundamentally is. Exactly one per cell.
@@ -123,6 +133,7 @@ impl ActorId {
 
     /// `(kind, slot)` of a live id, `None` for an empty cell.
     #[inline]
+    #[allow(clippy::cast_possible_truncation)] // the two halves: truncation is the point
     pub fn unpack(self) -> Option<(u16, u16)> {
         (!self.is_none()).then_some(((self.0 >> 16) as u16, self.0 as u16))
     }

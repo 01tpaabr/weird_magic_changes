@@ -21,7 +21,7 @@ pub mod systems;
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells};
+use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, cell_u16};
 
 pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, Tally, life};
 
@@ -32,6 +32,16 @@ pub const MEM_SLOTS: usize = 12;
 /// Rows reserved per chunk when it is loaded. Growth past this is chunk-level
 /// and amortised (a `Vec` doubling), never a per-actor allocation.
 pub const RESERVE: usize = 256;
+
+/// A row index as the `u16` slot an [`ActorId`] and an effect keep: a chunk
+/// has at most one row per cell in each layer.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // below 2 * CHUNK_CELLS, which fits
+pub fn slot_u16(slot: usize) -> u16 {
+    debug_assert!(slot < 2 * CHUNK_CELLS, "row {slot}: more than two per cell");
+    slot as u16
+}
+const _: () = assert!(2 * CHUNK_CELLS <= 1 << u16::BITS);
 
 /// Bits of [`ActorPub::flags`].
 pub mod flags {
@@ -154,10 +164,12 @@ impl ActorsMut<'_> {
         assert!(layer[cell].is_none(), "cell {cell} is occupied");
         let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
         layer[cell] = ActorId::pack(kind, slot);
+        #[allow(clippy::cast_possible_truncation)] // the uid's low bits: truncation is the point
+        let stagger = mind.uid as u16;
         self.pubs.push(ActorPub {
-            cell: cell as u16,
+            cell: cell_u16(cell),
             kind,
-            stagger: mind.uid as u16,
+            stagger,
             signal: 0,
             look: 0,
             flags: if cover { flags::COVER } else { 0 },
@@ -192,7 +204,7 @@ impl ActorsMut<'_> {
             if i < self.pubs.len() {
                 let moved = self.pubs[i];
                 self.cells.layer_mut(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
-                    ActorId::pack(moved.kind, i as u16);
+                    ActorId::pack(moved.kind, slot_u16(i));
             }
         }
     }
@@ -230,7 +242,7 @@ pub fn validate(
             return Err(format!("row {slot} is on cell {cell}, outside the chunk"));
         }
         let layer = cells.layer(p.flags & flags::COVER != 0);
-        let want = ActorId::pack(p.kind, slot as u16);
+        let want = ActorId::pack(p.kind, slot_u16(slot));
         if layer[cell] != want {
             return Err(format!(
                 "cell {cell} holds {:?}, row {slot} expects {want:?}",

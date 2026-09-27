@@ -19,6 +19,7 @@ pub const SCENT_CADENCE: u64 = 16;
 
 /// One fade step: `s - ceil(s / 32)`.
 #[inline]
+#[allow(clippy::cast_possible_truncation)] // ceil(s / 32) is at most 8
 pub const fn fade(s: u8) -> u8 {
     s - ((s as u16 + 31) >> 5) as u8
 }

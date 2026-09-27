@@ -84,10 +84,21 @@ pub const SUNRISE: u64 = 6 * TICKS_PER_HOUR;
 pub const SUNSET: u64 = 18 * TICKS_PER_HOUR;
 const RAMP: u64 = TICKS_PER_HOUR;
 
+/// `tick` on the 32-bit clock an actor's `born` and `last_think` keep: its
+/// low 32 bits. They are compared by `wrapping_sub`, so the clock wraps
+/// every 2^32 ticks (about 199 000 days) without harm: the truncation is
+/// the point.
+#[inline]
+#[allow(clippy::cast_possible_truncation)]
+pub const fn stamp(tick: u64) -> u32 {
+    tick as u32
+}
+
 /// Sunlight at `tick`, `0` (night) to `255` (full day). Integer, piecewise
 /// linear: dark until [`SUNRISE`], full by one hour later, full until one
 /// hour before [`SUNSET`], dark from [`SUNSET`]. Sim quantity: systems that
 /// care about light (plants) read this; the renderer maps it to brightness.
+#[allow(clippy::cast_possible_truncation)] // both ramps are 0..=255
 pub const fn daylight(tick: u64) -> u8 {
     let t = tick % TICKS_PER_DAY;
     if t < SUNRISE || t >= SUNSET {
