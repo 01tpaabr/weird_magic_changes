@@ -2095,6 +2095,12 @@ struct Gen<'a> {
     /// Checking traits on their own: declaration ranges are lenient and
     /// nothing compiled is kept.
     checking: bool,
+    /// The instance being resolved has arguments made from the trait
+    /// check's placeholder 1s: a trait it reaches twice is not reported.
+    placeholder: bool,
+    /// Instances that skipped such a conflict: never reused for one whose
+    /// arguments are real.
+    lenient: Vec<usize>,
     locals: Vec<Local>,
     next_local: u8,
     /// Position for errors without a better one.
@@ -2229,6 +2235,8 @@ impl<'a> Gen<'a> {
             sub: None,
             params: Vec::new(),
             checking: false,
+            placeholder: false,
+            lenient: Vec::new(),
             locals: Vec::new(),
             next_local: 0,
             here: Pos {
@@ -2559,11 +2567,10 @@ impl<'a> Gen<'a> {
     /// its ancestors, merged declarations and rule lists. Memoized per
     /// (item, arguments).
     fn inst(&mut self, item: usize, args: Vec<i32>, stack: &mut Vec<usize>) -> Result<usize> {
-        if let Some(i) = self
-            .insts
-            .iter()
-            .position(|x| x.item == item && x.args == args)
-        {
+        if let Some(i) = (0..self.insts.len()).find(|&i| {
+            let x = &self.insts[i];
+            x.item == item && x.args == args && (self.placeholder || !self.lenient.contains(&i))
+        }) {
             return Ok(i);
         }
         let items = self.items;
@@ -2636,15 +2643,20 @@ impl<'a> Gen<'a> {
             let saved = std::mem::replace(&mut self.params, scope.clone());
             let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a, &p.at)).collect();
             self.params = saved;
-            let pinst = self.inst(pi, folded?, stack)?;
-            parents.push(pinst);
+            let named = |n: &str| scope.iter().any(|(s, _)| s == n);
+            let ph = self.placeholder && p.args.iter().any(|a| any_name(a, &named));
+            let was = std::mem::replace(&mut self.placeholder, ph);
+            let pinst = folded.and_then(|f| self.inst(pi, f, stack));
+            self.placeholder = was;
+            parents.push(pinst?);
         }
         stack.pop();
         // Linearize: each parent's ancestors, then the parent; the first
         // occurrence wins. One trait, two argument lists: ambiguous (not
-        // while checking a trait with arguments: its 1s are placeholders,
-        // and a kind that really reaches both reports it).
+        // when this item's arguments are the trait check's placeholder 1s:
+        // a kind that really reaches both reports it).
         let mut ancestors: Vec<usize> = Vec::new();
+        let mut skipped = false;
         for &p in &parents {
             let chain: Vec<usize> = self.insts[p].ancestors.iter().copied().chain([p]).collect();
             for a in chain {
@@ -2655,7 +2667,8 @@ impl<'a> Gen<'a> {
                     .iter()
                     .find(|&&o| self.insts[o].item == self.insts[a].item)
                 {
-                    if self.checking && !args.is_empty() {
+                    if self.placeholder {
+                        skipped = true;
                         continue;
                     }
                     let fmt = |i: usize| -> String {
@@ -2684,6 +2697,9 @@ impl<'a> Gen<'a> {
         let inst = inst?;
         debug_assert_eq!(self.insts.len(), me, "merge resolves nothing new");
         self.insts.push(inst);
+        if skipped {
+            self.lenient.push(me);
+        }
         Ok(me)
     }
 
@@ -3310,7 +3326,10 @@ impl<'a> Gen<'a> {
             if !it.is_trait {
                 continue;
             }
-            let ti = self.inst(i, vec![1; it.params.len()], &mut Vec::new())?;
+            self.placeholder = !it.params.is_empty();
+            let ti = self.inst(i, vec![1; it.params.len()], &mut Vec::new());
+            self.placeholder = false;
+            let ti = ti?;
             let inst = self.insts[ti].clone();
             self.kind = None;
             self.cur = Some(ti);
@@ -5598,6 +5617,19 @@ mod tests {
             e.contains("`w` reaches trait `u` twice, with (1) and (2)"),
             "{e}"
         );
+        // And a trait that names t(1) itself, at any depth, before or after t.
+        for text in [
+            format!("{pack} trait w extends t(1) {{ }}"),
+            format!("{pack} trait w(k) extends t(1) {{ }}"),
+            format!("{pack} trait top extends w(3) {{ }} trait w(k) extends t(1) {{ }}"),
+            format!("trait w extends t(1) {{ }} {pack}"),
+        ] {
+            let e = compile_err(&text);
+            assert!(e.contains("`t` reaches trait `u` twice"), "{text}: {e}");
+        }
+        // A trait that passes its own parameter on is checked with 1s too.
+        compile_ok(&format!("trait w(k) extends t(k) {{ }} {pack}"));
+        compile_ok(&format!("{pack} trait w(k) extends t(k + 0) {{ }}"));
     }
 
     #[test]
