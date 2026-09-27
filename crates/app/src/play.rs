@@ -532,6 +532,11 @@ fn reload(world: &mut World) -> String {
             if r.rewritten > 0 {
                 text.push_str(&format!(" | {} saved chunks rewritten", r.rewritten));
             }
+            if let Some(e) = &r.world_file {
+                text.push_str(&format!(
+                    " | world file not written ({e}): p saves it again"
+                ));
+            }
             text
         }
     }

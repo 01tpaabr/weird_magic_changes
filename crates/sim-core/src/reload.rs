@@ -41,6 +41,9 @@ pub struct Reload {
     pub rewritten: usize,
     /// The new rules hash.
     pub hash: u64,
+    /// Why the world file was not written, if it was not. The new rules are
+    /// installed all the same; the next save writes it.
+    pub world_file: Option<String>,
 }
 
 /// Where one old kind's rows go.
@@ -240,9 +243,11 @@ pub fn rewrite_saved(
 /// Swap in `new` rules (see the module doc). With a `store`, every saved
 /// chunk is rewritten and the world file updated. On an error nothing in
 /// the world or the store has changed yet (a bad chunk file refuses the
-/// rewrite before any is written), except for a write that fails part-way
-/// (reported; the chunks already rewritten are consistent with the new
-/// rules, which are then not installed).
+/// rewrite before any is written), except for a chunk write that fails
+/// part-way (reported; the chunks already rewritten are consistent with the
+/// new rules, which are then not installed). The world file is written last,
+/// after the new rules are installed: if that fails, the reload still
+/// happened and [`Reload::world_file`] says why (the next save writes it).
 pub fn reload_rules(
     world: &mut World,
     store: Option<&Store>,
@@ -280,7 +285,7 @@ pub fn reload_rules(
             meta.dirty = true;
         }
     }
-    let report = Reload {
+    let mut report = Reload {
         added: new
             .names()
             .filter(|n| old.by_name(n).is_none())
@@ -294,15 +299,17 @@ pub fn reload_rules(
             .collect(),
         rewritten,
         hash: new.hash,
+        world_file: None,
     };
     world.insert_resource(new);
     world.insert_resource(Tally::default());
     let mut c = world.resource_mut::<SimConfig>();
     (c.starts, c.placement) = (starts, placement);
     if let Some(store) = store {
-        store
+        report.world_file = store
             .write_meta(&crate::sim::meta(world))
-            .map_err(|e| format!("writing the world file: {e}"))?;
+            .err()
+            .map(|e| e.to_string());
     }
     Ok(report)
 }

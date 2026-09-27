@@ -2881,6 +2881,43 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    /// A world file that cannot be written does not undo a reload: the new
+    /// rules are installed and reported so, and the next save writes it.
+    #[test]
+    fn a_reload_whose_world_file_fails_still_installs_the_rules() {
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let a = compile("a.rules", "kind hen { glyph \"h\" }").unwrap();
+        let b = compile(
+            "b.rules",
+            "kind egg { glyph \"e\" }\nkind hen { glyph \"h\" }",
+        )
+        .unwrap();
+        let s = Scenario {
+            starts: starts("start hen 1 / 4"),
+            ..cfg(2)
+        };
+        let store = tmp_store("reload-meta-fails");
+        let mut w = new_world_with(&s, a).unwrap();
+        save(&mut w, &store).unwrap();
+        // A non-empty directory where world.wmc was: its rename fails.
+        let meta = store.dir().join("world.wmc");
+        std::fs::remove_file(&meta).unwrap();
+        std::fs::create_dir_all(meta.join("x")).unwrap();
+        let r = reload_rules(&mut w, Some(&store), b.clone()).unwrap();
+        assert!(r.world_file.is_some(), "{r:?}");
+        assert!(r.rewritten > 0);
+        assert_eq!(w.resource::<Kinds>().hash, b.hash);
+        std::fs::remove_dir_all(&meta).unwrap();
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, b).unwrap().unwrap();
+        let near = LoadPolicy { load: 1, unload: 1 };
+        ensure_loaded(&mut back, Pos::new(64, 64), near, Some(&store)).unwrap();
+        let n = count_kinds(&mut back);
+        assert!(n[0] == 0 && n[1] > 0, "hens are kind 1 now: {n:?}");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
     const HENS: &str = "kind hen {
   glyph \"h\"  cadence 4
   need food  max 1d vital
