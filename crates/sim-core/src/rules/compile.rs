@@ -5901,6 +5901,19 @@ mod tests {
                 k.debug.diagnostics
             );
         }
+        // A let in another kind, compiled last, hides nothing here.
+        let k = compile_ok(
+            "const w = 1 kind a { when w => idle\n when 1 => move north }\n\
+             kind b { when 1 => { let w = 0  idle } }",
+        );
+        assert!(
+            k.debug
+                .diagnostics
+                .iter()
+                .any(|d| d.to_string().contains("never runs")),
+            "{:?}",
+            k.debug.diagnostics
+        );
         // Nothing hides it: still folded.
         let e = compile_err("const W = 1 kind a { when 1 => { choose { W: idle }  move north } }");
         assert!(e.contains("a second action"), "{e}");

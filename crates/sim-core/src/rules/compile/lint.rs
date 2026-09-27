@@ -317,6 +317,9 @@ impl<'a> Gen<'a> {
     pub(super) fn lint(&mut self, kinds: &Kinds) -> Vec<Diagnostic> {
         let items = self.items;
         let mut out = Out::default();
+        // The last rule or sub compiled left its locals; they hide nothing here.
+        self.locals.clear();
+        self.next_local = 0;
         self.diagnose(&mut out);
 
         // The rule set as a whole.
