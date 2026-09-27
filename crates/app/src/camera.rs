@@ -19,8 +19,9 @@ const FAST_SPEED: f64 = 56.0;
 const SMOOTHING: f64 = 0.07;
 /// Below this speed with no input the camera snaps to rest.
 const REST: f64 = 0.02;
-/// Keeps `cell()` inside `i32` with room for a viewport around it.
-const LIMIT: f64 = 1e9;
+/// The edge of the world (`sim_core::WORLD_EXTENT`): keeps `cell()` inside
+/// `i32` with room for a viewport around it.
+const LIMIT: f64 = sim_core::WORLD_EXTENT as f64;
 
 /// Direction the player is pushing: each axis -1, 0 or 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
