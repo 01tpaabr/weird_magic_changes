@@ -382,7 +382,7 @@ proptest! {
     // A case takes ~0.2 s: shrinking one takes minutes.
     #![proptest_config(proptest::test_runner::Config {
         max_shrink_iters: 1024,
-        ..crate::fuzz_config(8)
+        ..crate::fuzz_config(16)
     })]
 
     /// A generated program in a generated world keeps every invariant,
