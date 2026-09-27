@@ -66,6 +66,7 @@ make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: i
 make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
+make fuzz       the never-panic properties (scenarios, saves, CLI), FUZZ_CASES each, new seed (printed)
 make ci         check + test  == "done"
 make bench      criterion, results in target/criterion
 make release    LTO, static Bevy

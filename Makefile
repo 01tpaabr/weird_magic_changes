@@ -5,6 +5,7 @@
 #   make check      -> fmt-check + clippy          (fast, runs in pre-commit)
 #   make test       -> cargo test (includes the 1-thread vs N-thread determinism gate and every scenario)
 #   make scenario-test -> run scenarios/ and scenarios/tests/ at 1 and 8 threads, with their reports
+#   make fuzz       -> the never-panic properties (scenario text, save files, the CLI) with many more cases
 #   make ci         -> check + test (what "green" means for this repo)
 #   make bench      -> criterion benches
 #   make release    -> optimized build (LTO, static Bevy)
@@ -21,7 +22,7 @@ SHELL := /bin/bash
 ARGS ?=
 DEV := --features app/dev
 
-.PHONY: build run release check test scenario-test ci bench fmt fmt-check lint setup hooks clean help
+.PHONY: build run release check test scenario-test fuzz ci bench fmt fmt-check lint setup hooks clean help
 
 build:
 	cargo build --workspace $(DEV)
@@ -56,6 +57,15 @@ scenario-test: build
 			cargo run -q -p app --bin wmc $(DEV) -- scenario $$f --threads $$t || exit 1; \
 		done; \
 	done
+
+# `make test` runs these properties with a few cases and a fixed seed; this
+# runs FUZZ_CASES each from a new seed (printed: WMC_FUZZ_SEED=<it> replays one).
+FUZZ_CASES ?= 2000
+fuzz:
+	@seed=$${WMC_FUZZ_SEED:-$$(date +%s)}; \
+	echo "WMC_FUZZ_SEED=$$seed WMC_FUZZ_CASES=$(FUZZ_CASES)"; \
+	WMC_FUZZ_SEED=$$seed WMC_FUZZ_CASES=$(FUZZ_CASES) \
+		cargo test --workspace $(DEV) -- fuzz:: generated_command_lines_never_panic
 
 ci: check test
 
