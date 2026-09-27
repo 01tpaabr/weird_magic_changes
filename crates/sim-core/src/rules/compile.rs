@@ -301,7 +301,7 @@ impl<'a> Lexer<'a> {
                 }
                 let ticks = |t: u64| i32::try_from(t).ok();
                 match unit.as_str() {
-                    "" => Tok::Int(v as i32),
+                    "" => Tok::Int(i32::try_from(v).expect("checked against i32::MAX above")),
                     "min" => Tok::Time(
                         ticks(minutes(v as u64)).ok_or_else(|| self.err("time too long"))?,
                     ),
@@ -2444,8 +2444,8 @@ impl<'a> Gen<'a> {
         }
         let member_subs = items.iter().flat_map(|it| it.members.iter());
         for s in self.subs.iter().chain(member_subs) {
-            let width: u32 = s.params.iter().map(|(_, t)| u32::from(t.width())).sum();
-            if width > FRAME_LOCALS as u32 {
+            let width: usize = s.params.iter().map(|(_, t)| usize::from(t.width())).sum();
+            if width > FRAME_LOCALS {
                 return Err(self.err(&s.at, format!("sub `{}` has too many parameters", s.name)));
             }
         }
@@ -2860,14 +2860,14 @@ impl<'a> Gen<'a> {
                 |c| c >= 1 && (c as u32).is_power_of_two(),
                 "cadence must be a power of two (1, 2, 4, ...)",
             )?
-            .map(|c| c.trailing_zeros() as u8);
+            .map(|c| u8::try_from(c.trailing_zeros()).expect("a positive i32: < 31"));
         let sight = self
             .decl_num(
                 &d.sight,
                 |s| (0..=i32::from(MAX_SIGHT)).contains(&s),
                 &format!("sight is 0 to {MAX_SIGHT} cells"),
             )?
-            .map(|s| s as u8);
+            .map(|s| u8::try_from(s).expect("0..=MAX_SIGHT, checked above"));
         let fuel = self
             .decl_num(
                 &d.fuel,
@@ -2878,7 +2878,7 @@ impl<'a> Gen<'a> {
         let food = self.decl_num(&d.food, |f| f >= 0, "food is 0 or more ticks")?;
         let bite = self
             .decl_num(&d.bite, |b| (0..=255).contains(&b), "bite is 0 to 255")?
-            .map(|b| b as u8);
+            .map(|b| u8::try_from(b).expect("0..=255, checked above"));
         let glyph = self.pick(d.glyph, &parents, |i| i.glyph, "glyphs", item)?;
         let color = self.pick(d.color, &parents, |i| i.color, "colours", item)?;
         let cadence_shift = self.pick(cadence, &parents, |i| i.cadence_shift, "cadences", item)?;
@@ -3262,12 +3262,13 @@ impl<'a> Gen<'a> {
         // starts in the first; a state out of range runs no rules.
         self.debug.states.push(inst.states.clone());
         for (s, list) in inst.state_lists.iter().enumerate() {
-            self.state = Some(s as u8);
+            let state = u8::try_from(s).expect("at most MAX_STATES states");
+            self.state = Some(state);
             let skip = self.asm.label();
             let guard_pc = self.asm.here();
             self.asm
                 .sense(Sense::State)
-                .push(s as i32)
+                .push(i32::from(state))
                 .op(OpCode::Eq)
                 .jz(skip);
             self.rule_list(list)?;
@@ -3313,7 +3314,7 @@ impl<'a> Gen<'a> {
             bite: inst.bite.unwrap_or(1),
             needs: inst.needs.clone(),
             mems: inst.mems.clone(),
-            states: inst.states.len().max(1) as u8,
+            states: u8::try_from(inst.states.len().max(1)).expect("at most MAX_STATES states"),
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
             cover: inst.cover,
@@ -3427,7 +3428,7 @@ impl<'a> Gen<'a> {
             };
             self.rule_list(&own(&inst.reflex))?;
             for (s, list) in inst.state_lists.iter().enumerate() {
-                self.state = Some(s as u8);
+                self.state = Some(u8::try_from(s).expect("at most MAX_STATES states"));
                 self.rule_list(&own(list))?;
             }
             for (_, owner, sub) in inst.members.iter().filter(|m| m.1 == ti) {
@@ -3463,7 +3464,7 @@ impl<'a> Gen<'a> {
             Stmt::Call { name, .. } => {
                 // A callee's answer depends only on it, the tables and the
                 // depth (inside it every name is unknown): remembered.
-                depth < FRAMES as u32
+                (depth as usize) < FRAMES
                     && self.callee(name).is_some_and(|sub| {
                         let key = (std::ptr::from_ref(sub) as usize, self.cur, depth, acts_only);
                         if let Some(&v) = self.ends_memo.borrow().get(&key) {
@@ -3508,7 +3509,7 @@ impl<'a> Gen<'a> {
     /// May a call of `name` here act or `next`, on any path? Follows every
     /// call in its body, in statements and in expressions, eight deep.
     fn call_acts(&self, name: &str, depth: u32) -> bool {
-        depth < FRAMES as u32
+        (depth as usize) < FRAMES
             && self.callee(name).is_some_and(|sub| {
                 let key = (std::ptr::from_ref(sub) as usize, self.cur, depth);
                 if let Some(&v) = self.acts_memo.borrow().get(&key) {
@@ -3676,7 +3677,7 @@ impl<'a> Gen<'a> {
     /// The channel of scent `name`, numbered on first use.
     fn scent(&mut self, name: &str, at: &Pos) -> Result<u8> {
         if let Some(i) = self.scents.iter().position(|s| s == name) {
-            return Ok(i as u8);
+            return Ok(u8::try_from(i).expect("at most SCENT_CHANNELS scents"));
         }
         if self.scents.len() == SCENT_CHANNELS {
             return Err(self.err(
@@ -3688,7 +3689,7 @@ impl<'a> Gen<'a> {
             ));
         }
         self.scents.push(name.to_string());
-        Ok((self.scents.len() - 1) as u8)
+        Ok(u8::try_from(self.scents.len() - 1).expect("at most SCENT_CHANNELS scents"))
     }
 
     fn const_value(&self, n: &str) -> Option<i32> {
@@ -3743,7 +3744,7 @@ impl<'a> Gen<'a> {
                     OpCode::Clamp => v[1],
                     OpCode::Pack => v[0].wrapping_mul(256).wrapping_add(v[1] & 0xFF),
                     OpCode::Hi => v[0] >> 8,
-                    OpCode::Lo => i32::from(v[0] as u8 as i8),
+                    OpCode::Lo => (v[0] << 24) >> 24,
                     op => unreachable!("{op:?} is not a pure function"),
                 }
             }
@@ -3799,7 +3800,8 @@ impl<'a> Gen<'a> {
 
     fn alloc_local(&mut self, at: &Pos, n: usize) -> Result<u8> {
         let slot = self.next_local;
-        if usize::from(slot) + n > FRAME_LOCALS {
+        let end = usize::from(slot) + n;
+        if end > FRAME_LOCALS {
             return Err(self.err(
                 at,
                 format!(
@@ -3807,7 +3809,7 @@ impl<'a> Gen<'a> {
                 ),
             ));
         }
-        self.next_local += n as u8;
+        self.next_local = u8::try_from(end).expect("at most FRAME_LOCALS");
         Ok(slot)
     }
 
@@ -3827,7 +3829,7 @@ impl<'a> Gen<'a> {
             .needs
             .iter()
             .position(|d| d.name == n)
-            .map(|i| i as u8)
+            .map(|i| u8::try_from(i).expect("at most NEED_SLOTS needs"))
     }
 
     fn mem_slot(&self, n: &str) -> Option<u8> {
@@ -3839,7 +3841,7 @@ impl<'a> Gen<'a> {
             .mems
             .iter()
             .position(|m| m == n)
-            .map(|i| i as u8)
+            .map(|i| u8::try_from(i).expect("at most MEM_SLOTS mems"))
     }
 
     /// A local, binding or parameter (`what`) named `n` would hide a need
@@ -3997,7 +3999,7 @@ impl<'a> Gen<'a> {
                             format!("`only` applies to a kind, not the tag `{name}`"),
                         ));
                     }
-                    pred::TAG_BASE + bit as i32
+                    pred::TAG_BASE + i32::try_from(bit).expect("at most MAX_TAGS tags")
                 } else {
                     return Err(self.err(at, format!("unknown kind or tag `{name}`")));
                 }
@@ -4556,7 +4558,8 @@ impl<'a> Gen<'a> {
                     .iter()
                     .position(|st| st == name)
                     .expect("the owner's states are the kind's");
-                self.asm.next(s as u8);
+                self.asm
+                    .next(u8::try_from(s).expect("at most MAX_STATES states"));
             }
             Stmt::ForEach {
                 pred,
@@ -4600,35 +4603,28 @@ impl<'a> Gen<'a> {
         let here = self.here.clone();
         self.scoped(|g| {
             let base = g.alloc_local(&here, n + 1)?;
-            let draw = base + n as u8;
-            // Each weight is capped at i32::MAX / n, so the total cannot wrap
-            // (alloc_local has already held n to 15).
-            let cap = i32::MAX / n as i32;
+            // alloc_local has already held n to 15.
+            let n = u8::try_from(n).expect("at most FRAME_LOCALS arms");
+            let draw = base + n;
+            // Each weight is capped at i32::MAX / n, so the total cannot wrap.
+            let cap = i32::MAX / i32::from(n);
             g.asm.push(0);
-            for (i, (w, _)) in arms.iter().enumerate() {
+            for (i, (w, _)) in (0u8..).zip(arms) {
                 g.expr(w)?;
                 g.asm.push(0).op(OpCode::Max);
                 g.push_int(cap)?;
-                g.asm.op(OpCode::Min).store(base + i as u8);
-                g.asm.load(base + i as u8).op(OpCode::Add);
+                g.asm.op(OpCode::Min).store(base + i);
+                g.asm.load(base + i).op(OpCode::Add);
             }
             g.asm.op(OpCode::Rand).store(draw);
             let end = g.asm.label();
-            for (i, (_, body)) in arms.iter().enumerate() {
+            for (i, (_, body)) in (0u8..).zip(arms) {
                 let skip = g.asm.label();
-                g.asm
-                    .load(draw)
-                    .load(base + i as u8)
-                    .op(OpCode::Lt)
-                    .jz(skip);
+                g.asm.load(draw).load(base + i).op(OpCode::Lt).jz(skip);
                 g.scoped(|g| g.stmts(body))?;
                 g.asm.jmp(end).bind(skip);
                 if i + 1 < n {
-                    g.asm
-                        .load(draw)
-                        .load(base + i as u8)
-                        .op(OpCode::Sub)
-                        .store(draw);
+                    g.asm.load(draw).load(base + i).op(OpCode::Sub).store(draw);
                 }
             }
             g.asm.bind(end);

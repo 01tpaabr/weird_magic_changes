@@ -402,7 +402,7 @@ impl<'a> Gen<'a> {
                 .map_or(0, |i| u16::try_from(i).expect("at most MAX_FILES files"));
             self.debug.kind_at.push((file, it.at.line, it.at.col));
             let mut w = Walk {
-                kind: k as u16,
+                kind: u16::try_from(k).expect("at most MAX_KINDS kinds"),
                 sight: i32::from(def.sight),
                 binds: Vec::new(),
                 hidden: Vec::new(),
@@ -708,7 +708,7 @@ impl<'a> Gen<'a> {
         }
         let bit = self.tags.iter().position(|t| t == name)?;
         Some(Match {
-            ids: (0..kinds.len() as u16)
+            ids: (0..u16::try_from(kinds.len()).expect("at most MAX_KINDS kinds"))
                 .filter(|&k| kinds.tag_bits[usize::from(k)] & (1 << bit) != 0)
                 .collect(),
             shown,
@@ -1016,7 +1016,7 @@ impl<'a> Gen<'a> {
         at: &Pos,
         out: &mut Out,
     ) {
-        if w.depth >= FRAMES as u32 {
+        if w.depth as usize >= FRAMES {
             return;
         }
         if w.walks >= WALKS {
