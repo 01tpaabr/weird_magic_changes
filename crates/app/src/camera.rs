@@ -50,6 +50,9 @@ impl ViewCamera {
     }
 
     /// The cell under the centre of the view; the streaming focus.
+    // `update` and `load` hold x and y to ±LIMIT, well inside i32; past it
+    // (a test setting them) `as` saturates, which is the edge of the world.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn cell(&self) -> Pos {
         Pos::new(self.x.floor() as i32, self.y.floor() as i32)
     }

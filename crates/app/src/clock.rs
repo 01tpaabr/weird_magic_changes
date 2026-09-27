@@ -93,7 +93,10 @@ impl SimClock {
             (true, _) => 0,
             (false, Speed::Fixed(m)) => {
                 self.owed += dt.clamp(0.0, MAX_DT) * f64::from(BASE_TPS * m);
-                self.owed.floor() as u32
+                // Below 1 + MAX_DT * BASE_TPS * 16 = 33.
+                #[allow(clippy::cast_possible_truncation)]
+                let whole = self.owed.floor() as u32;
+                whole
             }
             (false, Speed::Max) => u32::MAX,
         };
