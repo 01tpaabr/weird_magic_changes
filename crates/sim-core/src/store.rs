@@ -5,7 +5,7 @@
 //! ```text
 //! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params,
 //!                              starts, drawn map, mutation rate, kinds (names, cover, slot
-//!                              and gene names), scent channels, packs, rules hash
+//!                              names, genes with their ranges), scent channels, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
 //!                              (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
@@ -80,7 +80,8 @@ pub struct SavedKind {
     pub needs: Vec<String>,
     pub mems: Vec<String>,
     pub states: Vec<String>,
-    pub genes: Vec<String>,
+    /// `(name, lo, hi)`: a range that changed must remap (clamp) the rows.
+    pub genes: Vec<(String, i32, i32)>,
 }
 
 impl SavedKind {
@@ -100,7 +101,11 @@ impl SavedKind {
                     .get(usize::from(d.id))
                     .cloned()
                     .unwrap_or_default(),
-                genes: d.genes.iter().map(|g| g.name.clone()).collect(),
+                genes: d
+                    .genes
+                    .iter()
+                    .map(|g| (g.name.clone(), g.lo, g.hi))
+                    .collect(),
             })
             .collect()
     }
@@ -250,13 +255,19 @@ impl Store {
         let n = r.count(u32::from(u16::MAX), "kinds")?;
         let mut kinds = Vec::with_capacity(n);
         for _ in 0..n {
+            let (name, cover) = (r.str()?, r.u8()? != 0);
+            let (needs, mems, states) = (r.strs()?, r.strs()?, r.strs()?);
+            let mut genes = Vec::new();
+            for _ in 0..r.count(u32::from(u8::MAX), "genes of a kind")? {
+                genes.push((r.str()?, r.i32()?, r.i32()?));
+            }
             kinds.push(SavedKind {
-                name: r.str()?,
-                cover: r.u8()? != 0,
-                needs: r.strs()?,
-                mems: r.strs()?,
-                states: r.strs()?,
-                genes: r.strs()?,
+                name,
+                cover,
+                needs,
+                mems,
+                states,
+                genes,
             });
         }
         let scents = r.strs()?;
@@ -350,7 +361,12 @@ impl Store {
             w.strs(&k.needs);
             w.strs(&k.mems);
             w.strs(&k.states);
-            w.strs(&k.genes);
+            w.len(k.genes.len());
+            for (name, lo, hi) in &k.genes {
+                w.str(name);
+                w.i32(*lo);
+                w.i32(*hi);
+            }
         }
         w.strs(&m.scents);
         w.strs(&m.packs);
@@ -663,7 +679,7 @@ mod tests {
                     needs: names(&["water", "health"]),
                     mems: names(&["lit"]),
                     states: Vec::new(),
-                    genes: names(&["reach", "fear"]),
+                    genes: vec![("reach".into(), 1, 10), ("fear".into(), -3, 3)],
                 },
                 SavedKind {
                     name: "árvore".into(),

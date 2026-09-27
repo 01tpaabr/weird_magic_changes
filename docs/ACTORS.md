@@ -130,8 +130,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   Migrate's cross-chunk one), reading the parent's row, which stays in place until Compact:
   the parent's genes by name, clamped to the child kind's range, then each moved with the
   world's mutation chance (the scenario's `mutation N / D`, a part of `2^24` compared with
-  the draw's top 24 bits) by a nonzero step of at most `(hi - lo) / 16` (at least 1),
-  clamped, in `i64`.
+  the draw's top 24 bits) by a nonzero step of at most `(hi - lo) / 16` (at least 1), turned
+  back if it would leave the range, in `i64`.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).

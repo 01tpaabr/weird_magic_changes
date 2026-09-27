@@ -1211,19 +1211,26 @@ pub fn offspring(
     child
 }
 
-/// `v` moved by a nonzero step of at most `(hi - lo) / 16` (at least 1),
-/// clamped to the gene's range, if the draw's top 24 bits fall under `rate`
-/// (out of `PLACE_ONE`, like a placement share); else `v`. Bit 32 picks the
-/// sign, the low 32 bits the size. In `i64`: a wide range cannot overflow.
+/// `v` moved by a nonzero step of at most `(hi - lo) / 16` (at least 1) if
+/// the draw's top 24 bits fall under `rate` (out of `PLACE_ONE`, like a
+/// placement share); else `v`. Bit 32 picks the direction, the low 32 bits
+/// the size. A step that would leave the range goes the other way, so a
+/// gene at an edge moves as often as any other (only a range of one value
+/// holds still). In `i64`: a wide range cannot overflow.
 fn mutate(g: &GeneDef, v: i32, h: u64, rate: u32) -> i32 {
     if (h >> 40) as u32 >= rate {
         return v;
     }
-    let (lo, hi) = (i64::from(g.lo), i64::from(g.hi));
+    let (lo, hi, v) = (i64::from(g.lo), i64::from(g.hi), i64::from(v));
     let step = ((hi - lo) / 16).max(1);
     let size = 1 + (h & 0xFFFF_FFFF) as i64 % step;
     let delta = if (h >> 32) & 1 == 0 { size } else { -size };
-    (i64::from(v) + delta).clamp(lo, hi) as i32
+    let moved = if (lo..=hi).contains(&(v + delta)) {
+        v + delta
+    } else {
+        v - delta
+    };
+    moved.clamp(lo, hi) as i32
 }
 
 /// Change a row's kind in place: consumable needs carry over by name
@@ -1662,17 +1669,21 @@ mod tests {
             .filter(|&uid| offspring(&k, &half, p, uid, 5, (p, &parent)).genes[1] != 60)
             .count();
         assert!((140..260).contains(&moved), "{moved} of 400");
-        // The widest range cannot overflow: at an edge, a step outward is
-        // clamped back onto it, a step inward moves off it.
+        // At an edge a step outward goes inward instead: the gene still
+        // moves, and the widest range cannot overflow.
         let mut wide = newborn(&k, w, 0x53, 0);
-        let step = (i64::from(u32::MAX) / 16) as u64;
+        let step = (i64::from(u32::MAX) / 16) as u32;
         for v in [i32::MAX, i32::MIN] {
             wide.genes[0] = v;
-            let got: Vec<i32> = (0..20u64)
-                .map(|uid| offspring(&k, &always, w, uid, 5, (w, &wide)).genes[0])
-                .collect();
-            assert!(got.iter().all(|g| g.abs_diff(v) <= step as u32), "{got:?}");
-            assert!(got.iter().any(|&g| g != v), "{got:?}");
+            for uid in 0..20u64 {
+                let g = offspring(&k, &always, w, uid, 5, (w, &wide)).genes[0];
+                assert!(g != v && g.abs_diff(v) <= step, "{v} -> {g}");
+            }
+        }
+        parent.genes[0] = 9;
+        for uid in 0..20u64 {
+            let g = offspring(&k, &always, p, uid, 5, (p, &parent)).genes[0];
+            assert_eq!(g, 8, "`a` at its top, step 1: always down");
         }
     }
 

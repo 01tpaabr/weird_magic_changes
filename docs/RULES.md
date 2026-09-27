@@ -98,7 +98,8 @@ its own value and no rule can change it. A child made by `spawn` takes its paren
 value, by name and clamped to `LO..HI`; a gene the parent lacks starts at the default `D`,
 as does everyone a scenario starts. If the scenario has a `mutation N / D` line (§14),
 each of the child's genes then moves by a small step with that chance: up or down by 1 to
-a sixteenth of the range, never out of it. Over generations a gene drifts, and where it
+a sixteenth of the range, never out of it (a step that would leave the range goes the
+other way). Over generations a gene drifts, and where it
 decides who lives to breed, selection moves it. `become` carries genes by name too,
 clamped, never mutated. All three numbers are constant expressions, so a trait can take
 them from its parameters:

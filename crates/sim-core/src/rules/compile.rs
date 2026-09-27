@@ -5062,7 +5062,7 @@ mod tests {
         let e =
             err("trait t { when fear > 1 => idle } kind a extends t { gene fear = 1 from 0 to 9 }");
         assert!(
-            e.contains("unknown name `fear`") || e.contains("which it does not declare"),
+            e.contains("`t` uses `fear`, which it does not declare (a trait or parent kind sees only its own needs, mems and genes)"),
             "{e}"
         );
     }

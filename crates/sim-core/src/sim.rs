@@ -674,12 +674,22 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             let ids = family(who)?;
             // Per kind (a family's kinds may lay slots out differently): a
             // need slot of that name, else a mem slot, else a gene.
-            let slot = |k: u16| -> Option<(u8, usize)> {
+            enum Layer {
+                Need,
+                Mem,
+                Gene,
+            }
+            let slot = |k: u16| -> Option<(Layer, usize)> {
                 let d = kinds.def(k);
                 d.need_named(name)
-                    .map(|i| (0, i))
-                    .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (1, i)))
-                    .or_else(|| d.gene_named(name).map(|i| (2, i)))
+                    .map(|i| (Layer::Need, i))
+                    .or_else(|| {
+                        d.mems
+                            .iter()
+                            .position(|m| m == name)
+                            .map(|i| (Layer::Mem, i))
+                    })
+                    .or_else(|| d.gene_named(name).map(|i| (Layer::Gene, i)))
             };
             if !ids.clone().any(|k| slot(k).is_some()) {
                 return Err(format!(
@@ -694,9 +704,9 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
                         && let Some((layer, i)) = slot(r.kind)
                     {
                         vals.push(i64::from(match layer {
-                            0 => mind.needs[i],
-                            1 => mind.mem[i],
-                            _ => mind.genes[i],
+                            Layer::Need => mind.needs[i],
+                            Layer::Mem => mind.mem[i],
+                            Layer::Gene => mind.genes[i],
                         }));
                     }
                 }
@@ -1384,6 +1394,29 @@ mod tests {
                 .unwrap_err()
                 .contains("no need, memory or gene `nope`")
         );
+
+        // Reopened under rules where only `g`'s range changed: the save
+        // keeps each gene's range, so its rows are remapped and clamped.
+        let store = tmp_store("genes");
+        save(&mut w, &store).unwrap();
+        assert!(store.has_chunk(ChunkCoord::new(0, 0)));
+        let narrow = compile(
+            "n.rules",
+            "kind a { glyph \"a\"  gene g = 5 from 5 to 9  gene h = 1 from 0 to 9 }",
+        )
+        .unwrap();
+        let mut o = open_world_with(&store, narrow).unwrap().unwrap();
+        ensure_loaded(
+            &mut o,
+            Pos::new(5, 5),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap();
+        let mut g = genes(&mut o);
+        g.sort();
+        assert_eq!(g, [[5, 1, 0], [5, 8, 0]], "3 clamped up to 5");
+        std::fs::remove_dir_all(store.dir()).unwrap();
 
         // `h` narrows to 2..=8 and moves to slot 0 (a reload re-checks the
         // starts: `with (h = 8)` must still fit); `k` is new.

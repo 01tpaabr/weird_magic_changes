@@ -26,7 +26,7 @@ use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
     Tally, flags,
 };
-use crate::rules::Kinds;
+use crate::rules::{GeneDef, Kinds};
 use crate::scenario::{Placement, present};
 use crate::sim::SimConfig;
 use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, SCENT_CHANNELS, Stage};
@@ -53,10 +53,9 @@ struct Target {
     maxes: [i32; NEED_SLOTS],
     need_count: usize,
     mems: [Option<usize>; MEM_SLOTS],
-    /// For each new gene slot: the old slot of that name, and the new
-    /// `(default, lo, hi)`.
+    /// For each new gene slot: the old slot of that name.
     genes: [Option<usize>; GENE_SLOTS],
-    gene_defs: Vec<(i32, i32, i32)>,
+    gene_defs: Vec<GeneDef>,
     /// Old state index -> new.
     states: Vec<u8>,
 }
@@ -100,7 +99,7 @@ impl Plan {
                 need_count: nd.needs.len(),
                 mems: [None; MEM_SLOTS],
                 genes: [None; GENE_SLOTS],
-                gene_defs: nd.genes.iter().map(|g| (g.default, g.lo, g.hi)).collect(),
+                gene_defs: nd.genes.clone(),
                 states: Vec::new(),
             };
             for (i, n) in nd.needs.iter().enumerate() {
@@ -111,7 +110,7 @@ impl Plan {
                 t.mems[i] = od.mems.iter().position(|o| o == m);
             }
             for (i, g) in nd.genes.iter().enumerate() {
-                t.genes[i] = od.genes.iter().position(|o| *o == g.name);
+                t.genes[i] = od.genes.iter().position(|o| o.0 == g.name);
             }
             let ns = new
                 .debug
@@ -184,8 +183,8 @@ impl Plan {
                     for i in 0..GENE_SLOTS {
                         m.genes[i] = match (t.gene_defs.get(i), t.genes[i]) {
                             (None, _) => 0,
-                            (Some(&(d, ..)), None) => d,
-                            (Some(&(_, lo, hi)), Some(src)) => old.genes[src].clamp(lo, hi),
+                            (Some(g), None) => g.default,
+                            (Some(g), Some(src)) => old.genes[src].clamp(g.lo, g.hi),
                         };
                     }
                     m.state = t.states.get(usize::from(old.state)).copied().unwrap_or(0);
