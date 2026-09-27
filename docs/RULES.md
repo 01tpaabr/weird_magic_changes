@@ -246,7 +246,7 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 | `idle` | nothing; ends the rule |
 | `die` | the actor is removed |
 | `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between standing and cover kinds |
-| `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover |
+| `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover. `BLOCKED` if the cell is taken, not loaded or out of reach (at least 64 cells each way, §11) |
 | `move t` | one step toward t; slides past a blocked cell by 45 degrees. Contested cells go to the actor with the lowest key this tick; a cell someone left or died on this tick can't be entered until the next. `BLOCKED` if it didn't move |
 | `drink t` | t must be adjacent water: the need named `water` refills to max; else `REFUSED` |
 | `eat t` | bites the standing actor at adjacent cell t, which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
@@ -293,7 +293,8 @@ Effects combine with the action and don't end the think.
 | `v.dx`, `v.dy` | a bound target's offset |
 
 Searches (`count`, `nearest`, `sniff`, `for each`) are capped by `sight` and see into the
-neighbouring chunks. An unloaded chunk reads as rock with nobody on it. `nearest` scans
+neighbouring chunks. An unloaded chunk reads as rock with nobody on it, and so does any
+cell out of reach (§11). `nearest` scans
 rings 1 to r (not its own cell), and each ring starts at a random point so a flock doesn't
 all pick the same target.
 
@@ -306,9 +307,14 @@ A **target** is a cell relative to the actor:
 | a binding (`f`, `w`), `here` | |
 | `north`, `east`, `south`, `west`, `dir(h)` | one step; `dir(h)` for heading 1 to 8, clockwise from north |
 | `toward t`, `away t` | one step toward or away from t |
-| `at(x, y)` | a world position |
+| `at(x, y)` | a world position, within reach |
 | `attacker` | where the lowest-key biter came from |
 | `random free` | a free neighbour, if any: one of the 8, whatever the kind's `sight` (not a search) |
+
+**Reach.** A target reaches the actor's chunk and the eight around it: at least 64 cells
+each way (up to 127, depending on where the actor stands in its chunk). Beyond, a target
+reads as rock with nobody on it, even where the world is loaded, and a spawn there is
+`BLOCKED`.
 
 A **predicate** says what a cell must hold:
 

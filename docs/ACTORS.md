@@ -155,7 +155,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
-| here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
+| here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo (the reach of every target: at least 64 cells each way); unloaded or beyond the halo = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
 
@@ -406,7 +406,9 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    bites are rare next to thinks, and the sequential sum needs no cross-chunk credit pass;
    the per-chunk split is the hatch if Exchange ever shows in a profile.)
 3. **Apply** (parallel): intents of DEAD actors dropped; claims skip touched cells; `key ==
-   claim[target]` wins the cell; losers get `BLOCKED`; a cover spawn claims nothing and takes
+   claim[target]` wins the cell; losers get `BLOCKED`; a spawn beyond the 3x3 halo is
+   `BLOCKED` (the VM turns an offset past ±127 into -128, which is beyond it too, rather
+   than trap); a cover spawn claims nothing and takes
    its cell in key order if it is walkable and has no cover yet; a cover row's `move` and a
    `become` across layers are REFUSED; `become`, self-`die` (a standing actor touches its
    cell), `drink`, `look`, `result` written. Births, `become`s and deaths (by bites:

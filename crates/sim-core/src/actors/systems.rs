@@ -1026,6 +1026,8 @@ pub fn apply(
                             result::NONE // Migrate decides
                         }
                     }),
+                    // Past the halo, even into a loaded chunk: as unloaded.
+                    Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
                     // Ground cover: the first spawn in key order onto a
                     // walkable cell with no cover gets it.
                     Action::Spawn if is_cover(kinds, it.kind) => {
@@ -1127,6 +1129,14 @@ fn target_of(coord: ChunkCoord, cell: usize, dx: i8, dy: i8) -> Where {
     } else {
         Where::Elsewhere(ChunkCoord::new(coord.x + ox, coord.y + oy), local)
     }
+}
+
+/// Does `(dx, dy)` from `cell` leave the chunk's 3x3 halo, the reach of
+/// every target (RULES §11)?
+#[inline]
+fn beyond(cell: usize, dx: i8, dy: i8) -> bool {
+    let ((ox, oy), _) = vm::offset_cell(cell, dx, dy);
+    ox.abs() > 1 || oy.abs() > 1
 }
 
 /// Local index of `(dx, dy)` from `cell`, or `None` if it leaves the chunk.

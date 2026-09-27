@@ -882,8 +882,12 @@ impl Machine<'_> {
                 let dx = self.pop()?;
                 let kind = self.pop()?;
                 self.out.kind = u16::try_from(kind).map_err(|_| Trap::BadAction)?;
-                self.out.dx = i8::try_from(dx).map_err(|_| Trap::BadAction)?;
-                self.out.dy = i8::try_from(dy).map_err(|_| Trap::BadAction)?;
+                // Every cell of the halo is within 127 each way. Past that
+                // the offset becomes -128, which is outside the halo from any
+                // cell too, and Apply answers BLOCKED (not clamped: that
+                // would spawn on another cell).
+                self.out.dx = i8::try_from(dx).unwrap_or(i8::MIN);
+                self.out.dy = i8::try_from(dy).unwrap_or(i8::MIN);
             }
             Action::Take | Action::Give => {
                 let amount = self.pop()?;

@@ -2452,6 +2452,62 @@ mod tests {
         assert!(pods >= 2, "the pod spawned a neighbour: {pods}");
     }
 
+    /// A target reaches the actor's chunk and its eight neighbours (the
+    /// halo): beyond it a cell reads as rock and a spawn there is BLOCKED,
+    /// even into a loaded chunk, and never traps, even past 127 cells.
+    #[test]
+    fn a_spawn_beyond_the_halo_is_blocked() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::rules::vm::result;
+        let kinds = compile(
+            "t.rules",
+            "kind egg { cadence 1024 }
+             kind hen { cadence 1  mem dx, r, f, t
+               when r == 0 and dx != 0 => { r = 9  f = free(at(x + dx, y))  spawn egg at at(x + dx, y) }
+               when r == 9 => { r = result  t = trapped  idle }
+               when true => idle }",
+        )
+        .unwrap();
+        let (egg, hen) = (0, 1);
+        // Five chunks in a row, all loaded.
+        let cfg = Scenario {
+            width: 320,
+            height: 64,
+            ..cfg(1)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        assert_eq!(w.resource::<Stage>().loaded_count(), 5);
+        flatten(&mut w);
+        let now = tick(&w);
+        // (start, dx): two chunks east from x = 10; from the east edge of
+        // chunk 1 (x = 127) to chunk 3 (70 fits an i8); 200 cells; in the halo.
+        let hens = [
+            (Pos::new(10, 10), 120),
+            (Pos::new(127, 20), 70),
+            (Pos::new(10, 30), 200),
+            (Pos::new(10, 40), 60),
+        ];
+        for (i, &(p, dx)) in hens.iter().enumerate() {
+            let mut m = newborn(&kinds, hen, 0xF0 + i as u64, now);
+            m.mem[0] = dx;
+            assert!(place_actor(&mut w, p, hen, m));
+        }
+        for _ in 0..3 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        let (ok, blocked) = (i32::from(result::OK), i32::from(result::BLOCKED));
+        for (i, &(p, dx)) in hens.iter().enumerate() {
+            let m = all.iter().find(|r| r.0 == 0xF0 + i as u64).unwrap().3.mem;
+            let near = dx == 60;
+            let want = [dx, if near { ok } else { blocked }, i32::from(near), 0];
+            assert_eq!(&m[..4], &want, "hen at {p:?}, dx {dx}");
+        }
+        let eggs: Vec<Pos> = all.iter().filter(|r| r.1 == egg).map(|r| r.2).collect();
+        assert_eq!(eggs, vec![Pos::new(70, 40)]);
+    }
+
     /// A kind built from traits with `inherit` and a member sub behaves
     /// exactly like the same kind written flat: same rows, tick for tick
     /// (only the rules hash differs).
