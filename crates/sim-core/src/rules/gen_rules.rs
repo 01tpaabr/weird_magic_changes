@@ -18,6 +18,11 @@
 //!   chains are acyclic; locals stay within 12 slots, leaving 4 for targets
 //!   being evaluated. [`Program::kinds`] names the concrete kinds, for a
 //!   scenario to start.
+//! - [`Mode::Lively`]: valid programs, half of whose rules are `when C =>
+//!   ACTION` with a simple `C` (`true`, a `chance`, a short condition), and
+//!   many targets a step away, so their actors move, bite, spawn and trade:
+//!   a valid program's rules seldom hold and act, and its actions seldom
+//!   land (for the simulation fuzzer, `sim/fuzz.rs`).
 
 use proptest::prelude::*;
 
@@ -25,6 +30,7 @@ use proptest::prelude::*;
 pub enum Mode {
     Syntax,
     Valid,
+    Lively,
 }
 
 #[derive(Debug, Clone)]
@@ -132,6 +138,7 @@ struct G<'a> {
     c: &'a [u32],
     at: usize,
     strict: bool,
+    lively: bool,
     fresh: u32,
     /// Statements left to write in the whole program.
     budget: u32,
@@ -159,7 +166,8 @@ impl<'a> G<'a> {
         Self {
             c,
             at: 0,
-            strict: mode == Mode::Valid,
+            strict: mode != Mode::Syntax,
+            lively: mode == Mode::Lively,
             fresh: 0,
             budget: 80,
             kind_names: Vec::new(),
@@ -830,6 +838,14 @@ impl<'a> G<'a> {
     }
 
     fn rule(&mut self) -> String {
+        if self.lively && self.maybe(50) {
+            let c = match self.n(3) {
+                0 => "true".to_string(),
+                1 => format!("chance({})", 1 + self.n(99)),
+                _ => self.cond(true, 1),
+            };
+            return format!("when {c} => {}", self.action(2));
+        }
         let c = self.cond(true, 2);
         let stmts = self.stmts(3, true);
         if stmts.len() == 1 && self.maybe(60) {
@@ -1356,6 +1372,23 @@ impl<'a> G<'a> {
 
     /// A target; at `d == 0` one that holds no slot and has no expression.
     fn target(&mut self, d: u32) -> String {
+        // Lively: more targets that are a step away, so actions land.
+        if self.lively && self.maybe(40) {
+            return match self.n(3) {
+                _ if d == 0 => self.one(&["north", "east", "south", "west"]).into(),
+                0 => "random free".into(),
+                _ => self
+                    .one(&[
+                        "north",
+                        "east",
+                        "south",
+                        "west",
+                        "dir(rand(8))",
+                        "at(rand(3) - 1, rand(3) - 1)",
+                    ])
+                    .into(),
+            };
+        }
         if d == 0 {
             return match self.n(4) {
                 0 => "here".into(),
