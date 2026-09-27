@@ -3533,8 +3533,9 @@ impl<'a> Gen<'a> {
     }
 
     /// Fold a `const` expression: numbers, other constants, arithmetic,
-    /// comparisons and the pure functions. Same results as the VM. `at`:
-    /// where to report anything else.
+    /// comparisons and the pure functions. Same results as the VM
+    /// (`folded_constants_match_the_vm` checks). `at`: where to report
+    /// anything else.
     fn fold(&self, e: &Expr, at: &Pos) -> Result<i32> {
         Ok(match e {
             Expr::Int(v) => *v,
@@ -3558,7 +3559,8 @@ impl<'a> Gen<'a> {
                     OpCode::Eq => i32::from(x == y),
                     OpCode::Ne => i32::from(x != y),
                     OpCode::Ge => i32::from(x >= y),
-                    _ => i32::from(x > y),
+                    OpCode::Gt => i32::from(x > y),
+                    op => unreachable!("{op:?} is not an operator"),
                 }
             }
             Expr::Fn(op, args) => {
@@ -3575,7 +3577,8 @@ impl<'a> Gen<'a> {
                     OpCode::Clamp => v[1],
                     OpCode::Pack => v[0].wrapping_mul(256).wrapping_add(v[1] & 0xFF),
                     OpCode::Hi => v[0] >> 8,
-                    _ => i32::from(v[0] as u8 as i8),
+                    OpCode::Lo => i32::from(v[0] as u8 as i8),
+                    op => unreachable!("{op:?} is not a pure function"),
                 }
             }
             _ => {
@@ -5394,6 +5397,65 @@ mod tests {
             signal: 0,
         };
         vm::think(k, ctx, mind)
+    }
+
+    /// A constant folds to what the VM computes for the same expression
+    /// (lets are not folded), for every operator and pure function on
+    /// edge operands.
+    #[test]
+    fn folded_constants_match_the_vm() {
+        use bytemuck::Zeroable;
+        let lit = |v: i32| {
+            if v == i32::MIN {
+                "(-2147483647 - 1)".to_string()
+            } else {
+                format!("({v})")
+            }
+        };
+        let vals = [0, 1, -1, 7, -300, i32::MIN, i32::MAX];
+        let mut cases: Vec<(String, Vec<i32>)> = Vec::new();
+        for op in ["+", "-", "*", "/", "%", "<", "<=", "==", "!=", ">=", ">"] {
+            for x in vals {
+                for y in vals {
+                    cases.push((format!("$0 {op} $1"), vec![x, y]));
+                }
+            }
+        }
+        for f in ["abs", "sign", "hi", "lo"] {
+            for x in vals {
+                cases.push((format!("{f}($0)"), vec![x]));
+            }
+        }
+        for f in ["min", "max", "pack"] {
+            for x in vals {
+                for y in vals {
+                    cases.push((format!("{f}($0, $1)"), vec![x, y]));
+                }
+            }
+        }
+        for x in vals {
+            for y in vals {
+                for z in vals {
+                    cases.push(("clamp($0, $1, $2)".to_string(), vec![x, y, z]));
+                }
+            }
+        }
+        for (e, args) in cases {
+            let (mut folded, mut run, mut lets) = (e.clone(), e.clone(), String::new());
+            for (i, &v) in args.iter().enumerate() {
+                folded = folded.replace(&format!("${i}"), &lit(v));
+                run = run.replace(&format!("${i}"), &format!("v{i}"));
+                lets += &format!("let v{i} = {}  ", lit(v));
+            }
+            let k = compile_ok(&format!(
+                "const C = {folded}
+                 kind k {{ mem m, n  when true => {{ {lets} m = C  n = {run}  idle }} }}"
+            ));
+            let mut mind = crate::actors::ActorMind::zeroed();
+            let out = run_think(&k, "k", &mut mind);
+            assert_eq!(out.trap, None, "{e} with {args:?}");
+            assert_eq!(mind.mem[0], mind.mem[1], "{e} with {args:?}: fold vs VM");
+        }
     }
 
     /// `spawn K ... with` names the memory it sets. Those names take K's
