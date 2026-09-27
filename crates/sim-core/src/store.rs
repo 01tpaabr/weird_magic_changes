@@ -612,6 +612,9 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
+mod fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rules::SEED;
