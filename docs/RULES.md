@@ -238,7 +238,7 @@ the trait a tag (`tags drinker`) and match the tag.
 | `if cond { } else if cond { } else { }` | |
 | `while cond { }`, `repeat n { }` | bounded by fuel |
 | `for each pred within r as v { }` | once per matching cell in rings 1..r, in a fixed order (each ring clockwise from its top-left). The search's fuel is paid once. There is no `break`, so collect into locals and act after the loop |
-| `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm. A negative weight counts as 0, and each weight is capped at 2^31 / (number of arms) |
+| `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm. A negative weight counts as 0, and each weight is capped at (2^31 - 1) / (number of arms) |
 | `sub_name(args)` | call a sub (§12) |
 | `return expr`, `return` | inside a sub: leave it with a value, or with none. The value must start on the `return` line: a `return` with nothing after it on its line returns nothing, and the next line is the next statement or `choose` arm |
 
@@ -257,7 +257,8 @@ kind hen {
 ## 8. Actions
 
 Each action is one intent, settled after every actor has thought. The outcome is readable at
-the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the shorthands
+the next think as `result`, a number: 1 OK, 2 BLOCKED, 3 MISSED, 4 REFUSED (0 before the
+first). Those names are not words of the language; the last three read as the shorthands
 `blocked`, `missed` and `refused`.
 
 | action | what happens |
@@ -348,7 +349,7 @@ A **predicate** says what a cell must hold:
 
 ## 12. Expressions, subs and constants
 
-Every value is a 32-bit integer; there are no floats. Arithmetic wraps, `x / 0` and
+Every value is a 32-bit integer; there are no floats, and `true` is 1, `false` 0. Arithmetic wraps, `x / 0` and
 `x % 0` are 0. Operators: `+ - * / %`, `< <= == != >= >`, `and or not`. Functions:
 `min`, `max`, `abs`, `sign`, `clamp(x, lo, hi)`, `rand(n)` (0 to n-1), `chance(p)`
 (p percent), `pack(a, b)` / `hi(v)` / `lo(v)` (two signed bytes in one value, for signals).
@@ -669,7 +670,8 @@ Reserved words can't name a need, mem, local, kind, sub or constant. They are ev
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
 `rand`, `chance`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
-`taken`, `trapped`). `wmc lint` says so when you hit one. `water`,
+`taken`, `trapped`), and `place` (where kinds start is a scenario's `start` line now, §14).
+`wmc lint` says so when you hit one. `water`,
 `soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`. But
 `water`, `soil`, `rock` and `bare` always mean the predicate where one is read, so they can't
 name a kind or a tag.

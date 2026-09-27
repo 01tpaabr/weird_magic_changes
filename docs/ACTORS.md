@@ -148,7 +148,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
 
-Per actor: 104 B persistent (12 + 88 + 4 occupant) + 32 B intent scratch.
+Per actor: 104 B persistent (12 + 88 + 4 occupant) + 40 B intent scratch.
 
 ## 3. Senses
 
