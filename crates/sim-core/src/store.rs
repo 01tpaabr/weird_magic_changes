@@ -335,14 +335,21 @@ impl Store {
 
     /// `Ok(None)` if the chunk was never saved (regenerate it). Row *shape*
     /// is checked here (counts, sizes); the invariants that need the kind
-    /// table (`ChunkData::validate`) are the caller's.
+    /// table (`ChunkData::validate`) are the caller's. An error names the
+    /// file.
     pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<SavedChunk>> {
-        let bytes = match fs::read(self.chunk_path(c)) {
+        let path = self.chunk_path(c);
+        let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        let bytes = match fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => return Err(named(e)),
         };
-        let mut r = Reader::new(&bytes, CHUNK_MAGIC)?;
+        Self::decode_chunk(c, &bytes).map(Some).map_err(named)
+    }
+
+    fn decode_chunk(c: ChunkCoord, bytes: &[u8]) -> io::Result<SavedChunk> {
+        let mut r = Reader::new(bytes, CHUNK_MAGIC)?;
         let (x, y) = (r.i32()?, r.i32()?);
         if (x, y) != (c.x, c.y) {
             return Err(bad(format!("chunk file for {c:?} claims ({x}, {y})")));
@@ -380,14 +387,14 @@ impl Store {
             rows: r.rows::<ActorMind>(n)?,
         };
         r.finish()?;
-        Ok(Some(SavedChunk {
+        Ok(SavedChunk {
             data: ChunkData {
                 cells,
                 actors,
                 minds,
             },
             last_ticked,
-        }))
+        })
     }
 
     /// Write a chunk whose state is current as of `last_ticked`.
@@ -810,6 +817,21 @@ mod tests {
                 .to_string()
                 .contains("format 7")
         );
+        fs::remove_dir_all(s.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_bad_chunk_file_is_named_in_the_error() {
+        let s = tmp_store("named");
+        let c = ChunkCoord::new(3, -2);
+        let data = ChunkData::default();
+        s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
+            .unwrap();
+        let mut bytes = fs::read(s.chunk_path(c)).unwrap();
+        bytes.truncate(bytes.len() - 3);
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        let e = s.read_chunk(c).unwrap_err().to_string();
+        assert!(e.contains("3_-2.wmcc") && e.contains("truncated"), "{e}");
         fs::remove_dir_all(s.dir()).unwrap();
     }
 }

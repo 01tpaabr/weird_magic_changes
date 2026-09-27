@@ -3090,7 +3090,7 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
 
         let mut w = open_world_with(&store, fh.clone()).unwrap().unwrap();
         let e = save(&mut w, &store).unwrap_err().to_string();
-        assert!(e.contains("(1, 0)") || e.contains("x: 1"), "{e}");
+        assert!(e.contains("1_0.wmcc"), "{e}");
         assert!(
             std::fs::read(chunks.join("0_0.wmcc")).unwrap() == before,
             "(0, 0) rewritten"

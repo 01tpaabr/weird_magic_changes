@@ -205,9 +205,7 @@ pub fn rewrite_saved(
         .saved_chunks()
         .map_err(|e| format!("listing saved chunks: {e}"))?;
     let read = |c: ChunkCoord| {
-        let saved = store
-            .read_chunk(c)
-            .map_err(|e| format!("reading saved chunk {c:?}: {e}"))?;
+        let saved = store.read_chunk(c).map_err(|e| e.to_string())?;
         if let Some(s) = &saved {
             s.data
                 .validate(plan.old_kinds())
