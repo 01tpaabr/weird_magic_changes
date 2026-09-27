@@ -198,12 +198,12 @@ impl Remap {
         };
         for (i, n) in to.needs.iter().enumerate() {
             if let Some(j) = from.need_named(&n.name) {
-                r.needs[i] = j as u8;
+                r.needs[i] = u8::try_from(j).expect("at most NEED_SLOTS needs");
             }
         }
         for (i, m) in to.mems.iter().enumerate() {
             if let Some(j) = from.mem_index(m) {
-                r.mems[i] = j as u8;
+                r.mems[i] = u8::try_from(j).expect("at most MEM_SLOTS mems");
             }
         }
         r
@@ -248,7 +248,7 @@ impl Kinds {
     ) -> Self {
         assert!(defs.len() < usize::from(u16::MAX), "too many kinds");
         for (i, d) in defs.iter_mut().enumerate() {
-            d.id = i as u16;
+            d.id = u16::try_from(i).expect("fewer than u16::MAX kinds, asserted above");
             assert!(d.needs.len() <= NEED_SLOTS, "{}: too many needs", d.name);
             assert!(d.mems.len() <= MEM_SLOTS, "{}: too many mem slots", d.name);
             assert!(
@@ -262,7 +262,8 @@ impl Kinds {
         let tag_bits = defs.iter().map(|d| d.tags).collect();
         // Families: pre-order numbering puts every descendant right after
         // its ancestor, so a family is one id range.
-        let mut family_end: Vec<u16> = (1..=defs.len() as u16).collect();
+        let last = u16::try_from(defs.len()).expect("fewer than u16::MAX kinds");
+        let mut family_end: Vec<u16> = (1..=last).collect();
         for id in (0..defs.len()).rev() {
             if let Some(p) = defs[id].parent {
                 assert!(

@@ -37,7 +37,7 @@ use std::fmt;
 
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
-use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos};
+use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, cell_u16};
 
 mod expect;
 pub use expect::{check_expect, expect, expect_family};
@@ -91,7 +91,8 @@ impl Start {
     pub fn share(&self) -> u32 {
         match self {
             Start::Share { num, den, .. } => {
-                (u64::from(*num) * u64::from(PLACE_ONE) / u64::from(*den)) as u32
+                let share = u64::from(*num) * u64::from(PLACE_ONE) / u64::from(*den);
+                u32::try_from(share).expect("num <= den: parse and load refuse the rest")
             }
             Start::At { .. } => 0,
         }
@@ -616,7 +617,8 @@ impl Scenario {
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut lines = text.lines().enumerate();
         while let Some((n, raw)) = lines.next() {
-            let line_no = n as u32 + 1;
+            // Past 2^32 lines, the last line number.
+            let line_no = u32::try_from(n + 1).unwrap_or(u32::MAX);
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
@@ -661,15 +663,12 @@ impl Scenario {
                         int(rest.first(), "`size W H`")?,
                         int(rest.get(1), "`size W H`")?,
                     );
-                    if rest.len() != 2
-                        || w < 1
-                        || h < 1
-                        || w > i64::from(u32::MAX)
-                        || h > i64::from(u32::MAX)
-                    {
+                    let (2, Ok(w @ 1..), Ok(h @ 1..)) =
+                        (rest.len(), u32::try_from(w), u32::try_from(h))
+                    else {
                         return Err(err(line_no, "expected `size W H`, both at least 1".into()));
-                    }
-                    if (w as u64).div_ceil(64) * (h as u64).div_ceil(64) > MAX_SIZE_CHUNKS {
+                    };
+                    if u64::from(w).div_ceil(64) * u64::from(h).div_ceil(64) > MAX_SIZE_CHUNKS {
                         return Err(err(
                             line_no,
                             format!(
@@ -678,7 +677,7 @@ impl Scenario {
                             ),
                         ));
                     }
-                    (s.width, s.height) = (w as u32, h as u32);
+                    (s.width, s.height) = (w, h);
                     size_line = Some(line_no);
                 }
                 "terrain" => {
@@ -808,7 +807,7 @@ impl Scenario {
                             break;
                         }
                         if !row.is_empty() {
-                            drawn.push((m as u32 + 1, row.to_string()));
+                            drawn.push((u32::try_from(m + 1).unwrap_or(u32::MAX), row.to_string()));
                         }
                     }
                     if drawn.is_empty() {
@@ -831,7 +830,7 @@ impl Scenario {
                         let Some((m, raw)) = lines.next() else {
                             return Err(err(line_no, "`legend {` is never closed".into()));
                         };
-                        let at = m as u32 + 1;
+                        let at = u32::try_from(m + 1).unwrap_or(u32::MAX);
                         let entry = raw.trim();
                         if entry == "}" {
                             break;
@@ -994,7 +993,8 @@ impl Scenario {
         if width * height > MAP_CELLS {
             return Err(err(map_line, format!("a map of at most {MAP_CELLS} cells")));
         }
-        let (w, h) = (width as u32, height as u32);
+        let fits = |n: usize| u32::try_from(n).expect("at most MAP_CELLS cells");
+        let (w, h) = (fits(width), fits(height));
         if let Some(at) = size_line
             && (s.width < w || s.height < h)
         {
@@ -1019,8 +1019,9 @@ impl Scenario {
         }
         let mut cells = Vec::with_capacity(width * height);
         let mut used = [false; 256];
-        for (y, (at, row)) in drawn.iter().enumerate() {
-            for (x, b) in row.bytes().enumerate() {
+        // At most MAP_CELLS cells, so x and y are i32s.
+        for (y, (at, row)) in (0i32..).zip(&drawn) {
+            for (x, b) in (0i32..).zip(row.bytes()) {
                 used[usize::from(b)] = true;
                 let Some((_, what, _)) = entries.iter().find(|e| e.0 == b) else {
                     return Err(err(
@@ -1037,8 +1038,8 @@ impl Scenario {
                         cells.push(DrawnMap::encode(Ground::Soil, Feature::None));
                         s.starts.push(Start::At {
                             kind: kind.clone(),
-                            x: x as i32,
-                            y: y as i32,
+                            x,
+                            y,
                             with: with.clone(),
                         });
                         s.start_lines.push(*at);
@@ -1282,9 +1283,9 @@ impl Placement {
                                     ticks(max)
                                 )));
                             }
-                            needs.push((i as u8, *v));
+                            needs.push((u8::try_from(i).expect("at most NEED_SLOTS"), *v));
                         } else if let Some(i) = def.mems.iter().position(|m| m == name) {
-                            mems.push((i as u8, *v));
+                            mems.push((u8::try_from(i).expect("at most MEM_SLOTS"), *v));
                         } else {
                             return Err(err(format!(
                                 "`{}` has no need or memory `{name}`",
@@ -1296,7 +1297,7 @@ impl Placement {
                     explicit.push((
                         Explicit {
                             chunk,
-                            cell: i as u16,
+                            cell: cell_u16(i),
                             placed,
                             needs,
                             mems,
@@ -1325,7 +1326,8 @@ impl Placement {
                     msg: "the shares add up to more than 1".into(),
                 });
             }
-            bounds.push((upto as u32, placed));
+            let upto = u32::try_from(upto).expect("at most PLACE_ONE, checked above");
+            bounds.push((upto, placed));
         }
         // Stable: of two starts on one cell, the later is the error.
         explicit.sort_by_key(|(e, _)| (e.chunk.y, e.chunk.x, e.cell));
