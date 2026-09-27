@@ -46,7 +46,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     kind: u16,      // index into Programs.kinds (0xFFFF reserved by ActorId::NONE)
     stagger: u16,   // uid low bits: cadence phase
     signal: i16,    // rule-written, readable by others via signal_of(t)
-    look: u8,       // rule-written appearance: palette variant + `kind:look` predicate
+    look: u8,       // rule-written public byte: `kind:look`, `look_of`, `wmc why`; not drawn
     flags: u8,      // DEAD | WAKE
     _pad: u16,
 }

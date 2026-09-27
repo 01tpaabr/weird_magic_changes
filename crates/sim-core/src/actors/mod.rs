@@ -58,7 +58,8 @@ pub struct ActorPub {
     pub stagger: u16,
     /// Rule-written, readable by others (`signal_of`). What an actor broadcasts.
     pub signal: i16,
-    /// Rule-written appearance byte: palette variant and the `kind:look` predicate.
+    /// Rule-written public byte that other actors read (`kind:look`,
+    /// `look_of`) and `wmc why` shows; the renderer does not draw it.
     pub look: u8,
     /// See [`flags`].
     pub flags: u8,

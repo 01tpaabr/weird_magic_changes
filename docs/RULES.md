@@ -266,7 +266,7 @@ Effects combine with the action and don't end the think.
 
 | effect | |
 |---|---|
-| `look = v` | a public byte, 0 to 255: the palette variant, `kind:look` predicates, `look_of(t)` |
+| `look = v` | a public byte, 0 to 255, that other actors read (`kind:look` predicates, `look_of(t)`) and `wmc why` shows; it is not drawn |
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
 | `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Several marks in one think add up, per channel, even from rules that fall through. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 4 channels in a rule set, numbered by first use |
 
