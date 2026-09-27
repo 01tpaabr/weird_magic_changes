@@ -266,6 +266,7 @@ impl<'a> Lexer<'a> {
             let tok = if self.end() {
                 Tok::Eof
             } else if b.is_ascii_digit() {
+                let start = self.at;
                 let mut v: i64 = 0;
                 while self.peek(0).is_ascii_digit() {
                     v = v * 10 + i64::from(self.bump() - b'0');
@@ -276,6 +277,19 @@ impl<'a> Lexer<'a> {
                 let mut unit = String::new();
                 while self.peek(0).is_ascii_alphabetic() {
                     unit.push(char::from(self.bump()));
+                }
+                // `5_m` or `3h2` would lex as two tokens and may parse.
+                if self.peek(0).is_ascii_digit() || self.peek(0) == b'_' {
+                    let mut s = self.text[start..self.at].to_string();
+                    while self.peek(0).is_ascii_alphanumeric() || self.peek(0) == b'_' {
+                        s.push(char::from(self.bump()));
+                    }
+                    return Err(CompileError {
+                        file: self.file.to_string(),
+                        line,
+                        col,
+                        msg: format!("`{s}`: a number runs into a name"),
+                    });
                 }
                 let ticks = |t: u64| i32::try_from(t).ok();
                 match unit.as_str() {

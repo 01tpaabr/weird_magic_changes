@@ -107,6 +107,16 @@ fn lexer_handles_times_strings_symbols_and_comments() {
         ]
     );
     assert!(compile_err("kind a { glyph \"a\" 3w }").contains("unknown unit"));
+    // A number does not run into a name: `5_m` is not `5` then `_m`.
+    let glued = "kind a { mem m, _m\n when true => { m = 5_m = 2 } }";
+    assert_eq!(
+        compile_err(glued),
+        "t.rules:2:21: `5_m`: a number runs into a name"
+    );
+    assert_eq!(
+        compile_err("kind a { mem m\n when true => { m = 3h2 } }"),
+        "t.rules:2:21: `3h2`: a number runs into a name"
+    );
     assert!(compile_err("kind a { glyph \"ab\" }").contains("one printable"));
     assert!(compile_err("kind a { glyph \"a\" when 1 => x = $ }").contains("unexpected character"));
     // A NUL byte is a character like any other, not the end of the file.
