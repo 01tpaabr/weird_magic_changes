@@ -103,7 +103,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
   the code; a fifth name is a compile error. The renderer washes a scented cell toward the
   channel's colour.
-- **Save**: chunk file v10 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
+- **Save**: chunk file v11 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
@@ -120,7 +120,18 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   set `WAKE`; the result of an action is read at the next scheduled think.
 - **RNG**: counter-based, no stream state: draw `n` for `uid` at `tick` is
   `splitmix64(splitmix64(seed ^ STREAM_THINK ^ splitmix64(tick) ^ uid) + n)`. Claim key
-  `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`.
+  `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`. Gene `i` of a child at
+  birth draws `splitmix64(splitmix64(seed ^ splitmix64(STREAM_GENES) ^ uid ^
+  splitmix64(parent_uid)) + i)`: the child's uid already folds in its cell and tick, and the
+  parent's is there because a cover and a standing child of one cell and tick share a uid.
+- **Genes** (step 9): `genes[i]`, named per kind, read by `Gene i` and never written by a
+  rule. `newborn` sets each to its default (worldgen, scenario starts); `spawn` goes through
+  `offspring`, at the three places a child is made (Apply's cover and standing spawns,
+  Migrate's cross-chunk one), reading the parent's row, which stays in place until Compact:
+  the parent's genes by name, clamped to the child kind's range, then each moved with the
+  world's mutation chance (the scenario's `mutation N / D`, a part of `2^24` compared with
+  the draw's top 24 bits) by a nonzero step of at most `(hi - lo) / 16` (at least 1),
+  clamped, in `i64`.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).
@@ -135,7 +146,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   world does not replay from its seed.
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
-  adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
+  adds start at max. Memory carries by name, the rest is zeroed; genes carry by name,
+  clamped to the new range (new ones at their default, never mutated); `state` resets.
 
 Per actor: 136 B persistent (12 + 120 + 4 occupant) + 32 B intent scratch.
 
@@ -409,7 +421,8 @@ Thread count, batching and entity ids can reach a result only through a shared m
 write, an iteration order or a random source. Every parallel phase writes only the chunk it
 was handed; per-chunk order is sorted-key order; claims use `min` and damage uses `+`, both
 commutative; every sequential phase walks `stage.active()`; every random draw is
-`f(seed, tick, uid, n)`. Not promised: independence from chunk borders (`CHUNK_BITS` joins
+`f(seed, tick, uid, n)`, or at birth `f(seed, uid, parent uid, n)`, the child's uid holding
+the tick. Not promised: independence from chunk borders (`CHUNK_BITS` joins
 the world's identity) and from the rules text (its hash is part of the checksum).
 
 Tests per step: two-fresh-worlds checksum per new system; `crates/app/tests/determinism.rs`

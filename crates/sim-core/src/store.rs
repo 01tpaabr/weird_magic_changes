@@ -4,8 +4,8 @@
 //!
 //! ```text
 //! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params,
-//!                              starts, drawn map, kinds (names, cover, slot names), scent
-//!                              channels, packs, rules hash
+//!                              starts, drawn map, mutation rate, kinds (names, cover, slot
+//!                              and gene names), scent channels, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
 //!                              (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
@@ -39,7 +39,7 @@ use crate::stage::worldgen::GenParams;
 use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -57,6 +57,8 @@ pub struct WorldMeta {
     pub starts: Vec<Start>,
     /// A drawn map's terrain (step 8e); `None`: noise everywhere.
     pub map: Option<DrawnMap>,
+    /// The scenario's `mutation N / D` (step 9); `None`: exact inheritance.
+    pub mutation: Option<(u32, u32)>,
     /// Kind table of the rules that wrote the save, by index.
     pub kinds: Vec<SavedKind>,
     /// Scent channel names of those rules, in channel order.
@@ -78,6 +80,7 @@ pub struct SavedKind {
     pub needs: Vec<String>,
     pub mems: Vec<String>,
     pub states: Vec<String>,
+    pub genes: Vec<String>,
 }
 
 impl SavedKind {
@@ -97,6 +100,7 @@ impl SavedKind {
                     .get(usize::from(d.id))
                     .cloned()
                     .unwrap_or_default(),
+                genes: d.genes.iter().map(|g| g.name.clone()).collect(),
             })
             .collect()
     }
@@ -232,6 +236,17 @@ impl Store {
             }
             t => return Err(bad(format!("map tag {t}"))),
         };
+        let mutation = match r.u8()? {
+            0 => None,
+            1 => {
+                let (num, den) = (r.u32()?, r.u32()?);
+                if num == 0 || den == 0 || num > den {
+                    return Err(bad(format!("mutation {num} / {den}")));
+                }
+                Some((num, den))
+            }
+            t => return Err(bad(format!("mutation tag {t}"))),
+        };
         let n = r.count(u32::from(u16::MAX), "kinds")?;
         let mut kinds = Vec::with_capacity(n);
         for _ in 0..n {
@@ -241,6 +256,7 @@ impl Store {
                 needs: r.strs()?,
                 mems: r.strs()?,
                 states: r.strs()?,
+                genes: r.strs()?,
             });
         }
         let scents = r.strs()?;
@@ -255,6 +271,7 @@ impl Store {
             params,
             starts,
             map,
+            mutation,
             kinds,
             scents,
             packs,
@@ -318,6 +335,14 @@ impl Store {
                 }
             }
         }
+        match m.mutation {
+            None => w.u8(0),
+            Some((num, den)) => {
+                w.u8(1);
+                w.u32(num);
+                w.u32(den);
+            }
+        }
         w.len(m.kinds.len());
         for k in &m.kinds {
             w.str(&k.name);
@@ -325,6 +350,7 @@ impl Store {
             w.strs(&k.needs);
             w.strs(&k.mems);
             w.strs(&k.states);
+            w.strs(&k.genes);
         }
         w.strs(&m.scents);
         w.strs(&m.packs);
@@ -629,6 +655,7 @@ mod tests {
                 cells: vec![0, 1, 0x10, 0, 0, 1],
                 outside: Some(0x10),
             }),
+            mutation: Some((3, 40)),
             kinds: vec![
                 SavedKind {
                     name: "seed".into(),
@@ -636,6 +663,7 @@ mod tests {
                     needs: names(&["water", "health"]),
                     mems: names(&["lit"]),
                     states: Vec::new(),
+                    genes: names(&["reach", "fear"]),
                 },
                 SavedKind {
                     name: "árvore".into(),
@@ -643,6 +671,7 @@ mod tests {
                     needs: Vec::new(),
                     mems: Vec::new(),
                     states: names(&["grow", "rest"]),
+                    genes: Vec::new(),
                 },
             ],
             scents: names(&["trail"]),
@@ -657,6 +686,7 @@ mod tests {
                 outside: None,
                 ..m.map.clone().unwrap()
             }),
+            mutation: None,
             kinds: Vec::new(),
             scents: Vec::new(),
             packs: Vec::new(),
@@ -678,13 +708,13 @@ mod tests {
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
-        // A v9 header is refused by version.
+        // A v10 header is refused by version.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
-        bytes[4] = 9;
+        bytes[4] = 10;
         fs::write(s.meta_path(), &bytes).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
-        assert!(err.contains("format 9, this build reads 10"), "{err}");
+        assert!(err.contains("format 10, this build reads 11"), "{err}");
         // A header written for a different day length is refused.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();

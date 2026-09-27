@@ -1,6 +1,7 @@
-//! Scenarios: the physical world a save is generated from, and where each
-//! kind starts (`docs/RULES.md` §14, decision 36). Everything else a world needs is
-//! its rules. A scenario is a small text file:
+//! Scenarios: the physical world a save is generated from, where each kind
+//! starts, and how fast genes mutate (`docs/RULES.md` §14, decisions 36 and
+//! 38). Everything else a world needs is its rules. A scenario is a small
+//! text file:
 //!
 //! ```text
 //! rules ../packs/life                           # the packs its world runs (else the built-in rules)
@@ -22,6 +23,7 @@
 //!   F fox with (food = 2h)
 //! }
 //! outside soil                                  # beyond the map: noise (the default), soil, rock, water
+//! mutation 1 / 20                               # each gene of a child moves with this chance (else: none)
 //! run 2d                                        # a test: step, then check what happened
 //! expect count chicken >= 10
 //! ```
@@ -340,6 +342,9 @@ pub struct Scenario {
     /// written; in a file, relative to it. `--rules` and `WMC_RULES` come
     /// first, and a saved world keeps its own.
     pub packs: Vec<String>,
+    /// `mutation N / D`: the chance that each gene of a child moves by a
+    /// step at birth. `None`: children inherit their genes exactly.
+    pub mutation: Option<(u32, u32)>,
 }
 
 /// A scenario that does not parse: where and why.
@@ -370,6 +375,7 @@ impl Default for Scenario {
             map: None,
             checks: Vec::new(),
             packs: Vec::new(),
+            mutation: None,
         }
     }
 }
@@ -593,6 +599,24 @@ impl Scenario {
                         *field = v;
                     }
                 }
+                "mutation" => {
+                    let tail = rest.join(" ");
+                    let parts: Vec<&str> = tail.split('/').map(str::trim).collect();
+                    let form = "expected `mutation N / D` with 0 < N <= D";
+                    let (Some(num), Some(den)) = (
+                        parts.first().and_then(|n| n.parse::<u32>().ok()),
+                        parts.get(1).and_then(|d| d.parse::<u32>().ok()),
+                    ) else {
+                        return Err(err(line_no, form.into()));
+                    };
+                    if parts.len() != 2 || num == 0 || den == 0 || num > den {
+                        return Err(err(line_no, form.into()));
+                    }
+                    if s.mutation.is_some() {
+                        return Err(err(line_no, "two `mutation` lines".into()));
+                    }
+                    s.mutation = Some((num, den));
+                }
                 "start" => {
                     let Some(kind) = rest.first() else {
                         return Err(err(
@@ -815,7 +839,7 @@ impl Scenario {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect)"
+                            "unknown statement `{other}` (rules, seed, size, terrain, start, mutation, map, legend, outside, run, expect)"
                         ),
                     ));
                 }
@@ -1297,6 +1321,16 @@ mod tests {
             ("start a 1 / 2\nstart b 2 / 3", "add up to more than 1"),
             ("start hive at 3", "expected `start KIND at (X, Y)`"),
             ("spawn fox", "unknown statement `spawn`"),
+            (
+                "mutation 0 / 5",
+                "expected `mutation N / D` with 0 < N <= D",
+            ),
+            (
+                "mutation 3 / 2",
+                "expected `mutation N / D` with 0 < N <= D",
+            ),
+            ("mutation 1", "expected `mutation N / D` with 0 < N <= D"),
+            ("mutation 1 / 2\nmutation 1 / 3", "two `mutation` lines"),
             ("terrain water_level nan", "`nan` is not a number"),
             ("terrain water_scale 0", "above 0"),
             (

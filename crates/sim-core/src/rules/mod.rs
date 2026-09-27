@@ -196,6 +196,7 @@ impl KindDef {
 pub struct Remap {
     pub needs: [u8; NEED_SLOTS],
     pub mems: [u8; MEM_SLOTS],
+    pub genes: [u8; GENE_SLOTS],
 }
 
 impl Remap {
@@ -205,6 +206,7 @@ impl Remap {
         let mut r = Remap {
             needs: [Self::NONE; NEED_SLOTS],
             mems: [Self::NONE; MEM_SLOTS],
+            genes: [Self::NONE; GENE_SLOTS],
         };
         for (i, n) in to.needs.iter().enumerate() {
             if let Some(j) = from.need_named(&n.name) {
@@ -214,6 +216,11 @@ impl Remap {
         for (i, m) in to.mems.iter().enumerate() {
             if let Some(j) = from.mem_index(m) {
                 r.mems[i] = j as u8;
+            }
+        }
+        for (i, g) in to.genes.iter().enumerate() {
+            if let Some(j) = from.gene_named(&g.name) {
+                r.genes[i] = j as u8;
             }
         }
         r

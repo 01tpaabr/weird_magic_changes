@@ -94,8 +94,14 @@ read a need by its name and can assign to it, clamped to `0..max`
 `drink`, `health` for bites, and `food` for what eating gives.
 
 **Genes.** A gene is a number the rules read by name, like a mem slot, but each actor has
-its own value and no rule can change it. A newborn starts at the default `D`. All three
-numbers are constant expressions, so a trait can take them from its parameters:
+its own value and no rule can change it. A child made by `spawn` takes its parent's
+value, by name and clamped to `LO..HI`; a gene the parent lacks starts at the default `D`,
+as does everyone a scenario starts. If the scenario has a `mutation N / D` line (§14),
+each of the child's genes then moves by a small step with that chance: up or down by 1 to
+a sixteenth of the range, never out of it. Over generations a gene drifts, and where it
+decides who lives to breed, selection moves it. `become` carries genes by name too,
+clamped, never mutated. All three numbers are constant expressions, so a trait can take
+them from its parameters:
 
 ```
 trait drinker(thirsty) {
@@ -393,6 +399,7 @@ start hive at (77, 103)                        # exactly there
 | `map { ... }` | | cells drawn from (0, 0), one character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with` |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
+| `mutation N / D` | none | the chance that each gene of a child made by `spawn` moves by a step at birth (§3); without it children inherit exactly |
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and

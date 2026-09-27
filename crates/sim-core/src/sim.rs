@@ -28,7 +28,7 @@ use bevy_ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
 use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch, systems};
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
-use crate::scenario::{Agg, DrawnMap, Expect, Placement, Scenario, Start, Who};
+use crate::scenario::{Agg, DrawnMap, Expect, PLACE_ONE, Placement, Scenario, Start, Who};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
 use crate::store::{SavedKind, Store, WorldMeta};
@@ -49,9 +49,20 @@ pub struct SimConfig {
     pub map: Option<DrawnMap>,
     /// `starts` resolved against the loaded kind table: what worldgen places.
     pub placement: Placement,
+    /// The scenario's `mutation N / D`: the chance that each gene of a
+    /// child moves at birth. `None`: children inherit genes exactly.
+    pub mutation: Option<(u32, u32)>,
 }
 
 impl SimConfig {
+    /// [`SimConfig::mutation`] as a part of [`PLACE_ONE`], like a share.
+    pub fn mutation_share(&self) -> u32 {
+        match self.mutation {
+            Some((n, d)) => (u64::from(n) * u64::from(PLACE_ONE) / u64::from(d)) as u32,
+            None => 0,
+        }
+    }
+
     /// The world's ground: its seed's noise under its drawn map.
     pub fn terrain(&self) -> Terrain<'_> {
         Terrain {
@@ -203,6 +214,7 @@ pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), String> {
         starts: scenario.starts.clone(),
         map: scenario.map.clone(),
         placement,
+        mutation: scenario.mutation,
     });
     world.insert_resource(Tick(START_TICK));
     let cx = i32::try_from(scenario.width.div_ceil(CHUNK_SIZE as u32)).expect("width");
@@ -280,6 +292,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         starts: m.starts,
         map: m.map,
         placement,
+        mutation: m.mutation,
     });
     world.insert_resource(Tick(m.tick));
     world.insert_resource(PendingRemap(remap));
@@ -329,6 +342,7 @@ pub fn meta(world: &World) -> WorldMeta {
         params: c.params,
         starts: c.starts.clone(),
         map: c.map.clone(),
+        mutation: c.mutation,
         kinds: SavedKind::table(kinds),
         scents: kinds.scents.clone(),
         packs: kinds.debug.packs.clone(),
@@ -1253,6 +1267,48 @@ mod tests {
             crate::rules::vm::result::BLOCKED
         );
         assert_eq!(w.get::<ChunkActors>(east_e).unwrap().rows.len(), 2);
+    }
+
+    #[test]
+    fn children_inherit_genes_in_their_chunk_and_across_a_border() {
+        let kinds = crate::rules::compile(
+            "g.rules",
+            "kind budder { glyph \"b\"  cadence 1  gene g = 3 from 0 to 9  mem done
+               when done == 0 => { done = 1  spawn budder at east } }",
+        )
+        .unwrap();
+        // One parent spawns inside chunk (0, 0), the other into (1, 0):
+        // Apply makes the first child, Migrate the second.
+        let children = |mutation| {
+            let mut w = new_world_with(&Scenario { mutation, ..cfg(4) }, kinds.clone()).unwrap();
+            flatten(&mut w);
+            let now = tick(&w);
+            for (x, uid) in [(10, 0xA1), (63, 0xA2)] {
+                let mut m = systems::newborn(&kinds, 0, uid, now);
+                m.genes[0] = 7;
+                assert!(place_actor(&mut w, Pos::new(x, 10), 0, m));
+            }
+            step(&mut w);
+            let born: Vec<(Pos, i32)> = rows(&mut w)
+                .into_iter()
+                .filter(|r| r.0 != 0xA1 && r.0 != 0xA2)
+                .map(|r| (r.2, r.3.genes[0]))
+                .collect();
+            let mut born = born;
+            born.sort_by_key(|(p, _)| p.x);
+            born
+        };
+        assert_eq!(
+            children(None),
+            [(Pos::new(11, 10), 7), (Pos::new(64, 10), 7)],
+            "without `mutation`, exact copies"
+        );
+        let moved = children(Some((1, 1)));
+        assert_eq!(moved.len(), 2);
+        for (_, g) in &moved {
+            assert!(*g == 6 || *g == 8, "one step off 7: {g}");
+        }
+        assert_eq!(children(Some((1, 1))), moved, "and the same every run");
     }
 
     /// Every cell of the loaded chunks becomes plain soil: scenarios place
