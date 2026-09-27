@@ -436,7 +436,8 @@ mod tests {
     /// the built-in rules, so the reference cannot drift from the language.
     #[test]
     fn the_rules_md_trait_example_compiles_on_the_builtin_rules() {
-        let doc = include_str!("../../../../docs/RULES.md");
+        // A checkout with `core.autocrlf` has CRLF line ends.
+        let doc = include_str!("../../../../docs/RULES.md").replace("\r\n", "\n");
         let section = &doc[doc.find("## 6. Traits").unwrap()..];
         let start = section.find("```\n").unwrap() + 4;
         let end = start + section[start..].find("```").unwrap();
