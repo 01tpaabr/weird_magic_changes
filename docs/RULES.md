@@ -300,7 +300,7 @@ Effects combine with the action and don't end the think.
 | `x`, `y` | world position |
 | `kind`, `look`, `signal`, `state` | own public bytes and state index |
 | `light` | daylight, 0 (night) to 255 |
-| `hour`, `day` | clock, 0 to 23, and days since the world began |
+| `hour`, `day` | clock, 0 to 23, and days since the world began (at most 2147483647) |
 | `hurt`, `hurt_dir` | damage taken since the last think; direction (1 to 8, clockwise from north) of the lowest-key attacker. Also the target `attacker` |
 | `result`, `blocked`, `missed`, `refused` | the last action's outcome |
 | `taken` | something was taken from it since its last think |

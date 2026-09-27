@@ -733,7 +733,9 @@ impl Machine<'_> {
             Sense::X => c.pos.x,
             Sense::Y => c.pos.y,
             Sense::Hour => i32::from(Clock::at(c.tick).hour),
-            Sense::Day => Clock::at(c.tick).day as i32,
+            // Past i32::MAX days (a save may hold a tick up to 2^63) it
+            // stays there rather than wrap.
+            Sense::Day => i32::try_from(Clock::at(c.tick).day).unwrap_or(i32::MAX),
             Sense::Kind => i32::from(c.kind.id),
             Sense::Look => i32::from(c.look),
             Sense::Signal => i32::from(c.signal),
@@ -1431,6 +1433,7 @@ mod tests {
     use crate::rules::asm::Asm;
     use crate::rules::{KindDef, Kinds, NeedDef};
     use crate::stage::CHUNK_CELLS;
+    use crate::time::TICKS_PER_DAY;
     use bytemuck::Zeroable;
 
     fn kind(needs: Vec<NeedDef>, entry: u32) -> KindDef {
@@ -1483,6 +1486,11 @@ mod tests {
 
     /// One think of kind 0 at (11, 10) on [`stage`].
     fn run_kinds(kinds: &Kinds, mind: &mut ActorMind) -> Outcome {
+        run_at(kinds, mind, 1000)
+    }
+
+    /// [`run_kinds`] at `tick`.
+    fn run_at(kinds: &Kinds, mind: &mut ActorMind, tick: u64) -> Outcome {
         let (cells, actors) = stage();
         let halo = Halo {
             chunks: [
@@ -1504,8 +1512,8 @@ mod tests {
             kind: &kinds.defs[0],
             cell: 10 * 64 + 11,
             pos: Pos::new(11, 10),
-            tick: 1000,
-            rng: rng_base(1, 1000, 7),
+            tick,
+            rng: rng_base(1, tick, 7),
             look: 0,
             signal: 0,
         };
@@ -1701,6 +1709,24 @@ mod tests {
             run(a.finish(), vec![], vec![], &mut mind()).trap,
             Some(Trap::BadNeed)
         );
+    }
+
+    #[test]
+    fn day_saturates_past_i32_max_days() {
+        let mut a = Asm::new();
+        a.sense(Sense::Day).set_mem(0).halt();
+        let kinds = Kinds::from_parts(vec![kind(vec![], 0)], a.finish(), vec![], vec![]);
+        // The latest tick a save may hold is 2^63 - 1: day 4.3e14.
+        for (tick, day) in [
+            (3 * TICKS_PER_DAY + 5, 3),
+            (u64::from(i32::MAX.unsigned_abs()) * TICKS_PER_DAY, i32::MAX),
+            ((1 << 32) * TICKS_PER_DAY, i32::MAX),
+            (u64::MAX / 2, i32::MAX),
+        ] {
+            let mut m = mind();
+            assert_eq!(run_at(&kinds, &mut m, tick).trap, None);
+            assert_eq!(m.mem[0], day, "tick {tick}");
+        }
     }
 
     #[test]
