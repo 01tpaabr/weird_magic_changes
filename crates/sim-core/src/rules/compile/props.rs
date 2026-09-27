@@ -61,15 +61,25 @@ fn parse(text: &str) -> Result<()> {
     p.file(&mut Items::default())
 }
 
-/// Compile, and fail if that panics (proptest catches it) or is slow.
+/// Compile, and fail if that panics (proptest catches it), is slow, or
+/// refuses the text without a place in it.
 fn compile_quickly(text: &str) -> std::result::Result<Result<Kinds>, TestCaseError> {
     let t = Instant::now();
     let r = compile("g.rules", text);
     let took = t.elapsed();
+    let fail = |why: String| {
+        Err(TestCaseError::fail(format!(
+            "{why}\n--- program ---\n{text}"
+        )))
+    };
     if took > SLOW {
-        return Err(TestCaseError::fail(format!(
-            "compiling took {took:?}\n--- program ---\n{text}"
-        )));
+        return fail(format!("compiling took {took:?}"));
+    }
+    if let Err(e) = &r {
+        let lines = text.split('\n').count() as u32;
+        if e.file != "g.rules" || e.line == 0 || e.line > lines || e.col == 0 {
+            return fail(format!("an error out of the text: {e:?}"));
+        }
     }
     Ok(r)
 }
@@ -94,6 +104,34 @@ fn valid_programs_compile_and_lint() {
         let fail = |e: String| TestCaseError::fail(format!("{e}\n--- program ---\n{}", p.text));
         parse(&p.text).map_err(|e| fail(e.to_string()))?;
         let k = compile_quickly(&p.text)?.map_err(|e| fail(e.to_string()))?;
+        let again = compile("g.rules", &p.text).map_err(|e| fail(e.to_string()))?;
+        if again.hash != k.hash {
+            return Err(fail("two compiles of one text differ".into()));
+        }
+        // One file per item: names are global, and the order is kept, so
+        // the kinds are the same. An item starts a line with `kind k<n>` or
+        // `trait` (a `choose` weight may start one with the sense `kind`).
+        let starts = |w: &str| {
+            p.text
+                .match_indices(w)
+                .filter(|(i, _)| p.text[i + w.len()..].starts_with(|c: char| c.is_ascii_digit()))
+                .map(|(i, _)| i + 1)
+                .collect::<Vec<_>>()
+        };
+        let mut cuts = starts("\nkind k");
+        cuts.extend(starts("\ntrait t"));
+        cuts.sort_unstable();
+        let mut texts = Vec::new();
+        let mut from = 0;
+        for c in cuts.into_iter().chain([p.text.len()]) {
+            texts.push((format!("f{}.rules", texts.len()), &p.text[from..c]));
+            from = c;
+        }
+        let files: Vec<(&str, &str)> = texts.iter().map(|(n, t)| (n.as_str(), *t)).collect();
+        let split = compile_files(&files).map_err(|e| fail(format!("in files: {e}")))?;
+        if split.hash != k.hash {
+            return Err(fail(format!("{} files compile differently", files.len())));
+        }
         if p.kinds.iter().any(|n| k.by_name(n).is_none()) || k.len() != p.kinds.len() {
             return Err(fail(format!(
                 "kinds {:?}, compiled {:?}",
