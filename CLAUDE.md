@@ -66,6 +66,7 @@ make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: i
 make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
+make fuzz       the fuzzers (rules, scenarios, saves, CLI, simulation), FUZZ_CASES each, new seed (printed)
 make ci         check + test  == "done"
 make bench      criterion, results in target/criterion
 make release    LTO, static Bevy
@@ -87,8 +88,16 @@ make fmt
   The skill's `references/` hold verified cheatsheets.
 - New sim system: a plain fn in `sim-core`, added to `SimTick` inside a `Phase` set, with a
   checksum test. New actor kind: a `.rules` file (`docs/RULES.md`), `wmc lint` it, a test in `scenarios/tests/`, `wmc why` to debug it. New
-  sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
+  sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test, and
+  `docs/GRAMMAR.md` + `rules/gen_rules.rs` taught it (any syntax change: the same two). New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
+- Tests guard the whole surface, not just the new case. A change also extends what fuzzes it:
+  new syntax or sense/action -> `GRAMMAR.md` + `rules/gen_rules.rs` (its `Lively` mode, so
+  `sim/fuzz.rs` runs it); new actor state -> `sim::invariants`; new saved field -> the store
+  round trip and `store/fuzz.rs`; new scenario syntax -> `scenario/fuzz.rs`; new doc example
+  -> a fence label (`tests/docs.rs` runs it). A fuzz failure becomes a fixed regression test.
+  Run `make fuzz` before closing a design step. A narrowing `as` needs a checked conversion
+  or `#[allow(clippy::cast_possible_truncation)] // why it fits`. How-to: `/bevy-dev`, Testing.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).
 - Remote: `origin` = github.com/01tpaabr/weird_magic_changes. Commit on `main` in small steps
   and push; no PRs yet.

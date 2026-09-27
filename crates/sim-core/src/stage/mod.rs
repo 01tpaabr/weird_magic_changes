@@ -1,5 +1,6 @@
-//! The Stage: an unbounded 2D grid of cells that actors stand on, stored as
-//! fixed-size **chunks**, one entity per loaded chunk.
+//! The Stage: a 2D grid of cells that actors stand on, a billion cells each
+//! way from the origin ([`WORLD_EXTENT`]), stored as fixed-size **chunks**,
+//! one entity per loaded chunk.
 //!
 //! ```text
 //! world cell (x, y): i32          chunk coord = (x >> CHUNK_BITS, y >> CHUNK_BITS)
@@ -61,7 +62,31 @@ pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
 /// Scent channels per cell (`mark`, `sniff`): named by the rules, numbered
 /// in first-appearance order.
 pub const SCENT_CHANNELS: usize = 4;
+const _: () = assert!(CHUNK_CELLS <= 1 << u16::BITS);
+
+/// A local cell index, `0..CHUNK_CELLS`, as the `u16` that rows, effects
+/// and hits keep.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // below CHUNK_CELLS, which fits
+pub fn cell_u16(cell: usize) -> u16 {
+    debug_assert!(cell < CHUNK_CELLS, "cell {cell} is outside the chunk");
+    cell as u16
+}
 const MASK: i32 = CHUNK_SIZE - 1;
+
+/// The world's extent: a cell's `x` and `y` each lie in
+/// `[-WORLD_EXTENT, WORLD_EXTENT)`, whole chunks either way. Nothing past it
+/// ever loads: streaming clamps its focus to it, and scenarios and saves
+/// refuse positions past it. So to an actor at the edge the cells beyond
+/// read as an unloaded chunk (rock, nobody) and a move or spawn there is
+/// BLOCKED. Every chunk inside, and every neighbour of one, has
+/// representable cells, and the difference of two positions inside fits an
+/// `i32`. It is also where the app's camera stops.
+pub const WORLD_EXTENT: i32 = 1_000_000_000;
+/// [`WORLD_EXTENT`] in chunks: a chunk coordinate inside lies in
+/// `[-CHUNK_EXTENT, CHUNK_EXTENT)`.
+pub const CHUNK_EXTENT: i32 = WORLD_EXTENT / CHUNK_SIZE;
+const _: () = assert!(WORLD_EXTENT % CHUNK_SIZE == 0 && WORLD_EXTENT <= 1 << 30);
 
 /// What a cell fundamentally is. Exactly one per cell.
 #[repr(u8)]
@@ -123,6 +148,7 @@ impl ActorId {
 
     /// `(kind, slot)` of a live id, `None` for an empty cell.
     #[inline]
+    #[allow(clippy::cast_possible_truncation)] // the two halves: truncation is the point
     pub fn unpack(self) -> Option<(u16, u16)> {
         (!self.is_none()).then_some(((self.0 >> 16) as u16, self.0 as u16))
     }
@@ -139,8 +165,9 @@ impl Default for ActorId {
     }
 }
 
-/// World cell coordinate. Unbounded; `y` grows downward. The initial map
-/// occupies `[0, w) x [0, h)`, everything else is generated on demand.
+/// World cell coordinate; `y` grows downward. The initial map occupies
+/// `[0, w) x [0, h)`, everything else is generated on demand, up to
+/// [`WORLD_EXTENT`] each way. A `Pos` may lie outside it: nothing is there.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
 pub struct Pos {
@@ -154,7 +181,23 @@ impl Pos {
         Self { x, y }
     }
 
-    /// `self + (dx, dy)`, `None` only on i32 overflow (the edge of the world).
+    /// Inside the world's extent ([`WORLD_EXTENT`])?
+    #[inline]
+    pub const fn in_world(self) -> bool {
+        -WORLD_EXTENT <= self.x
+            && self.x < WORLD_EXTENT
+            && -WORLD_EXTENT <= self.y
+            && self.y < WORLD_EXTENT
+    }
+
+    /// The nearest position inside the world's extent.
+    #[inline]
+    pub fn clamp_to_world(self) -> Pos {
+        let c = |v: i32| v.clamp(-WORLD_EXTENT, WORLD_EXTENT - 1);
+        Pos::new(c(self.x), c(self.y))
+    }
+
+    /// `self + (dx, dy)`, `None` only on i32 overflow.
     #[inline]
     pub fn offset(self, dx: i32, dy: i32) -> Option<Pos> {
         Some(Pos::new(self.x.checked_add(dx)?, self.y.checked_add(dy)?))
@@ -193,7 +236,17 @@ impl ChunkCoord {
         Self { x, y }
     }
 
-    /// World position of this chunk's top-left cell.
+    /// Inside the world's extent ([`CHUNK_EXTENT`])?
+    #[inline]
+    pub const fn in_world(self) -> bool {
+        -CHUNK_EXTENT <= self.x
+            && self.x < CHUNK_EXTENT
+            && -CHUNK_EXTENT <= self.y
+            && self.y < CHUNK_EXTENT
+    }
+
+    /// World position of this chunk's top-left cell (for a chunk inside the
+    /// world or next to it: further out, the shift wraps).
     #[inline]
     pub const fn origin(self) -> Pos {
         Pos::new(self.x << CHUNK_BITS, self.y << CHUNK_BITS)
@@ -253,6 +306,22 @@ impl ChunkCells {
         self.ground[i].walkable() && !self.feature[i].blocks()
     }
 
+    /// The occupant layer, or the cover layer.
+    #[inline]
+    pub fn layer(&self, cover: bool) -> &[ActorId; CHUNK_CELLS] {
+        if cover { &self.cover } else { &self.occupant }
+    }
+
+    /// [`ChunkCells::layer`], mutable.
+    #[inline]
+    pub fn layer_mut(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
+        if cover {
+            &mut self.cover
+        } else {
+            &mut self.occupant
+        }
+    }
+
     /// Content hash, independent of where the chunk lives in memory.
     pub fn hash(&self) -> u64 {
         let h = fnv1a(0xCBF2_9CE4_8422_2325, bytemuck::cast_slice(&self.ground));
@@ -296,24 +365,11 @@ impl ChunkData {
 /// Bookkeeping for one chunk entity.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChunkMeta {
-    /// Modified since it was generated or loaded from disk. Clean chunks are
-    /// never written: they can be regenerated from the seed.
+    /// Must be written before it is dropped: changed since it was generated
+    /// or read, or inhabited (rows carry clocks, which a save file stamps
+    /// with the tick it was written at). A clean chunk is empty and
+    /// unchanged: the seed or its file brings it back as it is.
     pub dirty: bool,
-    /// World tick the chunk's state was current at when it was spawned (the
-    /// tick it was generated, or `last_ticked` from its save file). While
-    /// loaded the live value is `Tick`; `sim::save` refreshes this whenever
-    /// the chunk is written. Not part of the checksum.
-    pub last_ticked: u64,
-}
-
-/// Everything a cell holds, copied out. For convenience APIs, not hot loops.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cell {
-    pub ground: Ground,
-    pub feature: Feature,
-    pub occupant: ActorId,
-    pub cover: ActorId,
-    pub scent: [u8; SCENT_CHANNELS],
 }
 
 /// The set of loaded chunks: coordinate -> entity, plus the canonical order.
@@ -383,18 +439,12 @@ impl Stage {
 
 /// Spawn a chunk entity. Panics if `coord` is already loaded. The world must
 /// have a [`Stage`] resource (`sim::install`).
-pub fn insert(
-    world: &mut World,
-    coord: ChunkCoord,
-    data: ChunkData,
-    dirty: bool,
-    last_ticked: u64,
-) -> Entity {
+pub fn insert(world: &mut World, coord: ChunkCoord, data: ChunkData, dirty: bool) -> Entity {
     let e = world
         .spawn((
             coord,
             data,
-            ChunkMeta { dirty, last_ticked },
+            ChunkMeta { dirty },
             Intents::default(),
             Scratch::default(),
             Outbox::default(),
@@ -469,12 +519,6 @@ impl std::fmt::Debug for StageCells<'_, '_> {
 }
 
 impl StageCells<'_, '_> {
-    /// The directory of loaded chunks.
-    #[inline]
-    pub fn stage(&self) -> &Stage {
-        &self.stage
-    }
-
     pub fn loaded_count(&self) -> usize {
         self.stage.loaded_count()
     }
@@ -484,35 +528,6 @@ impl StageCells<'_, '_> {
     pub fn chunk(&self, c: ChunkCoord) -> Option<&ChunkCells> {
         let e = self.stage.entity(c)?;
         self.cells.get(e).ok()
-    }
-
-    /// `None` if the chunk is not loaded.
-    #[inline]
-    pub fn get(&self, p: Pos) -> Option<Cell> {
-        let (cc, i) = p.split();
-        let c = self.chunk(cc)?;
-        Some(Cell {
-            ground: c.ground[i],
-            feature: c.feature[i],
-            occupant: c.occupant[i],
-            cover: c.cover[i],
-            scent: std::array::from_fn(|j| c.scent[j][i]),
-        })
-    }
-
-    /// Terrain permits standing here. `None` if not loaded.
-    #[inline]
-    pub fn walkable(&self, p: Pos) -> Option<bool> {
-        let (cc, i) = p.split();
-        self.chunk(cc).map(|c| c.walkable(i))
-    }
-
-    /// Terrain permits standing here and nobody is here. `None` if not loaded.
-    #[inline]
-    pub fn free(&self, p: Pos) -> Option<bool> {
-        let (cc, i) = p.split();
-        self.chunk(cc)
-            .map(|c| c.walkable(i) && c.occupant[i].is_none())
     }
 }
 
@@ -554,6 +569,44 @@ mod tests {
         assert_eq!(ChunkCoord::new(-1, 2).origin(), Pos::new(-64, 128));
     }
 
+    /// The extent is whole chunks: a cell is inside iff its chunk is, and
+    /// the chunks just past the edge still have representable cells.
+    #[test]
+    fn the_world_extent_is_whole_chunks() {
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        for (p, inside) in [
+            (Pos::new(0, 0), true),
+            (Pos::new(lo, lo), true),
+            (Pos::new(hi, hi), true),
+            (Pos::new(hi + 1, 0), false),
+            (Pos::new(0, lo - 1), false),
+            (Pos::new(i32::MAX, i32::MIN), false),
+        ] {
+            assert_eq!(p.in_world(), inside, "{p:?}");
+            let (cc, i) = p.split();
+            assert_eq!(cc.in_world(), inside, "{p:?}");
+            assert_eq!(cc.cell(i), p, "{p:?}");
+        }
+        assert_eq!(
+            Pos::new(hi, 0).split().0,
+            ChunkCoord::new(CHUNK_EXTENT - 1, 0)
+        );
+        assert_eq!(
+            ChunkCoord::new(CHUNK_EXTENT, 0).origin(),
+            Pos::new(WORLD_EXTENT, 0)
+        );
+        let past = ChunkCoord::new(-CHUNK_EXTENT - 1, CHUNK_EXTENT);
+        assert_eq!(
+            past.cell(CHUNK_CELLS - 1),
+            Pos::new(lo - 1, WORLD_EXTENT + 63)
+        );
+        assert_eq!(
+            Pos::new(i32::MAX, i32::MIN).clamp_to_world(),
+            Pos::new(hi, lo)
+        );
+        assert_eq!(Pos::new(-5, 7).clamp_to_world(), Pos::new(-5, 7));
+    }
+
     #[test]
     fn neighbors_are_ordered() {
         let n: Vec<_> = Pos::new(0, 0).neighbors4().collect();
@@ -572,21 +625,9 @@ mod tests {
     #[test]
     fn insert_remove_keeps_active_sorted_and_entities_die() {
         let mut w = world();
-        let a = insert(
-            &mut w,
-            ChunkCoord::new(1, 1),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        let b = insert(
-            &mut w,
-            ChunkCoord::new(-3, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        let c = insert(&mut w, ChunkCoord::new(0, 1), ChunkData::default(), true, 0);
+        let a = insert(&mut w, ChunkCoord::new(1, 1), ChunkData::default(), false);
+        let b = insert(&mut w, ChunkCoord::new(-3, 0), ChunkData::default(), false);
+        let c = insert(&mut w, ChunkCoord::new(0, 1), ChunkData::default(), true);
         assert!(a != b && b != c);
         let order: Vec<_> = w.resource::<Stage>().loaded_coords().collect();
         assert_eq!(
@@ -612,68 +653,26 @@ mod tests {
         let mut cells = ChunkData::default();
         cells.cells.ground[5] = Ground::Water;
         let mut a = world();
-        insert(&mut a, ChunkCoord::new(0, 0), cells.clone(), false, 0);
-        insert(
-            &mut a,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut a, ChunkCoord::new(0, 0), cells.clone(), false);
+        insert(&mut a, ChunkCoord::new(1, 0), ChunkData::default(), false);
         let mut b = world();
-        insert(
-            &mut b,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(&mut b, ChunkCoord::new(0, 0), cells, false, 0);
+        insert(&mut b, ChunkCoord::new(1, 0), ChunkData::default(), false);
+        insert(&mut b, ChunkCoord::new(0, 0), cells, false);
         assert_eq!(checksum(&mut a), checksum(&mut b));
         // But it does see position and content.
         let mut c = world();
-        insert(
-            &mut c,
-            ChunkCoord::new(0, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(
-            &mut c,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut c, ChunkCoord::new(0, 0), ChunkData::default(), false);
+        insert(&mut c, ChunkCoord::new(1, 0), ChunkData::default(), false);
         assert_ne!(checksum(&mut a), checksum(&mut c));
         let mut d = world();
-        insert(
-            &mut d,
-            ChunkCoord::new(0, 1),
-            ChunkData::default(),
-            false,
-            0,
-        );
-        insert(
-            &mut d,
-            ChunkCoord::new(1, 0),
-            ChunkData::default(),
-            false,
-            0,
-        );
+        insert(&mut d, ChunkCoord::new(0, 1), ChunkData::default(), false);
+        insert(&mut d, ChunkCoord::new(1, 0), ChunkData::default(), false);
         assert_ne!(checksum(&mut c), checksum(&mut d));
         // Many chunks: exercises the batched parallel path.
         let mut e = world();
         for y in 0..10 {
             for x in 0..10 {
-                insert(
-                    &mut e,
-                    ChunkCoord::new(x, y),
-                    ChunkData::default(),
-                    false,
-                    0,
-                );
+                insert(&mut e, ChunkCoord::new(x, y), ChunkData::default(), false);
             }
         }
         let first = checksum(&mut e);
@@ -684,36 +683,29 @@ mod tests {
     fn cell_queries_and_dirty_tracking() {
         let mut w = world();
         let cc = ChunkCoord::new(0, 0);
-        insert(&mut w, cc, ChunkData::default(), false, 0);
+        insert(&mut w, cc, ChunkData::default(), false);
         let p = Pos::new(3, 4);
         let (_, i) = p.split();
-        let free =
-            |w: &mut World, p: Pos| w.run_system_once(move |s: StageCells| s.free(p)).unwrap();
-        let walkable = |w: &mut World, p: Pos| {
-            w.run_system_once(move |s: StageCells| s.walkable(p))
-                .unwrap()
+        // (walkable, occupant) at `p` through the system param; None if not loaded.
+        let at = |w: &mut World, p: Pos| {
+            let (cc, i) = p.split();
+            w.run_system_once(move |s: StageCells| {
+                s.chunk(cc).map(|c| (c.walkable(i), c.occupant[i]))
+            })
+            .unwrap()
         };
-        assert_eq!(free(&mut w, p), Some(true));
-        assert_eq!(
-            w.run_system_once(|s: StageCells| s.get(Pos::new(64, 0)))
-                .unwrap(),
-            None
-        );
+        assert_eq!(at(&mut w, p), Some((true, ActorId::NONE)));
+        assert_eq!(at(&mut w, Pos::new(64, 0)), None);
         chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::Rock;
         let e = w.resource::<Stage>().entity(cc).unwrap();
         assert!(w.get::<ChunkMeta>(e).unwrap().dirty);
-        assert_eq!(walkable(&mut w, p), Some(false));
+        assert_eq!(at(&mut w, p), Some((false, ActorId::NONE)));
         chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::None;
         chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Water;
-        assert_eq!(walkable(&mut w, p), Some(false));
+        assert_eq!(at(&mut w, p), Some((false, ActorId::NONE)));
         chunk_mut(&mut w, cc).unwrap().ground[i] = Ground::Soil;
         chunk_mut(&mut w, cc).unwrap().occupant[i] = ActorId(7);
-        assert_eq!(
-            (walkable(&mut w, p), free(&mut w, p)),
-            (Some(true), Some(false))
-        );
-        let got = w.run_system_once(move |s: StageCells| s.get(p)).unwrap();
-        assert_eq!(got.unwrap().occupant, ActorId(7));
+        assert_eq!(at(&mut w, p), Some((true, ActorId(7))));
         assert_eq!(chunk(&w, cc).unwrap().occupant[i], ActorId(7));
         assert!(chunk(&w, ChunkCoord::new(5, 5)).is_none());
     }

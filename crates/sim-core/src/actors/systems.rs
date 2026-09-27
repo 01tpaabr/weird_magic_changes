@@ -4,7 +4,8 @@
 //! Think     par  every due actor runs its program against the tick-start world;
 //!                writes its own mind and one Intent per actor into the chunk's Intents
 //! Resolve   par  own chunk: sort intents by key, clear WAKE of every thinker, record
-//!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites -> Outbox
+//!                in-chunk bites on the victim chunk's Scratch; cross-chunk bites and every
+//!                take/give -> Outbox
 //! Exchange  seq  cross-chunk bites recorded on their victims; then, chunk by chunk in
 //!                stage.active() order: bites per victim in key order, hurt + WAKE,
 //!                deaths; food by share to the eaters; last every take/give in key order
@@ -31,14 +32,18 @@ use bevy_ecs::prelude::*;
 
 use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
-    flags,
+    flags, slot_u16,
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
 use crate::rules::{GeneDef, Kinds, Remap};
 use crate::sim::{SimConfig, Tick};
-use crate::stage::worldgen::STREAM_UID;
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Stage};
+use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
+use crate::stage::{
+    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, SCENT_CHANNELS, Stage,
+    cell_u16,
+};
+use crate::time::stamp;
 
 /// One actor's decision this tick, waiting for the resolve phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +66,9 @@ pub struct Intent {
     pub amount: i32,
     /// A `Spawn`'s child's first two `mem` values.
     pub with: [i32; 2],
-    /// `mark ch v` effect: added to the actor's (tick-start) cell in Apply.
-    pub mark: Option<(u8, u8)>,
+    /// `mark ch v` effects, per channel: added to the actor's (tick-start)
+    /// cell in Apply.
+    pub mark: [u8; SCENT_CHANNELS],
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
     /// Ops the think executed (saturating), for the per-kind counters.
@@ -114,9 +120,9 @@ pub enum EffectKind {
     },
 }
 
-/// Cross-chunk effects a chunk's actors asked for this tick: bites (filled
-/// by Resolve, drained by Exchange), then moves and spawns (filled by
-/// Apply, drained by Migrate).
+/// Effects a chunk's actors asked for this tick: bites that cross a chunk and
+/// every take/give (filled by Resolve, drained by Exchange), then cross-chunk
+/// moves and spawns (filled by Apply, drained by Migrate).
 #[derive(Component, Debug, Default)]
 pub struct Outbox {
     pub list: Vec<Effect>,
@@ -216,7 +222,7 @@ impl Scratch {
         match *c {
             TOUCHED => {}
             UNCLAIMED => {
-                self.touched.push(cell as u16);
+                self.touched.push(cell_u16(cell));
                 *c = key;
             }
             _ => *c = (*c).min(key),
@@ -226,7 +232,7 @@ impl Scratch {
     /// The cell's occupancy changed this tick: nobody else enters it.
     fn touch(&mut self, cell: usize) {
         if self.claim[cell] == UNCLAIMED {
-            self.touched.push(cell as u16);
+            self.touched.push(cell_u16(cell));
         }
         self.claim[cell] = TOUCHED;
     }
@@ -265,36 +271,13 @@ pub fn intent_key(uid: u64, tick: u64) -> u64 {
     splitmix64(uid ^ splitmix64(tick))
 }
 
-/// Is an actor due to think at `tick`?
+/// Is an actor due to think at `tick`? Above a cadence of 2^16 the 16-bit
+/// stagger is shifted up, so the phases still spread over the whole period.
 #[inline]
 pub fn due(tick: u64, row: &ActorPub, cadence: u64) -> bool {
-    row.flags & flags::WAKE != 0 || tick.wrapping_add(u64::from(row.stagger)) & (cadence - 1) == 0
-}
-
-/// The 3x3 halo around `c`, from the read-only queries of the Think phase.
-fn halo_of<'a>(
-    stage: &Stage,
-    cells: &'a Query<&ChunkCells>,
-    pubs: &'a Query<&ChunkActors>,
-    kinds: &'a Kinds,
-    c: ChunkCoord,
-) -> Halo<'a> {
-    let (tags, family_end) = (&kinds.tag_bits[..], &kinds.family_end[..]);
-    let mut chunks = [None; 9];
-    for (i, slot) in chunks.iter_mut().enumerate() {
-        let (ox, oy) = ((i % 3) as i32 - 1, (i / 3) as i32 - 1);
-        let Some(e) = stage.entity(ChunkCoord::new(c.x + ox, c.y + oy)) else {
-            continue;
-        };
-        if let (Ok(cells), Ok(pubs)) = (cells.get(e), pubs.get(e)) {
-            *slot = Some((cells, pubs));
-        }
-    }
-    Halo {
-        chunks,
-        tags,
-        family_end,
-    }
+    let shift = cadence.trailing_zeros().saturating_sub(16);
+    row.flags & flags::WAKE != 0
+        || tick.wrapping_add(u64::from(row.stagger) << shift) & (cadence - 1) == 0
 }
 
 // ---- Think ------------------------------------------------------------------------------
@@ -332,7 +315,12 @@ pub fn think(
                 if !due(tick, row, kind.cadence()) {
                     continue;
                 }
-                let halo = halo.get_or_insert_with(|| halo_of(stage, cells, pubs, kinds, *coord));
+                let halo = halo.get_or_insert_with(|| {
+                    Halo::around(*coord, kinds, |c| {
+                        let e = stage.entity(c)?;
+                        Some((cells.get(e).ok()?, pubs.get(e).ok()?))
+                    })
+                });
                 let mind = &mut minds.rows[slot];
                 let (intent, _) = think_one::<false>(
                     kinds,
@@ -340,7 +328,7 @@ pub fn think(
                     seed,
                     halo,
                     *coord,
-                    slot as u16,
+                    slot_u16(slot),
                     row,
                     mind,
                     &mut Vec::new(),
@@ -373,7 +361,8 @@ pub struct Explained {
 }
 
 /// Run one actor's think on a copy of its mind, with a trace. Pure: the
-/// same function the Think phase runs, against the same tick-start state.
+/// same function the Think phase runs, against the halo it is given
+/// (`sim::explain_slot` builds the one Think sees).
 #[allow(clippy::too_many_arguments)]
 pub fn explain(
     kinds: &Kinds,
@@ -434,7 +423,7 @@ fn think_one<const TRACE: bool>(
         signal: None,
         amount: 0,
         with: [0; 2],
-        mark: None,
+        mark: [0; SCENT_CHANNELS],
         trapped: false,
         used: 0,
     };
@@ -480,12 +469,13 @@ fn think_one<const TRACE: bool>(
     }
     intent.trapped = out.trap.is_some();
     intent.used = u16::try_from(out.used).unwrap_or(u16::MAX);
-    let (lx, ly) = local_xy(cell);
+    let (lx, ly) = (vm::lx(cell), vm::ly(cell));
     match out.action {
         Action::Move => {
             let (dx, dy) = step_toward(halo, lx, ly, i32::from(out.dx), i32::from(out.dy));
-            intent.dx = dx as i8;
-            intent.dy = dy as i8;
+            #[allow(clippy::cast_possible_truncation)] // a unit step, -1..=1
+            let step = (dx as i8, dy as i8);
+            (intent.dx, intent.dy) = step;
         }
         Action::Drink => {
             // Adjacent water (or underfoot, which a standing actor never is).
@@ -504,11 +494,6 @@ fn clear_events(mind: &mut ActorMind) {
     mind.events = 0;
     mind.hurt = 0;
     mind.hurt_dir = 0;
-}
-
-#[inline]
-fn local_xy(cell: usize) -> (i32, i32) {
-    ((cell as i32) & 63, (cell as i32) >> 6)
 }
 
 /// Reduce a move to one step: `(sign dx, sign dy)`, and if that cell is not
@@ -568,6 +553,10 @@ pub fn resolve(
                     let res = if dx.abs() > 1 || dy.abs() > 1 || (dx, dy) == (0, 0) {
                         result::REFUSED
                     } else {
+                        // A take or give's kind is its need slot (Think
+                        // widened the u8).
+                        #[allow(clippy::cast_possible_truncation)]
+                        let need = it.kind as u8;
                         let (to, cell) = match target_of(
                             *coord,
                             usize::from(pubs.rows[slot].cell),
@@ -581,12 +570,12 @@ pub fn resolve(
                             key: it.key,
                             slot: it.slot,
                             what: EffectKind::Transfer {
-                                need: it.kind as u8,
+                                need,
                                 amount: it.amount,
                                 give: it.action == Action::Give,
                             },
                             to,
-                            cell: cell as u16,
+                            cell: cell_u16(cell),
                         });
                         result::NONE // Exchange decides
                     };
@@ -608,12 +597,12 @@ pub fn resolve(
                     let eat = it.action != Action::Hit;
                     let dir = vm::dir_index(-dx, -dy);
                     match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
-                        Where::Here(cell) => match layer_of(cells, cover)[cell].unpack() {
+                        Where::Here(cell) => match cells.layer(cover)[cell].unpack() {
                             None => result::MISSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
                                 scratch.hits.push(Hit {
-                                    cell: cell as u16,
+                                    cell: cell_u16(cell),
                                     key: it.key,
                                     from: e,
                                     slot: it.slot,
@@ -636,7 +625,7 @@ pub fn resolve(
                                     cover,
                                 },
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE // Exchange decides
                         }
@@ -651,12 +640,6 @@ pub fn resolve(
 #[inline]
 fn has_health(kinds: &Kinds, kind: u16) -> bool {
     kinds.def(kind).need_named("health").is_some()
-}
-
-/// The occupant layer, or the cover layer.
-#[inline]
-fn layer_of(cells: &ChunkCells, cover: bool) -> &[ActorId; CHUNK_CELLS] {
-    if cover { &cells.cover } else { &cells.occupant }
 }
 
 // ---- Exchange ---------------------------------------------------------------------------
@@ -676,20 +659,21 @@ type ChunkQuery<'w, 's> = Query<
 /// Damage, deaths and feeding, one thread. First every cross-chunk bite is
 /// recorded on its victim (tick-start occupancy: nothing has died or moved
 /// yet). Then, chunk by chunk in `stage.active()` order, the bites on each
-/// victim take its `health` in key order, each at most what is left; its
-/// `hurt` grows by what was taken (saturating), `hurt_dir` points at the
-/// lowest-key biter and `WAKE` is set; at `health <= 0` it dies. Every `eat`
+/// victim take its `health` (decayed to now) in key order, each at most
+/// what is left; its `hurt` grows by what was taken (saturating), `hurt_dir`
+/// points at the lowest-key biter and `WAKE` is set; at `health <= 0` it dies. Every `eat`
 /// gains the share of the victim kind's `food` it took (`food * taken /
 /// max health`), if the eater is alive itself at the end: a fox eats a
 /// chicken over two bites, a chicken crops grass that grows back.
 pub fn exchange(
+    tick: Res<Tick>,
     kinds: Res<Kinds>,
     stage: Res<Stage>,
     mut work: ResMut<CrossScratch>,
     mut outboxes: Query<&mut Outbox>,
     mut chunks: ChunkQuery,
 ) {
-    let kinds = &*kinds;
+    let (tick, kinds) = (tick.0, &*kinds);
     let work = &mut *work;
     work.list.clear();
     work.credits.clear();
@@ -713,7 +697,7 @@ pub fn exchange(
         };
         let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
-                match layer_of(&cells, cover)[usize::from(fx.cell)].unpack() {
+                match cells.layer(cover)[usize::from(fx.cell)].unpack() {
                     None => result::MISSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
@@ -760,7 +744,7 @@ pub fn exchange(
             let group = i..j;
             i = j;
             let cell = usize::from(first.cell);
-            let Some((vk, vslot)) = layer_of(&cells, first.cover)[cell].unpack() else {
+            let Some((vk, vslot)) = cells.layer(first.cover)[cell].unpack() else {
                 continue;
             };
             let vslot = usize::from(vslot);
@@ -774,13 +758,19 @@ pub fn exchange(
             // feeds nobody and a shared kill is shared.
             let max = i64::from(def.needs[h].max.max(1));
             let m = &mut minds.rows[vslot];
+            if def.needs[h].decays {
+                vm::decay(def, m, tick); // health as it stands now
+            }
             let mut left = m.needs[h].max(0);
             for hit in &scratch.hits[group] {
                 let taken = i32::from(hit.bite).min(left);
                 left -= taken;
                 if hit.eat && taken > 0 && def.food > 0 {
-                    let food = i64::from(def.food) * i64::from(taken) / max;
-                    work.credits.push((hit.from, hit.slot, food as i32));
+                    // Health is in 0..=max (every write clamps it), so
+                    // taken <= max and food <= def.food, an i32.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let food = (i64::from(def.food) * i64::from(taken) / max) as i32;
+                    work.credits.push((hit.from, hit.slot, food));
                 }
             }
             let taken = m.needs[h].max(0) - left;
@@ -832,7 +822,7 @@ pub fn exchange(
             amount,
             give,
         };
-        if let Some(res) = transfer(kinds, &stage, &mut chunks, src_e, slot, &fx, t) {
+        if let Some(res) = transfer(kinds, &stage, tick, &mut chunks, src_e, slot, &fx, t) {
             set_result(&mut chunks, src_e, slot, res);
         }
     }
@@ -849,13 +839,15 @@ struct Transfer {
 /// Settle one transfer between the mover (`src_e`, `slot`) and whoever
 /// stands on the target cell at tick start. `take` moves up to `amount` of
 /// the target's same-named need into the mover's, `give` the reverse, never
-/// more than the source holds or past the receiver's max. The target of a
-/// `take` gets `TAKEN` and wakes. `None` if the mover died this tick (its
+/// more than the source holds or past the receiver's max. A decaying need
+/// of the target is first decayed to now. The target of a `take` that
+/// moved anything gets `TAKEN` and wakes. `None` if the mover died this tick (its
 /// intent is void); else the mover's result: MISSED (nobody there, or dead
-/// now), REFUSED (the target has no such need), OK.
+/// now), REFUSED (the target has no such need), BLOCKED (nothing moved), OK.
 fn transfer(
     kinds: &Kinds,
     stage: &Stage,
+    tick: u64,
     chunks: &mut ChunkQuery,
     src_e: Entity,
     slot: usize,
@@ -873,7 +865,7 @@ fn transfer(
     let Some(dst_e) = stage.entity(fx.to) else {
         return Some(result::MISSED);
     };
-    let Ok((cells, dst_pubs, dst_minds, _, _)) = chunks.get(dst_e) else {
+    let Ok((cells, mut dst_pubs, mut dst_minds, _, mut dst_meta)) = chunks.get_mut(dst_e) else {
         return Some(result::MISSED);
     };
     let Some((dk, ds)) = cells.occupant[usize::from(fx.cell)].unpack() else {
@@ -888,29 +880,36 @@ fn transfer(
     let Some(dn) = ddef.need_named(&sdef.needs[t.need].name) else {
         return Some(result::REFUSED);
     };
-    let dv = dst_minds.rows[ds].needs[dn];
+    let m = &mut dst_minds.rows[ds];
+    if ddef.needs[dn].decays {
+        // The target last thought a while ago: bring it to now first. An
+        // emptied vital need kills it at its next think.
+        vm::decay(ddef, m, tick);
+        dst_meta.dirty = true;
+    }
+    let dv = m.needs[dn];
     let (smax, dmax) = (sdef.needs[t.need].max, ddef.needs[dn].max);
     let moved = if t.give {
         t.amount.min(sv.max(0)).min((dmax - dv).max(0))
     } else {
         t.amount.min(dv.max(0)).min((smax - sv).max(0))
     };
+    if moved == 0 {
+        return Some(result::BLOCKED); // nothing moved: nobody saw a take
+    }
     let (sv, dv) = if t.give {
         (sv - moved, dv + moved)
     } else {
         (sv + moved, dv - moved)
     };
+    m.needs[dn] = dv;
+    if !t.give {
+        m.events |= event::TAKEN;
+        dst_pubs.rows[ds].flags |= flags::WAKE;
+    }
+    dst_meta.dirty = true;
     if let Ok((_, _, mut minds, _, mut meta)) = chunks.get_mut(src_e) {
         minds.rows[slot].needs[t.need] = sv;
-        meta.dirty = true;
-    }
-    if let Ok((_, mut pubs, mut minds, _, mut meta)) = chunks.get_mut(dst_e) {
-        let m = &mut minds.rows[ds];
-        m.needs[dn] = dv;
-        if !t.give {
-            m.events |= event::TAKEN;
-            pubs.rows[ds].flags |= flags::WAKE;
-        }
         meta.dirty = true;
     }
     Some(result::OK)
@@ -932,7 +931,7 @@ pub fn apply(
         &mut Outbox,
     )>,
 ) {
-    let (tick, seed, kinds, cfg) = (tick.0, cfg.seed, &*kinds, &*cfg);
+    let (tick, kinds, cfg) = (tick.0, &*kinds, &*cfg);
     q.par_iter_mut().for_each(
         |(coord, mut cells, mut pubs, mut minds, intents, mut scratch, mut outbox)| {
             // Exchange drained the bites; what goes in now is moves and spawns.
@@ -941,7 +940,8 @@ pub fn apply(
                 return;
             }
             // Claims: in-chunk targets free at tick start and untouched, lowest
-            // key wins. Intents are in key order since Resolve.
+            // key wins. Intents are in key order since Resolve; a winner
+            // touches the cell, so a tied key (twin uids) after it is blocked.
             for it in &intents.list {
                 if !matches!(it.action, Action::Move | Action::Spawn) {
                     continue;
@@ -952,6 +952,9 @@ pub fn apply(
                 let row = pubs.rows[usize::from(it.slot)];
                 if row.flags & flags::DEAD != 0 {
                     continue;
+                }
+                if it.action == Action::Move && row.flags & flags::COVER != 0 {
+                    continue; // REFUSED below: a rooted row claims nothing
                 }
                 if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
                     && cells.walkable(cell)
@@ -973,7 +976,7 @@ pub fn apply(
                     continue; // died in Exchange: its intent is void
                 }
                 let from = usize::from(pubs.rows[slot].cell);
-                let grounded = pubs.rows[slot].flags & flags::COVER != 0;
+                let cover = pubs.rows[slot].flags & flags::COVER != 0;
                 let mut actors = ActorsMut {
                     pubs: &mut pubs.rows,
                     minds: &mut minds.rows,
@@ -987,7 +990,7 @@ pub fn apply(
                         let kind = actors.pubs[slot].kind;
                         actors.kill(slot);
                         scratch.deaths += 1;
-                        if !grounded {
+                        if !cover {
                             scratch.touch(from);
                         }
                         scratch.count(kind, life::DIED);
@@ -1011,14 +1014,15 @@ pub fn apply(
                         })
                     }
                     // Ground cover is rooted.
-                    Action::Move if grounded => Some(result::REFUSED),
+                    Action::Move if cover => Some(result::REFUSED),
                     Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let kind = actors.pubs[slot].kind;
                             actors.cells.occupant[from] = ActorId::NONE;
                             scratch.touch(from);
                             actors.cells.occupant[cell] = ActorId::pack(kind, it.slot);
-                            actors.pubs[slot].cell = cell as u16;
+                            actors.pubs[slot].cell = cell_u16(cell);
+                            scratch.touch(cell);
                             result::OK
                         }
                         Where::Here(_) => result::BLOCKED,
@@ -1028,12 +1032,13 @@ pub fn apply(
                                 slot: it.slot,
                                 what: EffectKind::Move,
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE // Migrate decides
                         }
                     }),
-                    Action::Spawn if usize::from(it.kind) >= kinds.len() => Some(result::REFUSED),
+                    // Past the halo, even into a loaded chunk: as unloaded.
+                    Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
                     // Ground cover: the first spawn in key order onto a
                     // walkable cell with no cover gets it.
                     Action::Spawn if is_cover(kinds, it.kind) => {
@@ -1042,16 +1047,15 @@ pub fn apply(
                                 if actors.cells.walkable(cell)
                                     && actors.cells.cover[cell].is_none() =>
                             {
-                                let pos = coord.cell(cell);
-                                let mut child = offspring(
+                                let child = spawn_mind(
                                     kinds,
                                     cfg,
-                                    it.kind,
-                                    hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                                     tick,
+                                    coord.cell(cell),
+                                    it.kind,
+                                    it.with,
                                     (kind, &actors.minds[slot]),
                                 );
-                                child.mem[..2].copy_from_slice(&it.with);
                                 actors.push_cover(cell, it.kind, child);
                                 scratch.count(it.kind, life::BORN);
                                 result::OK
@@ -1066,7 +1070,7 @@ pub fn apply(
                                         with: it.with,
                                     },
                                     to,
-                                    cell: cell as u16,
+                                    cell: cell_u16(cell),
                                 });
                                 result::NONE
                             }
@@ -1074,16 +1078,15 @@ pub fn apply(
                     }
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
-                            let pos = coord.cell(cell);
-                            let mut child = offspring(
+                            let child = spawn_mind(
                                 kinds,
                                 cfg,
-                                it.kind,
-                                hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                                 tick,
+                                coord.cell(cell),
+                                it.kind,
+                                it.with,
                                 (kind, &actors.minds[slot]),
                             );
-                            child.mem[..2].copy_from_slice(&it.with);
                             actors.push(cell, it.kind, child);
                             scratch.touch(cell);
                             scratch.count(it.kind, life::BORN);
@@ -1099,7 +1102,7 @@ pub fn apply(
                                     with: it.with,
                                 },
                                 to,
-                                cell: cell as u16,
+                                cell: cell_u16(cell),
                             });
                             result::NONE
                         }
@@ -1114,9 +1117,11 @@ pub fn apply(
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
                 }
-                if let Some((ch, v)) = it.mark {
-                    let s = &mut cells.scent[usize::from(ch)][from];
-                    *s = s.saturating_add(v);
+                for (ch, &v) in it.mark.iter().enumerate() {
+                    if v > 0 {
+                        let s = &mut cells.scent[ch][from];
+                        *s = s.saturating_add(v);
+                    }
                 }
             }
         },
@@ -1137,7 +1142,7 @@ enum Where {
 
 #[inline]
 fn target_of(coord: ChunkCoord, cell: usize, dx: i8, dy: i8) -> Where {
-    let ((ox, oy), local) = vm::offset_cell(cell, i32::from(dx), i32::from(dy));
+    let ((ox, oy), local) = vm::offset_cell(cell, dx, dy);
     if (ox, oy) == (0, 0) {
         Where::Here(local)
     } else {
@@ -1145,10 +1150,18 @@ fn target_of(coord: ChunkCoord, cell: usize, dx: i8, dy: i8) -> Where {
     }
 }
 
+/// Does `(dx, dy)` from `cell` leave the chunk's 3x3 halo, the reach of
+/// every target (RULES §11)?
+#[inline]
+fn beyond(cell: usize, dx: i8, dy: i8) -> bool {
+    let ((ox, oy), _) = vm::offset_cell(cell, dx, dy);
+    ox.abs() > 1 || oy.abs() > 1
+}
+
 /// Local index of `(dx, dy)` from `cell`, or `None` if it leaves the chunk.
 #[inline]
 fn local_target(cell: usize, dx: i8, dy: i8) -> Option<usize> {
-    let ((ox, oy), local) = vm::offset_cell(cell, i32::from(dx), i32::from(dy));
+    let ((ox, oy), local) = vm::offset_cell(cell, dx, dy);
     ((ox, oy) == (0, 0)).then_some(local)
 }
 
@@ -1166,8 +1179,8 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
     }
     ActorMind {
         uid,
-        born: tick as u32,
-        last_think: tick as u32,
+        born: stamp(tick),
+        last_think: stamp(tick),
         needs,
         mem: [0; MEM_SLOTS],
         state: 0,
@@ -1186,9 +1199,8 @@ pub const STREAM_GENES: u64 = 0x0020;
 /// A child of `parent` (its kind, its mind), born now: a [`newborn`] of
 /// `kind` whose genes come from the parent by name, clamped to the child's
 /// ranges (a gene the parent lacks keeps its default), and each then moves
-/// by a small step with the world's mutation chance. The draws hash both
-/// uids: a cover child and a standing child born on one cell in one tick
-/// share a uid, not a parent.
+/// by a small step with the world's mutation chance. The draws hash the
+/// parent's uid as well as the child's.
 pub fn offspring(
     kinds: &Kinds,
     cfg: &SimConfig,
@@ -1230,7 +1242,32 @@ fn mutate(g: &GeneDef, v: i32, h: u64, rate: u32) -> i32 {
     } else {
         v - delta
     };
-    moved.clamp(lo, hi) as i32
+    i32::try_from(moved.clamp(lo, hi)).expect("clamped to an i32 range")
+}
+
+/// The mind of a child `spawn`ed at `pos` this tick by `parent` (its kind,
+/// its mind): its uid (every later key, stagger and dice stream derive from
+/// it), its [`offspring`] genes, and the `with` memory. Every run-time birth
+/// goes through here. A cell takes one standing and one cover birth a tick,
+/// so the two layers hash apart.
+fn spawn_mind(
+    kinds: &Kinds,
+    cfg: &SimConfig,
+    tick: u64,
+    pos: Pos,
+    kind: u16,
+    with: [i32; 2],
+    parent: (u16, &ActorMind),
+) -> ActorMind {
+    let stream = if is_cover(kinds, kind) {
+        STREAM_UID_COVER
+    } else {
+        STREAM_UID
+    };
+    let uid = hash_cell(cfg.seed, stream, pos.x, pos.y) ^ splitmix64(tick);
+    let mut child = offspring(kinds, cfg, kind, uid, tick, parent);
+    child.mem[..2].copy_from_slice(&with);
+    child
 }
 
 /// Change a row's kind in place: consumable needs carry over by name
@@ -1242,8 +1279,8 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if usize::from(to) >= kinds.len() {
         return result::REFUSED;
     }
-    let grounded = actors.pubs[slot].flags & flags::COVER != 0;
-    if kinds.def(to).cover != grounded {
+    let cover = actors.pubs[slot].flags & flags::COVER != 0;
+    if kinds.def(to).cover != cover {
         return result::REFUSED; // a row cannot change layers
     }
     let from = actors.pubs[slot].kind;
@@ -1275,10 +1312,10 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
         };
     }
     m.state = 0;
-    m.born = tick as u32;
+    m.born = stamp(tick);
     actors.pubs[slot].kind = to;
     let cell = usize::from(actors.pubs[slot].cell);
-    actors.layer(grounded)[cell] = ActorId::pack(to, slot as u16);
+    actors.cells.layer_mut(cover)[cell] = ActorId::pack(to, slot_u16(slot));
     result::OK
 }
 
@@ -1297,7 +1334,7 @@ pub fn migrate(
     mut outboxes: Query<&mut Outbox>,
     mut chunks: ChunkQuery,
 ) {
-    let (tick, seed) = (tick.0, cfg.seed);
+    let tick = tick.0;
     work.list.clear();
     for &(_, e) in stage.active() {
         if let Ok(mut ob) = outboxes.get_mut(e)
@@ -1366,21 +1403,16 @@ pub fn migrate(
                 src_scratch.touch(usize::from(row.cell));
             }
             EffectKind::Spawn { kind, with } => {
-                let pos = fx.to.cell(cell);
-                let mut child = offspring(
+                let child = spawn_mind(
                     &kinds,
                     &cfg,
-                    kind,
-                    hash_cell(seed, STREAM_UID, pos.x, pos.y) ^ splitmix64(tick),
                     tick,
+                    fx.to.cell(cell),
+                    kind,
+                    with,
                     (src_pubs.rows[slot].kind, &src_minds.rows[slot]),
                 );
-                child.mem[..2].copy_from_slice(&with);
-                if cover {
-                    to.push_cover(cell, kind, child);
-                } else {
-                    to.push(cell, kind, child);
-                }
+                to.push_in(cell, kind, child, cover);
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
@@ -1493,6 +1525,18 @@ mod tests {
         assert!(due(6, &row, 1)); // cadence 1: every tick
         row.flags = flags::WAKE;
         assert!(due(6, &row, 8));
+        // Above 2^16 the 16-bit stagger is spread over the whole period:
+        // one stagger per even phase, none crowded into its last 65536.
+        let slow = 1 << 17;
+        row.flags = 0;
+        row.stagger = 0xC000;
+        assert!(due(32768, &row, slow) && !due(81920, &row, slow));
+        for t in [2, 4096, 32768, 65536, 98304, 131070] {
+            let n = (0..=u16::MAX)
+                .filter(|&s| due(t, &ActorPub { stagger: s, ..row }, slow))
+                .count();
+            assert_eq!(n, 1, "tick {t}");
+        }
     }
 
     #[test]
@@ -1549,6 +1593,10 @@ mod tests {
         assert_eq!((m.born, m.state, m.uid), (2000, 0, 42));
         assert_eq!(change_kind(&kinds, 2000, &mut a, 0, 99), result::REFUSED);
         assert_eq!(a.pubs[0].kind, TREE);
+    }
+
+    #[test]
+    fn a_target_off_the_chunk_is_in_the_neighbour() {
         assert_eq!(local_target(63, 1, 0), None);
         assert_eq!(local_target(63, -1, 1), Some(62 + 64));
         let c = ChunkCoord::new(2, 3);
@@ -1591,6 +1639,10 @@ mod tests {
         assert_eq!(step_toward(&halo, 10, 10, 0, 0), (0, 0));
         // Off the halo's edge counts as blocked.
         assert_eq!(step_toward(&halo, 0, 5, -1, 0), (-1, 0));
+    }
+
+    #[test]
+    fn dir_index_numbers_the_unit_steps_from_one() {
         assert_eq!(vm::dir_index(0, -1), 1);
         assert_eq!(vm::dir_index(-1, -1), 8);
         assert_eq!(vm::dir_index(0, 0), 0);

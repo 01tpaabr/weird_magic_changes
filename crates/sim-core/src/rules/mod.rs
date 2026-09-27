@@ -4,12 +4,14 @@
 //! [`Kinds`] is one shared, read-only resource: every kind's properties
 //! ([`KindDef`]), all bytecode in one `Vec<Op>`, the constant pool and the
 //! sub table. [`compile`] builds it from rules text; [`builtin`] is the
-//! rules text every build carries (`rules/plants.rules`). Its hash is part
+//! rules text every build carries (`rules/*.rules`, see `builtin::FILES`). Its hash is part
 //! of the world's checksum: the rules are an input.
 
 pub mod asm;
 pub mod builtin;
 pub mod compile;
+#[cfg(test)]
+pub mod gen_rules;
 pub mod vm;
 
 use bevy_ecs::prelude::*;
@@ -21,7 +23,7 @@ use vm::Op;
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
 pub use compile::{CompileError, compile, compile_files, compile_packs};
 
-/// One need of a kind: `need NAME max M [decay 0] [vital]`.
+/// One need of a kind: `need NAME max M [decay 0|1] [vital]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeedDef {
     pub name: String,
@@ -55,7 +57,8 @@ pub struct KindDef {
     pub tags: u64,
     /// Thinks every `1 << cadence_shift` ticks.
     pub cadence_shift: u8,
-    /// Search radius cap, in cells (`<= 16`: inside the 3x3 halo).
+    /// Search radius cap, in cells (at most [`compile::MAX_SIGHT`]: inside
+    /// the 3x3 halo).
     pub sight: u8,
     /// Ops per think.
     pub fuel: u32,
@@ -115,7 +118,8 @@ pub enum Level {
 }
 
 /// A warning or note about a rule set that compiled (`wmc lint` prints
-/// them as `file:line:col: warning: message`).
+/// them as `file:line:col: warning: message`, or `file: warning: message`
+/// when `line` is 0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
     pub level: Level,
@@ -131,6 +135,10 @@ impl std::fmt::Display for Diagnostic {
             Level::Warning => "warning",
             Level::Note => "note",
         };
+        if self.line == 0 {
+            // Not about a line (a whole file, or a scenario start).
+            return write!(f, "{}: {level}: {}", self.file, self.msg);
+        }
         write!(
             f,
             "{}:{}:{}: {level}: {}",
@@ -210,17 +218,17 @@ impl Remap {
         };
         for (i, n) in to.needs.iter().enumerate() {
             if let Some(j) = from.need_named(&n.name) {
-                r.needs[i] = j as u8;
+                r.needs[i] = u8::try_from(j).expect("at most NEED_SLOTS needs");
             }
         }
         for (i, m) in to.mems.iter().enumerate() {
             if let Some(j) = from.mem_index(m) {
-                r.mems[i] = j as u8;
+                r.mems[i] = u8::try_from(j).expect("at most MEM_SLOTS mems");
             }
         }
         for (i, g) in to.genes.iter().enumerate() {
             if let Some(j) = from.gene_named(&g.name) {
-                r.genes[i] = j as u8;
+                r.genes[i] = u8::try_from(j).expect("at most GENE_SLOTS genes");
             }
         }
         r
@@ -265,7 +273,7 @@ impl Kinds {
     ) -> Self {
         assert!(defs.len() < usize::from(u16::MAX), "too many kinds");
         for (i, d) in defs.iter_mut().enumerate() {
-            d.id = i as u16;
+            d.id = u16::try_from(i).expect("fewer than u16::MAX kinds, asserted above");
             assert!(d.needs.len() <= NEED_SLOTS, "{}: too many needs", d.name);
             assert!(d.mems.len() <= MEM_SLOTS, "{}: too many mem slots", d.name);
             assert!(d.genes.len() <= GENE_SLOTS, "{}: too many genes", d.name);
@@ -277,14 +285,19 @@ impl Kinds {
                     g.name
                 );
             }
-            assert!(d.sight <= 16, "{}: sight beyond the halo", d.name);
+            assert!(
+                d.sight <= compile::MAX_SIGHT,
+                "{}: sight beyond the halo",
+                d.name
+            );
             assert!(d.cadence_shift < 32, "{}: cadence", d.name);
         }
         let glyphs = defs.iter().map(|d| d.glyph).collect();
         let tag_bits = defs.iter().map(|d| d.tags).collect();
         // Families: pre-order numbering puts every descendant right after
         // its ancestor, so a family is one id range.
-        let mut family_end: Vec<u16> = (1..=defs.len() as u16).collect();
+        let last = u16::try_from(defs.len()).expect("fewer than u16::MAX kinds");
+        let mut family_end: Vec<u16> = (1..=last).collect();
         for id in (0..defs.len()).rev() {
             if let Some(p) = defs[id].parent {
                 assert!(
@@ -471,30 +484,6 @@ mod tests {
         assert_ne!(
             hash_all(&other.defs, &other.code, &other.consts, &other.subs),
             k.hash
-        );
-    }
-
-    /// The trait example in docs/RULES.md §6 compiles as a pack on top of
-    /// the built-in rules, so the reference cannot drift from the language.
-    #[test]
-    fn the_rules_md_trait_example_compiles_on_the_builtin_rules() {
-        // A checkout with `core.autocrlf` has CRLF line ends.
-        let doc = include_str!("../../../../docs/RULES.md").replace("\r\n", "\n");
-        let section = &doc[doc.find("## 6. Traits").unwrap()..];
-        let start = section.find("```\n").unwrap() + 4;
-        let end = start + section[start..].find("```").unwrap();
-        let mut files = builtin::FILES.to_vec();
-        files.push(("example.rules", &section[start..end]));
-        let k = compile::compile_files(&files).unwrap_or_else(|e| panic!("{e}"));
-        let lamb = k.by_name("lamb").unwrap();
-        assert_eq!(k.def(lamb.parent.unwrap()).name, "sheep");
-        assert!(
-            k.debug
-                .diagnostics
-                .iter()
-                .all(|d| d.level != Level::Warning),
-            "{:?}",
-            k.debug.diagnostics
         );
     }
 

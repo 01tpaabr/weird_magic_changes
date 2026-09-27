@@ -1,6 +1,7 @@
 //! A tiny assembler for [`Op`] programs: labels with forward references,
-//! one method per instruction. The compiler's back end, and how the
-//! built-in programs are written until the compiler exists.
+//! one method per instruction. The compiler's back end; the VM tests and
+//! the plants oracle (`builtin::hand_assembled`) also write programs with
+//! it by hand.
 
 use super::vm::{Action, Op, OpCode, Sense};
 
@@ -16,6 +17,11 @@ pub struct Asm {
     labels: Vec<Option<usize>>,
     /// `(instruction index, label)` to patch.
     fixups: Vec<(usize, Label)>,
+    /// Stack values at the next instruction, the most since
+    /// [`Asm::take_peak`], and at each label (from its first jump).
+    depth: i32,
+    peak: i32,
+    label_depth: Vec<Option<i32>>,
 }
 
 impl Asm {
@@ -30,29 +36,51 @@ impl Asm {
 
     pub fn label(&mut self) -> Label {
         self.labels.push(None);
+        self.label_depth.push(None);
         Label(self.labels.len() - 1)
     }
 
-    /// Place `l` at the next instruction.
+    /// Place `l` at the next instruction. Code after a jump, a halt or a
+    /// return is reached only through a label, so its depth is the label's.
     pub fn bind(&mut self, l: Label) -> &mut Self {
         assert!(self.labels[l.0].is_none(), "label bound twice");
         self.labels[l.0] = Some(self.code.len());
+        self.depth = *self.label_depth[l.0].get_or_insert(self.depth);
         self
     }
 
     pub fn op(&mut self, code: OpCode) -> &mut Self {
-        self.code.push(Op::new(code, 0, 0));
-        self
+        self.emit(code, 0, 0)
     }
 
     fn emit(&mut self, code: OpCode, a: u8, imm: i16) -> &mut Self {
         self.code.push(Op::new(code, a, imm));
+        let (pops, pushes) = code.stack_effect(a);
+        self.depth += i32::from(pushes) - i32::from(pops);
+        self.peak = self.peak.max(self.depth);
         self
     }
 
     fn jump(&mut self, code: OpCode, l: Label) -> &mut Self {
         self.fixups.push((self.code.len(), l));
-        self.emit(code, 0, 0)
+        self.emit(code, 0, 0);
+        self.label_depth[l.0].get_or_insert(self.depth);
+        self
+    }
+
+    /// The sub just called returns a value: count it on the stack.
+    pub fn returned(&mut self) -> &mut Self {
+        self.depth += 1;
+        self.peak = self.peak.max(self.depth);
+        self
+    }
+
+    /// The most values on the stack at once since the last call (the VM
+    /// has [`super::vm::STACK`]).
+    pub fn take_peak(&mut self) -> u32 {
+        let peak = self.peak;
+        self.peak = self.depth;
+        peak.max(0) as u32
     }
 
     pub fn push(&mut self, v: i32) -> &mut Self {
@@ -104,10 +132,6 @@ impl Asm {
         self.jump(OpCode::Jz, l)
     }
 
-    pub fn jnz(&mut self, l: Label) -> &mut Self {
-        self.jump(OpCode::Jnz, l)
-    }
-
     /// A raw relative jump, for tests of bad targets.
     pub fn jmp_raw(&mut self, imm: i16) -> &mut Self {
         self.emit(OpCode::Jmp, 0, imm)
@@ -125,6 +149,11 @@ impl Asm {
     /// `pred r -> found`, binding `(dx, dy)` into locals `slot`, `slot + 1`.
     pub fn nearest(&mut self, slot: u8) -> &mut Self {
         self.emit(OpCode::Nearest, slot, 0)
+    }
+
+    /// `-> found`, binding a free neighbour into `slot`, `slot + 1`.
+    pub fn random_free(&mut self, slot: u8) -> &mut Self {
+        self.emit(OpCode::RandomFree, slot, 0)
     }
 
     /// `ch r -> found`, binding the strongest scent cell into `slot`, `slot + 1`.
@@ -164,14 +193,21 @@ impl Asm {
     }
 
     /// Resolve labels and hand over the code. Panics on an unbound label
-    /// or a jump too far for 16 bits (a program bug, not a run-time one).
-    pub fn finish(mut self) -> Vec<Op> {
+    /// or a jump too far for 16 bits: for hand-written programs.
+    pub fn finish(self) -> Vec<Op> {
+        self.try_finish().expect("jump within 16 bits")
+    }
+
+    /// [`Asm::finish`], with a jump too far for 16 bits (which rules text
+    /// can make) as `Err(index of the jump)`. Panics on an unbound label
+    /// (a program bug, not the author's).
+    pub fn try_finish(mut self) -> Result<Vec<Op>, usize> {
         for (at, l) in self.fixups.drain(..) {
             let target = self.labels[l.0].expect("label bound");
             let rel = target as i64 - (at as i64 + 1);
-            self.code[at].imm = i16::try_from(rel).expect("jump within 16 bits");
+            self.code[at].imm = i16::try_from(rel).map_err(|_| at)?;
         }
-        self.code
+        Ok(self.code)
     }
 }
 
@@ -191,6 +227,38 @@ mod tests {
         assert_eq!(code[3], Op::new(OpCode::Jmp, 0, -4)); // to index 0 from index 4
         assert_eq!(code[4].code, OpCode::Halt);
         assert_eq!(code[0].bits(), 1 << 16); // Push, a = 0, imm = 1
+    }
+
+    #[test]
+    fn the_stack_peak_follows_jumps() {
+        let mut a = Asm::new();
+        a.push(1).push(2).op(OpCode::Add).set_mem(0);
+        assert_eq!(a.take_peak(), 2);
+        let (l, e) = (a.label(), a.label());
+        a.push(1)
+            .jz(l)
+            .push(2)
+            .jmp(e)
+            .bind(l)
+            .push(3)
+            .bind(e)
+            .set_mem(0);
+        assert_eq!(a.take_peak(), 1);
+        assert_eq!(a.depth, 0);
+        a.push(4).call(0, 1).returned().push(5);
+        assert_eq!(a.take_peak(), 2);
+    }
+
+    #[test]
+    fn a_jump_too_far_for_16_bits_is_an_err() {
+        let mut a = Asm::new();
+        let end = a.label();
+        a.push(1).jz(end);
+        for _ in 0..=i16::MAX {
+            a.op(OpCode::Pop);
+        }
+        a.bind(end).halt();
+        assert_eq!(a.try_finish(), Err(1));
     }
 
     #[test]

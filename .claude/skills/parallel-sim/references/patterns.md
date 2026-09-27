@@ -8,8 +8,12 @@ Exact API signatures: `.claude/skills/bevy-dev/references/ecs-tasks-app.md`.
 fn grow(tick: Res<Tick>, cfg: Res<SimConfig>,
         mut chunks: Query<(&ChunkCoord, &mut ChunkCells, &mut ChunkMeta)>) {
     chunks.par_iter_mut().for_each(|(coord, mut cells, mut meta)| {
-        let mut rng = rng_for(cfg.seed, tick.0, coord_id(*coord));   // derived seed, never shared
-        for i in 0..CHUNK_CELLS { /* this chunk only */ }
+        let t = splitmix64(tick.0);
+        for i in 0..CHUNK_CELLS {
+            let p = coord.cell(i);
+            let r = splitmix64(hash_cell(cfg.seed, STREAM_GROW, p.x, p.y) ^ t); // counter-based, no state
+            /* this chunk only */
+        }
         meta.dirty = true;
     });
 }
@@ -77,10 +81,12 @@ moved into the tasks (see `app/src/render/cells.rs`).
 ## Deterministic RNG per work unit
 
 ```rust
-let mut rng = rng_for(cfg.seed, tick.0, coord_id(coord));   // Xoshiro256++ from splitmix64
-let v = hash_cell(cfg.seed, STREAM_ROCK, x, y);             // or a pure hash per cell
+let v = hash_cell(cfg.seed, STREAM_ROCK, x, y);             // a pure hash per cell
+let base = vm::rng_base(cfg.seed, tick.0, uid);             // an actor at this tick
+let r = splitmix64(base.wrapping_add(n));                   // its n-th draw
 ```
-Never an `Entity`, never a slot, never a global RNG.
+Counter-based: no stream state, a draw depends only on what names it. Never an `Entity`,
+never a slot, never a global RNG.
 
 ## Determinism test
 

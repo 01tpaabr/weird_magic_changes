@@ -5,8 +5,10 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+/// `wmc args` on `threads` threads with no `WMC_RULES`: its stdout.
 fn wmc(threads: &str, args: &[&str]) -> String {
     let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+        .env_remove("WMC_RULES")
         .env("WMC_THREADS", threads)
         .args(args)
         .output()
@@ -87,4 +89,27 @@ fn show_is_identical_across_thread_counts() {
         line(&one, "checksum:"),
         line(&wmc("1", &["show", "200", "100", "6"]), "checksum:")
     );
+}
+
+/// The corner of the world: a save whose camera stands past the edge
+/// streams only the corner chunks inside it (3 x 3 around the nearest
+/// cell inside), and eight hours of the built-in ecosystem there, where every
+/// step or spawn out of the world is BLOCKED, ends with the same checksum
+/// on 1 and 8 threads.
+#[test]
+fn the_edge_of_the_world_is_identical_across_thread_counts() {
+    use sim_core::{Scenario, Store, sim};
+    let dir = tmp_dir("edge");
+    let store = Store::open(&dir).unwrap();
+    sim::save(&mut sim::new_world(&Scenario::builtin()), &store).unwrap();
+    std::fs::write(dir.join("camera.txt"), "1e9 -1e9\n").unwrap();
+    let dir = dir.to_str().unwrap();
+    let args = ["run", dir, "7200"];
+    let one = wmc("1", &args);
+    let eight = wmc("8", &args);
+    assert!(line(&one, "chunks:").starts_with("chunks:    9 ("), "{one}");
+    assert!(!line(&one, "chunks:").contains("(0 actors"), "{one}");
+    assert_eq!(line(&one, "chunks:"), line(&eight, "chunks:"));
+    assert_eq!(line(&one, "checksum:"), line(&eight, "checksum:"));
+    let _ = std::fs::remove_dir_all(dir);
 }

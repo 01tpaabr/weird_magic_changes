@@ -3,11 +3,12 @@
 //! of an unexplored world is a few dozen bytes.
 //!
 //! ```text
-//! <dir>/world.wmc              magic, version, seed, tick, ticks/day, initial size, gen params,
-//!                              starts, drawn map, mutation rate, kinds (names, cover, slot
-//!                              names, genes with their ranges), scent channels, packs, rules hash
-//! <dir>/chunks/<x>_<y>.wmcc    magic, version, coord, last_ticked, each cell layer as raw bytes
-//!                              (ground, feature, occupant, cover, scent channels),
+//! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
+//!                              gen params, starts, drawn map, mutation rate, kinds (names,
+//!                              cover, slot names, genes with their ranges), scent channels,
+//!                              packs, rules hash
+//! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
+//!                              as raw bytes (ground, feature, occupant, cover, scent channels),
 //!                              then n, n public actor rows, n private actor rows, as raw bytes
 //! ```
 //!
@@ -21,7 +22,10 @@
 //! length must not open it. Kinds travel by name, with the names of their
 //! need, mem and state slots and the scent channel names, so rows can be
 //! checked against (and remapped to) the loaded kind table on open
-//! (`sim::open`). The scenario's starts travel by kind name too.
+//! (`sim::open`). The scenario's starts travel by kind name too. Every
+//! position a save holds (a start, the initial region, a drawn map, a
+//! chunk file's coordinate) is inside the world's extent
+//! ([`WORLD_EXTENT`]); a save with one outside is refused.
 //!
 //! Revisit when a save directory grows past a few thousand chunk files:
 //! pack chunks into region files (32x32 chunks per file with an offset table).
@@ -32,11 +36,16 @@ use std::path::{Path, PathBuf};
 
 use bevy_ecs::resource::Resource;
 
-use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds};
+use crate::actors::{
+    ActorMind, ActorPub, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
+};
 use crate::rules::Kinds;
-use crate::scenario::{DrawnMap, Start};
+use crate::scenario::{DrawnMap, Start, in_world};
 use crate::stage::worldgen::GenParams;
-use crate::stage::{CHUNK_BITS, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkData};
+use crate::stage::{
+    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS,
+    WORLD_EXTENT,
+};
 use crate::time::TICKS_PER_DAY;
 
 pub const FORMAT_VERSION: u32 = 11;
@@ -115,9 +124,10 @@ impl SavedKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedChunk {
     pub data: ChunkData,
-    /// World tick the cells correspond to: the tick at which the chunk was
-    /// last simulated (i.e. written). A future catch-up on load reads
-    /// `world.tick - last_ticked`; today it is only recorded.
+    /// World tick the cells and rows are current as of. On load, rows'
+    /// `last_think`/`born` shift forward by `world.tick - last_ticked` (the
+    /// freeze of decision 29, `sim::load_chunks`), so this must be the tick
+    /// the rows were written at.
     pub last_ticked: u64,
 }
 
@@ -136,6 +146,13 @@ impl Store {
         Ok(Self { dir })
     }
 
+    /// A save directory as it stands, creating nothing: for readers that
+    /// never save (`wmc run`, `wmc why`). A directory that is not there
+    /// reads as no world ([`read_meta`](Self::read_meta) is `Ok(None)`).
+    pub fn at(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -145,7 +162,8 @@ impl Store {
     }
 
     /// Every chunk with a file in this store, in coordinate order (`y`, then
-    /// `x`). Files that are not `<x>_<y>.wmcc` are ignored.
+    /// `x`). Files that are not `<x>_<y>.wmcc` are ignored; one for a chunk
+    /// outside the world is an error.
     pub fn saved_chunks(&self) -> io::Result<Vec<ChunkCoord>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(self.dir.join("chunks"))? {
@@ -156,14 +174,18 @@ impl Store {
             if let Some((x, y)) = stem.split_once('_')
                 && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
             {
-                out.push(ChunkCoord::new(x, y));
+                let c = ChunkCoord::new(x, y);
+                outside(c).map_err(|e| {
+                    io::Error::new(e.kind(), format!("{}: {e}", self.chunk_path(c).display()))
+                })?;
+                out.push(c);
             }
         }
         out.sort_unstable_by_key(|c| (c.y, c.x));
         Ok(out)
     }
 
-    fn chunk_path(&self, c: ChunkCoord) -> PathBuf {
+    pub fn chunk_path(&self, c: ChunkCoord) -> PathBuf {
         self.dir
             .join("chunks")
             .join(format!("{}_{}.wmcc", c.x, c.y))
@@ -179,6 +201,10 @@ impl Store {
         let mut r = Reader::new(&bytes, WORLD_MAGIC)?;
         let seed = r.u64()?;
         let tick = r.u64()?;
+        // Room for a world's lifetime of `+ 1`s and cadence offsets.
+        if tick > u64::MAX / 2 {
+            return Err(bad(format!("tick {tick}")));
+        }
         let ticks_per_day = r.u64()?;
         if ticks_per_day != TICKS_PER_DAY {
             return Err(bad(format!(
@@ -186,27 +212,49 @@ impl Store {
             )));
         }
         let (initial_width, initial_height) = (r.u32()?, r.u32()?);
+        // The initial region is `[0, w) x [0, h)`.
+        let most = WORLD_EXTENT.unsigned_abs();
+        if initial_width > most || initial_height > most {
+            return Err(bad(format!(
+                "initial size {initial_width} x {initial_height} reaches outside the world \
+                 ({WORLD_EXTENT} cells each way)"
+            )));
+        }
         let params = GenParams {
             water_scale: r.f32()?,
             water_level: r.f32()?,
             rock_on_soil: r.f32()?,
             rock_on_water: r.f32()?,
         };
+        // What `Scenario::parse` refuses: worldgen trusts these.
+        let knobs = [
+            params.water_scale,
+            params.water_level,
+            params.rock_on_soil,
+            params.rock_on_water,
+        ];
+        if !knobs.iter().all(|v| v.is_finite()) || params.water_scale <= 0.0 {
+            return Err(bad(format!("terrain {params:?}")));
+        }
         let n = r.count(1 << 24, "starts")?;
         let mut starts = Vec::with_capacity(n.min(1 << 16));
         for _ in 0..n {
             let tag = r.u8()?;
             let kind = r.str()?;
             starts.push(match tag {
-                0 => Start::Share {
-                    kind,
-                    num: r.u32()?,
-                    den: r.u32()?,
-                },
+                0 => {
+                    // What `Scenario::parse` refuses: `share()` divides by `den`.
+                    let (num, den) = (r.u32()?, r.u32()?);
+                    if num == 0 || den == 0 || num > den {
+                        return Err(bad(format!("share {num} / {den} for `{kind}`")));
+                    }
+                    Start::Share { kind, num, den }
+                }
                 // 2: an explicit start with `with` values (still format 9:
                 // saves without them read as before).
                 1 | 2 => {
                     let (x, y) = (r.i32()?, r.i32()?);
+                    in_world(x, y).map_err(|m| bad(format!("a start of `{kind}` at {m}")))?;
                     let mut with = Vec::new();
                     if tag == 2 {
                         for _ in 0..r.count(u32::from(u8::MAX), "values in a start")? {
@@ -261,16 +309,34 @@ impl Store {
             for _ in 0..r.count(u32::from(u8::MAX), "genes of a kind")? {
                 genes.push((r.str()?, r.i32()?, r.i32()?));
             }
-            kinds.push(SavedKind {
+            let k = SavedKind {
                 name,
                 cover,
                 needs,
                 mems,
                 states,
                 genes,
-            });
+            };
+            // Rows hold this many slots: `reload::Plan` indexes them.
+            if k.needs.len() > NEED_SLOTS || k.mems.len() > MEM_SLOTS || k.genes.len() > GENE_SLOTS
+            {
+                return Err(bad(format!(
+                    "kind `{}`: {} needs, {} mems, {} genes, this build holds {NEED_SLOTS}, {MEM_SLOTS}, {GENE_SLOTS}",
+                    k.name,
+                    k.needs.len(),
+                    k.mems.len(),
+                    k.genes.len()
+                )));
+            }
+            kinds.push(k);
         }
         let scents = r.strs()?;
+        if scents.len() > SCENT_CHANNELS {
+            return Err(bad(format!(
+                "{} scent channels, this build holds {SCENT_CHANNELS}",
+                scents.len()
+            )));
+        }
         let packs = r.strs()?;
         let rules_hash = r.u64()?;
         r.finish()?;
@@ -374,20 +440,24 @@ impl Store {
         write_atomic(&self.meta_path(), &w.buf)
     }
 
-    pub fn has_chunk(&self, c: ChunkCoord) -> bool {
-        self.chunk_path(c).is_file()
-    }
-
     /// `Ok(None)` if the chunk was never saved (regenerate it). Row *shape*
     /// is checked here (counts, sizes); the invariants that need the kind
-    /// table (`ChunkData::validate`) are the caller's.
+    /// table (`ChunkData::validate`) are the caller's. An error names the
+    /// file; a chunk outside the world is one.
     pub fn read_chunk(&self, c: ChunkCoord) -> io::Result<Option<SavedChunk>> {
-        let bytes = match fs::read(self.chunk_path(c)) {
+        let path = self.chunk_path(c);
+        let named = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+        outside(c).map_err(named)?;
+        let bytes = match fs::read(&path) {
             Ok(b) => b,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e),
+            Err(e) => return Err(named(e)),
         };
-        let mut r = Reader::new(&bytes, CHUNK_MAGIC)?;
+        Self::decode_chunk(c, &bytes).map(Some).map_err(named)
+    }
+
+    fn decode_chunk(c: ChunkCoord, bytes: &[u8]) -> io::Result<SavedChunk> {
+        let mut r = Reader::new(bytes, CHUNK_MAGIC)?;
         let (x, y) = (r.i32()?, r.i32()?);
         if (x, y) != (c.x, c.y) {
             return Err(bad(format!("chunk file for {c:?} claims ({x}, {y})")));
@@ -425,14 +495,14 @@ impl Store {
             rows: r.rows::<ActorMind>(n)?,
         };
         r.finish()?;
-        Ok(Some(SavedChunk {
+        Ok(SavedChunk {
             data: ChunkData {
                 cells,
                 actors,
                 minds,
             },
             last_ticked,
-        }))
+        })
     }
 
     /// Write a chunk whose state is current as of `last_ticked`.
@@ -479,6 +549,20 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         f.sync_all()?;
     }
     fs::rename(&tmp, path)
+}
+
+/// A chunk outside the world's extent is an error.
+fn outside(c: ChunkCoord) -> io::Result<()> {
+    if c.in_world() {
+        return Ok(());
+    }
+    Err(bad(format!(
+        "chunk ({}, {}) is outside the world: chunks run from {} to {} each way",
+        c.x,
+        c.y,
+        -CHUNK_EXTENT,
+        CHUNK_EXTENT - 1
+    )))
 }
 
 fn bad(msg: impl Into<String>) -> io::Error {
@@ -617,6 +701,9 @@ impl<'a> Reader<'a> {
 }
 
 #[cfg(test)]
+mod fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::rules::SEED;
@@ -637,6 +724,18 @@ mod tests {
         Store::open(dir).unwrap()
     }
 
+    /// `Store::at` reads a directory that is not there as no world, and
+    /// leaves it not there.
+    #[test]
+    fn a_store_at_a_missing_dir_is_no_world_and_creates_nothing() {
+        let dir = std::env::temp_dir().join(format!("wmc-store-at-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let s = Store::at(&dir);
+        assert_eq!(s.read_meta().unwrap(), None);
+        assert_eq!(s.read_chunk(ChunkCoord::new(0, 0)).unwrap(), None);
+        assert!(!dir.exists());
+    }
+
     #[test]
     fn meta_roundtrip() {
         let s = tmp_store("meta");
@@ -648,7 +747,7 @@ mod tests {
             initial_width: 300,
             initial_height: 200,
             params: GenParams {
-                water_scale: 9.5,
+                water_scale: 0.25,
                 ..GenParams::default()
             },
             starts: vec![
@@ -721,16 +820,113 @@ mod tests {
         s.write_meta(&bad_map).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
         assert!(err.contains("0x22"), "{err}");
+        // Terrain knobs the scenario parser would refuse are refused.
+        for params in [
+            GenParams {
+                water_scale: 0.0,
+                ..m.params
+            },
+            GenParams {
+                water_level: f32::NAN,
+                ..m.params
+            },
+        ] {
+            s.write_meta(&WorldMeta {
+                params,
+                ..m.clone()
+            })
+            .unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains("terrain"), "{err}");
+        }
+        // So are shares it would refuse: `share()` divides by `den`.
+        for (num, den) in [(1, 0), (256, 1), (0, 4)] {
+            let starts = vec![Start::Share {
+                kind: "seed".into(),
+                num,
+                den,
+            }];
+            s.write_meta(&WorldMeta {
+                starts,
+                ..m.clone()
+            })
+            .unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains(&format!("share {num} / {den}")), "{err}");
+        }
+        // Slot names past this build's slot arrays, and a tick at the end
+        // of time, are refused; the arrays full are fine.
+        let slot = |n: usize| (0..n).map(|i| format!("s{i}")).collect::<Vec<_>>();
+        let kind = |needs: usize, mems: usize, genes: usize| SavedKind {
+            name: "seed".into(),
+            cover: false,
+            needs: slot(needs),
+            mems: slot(mems),
+            states: Vec::new(),
+            genes: slot(genes).into_iter().map(|g| (g, 0, 1)).collect(),
+        };
+        let full = WorldMeta {
+            kinds: vec![kind(NEED_SLOTS, MEM_SLOTS, GENE_SLOTS)],
+            scents: slot(SCENT_CHANNELS),
+            ..m.clone()
+        };
+        s.write_meta(&full).unwrap();
+        assert_eq!(s.read_meta().unwrap(), Some(full.clone()));
+        for (over, want) in [
+            (
+                WorldMeta {
+                    scents: slot(SCENT_CHANNELS + 1),
+                    ..full.clone()
+                },
+                "scent channels",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(NEED_SLOTS + 1, 0, 0)],
+                    ..full.clone()
+                },
+                "needs",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(0, MEM_SLOTS + 1, 0)],
+                    ..full.clone()
+                },
+                "mems",
+            ),
+            (
+                WorldMeta {
+                    kinds: vec![kind(0, 0, GENE_SLOTS + 1)],
+                    ..full.clone()
+                },
+                "genes",
+            ),
+            (
+                WorldMeta {
+                    tick: u64::MAX,
+                    ..full.clone()
+                },
+                "tick",
+            ),
+        ] {
+            s.write_meta(&over).unwrap();
+            let err = s.read_meta().unwrap_err().to_string();
+            assert!(err.contains(want), "{err}");
+        }
         let no_map = WorldMeta { map: None, ..none };
         s.write_meta(&no_map).unwrap();
         assert_eq!(s.read_meta().unwrap(), Some(no_map));
-        // A v10 header is refused by version.
+        // The previous format's header is refused by version.
+        let old = FORMAT_VERSION - 1;
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
-        bytes[4] = 10;
+        bytes[4..8].copy_from_slice(&old.to_le_bytes());
         fs::write(s.meta_path(), &bytes).unwrap();
         let err = s.read_meta().unwrap_err().to_string();
-        assert!(err.contains("format 10, this build reads 11"), "{err}");
+        assert!(
+            err.contains(&format!("format {old}, this build reads {FORMAT_VERSION}")),
+            "{err}"
+        );
         // A header written for a different day length is refused.
         s.write_meta(&m).unwrap();
         let mut bytes = fs::read(s.meta_path()).unwrap();
@@ -778,11 +974,9 @@ mod tests {
         let slot = data.actors_mut().push(cell, SEED, mind);
         data.actors.rows[usize::from(slot)].signal = -300;
         data.actors.rows[usize::from(slot)].look = 2;
-        assert!(!s.has_chunk(c));
         assert_eq!(s.read_chunk(c).unwrap(), None);
         s.write_chunk(c, &data.cells, &data.actors, &data.minds, 4242)
             .unwrap();
-        assert!(s.has_chunk(c));
         let back = s.read_chunk(c).unwrap().unwrap();
         assert_eq!(back.last_ticked, 4242);
         assert_eq!(back.data, data);
@@ -852,16 +1046,159 @@ mod tests {
                 .to_string()
                 .contains("trailing")
         );
-        // A v7 file is refused by version.
+        // The previous format's chunk file is refused by version.
+        let old = FORMAT_VERSION - 1;
         let mut bytes = fs::read(s.chunk_path(c)).unwrap();
-        bytes[4] = 7;
+        bytes[4..8].copy_from_slice(&old.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
+        let err = s.read_chunk(c).unwrap_err().to_string();
+        assert!(err.contains(&format!("format {old}")), "{err}");
+        fs::remove_dir_all(s.dir()).unwrap();
+    }
+
+    #[test]
+    fn a_bad_chunk_file_is_named_in_the_error() {
+        let s = tmp_store("named");
+        let c = ChunkCoord::new(3, -2);
+        let data = ChunkData::default();
+        s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
+            .unwrap();
+        let mut bytes = fs::read(s.chunk_path(c)).unwrap();
+        bytes.truncate(bytes.len() - 3);
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        let e = s.read_chunk(c).unwrap_err().to_string();
+        assert!(e.contains("3_-2.wmcc") && e.contains("truncated"), "{e}");
+        fs::remove_dir_all(s.dir()).unwrap();
+    }
+
+    /// A save holds positions inside the world only: a start, an initial
+    /// region or a drawn map past its edge, or a chunk file for a chunk past
+    /// it, is refused with an error, never read. The last cells are fine.
+    #[test]
+    fn a_save_outside_the_world_is_refused() {
+        let s = tmp_store("outside");
+        let m = WorldMeta {
+            seed: 1,
+            tick: 5,
+            initial_width: 64,
+            initial_height: 64,
+            params: GenParams::default(),
+            starts: Vec::new(),
+            map: None,
+            mutation: None,
+            kinds: Vec::new(),
+            scents: Vec::new(),
+            packs: Vec::new(),
+            rules_hash: 0,
+        };
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        let most = WORLD_EXTENT.unsigned_abs();
+        let map = |width, height| {
+            Some(DrawnMap {
+                width,
+                height,
+                cells: Vec::new(),
+                outside: None,
+            })
+        };
+        let fine = [
+            WorldMeta {
+                starts: vec![Start::at("hive", hi, lo), Start::at("hive", lo, hi)],
+                ..m.clone()
+            },
+            WorldMeta {
+                initial_width: most,
+                initial_height: most,
+                ..m.clone()
+            },
+            WorldMeta {
+                map: map(most, 0),
+                ..m.clone()
+            },
+        ];
+        for meta in fine {
+            s.write_meta(&meta).unwrap();
+            assert_eq!(s.read_meta().unwrap(), Some(meta));
+        }
+        let refused = [
+            (
+                WorldMeta {
+                    starts: vec![Start::at("hive", 0, WORLD_EXTENT)],
+                    ..m.clone()
+                },
+                "a start of `hive` at (0, 1000000000) is outside the world",
+            ),
+            (
+                WorldMeta {
+                    starts: vec![Start::At {
+                        kind: "fox".into(),
+                        x: i32::MIN,
+                        y: 0,
+                        with: vec![("food".into(), 1)],
+                    }],
+                    ..m.clone()
+                },
+                "a start of `fox` at (-2147483648, 0) is outside the world",
+            ),
+            (
+                WorldMeta {
+                    initial_width: most + 1,
+                    ..m.clone()
+                },
+                "initial size 1000000001 x 64 reaches outside the world",
+            ),
+            (
+                WorldMeta {
+                    initial_height: u32::MAX,
+                    ..m.clone()
+                },
+                "reaches outside the world",
+            ),
+            (
+                WorldMeta {
+                    map: map(0, most + 1),
+                    ..m.clone()
+                },
+                "a 0 x 1000000001 map reaches outside the world",
+            ),
+        ];
+        for (meta, want) in refused {
+            s.write_meta(&meta).unwrap();
+            let e = s.read_meta().unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::InvalidData);
+            assert!(e.to_string().contains(want), "{want}: {e}");
+        }
+        // Chunk files: the edge chunks read, one past them is refused by
+        // name, and so is a directory that holds one.
+        let data = ChunkData::default();
+        let write = |c: ChunkCoord| {
+            s.write_chunk(c, &data.cells, &data.actors, &data.minds, 0)
+                .unwrap();
+        };
+        let edge = [
+            ChunkCoord::new(CHUNK_EXTENT - 1, -CHUNK_EXTENT),
+            ChunkCoord::new(-CHUNK_EXTENT, CHUNK_EXTENT - 1),
+        ];
+        for c in edge {
+            write(c);
+            assert_eq!(s.read_chunk(c).unwrap().unwrap().data, data);
+        }
+        assert_eq!(s.saved_chunks().unwrap(), edge);
+        let past = ChunkCoord::new(CHUNK_EXTENT, 0);
+        write(past);
+        let e = s.read_chunk(past).unwrap_err().to_string();
         assert!(
-            s.read_chunk(c)
-                .unwrap_err()
-                .to_string()
-                .contains("format 7")
+            e.contains("15625000_0.wmcc: chunk (15625000, 0) is outside the world: chunks run from -15625000 to 15624999"),
+            "{e}"
         );
+        let e = s.saved_chunks().unwrap_err().to_string();
+        assert!(
+            e.contains("15625000_0.wmcc") && e.contains("outside the world"),
+            "{e}"
+        );
+        fs::remove_file(s.chunk_path(past)).unwrap();
+        write(ChunkCoord::new(0, i32::MIN));
+        assert!(s.saved_chunks().is_err());
         fs::remove_dir_all(s.dir()).unwrap();
     }
 }

@@ -47,7 +47,7 @@ mod tests {
         c.occupant[CHUNK_SIZE as usize] = ActorId::pack(0, 0);
         c.occupant[CHUNK_SIZE as usize + 1] = ActorId::pack(1, 0);
         c.occupant[CHUNK_SIZE as usize + 2] = ActorId::pack(9, 0);
-        stage::insert(&mut w, ChunkCoord::new(0, 0), d, false, 0);
+        stage::insert(&mut w, ChunkCoord::new(0, 0), d, false);
         let glyphs = *b",T";
         let look = |cc| stage::chunk(&w, cc);
         let render = |look, v| render(look, &glyphs, v);

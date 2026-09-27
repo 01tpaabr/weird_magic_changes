@@ -19,6 +19,7 @@ pub const SCENT_CADENCE: u64 = 16;
 
 /// One fade step: `s - ceil(s / 32)`.
 #[inline]
+#[allow(clippy::cast_possible_truncation)] // ceil(s / 32) is at most 8
 pub const fn fade(s: u8) -> u8 {
     s - ((s as u16 + 31) >> 5) as u8
 }
@@ -39,29 +40,34 @@ pub fn chunk_due(tick: u64, c: ChunkCoord, cadence: u64) -> bool {
     tick.wrapping_add(stagger) & (cadence - 1) == 0
 }
 
+/// One fade step of a chunk's scent. Only channels holding scent are
+/// touched: most rule sets use one or two. `true` if any channel held some.
+#[inline]
+pub fn fade_chunk(cells: &mut ChunkCells) -> bool {
+    let live: [bool; SCENT_CHANNELS] = std::array::from_fn(|j| scented(&cells.scent[j]));
+    if !live.contains(&true) {
+        return false;
+    }
+    for (ch, live) in cells.scent.iter_mut().zip(live) {
+        if live {
+            for s in ch.iter_mut() {
+                *s = fade(*s);
+            }
+        }
+    }
+    true
+}
+
 /// The Simulate phase: fade the scent of every due chunk. A chunk whose
 /// scent changed is dirty (it must be saved to be seen again). One thread:
 /// a sixteenth of the chunks per tick is too little work to pay for
 /// parallel dispatch (`par_iter_mut` measured 5% slower on the whole tick).
-/// Only channels holding scent are touched: most rule sets use one or two.
 pub fn scent_decay(tick: Res<Tick>, mut q: Query<(&ChunkCoord, &mut ChunkCells, &mut ChunkMeta)>) {
     let tick = tick.0;
     for (c, mut cells, mut meta) in &mut q {
-        if !chunk_due(tick, *c, SCENT_CADENCE) {
-            continue;
+        if chunk_due(tick, *c, SCENT_CADENCE) && fade_chunk(&mut cells) {
+            meta.dirty = true;
         }
-        let live: [bool; SCENT_CHANNELS] = std::array::from_fn(|j| scented(&cells.scent[j]));
-        if !live.contains(&true) {
-            continue;
-        }
-        for (ch, live) in cells.scent.iter_mut().zip(live) {
-            if live {
-                for s in ch.iter_mut() {
-                    *s = fade(*s);
-                }
-            }
-        }
-        meta.dirty = true;
     }
 }
 

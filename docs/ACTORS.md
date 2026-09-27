@@ -17,10 +17,11 @@ own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slo
 **cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
-state is exactly needs + memory + genes + a state byte: no saved program counter, so a think is a
-pure function of (own row, tick-start world, tick, seed).
+state is exactly needs + memory + genes + a state byte: no saved program counter, so a
+think is a pure function of (own row, the world after this tick's Simulate phase (scent
+faded), tick, seed).
 
-```
+```text
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
  Simulate  seq   scent_decay (cadence 16)     W ChunkCells.scent of due chunks (one thread: too little work to split)
  Think     par   actors::think                R Tick SimConfig Programs Stage, ANY ChunkCells + ChunkActors
@@ -45,12 +46,12 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     kind: u16,      // index into Programs.kinds (0xFFFF reserved by ActorId::NONE)
     stagger: u16,   // uid low bits: cadence phase
     signal: i16,    // rule-written, readable by others via signal_of(t)
-    look: u8,       // rule-written appearance: palette variant + `kind:look` predicate
+    look: u8,       // rule-written public byte: `kind:look`, `look_of`, `wmc why`; not drawn
     flags: u8,      // DEAD | WAKE
     _pad: u16,
 }
 #[repr(C)] pub struct ActorMind {  // 120 B, Pod. Only the owning chunk touches it.
-    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time]
+    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
     mem: [i32; 12],           // the program's whole persistent memory, named per kind
@@ -70,15 +71,19 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   within a tick; identity across ticks is `uid` or a position (unique: one standing and one cover actor
   per cell).
 - **Worldgen rows** get a tick-free `uid`, so regenerating a chunk equals reloading it.
-  Run-time spawns fold in the tick. Which kind starts where is the **scenario's**, not the
+  Run-time spawns fold in the tick, and a cover child hashes on its own stream, so the
+  standing and the cover child a cell can get in one tick differ. Which kind starts where is the **scenario's**, not the
   rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
   placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
   one cell (`with (food = 2h)` sets its needs, memory or genes by name). A scenario may also draw
   its ground (`map`, `legend`, `outside`, step 8e): drawn cells replace the noise, kind
   characters become explicit starts. Resolved against the loaded kind table into a
   `Placement` at create and at every open; a start naming a kind the rules lack, a trait,
-  or a cell that is not walkable refuses the world. The save header keeps the starts by
-  name and the drawn map.
+  or a cell that is not walkable refuses a new world. The save header keeps the starts by
+  name and the drawn map. A saved world's starts resolve leniently (open and hot reload): a
+  start of a kind the rules lack is skipped and reported, a share keeping its interval so
+  the others keep their cells, and stays in the header, so the kind starts again when it
+  is back.
 - **Migration**: a move into another chunk goes to the source `Outbox`; `Migrate` walks
   `stage.active()`, copies the *current* row into the target (damage taken this tick travels
   with it), writes the target's occupant, flags the source DEAD. An unloaded target is a
@@ -97,7 +102,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
   else the cover's glyph.
 - **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (4) `u8` layers. `mark ch v` adds
-  `v` (saturating) to the actor's tick-start cell in Apply; `scent_decay` (Simulate phase)
+  `v` (saturating) to the actor's tick-start cell in Apply (the marks of one think add up,
+  per channel: `Intent.mark` is one byte per channel); `scent_decay` (Simulate phase)
   takes `ceil(s / 32)` from every cell of a chunk's scented channels every 16 ticks,
   staggered by a hash of the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
@@ -106,7 +112,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Save**: chunk file v11 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
-  holding any row is **dirty** once actors think (undirtied rows would vanish on unload).
+  holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
+  clocks run on, so every save and unload writes it again, stamped with the tick.
   `world.wmc` carries the scenario (seed, initial size, terrain, starts, a drawn map from
   step 8e) and the kind table with each kind's need, mem and state names and the scent
   channel names, and the rule packs it was played with. A save opens under any rules that
@@ -115,9 +122,11 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   write to the store (a save, an unload, a reload) first rewrites every chunk file and then
   the header, so a directory never mixes two numberings. A kind the rules lack, or one that
   moved between standing and ground cover, refuses the open.
-- **Cadence**: `cadence 2^k` per kind; an actor is due when `(tick + stagger) & (2^k - 1) ==
-  0` or `WAKE` is set. Stagger is per actor (decision 28). Only `hurt` and being taken from
-  set `WAKE`; the result of an action is read at the next scheduled think.
+- **Cadence**: `cadence 2^k` per kind; an actor is due when
+  `(tick + (stagger << max(k - 16, 0))) & (2^k - 1) == 0` or `WAKE` is set: the 16-bit
+  stagger spreads over the whole period at any cadence. Stagger is per actor (decision 28).
+  Only `hurt` and being taken from set `WAKE`; the result of an action is read at the next
+  scheduled think.
 - **RNG**: counter-based, no stream state: draw `n` for `uid` at `tick` is
   `splitmix64(splitmix64(seed ^ STREAM_THINK ^ splitmix64(tick) ^ uid) + n)`. Claim key
   `splitmix64(uid ^ splitmix64(tick))`, compared as a full `u64`. Gene `i` of a child at
@@ -135,13 +144,16 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Frozen chunks**: on load, `last_think` and `born` shift forward by the frozen interval
   (`now - last_ticked`), so nothing decays or ages off screen and a reopen at the save tick is
   bit-identical to never stopping (decision 29: freeze, not catch-up).
-- **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the rules directory (`WMC_RULES`,
-  else `./rules`) is recompiled and swapped in between two ticks. Rows are remapped by
+- **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the packs the world runs (as it
+  was opened: `--rules`, `WMC_RULES`, the save's packs or the scenario's `rules`; `./rules`
+  for the built-in set) are recompiled and swapped in between two ticks. Rows are remapped by
   name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
   the new max; new needs start full), mem (new ones 0) and gene (clamped to the new range;
   new ones at their default), the state by its name, each scent channel by its name. Saved chunks that are not loaded are rewritten the same way and
   `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
-  with the old). Moving a kind between standing and ground cover is refused. A compile error
+  with the old). The starts stay whole: a removed kind's start places nobody (reported),
+  its share keeping its interval, and starts again when the kind is back. Moving a kind
+  between standing and ground cover is refused. A compile error
   changes nothing and shows on the status bar. A reload is not a recorded input: a reloaded
   world does not replay from its seed.
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped
@@ -149,7 +161,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   adds start at max. Memory carries by name, the rest is zeroed; genes carry by name,
   clamped to the new range (new ones at their default, never mutated); `state` resets.
 
-Per actor: 136 B persistent (12 + 120 + 4 occupant) + 32 B intent scratch.
+Per actor: 136 B persistent (12 + 120 + 4 occupant) + 40 B intent scratch.
 
 ## 3. Senses
 
@@ -161,8 +173,8 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 |---|---|---|
 | self | each need, mem and gene by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
-| here / at | `ground`, `feature`, `scent(ch)`; `ground_at(t)`, `feature_at(t)`, `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
-| search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, row-major in a ring, ring start rotated by one RNG draw |
+| here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo (the reach of every target: at least 64 cells each way); unloaded or beyond the halo = rock, no actor |
+| search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
 
 A *pred* is one integer at run time: a kind, `kind:look`, a tag, a ground, a feature,
@@ -175,7 +187,8 @@ No per-actor queues. Broadcast goes through `signal`, `look` and per-cell scent 
 ## 4. Needs
 
 `need water max 2h vital`: an `i32` in **ticks-until-empty**, decremented lazily by
-`tick - last_think` when a think starts. `decay 0` needs are in points (health). A vital
+`tick - last_think` when a think starts, or when a bite, `take` or `give` reaches it first
+(Exchange). `decay 0` needs are in points (health). A vital
 need at 0 makes the think emit `die` before any rule runs. Rules read needs by name and may
 write them (`water += 6h`, clamped to max); world-validated refills come from resolved
 actions (`eat`, `drink`, `take`/`give`). Dynamic objectives are a `state` plus targets in
@@ -248,7 +261,8 @@ TIME     := INT ("min" | "h" | "d")
 - `choose` evaluates all weights (clamped >= 0), draws once, runs that arm.
 - `state` blocks follow the reflex rules; an actor starts in the first one, `next NAME`
   switches for the following think and ends this one like an action, `become` resets to
-  the first. `next` inside a sub is a compile error (states belong to a kind).
+  the first. `next` inside a file sub is a compile error (states belong to a kind); a
+  member sub may use it.
 - **Traits and inheritance** (step 8a). A `trait` is a kind without a glyph, rows or id:
   declarations, member subs, rules and states that kinds include with `extends`. A kind
   extends at most one kind and any number of traits; a trait extends traits. Trait
@@ -266,7 +280,8 @@ TIME     := INT ("min" | "h" | "d")
   a splice never brings the same rules twice. A state the kind does not declare is
   inherited whole. A trait's rules and subs may name only the needs, mems, states and subs
   it or its ancestors declare, so it compiles for any kind that includes it; every trait is
-  compiled on its own once (parameters bound to 1) to prove it, used or not.
+  compiled on its own once (parameters bound to 1) to prove it, used or not; a trait
+  reached with two argument lists only through those 1s is left to the kinds that use it.
 - **Families** (step 8a). A kind's name in a predicate matches the kind and every kind that
   extends it; `only NAME` the kind alone (also `kind:look` and `only kind:look`). Kinds are
   numbered in pre-order over the inheritance forest (roots in file then declaration order,
@@ -292,26 +307,31 @@ TIME     := INT ("min" | "h" | "d")
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
   override up to 4096. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
   `trapped` for the next think and counts a trap for the kind (the `TRAPS` counter on the
-  status row, the `traps` column of `wmc run`). The sim never panics on a rules file.
+  status row, the `traps` column of `wmc run`); needs and mem written before the trap stay,
+  the action, `next`, `look`, `signal` and `mark` are dropped. The sim never panics on a
+  rules file.
 - Compiled at world open (`rules/compile.rs`: lexer, recursive-descent parser, codegen
   through `rules/asm.rs`): `Vec<Op>` with a constant pool (immediates are 16-bit; `3d` =
   64 800 goes to the pool), kind ids in **pre-order over the inheritance forest, roots and
   siblings in sorted file name then declaration order** (without `extends`: file name then
   declaration order), the
-  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`,
-  `free` and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random`, plain
-  names elsewhere, so `need water` and `water < 40min` read as intended; `food` likewise is a
+  rules hash recorded in `world.wmc` and folded into the checksum. `water`, `soil`, `rock`
+  and `bare` are contextual words: predicates after `count`/`nearest`/`is`/`random` and as a
+  sub's `pred` argument, plain names elsewhere (a need, mem or local, never a kind or tag), so
+  `need water` and `water < 40min` read as intended; `free` is reserved (a built-in), and a
+  predicate in those positions. `food` likewise is a
   declaration only where a declaration starts (`need food`, `food < 20h` work). `x` and `y`
   are senses, so they cannot name a parameter or local. A pred name is a sub's `pred`
   parameter, else a kind, else a **tag**: tags are global names numbered in first-appearance
-  order (64 at most, never a kind's name), a kind's tags a bitset the VM checks against the
+  order (64 at most, never a kind's name nor a predicate word), a kind's tags a bitset the VM checks against the
   occupant (`nearest meat within 8`). Where a kind starts is not in the rules: the
   scenario's `start` lines say it (§2, decision 36; `place` is an error pointing there).
   `color "#rrggbb"` is the glyph's colour (default a pale yellow), `cover` makes the kind
   ground cover (§2), `dir(h)` is the step for heading `h` (1..8 clockwise from north, 0 =
   none). The files in `rules/` (animals, grass, plants) are built into the binary; `WMC_RULES=<dir>` swaps in a directory; `wmc lint` compiles and
   prints the kind table. A radius after `within` is an additive expression, never a
-  comparison (`count water within 2 > 0` counts within 2). `wmc why [-v] <dir> <x> <y>
+  comparison, except `count`'s, which is one term: `count water within 2 > 0` counts
+  within 2, and `count a within 3 - 1` is that count minus one. `wmc why [-v] <dir> <x> <y>
   [ticks [w h seed]]` steps `ticks`, waits for the actor at the cell to be due, re-runs its
   think on a copy of its mind with a trace (`sim::explain`, the same code path as the Think
   phase: the VM's `run::<TRACE>` compiles the trace away when off) and prints its needs and
@@ -321,7 +341,7 @@ TIME     := INT ("min" | "h" | "d")
 
 **Example** (abridged; `rules/lib.rules` and `rules/animals.rules` have the full ones).
 
-```
+```rules
 sub turn(h) {                              # mostly straight on
   if h == 0 { return rand(8) + 1 }
   choose { 80: return h   8: return h % 8 + 1   8: return (h + 6) % 8 + 1   4: return rand(8) + 1 }
@@ -387,7 +407,8 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    a `Hit` on the chunk's scratch, a cross-chunk one goes to the `Outbox`.
 2. **Exchange** (sequential): cross-chunk bites recorded on their victims against tick-start
    occupancy; then chunk by chunk in `stage.active()` order, bites grouped per victim (and
-   layer): in key order each takes up to its `bite` from the health left, `hurt` grows
+   layer): in key order each takes up to its `bite` from the health left (decayed to now),
+   `hurt` grows
    (saturating), `hurt_dir` points at the lowest-key biter (the `attacker` target reads it),
    `WAKE` set. An `eat` or `graze` that took `t` points gains `food * t / max_health` of the
    victim kind's `food` into its own `food` need, so a kill feeds every biter by its share
@@ -396,19 +417,23 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    has been applied yet, so damage is symmetric across borders. Last, every `take`/`give`
    of the tick (Resolve sends them all here, in-chunk ones too), in key order: the target
    is whoever stands on the adjacent cell and is still alive (else MISSED) and must have a
-   need of the same name (else REFUSED); `take` moves up to the amount from it, `give` to
-   it, never more than the source holds nor past the receiver's max. A taken-from actor
-   gets `taken` and wakes. A mover that died this tick moves nothing. (Damage is
-   summed on one thread here rather than per chunk in Resolve: bites are rare next to
-   thinks, and the sequential sum needs no cross-chunk credit pass; the per-chunk split is
-   the hatch if Exchange ever shows in a profile.)
+   need of the same name (else REFUSED), decayed to now; `take` moves up to the amount
+   from it, `give` to it, never more than the source holds nor past the receiver's max
+   (OK; BLOCKED if nothing moved, as for a `move`). A taken-from actor gets `taken` and
+   wakes, if anything moved. A mover that died this tick
+   moves nothing. (Damage is summed on one thread here rather than per chunk in Resolve:
+   bites are rare next to thinks, and the sequential sum needs no cross-chunk credit pass;
+   the per-chunk split is the hatch if Exchange ever shows in a profile.)
 3. **Apply** (parallel): intents of DEAD actors dropped; claims skip touched cells; `key ==
-   claim[target]` wins the cell; losers get `BLOCKED`; a cover spawn claims nothing and takes
+   claim[target]` wins the cell; losers get `BLOCKED`; a spawn beyond the 3x3 halo is
+   `BLOCKED` (the VM turns an offset past ±127 into -128, which is beyond it too, rather
+   than trap); a cover spawn claims nothing and takes
    its cell in key order if it is walkable and has no cover yet; a cover row's `move` and a
    `become` across layers are REFUSED; `become`, self-`die` (a standing actor touches its
-   cell), `drink`, `look`, `result` written. Births, `become`s, bites that fed and deaths,
-   and thinks, ops and traps, are counted per kind (`Tally`: not saved, not hashed; the
-   status rows of `wmc play` and the table after `wmc run` print it, with ops per think).
+   cell), `drink`, `look`, `result` written. Births, `become`s and deaths (by bites:
+   `eaten`, counted in Exchange; by an empty vital need or `die`: `died`), and thinks, ops
+   and traps, are counted per kind (`Tally`: not saved, not hashed; the status rows of `wmc
+   play` and the table after `wmc run` print it, with ops per think).
 4. **Migrate** (sequential): cross-chunk `move`/`spawn` into cells free now and not touched
    this tick; contenders settled by key. An in-chunk winner beats a cross-chunk one (**home
    advantage**, deterministic, documented; decision 30).
@@ -560,7 +585,7 @@ where it touches the tick.
    to text; the Rust tests left are engine mechanics.
    What a new author needs is in `docs/RULES.md`: the language, traits, scenarios and their
    tests, packs, the vocabulary, the lint.
-9. **Genes: numbers that are inherited and mutate** (decision 38). The first way behaviour
+9. **Genes: numbers that are inherited and mutate** (decision 39). The first way behaviour
    changes across generations without a new rules file; rules that are themselves switched
    on and off per actor come after.
    9a: `ActorMind.genes` (8 `i32`, 88 -> 120 B), store v10.

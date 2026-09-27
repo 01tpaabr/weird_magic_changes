@@ -11,10 +11,12 @@
 //! `app`.
 //!
 //! Modules:
-//! - [`stage`]: the chunked, unbounded 2D grid every actor stands on.
-//! - [`actors`]: actor rows inside chunks and the Think/Apply/Compact phases.
+//! - [`stage`]: the chunked 2D grid every actor stands on, [`WORLD_EXTENT`] each way.
+//! - [`actors`]: actor rows inside chunks and the actor phases (Think,
+//!   Resolve, Exchange, Apply, Migrate, Compact).
 //! - [`rules`]: the kind table, the rules VM and the built-in programs (`docs/ACTORS.md`).
-//! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
+//! - [`reload`]: rule swaps and save remapping ([`reload::Plan`]).
+//! - [`rng`]: derived, counter-based randomness (`hash_cell`, `splitmix64`).
 //! - [`scenario`]: the world a save is made from (seed, size, terrain,
 //!   where kinds start), and its resolution against the rules.
 //! - [`store`]: save directory format (meta + per-chunk files).
@@ -22,6 +24,11 @@
 //! - [`sim`]: resources (`SimConfig`, `Tick`), the `SimTick` schedule and its
 //!   phases, world creation, streaming, save/load, checksum.
 //! - [`par`]: deterministic parallel helpers over the compute task pool.
+
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 
 pub mod actors;
 pub mod par;
@@ -39,8 +46,28 @@ pub use rules::{KindDef, Kinds};
 pub use scenario::Scenario;
 pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick};
 pub use stage::{
-    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, Cell, ChunkCells, ChunkCoord, ChunkData,
-    ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells,
+    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData,
+    ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells, WORLD_EXTENT,
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};
+
+/// Proptest settings for the never-panic properties (scenario text, save
+/// files): `cases` for `make test`, `WMC_FUZZ_CASES` for `make fuzz`. The
+/// seed is fixed, so `make test` checks the same cases every run;
+/// `WMC_FUZZ_SEED` picks others (`make fuzz` prints the one it used).
+/// Nothing is persisted: a failure prints its shrunk input, which goes in a
+/// regression test.
+#[cfg(test)]
+pub(crate) fn fuzz_config(cases: u32) -> proptest::test_runner::Config {
+    let var = |name: &str| std::env::var(name).ok();
+    let seed = var("WMC_FUZZ_SEED").and_then(|v| v.parse().ok());
+    proptest::test_runner::Config {
+        cases: var("WMC_FUZZ_CASES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cases),
+        failure_persistence: None,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(seed.unwrap_or(0x5EED)),
+        ..proptest::test_runner::Config::default()
+    }
+}

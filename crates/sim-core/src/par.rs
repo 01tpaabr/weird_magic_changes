@@ -8,27 +8,60 @@
 //! these wrappers make the default.
 //!
 //! The pool is a process-wide singleton. [`init_task_pool`] sizes it from
-//! `WMC_THREADS` (default: all cores); the first initialiser in a process
-//! wins, so `WMC_THREADS=1 wmc run ...` vs the default is the thread-count
-//! gate for the whole binary.
+//! `WMC_THREADS` (default: all cores; anything but a count of 1 to 1024
+//! panics, and `wmc` refuses it before that); the first initialiser in a
+//! process wins (`wmc --threads N` over `WMC_THREADS`), so `WMC_THREADS=1
+//! wmc run ...` vs the default is the thread-count gate for the whole binary.
 
 use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 
-/// Thread count requested through the environment, if any.
+/// Thread count requested through the environment, if any. Panics on a
+/// value that is not one: a mistyped `WMC_THREADS=1` would otherwise run
+/// on all cores and the thread-count gate would compare a run with itself.
 pub fn threads_from_env() -> Option<usize> {
-    std::env::var("WMC_THREADS")
-        .ok()?
-        .parse()
-        .ok()
-        .filter(|&n| n >= 1)
+    env_threads().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `WMC_THREADS` read with [`parse_threads`]; a value that is not UTF-8
+/// is no count. `wmc` checks it with this before it makes a world, so a
+/// bad one is an error there, not a panic.
+pub fn env_threads() -> Result<Option<usize>, String> {
+    match std::env::var("WMC_THREADS") {
+        Ok(v) => parse_threads(Some(&v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(v)) => parse_threads(Some(&v.to_string_lossy())),
+    }
+}
+
+/// The most threads a pool may have. Far past any core count; the pool
+/// panics when the system will not start one, and macOS stops at about
+/// 6000 a process.
+pub const MAX_THREADS: usize = 1024;
+
+/// `WMC_THREADS`'s value: unset or empty is `None` (all cores), else a
+/// count of 1 to [`MAX_THREADS`].
+fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
+    match v {
+        None | Some("") => Ok(None),
+        Some(v) => match v.trim().parse() {
+            Ok(n) if (1..=MAX_THREADS).contains(&n) => Ok(Some(n)),
+            _ => Err(format!(
+                "WMC_THREADS=`{v}` is not a thread count (1 to {MAX_THREADS})"
+            )),
+        },
+    }
 }
 
 /// Make sure the compute pool exists, sized from `WMC_THREADS` when set.
 /// Idempotent; returns the pool's thread count. Every `par_iter` and
 /// [`par_map`] needs this to have run once (an `App` with `TaskPoolPlugin`
-/// does it for you).
+/// does it for you). A pool that exists already (`wmc --threads N`) is
+/// kept, and `WMC_THREADS` not read.
 pub fn init_task_pool() -> usize {
-    init_task_pool_with(threads_from_env())
+    match ComputeTaskPool::try_get() {
+        Some(pool) => pool.thread_num(),
+        None => init_task_pool_with(threads_from_env()),
+    }
 }
 
 /// [`init_task_pool`] with this many threads (`None`: all cores); the
@@ -99,34 +132,22 @@ where
     });
 }
 
-/// Run `f` on `n` disjoint work indices `0..n` in parallel, `batch` indices
-/// per task. For phases that write through disjoint `&mut` slices the caller
-/// split beforehand (a frame's rows, a buffer's bands): `f(i)` must touch only
-/// what index `i` owns.
-pub fn par_for(n: usize, batch: usize, f: impl Fn(usize) + Sync) {
-    let batch = batch.max(1);
-    if n <= batch {
-        (0..n).for_each(f);
-        return;
-    }
-    let f = &f;
-    ComputeTaskPool::get().scope(|s| {
-        let mut start = 0;
-        while start < n {
-            let end = (start + batch).min(n);
-            s.spawn(async move {
-                for i in start..end {
-                    f(i);
-                }
-            });
-            start = end;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bad_thread_count_is_refused() {
+        assert!(parse_threads(Some("l")).is_err());
+        assert!(parse_threads(Some("0")).is_err());
+        assert!(parse_threads(Some("-1")).is_err());
+        assert!(parse_threads(Some("1025")).is_err());
+        assert_eq!(parse_threads(Some("1024")), Ok(Some(MAX_THREADS)));
+        assert_eq!(parse_threads(Some(" 1")), Ok(Some(1)));
+        assert_eq!(parse_threads(Some("8")), Ok(Some(8)));
+        assert_eq!(parse_threads(Some("")), Ok(None));
+        assert_eq!(parse_threads(None), Ok(None));
+    }
 
     #[test]
     fn par_map_preserves_order_for_every_batch_size() {
@@ -152,25 +173,5 @@ mod tests {
             );
         }
         par_zip_mut(&[] as &[u32], &mut [] as &mut [u64], 1, |_, _| {});
-    }
-
-    #[test]
-    fn par_for_touches_every_index_once() {
-        init_task_pool();
-        let n = 777;
-        let mut hits = vec![0u8; n];
-        // Hand each index its own cell through a raw split: the pattern a
-        // caller uses is disjoint slices, here simulated with atomics-free
-        // per-index ownership via `chunks_mut(1)` collected up front.
-        let cells: Vec<std::sync::atomic::AtomicU8> = (0..n)
-            .map(|_| std::sync::atomic::AtomicU8::new(0))
-            .collect();
-        par_for(n, 10, |i| {
-            cells[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-        for (h, c) in hits.iter_mut().zip(&cells) {
-            *h = c.load(std::sync::atomic::Ordering::Relaxed);
-        }
-        assert!(hits.iter().all(|&h| h == 1));
     }
 }

@@ -96,14 +96,126 @@ fn a_save_remembers_its_packs_and_opens_by_name() {
         "{err}"
     );
 
-    // Its packs gone: the built-in rules, said so.
+    // Its packs gone: the built-in rules, said so, and that a save keeps them.
     std::fs::remove_dir_all(&base).unwrap();
     let (ok, builtin, err) = wmc(&["run", dir, "400"]);
     assert!(ok, "{err}");
     assert!(err.contains("the save's packs are missing"), "{err}");
+    assert!(
+        err.contains("using the built-in rules (saving will keep them)"),
+        "{err}"
+    );
     assert_eq!(line(&builtin, "state:"), line(&plain, "state:"));
 
     // None of that wrote anything.
     assert_eq!(store.read_meta().unwrap().unwrap(), saved);
     std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// A save whose starts name a kind the rules lack opens: those starts are
+/// skipped, said so on stderr, and kept in the save.
+#[test]
+fn a_save_keeps_the_starts_of_a_kind_the_rules_lack() {
+    let root = std::env::temp_dir().join(format!("wmc-skipped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = Store::open(&root).unwrap();
+    let mut w = sim::new_world(&Scenario::builtin());
+    sim::save(&mut w, &store).unwrap();
+    let mut meta = store.read_meta().unwrap().unwrap();
+    let wolves = Scenario::parse("w", "start wolf 1 / 100\nstart wolf at (3, 3)").unwrap();
+    meta.starts.splice(0..0, wolves.starts);
+    store.write_meta(&meta).unwrap();
+    let (ok, _, err) = wmc(&["run", store.dir().to_str().unwrap(), "10"]);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains(
+            "starts: skipped, the rules lack their kinds (the save keeps them): \
+             start wolf 1 / 100, start wolf at (3, 3)"
+        ),
+        "{err}"
+    );
+    assert_eq!(store.read_meta().unwrap().unwrap(), meta);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// `lint` honours `WMC_RULES` like every command, and a pack on its command
+/// line wins over it as `--rules` does.
+#[test]
+fn lint_takes_its_packs_from_wmc_rules() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let lint = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env("WMC_RULES", repo.join("packs/life"))
+            .args(args)
+            .output()
+            .expect("wmc runs");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        (out.status.success(), stdout, out.stderr)
+    };
+    let (ok, out, err) = lint(&["lint"]);
+    assert!(ok, "{}", String::from_utf8_lossy(&err));
+    assert!(
+        out.contains("kind dead") && out.contains("kind alive"),
+        "{out}"
+    );
+    let rules = repo.join("rules");
+    let (ok, out, _) = lint(&["lint", rules.to_str().unwrap()]);
+    assert!(
+        ok && out.contains("kind chicken") && !out.contains("kind dead"),
+        "{out}"
+    );
+}
+
+/// `lint --scenario` checks the kinds, needs and memories a test's `expect`
+/// lines name, before a `run` would have to reach them.
+#[test]
+fn lint_checks_the_names_an_expect_uses() {
+    let root = std::env::temp_dir().join(format!("wmc-lint-expect-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let rules = rules.to_str().unwrap();
+    let head = "size 8 8\nstart egg at (3, 3)\nrun 1\n";
+    let lint = |name: &str, expect: &str| {
+        let f = root.join(name);
+        std::fs::write(&f, format!("{head}{expect}\n")).unwrap();
+        wmc(&["lint", rules, "--scenario", f.to_str().unwrap()])
+    };
+    let (ok, _, err) = lint("wolf.scenario", "expect count wolf == 0");
+    assert!(
+        !ok && err.contains("wolf.scenario:4: the rules have no kind `wolf`"),
+        "{err}"
+    );
+    let (ok, _, err) = lint("nn.scenario", "expect max nn of egg == 0");
+    assert!(
+        !ok && err.contains("nn.scenario:4: `egg` has no need, memory or gene `nn`"),
+        "{err}"
+    );
+    let (ok, out, err) = lint("egg.scenario", "expect count egg == 1");
+    assert!(ok, "{out}{err}");
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
+/// An empty `WMC_RULES` is none (the scenario's packs, else the built-in
+/// rules), and an empty entry in it (`a:`, `a::b`) is skipped.
+#[test]
+fn empty_wmc_rules_entries_are_skipped() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fox_pen = repo.join("scenarios/tests/fox_pen.scenario");
+    let run = |rules: std::ffi::OsString| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env("WMC_RULES", rules)
+            .args(["scenario", fox_pen.to_str().unwrap(), "--threads", "1"])
+            .output()
+            .expect("wmc runs");
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (ok, err) = run("".into());
+    assert!(ok, "{err}");
+    let mut trailing = repo.join("rules").into_os_string();
+    trailing.push(":");
+    let (ok, err) = run(trailing);
+    assert!(ok, "{err}");
 }

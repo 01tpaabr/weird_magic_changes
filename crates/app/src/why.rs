@@ -2,13 +2,14 @@
 //! whoever stands on a cell (else its ground cover) against the world as it
 //! is, with a trace, and prints its state, every rule the think checked and
 //! whether it fired, what it decided and what it wrote. Nothing in the
-//! world changes (`sim::explain`).
+//! world changes (`sim::explain`). `wmc why` then follows the actor it
+//! found by uid, whoever else steps onto its cell.
 
 use std::fmt::Write;
 
 use bevy::prelude::World;
 use sim_core::actors::systems::Explained;
-use sim_core::rules::vm::{Action, OpCode, result};
+use sim_core::rules::vm::{Action, OpCode, need_now, result};
 use sim_core::time::{Clock, TICKS_PER_DAY};
 use sim_core::{Kinds, Pos, sim};
 
@@ -16,9 +17,15 @@ use sim_core::{Kinds, Pos, sim};
 /// adds every executed op, with the rule it belongs to.
 pub fn report(world: &World, p: Pos, ops: bool) -> Option<String> {
     let e = sim::explain(world, p)?;
+    Some(report_of(world, p, &e, ops))
+}
+
+/// The report for `e`, a think already explained (`sim::explain_slot`) of
+/// the actor at `p`.
+pub fn report_of(world: &World, p: Pos, e: &Explained, ops: bool) -> String {
     let kinds = world.resource::<Kinds>();
     let tick = world.resource::<sim_core::Tick>().0;
-    Some(format(kinds, tick, p, &e, ops))
+    format(kinds, tick, p, e, ops)
 }
 
 /// Ticks as `1d 2h 03m` (whole minutes; `0m` for less).
@@ -94,7 +101,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     let _ = writeln!(
         s,
         "  age {} | state {} | look {} | signal {} | last result {} | hurt {}{}",
-        duration(i64::from((tick as u32).wrapping_sub(b.born))),
+        duration(i64::from(sim_core::time::stamp(tick).wrapping_sub(b.born))),
         state_name(kinds, e.row.kind, b.state),
         e.row.look,
         e.row.signal,
@@ -113,7 +120,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             .enumerate()
             .map(|(i, n)| {
                 // As the think saw them: decayed, before its writes.
-                let v = decayed(b.needs[i], n.decays, tick, b.last_think);
+                let v = need_now(b.needs[i], n.decays, tick, b.last_think);
                 if n.decays {
                     format!(
                         "{} {} / {}",
@@ -164,10 +171,18 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     } else {
         let _ = writeln!(
             s,
-            "rules  (FIRED: its body ran; no: its condition was false; blank: not reached)"
+            "rules  (FIRED: its body ran; no: its condition was false; TRAPPED: the think \
+             trapped in its condition; blank: not reached)"
         );
+        // A trap outside a body is in the condition of the last rule entered.
+        let trapped = e.outcome.trap.and_then(|_| {
+            e.trace
+                .iter()
+                .rev()
+                .find_map(|st| rules.iter().position(|r| r.cond_pc == st.pc))
+        });
         let mut shown_state = None;
-        for r in &rules {
+        for (i, r) in rules.iter().enumerate() {
             if r.state.is_some_and(|st| st != b.state) {
                 continue;
             }
@@ -177,6 +192,8 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             }
             let verdict = if visited(r.body_pc) {
                 "FIRED"
+            } else if trapped == Some(i) {
+                "TRAPPED"
             } else if visited(r.cond_pc) {
                 "no"
             } else {
@@ -204,7 +221,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     let mut writes = Vec::new();
     for (i, n) in def.needs.iter().enumerate() {
         // Decay is not a write: compare with the decayed value the rules saw.
-        let seen = decayed(b.needs[i], n.decays, tick, b.last_think);
+        let seen = need_now(b.needs[i], n.decays, tick, b.last_think);
         if a.needs[i] != seen {
             writes.push(format!("{} {} -> {}", n.name, seen, a.needs[i]));
         }
@@ -224,10 +241,13 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     if !writes.is_empty() {
         let _ = writeln!(s, "writes  {}", writes.join(" | "));
     }
+    // Ops and fuel differ: a search costs fuel beyond its op (RULES.md §13).
+    let left = e.trace.last().map_or(def.fuel, |st| st.fuel);
     let _ = writeln!(
         s,
-        "cost    {} ops of {} fuel{}",
+        "cost    {} ops, {} of {} fuel{}",
         e.outcome.used,
+        def.fuel - left,
         def.fuel,
         e.outcome.trap.map_or(String::new(), |t| format!(
             " | TRAPPED: {t:?} (the think became idle)"
@@ -264,15 +284,6 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
         }
     }
     s
-}
-
-/// A need as the think saw it: decayed by the ticks since the last think.
-fn decayed(v: i32, decays: bool, tick: u64, last: u32) -> i32 {
-    if decays {
-        (i64::from(v) - i64::from((tick as u32).wrapping_sub(last))).max(0) as i32
-    } else {
-        v
-    }
 }
 
 fn decision(kinds: &Kinds, e: &Explained) -> String {
@@ -334,12 +345,11 @@ fn decision(kinds: &Kinds, e: &Explained) -> String {
     if let Some(v) = it.signal {
         let _ = write!(d, "; signal = {v}");
     }
-    if let Some((ch, v)) = it.mark {
-        let name = kinds
-            .scents
-            .get(usize::from(ch))
-            .map_or("?", String::as_str);
-        let _ = write!(d, "; mark {name} {v}");
+    for (ch, &v) in it.mark.iter().enumerate() {
+        if v > 0 {
+            let name = kinds.scents.get(ch).map_or("?", String::as_str);
+            let _ = write!(d, "; mark {name} {v}");
+        }
     }
     if let Some(n) = out.next {
         let _ = write!(d, "; next {}", state_name(kinds, e.row.kind, n));
@@ -351,8 +361,8 @@ fn decision(kinds: &Kinds, e: &Explained) -> String {
 pub fn after(world: &mut World, uid: u64) -> String {
     match sim::find_uid(world, uid) {
         None => "gone: it died or was eaten this tick".to_string(),
-        Some(p) => {
-            let e = sim::explain(world, p).expect("found it there");
+        Some((p, cc, slot)) => {
+            let e = sim::explain_slot(world, cc, slot).expect("found it there");
             format!(
                 "at ({}, {}), result {}",
                 p.x,
@@ -431,5 +441,99 @@ mod tests {
             r.contains("FIRED  when hour >= 0 => idle   [via restful]"),
             "{r}"
         );
+    }
+
+    /// A think that traps in a condition (here: out of fuel in a search)
+    /// marks that rule TRAPPED, not `no`, and the ops end at the fault.
+    #[test]
+    fn a_trap_in_a_condition_is_shown_where_it_happened() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind k { glyph \"k\"  sight 16  fuel 20\n  when count free within 16 > 0 => idle\n}",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0xCA, now)))
+            .expect("a walkable cell");
+        let r = report(&w, at, true).expect("a k there");
+        assert!(r.contains("TRAPPED: Fuel"), "{r}");
+        let line = r.lines().find(|l| l.contains("t.rules:2")).unwrap();
+        assert!(line.contains("TRAPPED when count"), "{r}");
+        let last = r.lines().last().unwrap();
+        assert!(last.contains("Count"), "{r}");
+    }
+
+    /// The cost line gives ops and fuel apart: a search costs fuel beyond
+    /// its op (a radius-8 search, 289 / 8 = 36 more).
+    #[test]
+    fn the_cost_line_counts_ops_and_fuel() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind k { glyph \"k\"  sight 8\n  when count free within 8 >= 0 => idle\n}",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0xCA, now)))
+            .expect("a walkable cell");
+        let r = report(&w, at, false).expect("a k there");
+        let cost = r.lines().find(|l| l.starts_with("cost")).unwrap();
+        let num = |w: &str| {
+            let i = cost.find(w).unwrap_or_else(|| panic!("{cost}"));
+            let n = cost[..i].split_whitespace().last().unwrap();
+            n.parse::<u32>().unwrap()
+        };
+        let (ops, spent) = (num(" ops, "), num(" of 512 fuel"));
+        assert!(spent >= ops + 36, "{cost}");
+    }
+
+    /// Needs show as the think sees them, decayed to now, and decay is not
+    /// a write.
+    #[test]
+    fn a_report_shows_needs_decayed_and_no_decay_writes() {
+        use sim_core::actors::systems::newborn;
+        let kinds = sim_core::rules::compile(
+            "t.rules",
+            "kind stone { glyph \"o\"  cadence 64  need w max 1d  when true => idle }",
+        )
+        .unwrap();
+        let cfg = sim_core::Scenario {
+            width: 64,
+            height: 64,
+            seed: 5,
+            ..Default::default()
+        };
+        let mut w = sim::new_world_with(&cfg, kinds.clone()).unwrap();
+        let now = sim::tick(&w);
+        let at = (0..64 * 64)
+            .map(|i| Pos::new(i % 64, i / 64))
+            .find(|&p| sim::place_actor(&mut w, p, 0, newborn(&kinds, 0, 0x57, now)))
+            .expect("a walkable cell");
+        for _ in 0..10 {
+            sim::step(&mut w);
+        }
+        let r = report(&w, at, false).expect("a stone there");
+        let left = duration(TICKS_PER_DAY as i64 - 10);
+        assert!(r.contains(&format!("needs  w {left} / 1d")), "{r}");
+        assert!(!r.contains("writes"), "{r}");
     }
 }

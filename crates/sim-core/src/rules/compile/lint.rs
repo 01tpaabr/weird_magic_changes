@@ -11,6 +11,10 @@ use super::*;
 /// The needs the engine reads by name.
 const ENGINE_NEEDS: [&str; 3] = ["health", "water", "food"];
 
+/// Sub bodies walked per kind before the lint stops following calls: a sub
+/// that calls itself k times would otherwise cost k^8 walks.
+const WALKS: u32 = 1 << 16;
+
 /// Diagnostics without repeats, in the order found.
 #[derive(Default)]
 struct Out(Vec<Diagnostic>);
@@ -54,28 +58,19 @@ struct Names {
     smells: Vec<(String, Pos, String)>,
     /// Where `signal_of` is read, and by whom.
     signal_reads: Vec<(Pos, String)>,
-    /// Actions inside a `for each`.
-    each_actions: Vec<Pos>,
 }
 
 /// One pass over one item's or sub's code, filling [`Names`].
 struct Seen<'n> {
     names: &'n mut Names,
+    /// As messages name it: "`ant`", "sub `helper`".
     who: String,
-    here: Pos,
-    each: u32,
 }
 
 impl Seen<'_> {
     fn stmts(&mut self, body: &[Stmt]) {
         for s in body {
             self.stmt(s);
-        }
-    }
-
-    fn act(&mut self, at: &Pos) {
-        if self.each > 0 {
-            self.names.each_actions.push(at.clone());
         }
     }
 
@@ -111,45 +106,33 @@ impl Seen<'_> {
                 args.iter().for_each(|a| self.arg(a));
             }
             Stmt::Return { value, .. } => value.iter().for_each(|e| self.expr(e)),
-            Stmt::Idle(at) | Stmt::Die(at) => self.act(at),
-            Stmt::Become { kind, at } => {
+            Stmt::Idle(_) | Stmt::Die(_) => {}
+            Stmt::Become { kind, .. } => {
                 self.names.all.insert(kind.clone());
-                self.act(at);
             }
-            Stmt::Spawn {
-                kind,
-                at,
-                pos,
-                with,
-            } => {
+            Stmt::Spawn { kind, at, with, .. } => {
                 self.names.all.insert(kind.clone());
                 self.target(at);
                 for (n, e, _) in with {
                     self.names.all.insert(n.clone());
                     self.expr(e);
                 }
-                self.act(pos);
             }
             Stmt::Transfer {
                 target,
                 need,
                 amount,
-                at,
                 ..
             } => {
                 self.names.all.insert(need.clone());
                 self.target(target);
                 self.expr(amount);
-                self.act(at);
             }
-            Stmt::Move(t, at)
-            | Stmt::Drink(t, at)
-            | Stmt::Eat(t, at)
-            | Stmt::Hit(t, at)
-            | Stmt::Graze(t, at) => {
-                self.target(t);
-                self.act(at);
-            }
+            Stmt::Move(t, _)
+            | Stmt::Drink(t, _)
+            | Stmt::Eat(t, _)
+            | Stmt::Hit(t, _)
+            | Stmt::Graze(t, _) => self.target(t),
             Stmt::Look(e) => self.expr(e),
             Stmt::Signal(e) => {
                 self.names.signal_set = true;
@@ -159,16 +142,13 @@ impl Seen<'_> {
                 self.names.marks.insert(ch.clone());
                 self.expr(e);
             }
-            Stmt::Next(name, at) => {
+            Stmt::Next(name, _) => {
                 self.names.nexts.insert(name.clone());
-                self.act(at);
             }
             Stmt::ForEach { pred, r, body, .. } => {
                 self.pred(pred);
                 self.expr(r);
-                self.each += 1;
                 self.stmts(body);
-                self.each -= 1;
             }
         }
     }
@@ -214,10 +194,8 @@ impl Seen<'_> {
                 self.target(t);
                 self.pred(p);
             }
-            Expr::SignalOf(t) => {
-                self.names
-                    .signal_reads
-                    .push((self.here.clone(), self.who.clone()));
+            Expr::SignalOf(t, at) => {
+                self.names.signal_reads.push((at.clone(), self.who.clone()));
                 self.target(t);
             }
             Expr::Scent(ch, t, at) => {
@@ -257,6 +235,10 @@ impl Seen<'_> {
             Arg::Pred(p) => self.pred(p),
             Arg::Name(n, at) => {
                 self.names.all.insert(n.clone());
+                // `water` passed to a pred parameter is the ground.
+                if pred_word(n).is_some() {
+                    return;
+                }
                 self.names.preds.insert(n.clone());
                 self.names
                     .pred_uses
@@ -301,13 +283,22 @@ struct Walk {
     sight: i32,
     /// Bound names (targets, `pred` parameters) and what they match.
     binds: Vec<(String, Option<Match>)>,
-    /// A sub's int parameters with a constant argument.
-    ints: Vec<(String, i32)>,
+    /// Names that may hide a constant here: the `let`s met so far, a sub's
+    /// parameters without a constant argument.
+    hidden: Vec<String>,
     depth: u32,
     eats: Option<Pos>,
     drinks: Option<Pos>,
     sets_look: bool,
     makes: BTreeSet<u16>,
+    /// What it `become`s (it keeps its look).
+    becomes: BTreeSet<u16>,
+    /// `for each` loops around here.
+    each: u32,
+    /// The outermost call made inside a `for each`, and where.
+    each_call: Option<(String, Pos)>,
+    /// Sub bodies walked so far (see [`WALKS`]).
+    walks: u32,
 }
 
 impl Walk {
@@ -326,10 +317,35 @@ impl<'a> Gen<'a> {
     pub(super) fn lint(&mut self, kinds: &Kinds) -> Vec<Diagnostic> {
         let items = self.items;
         let mut out = Out::default();
+        // The last rule or sub compiled left its locals; they hide nothing here.
+        self.locals.clear();
+        self.next_local = 0;
+        self.diagnose(&mut out);
 
         // The rule set as a whole.
         let mut names = Names::default();
         for it in items {
+            // `extends T(args)` and the declared numbers are constant
+            // expressions too.
+            let mut seen = Seen {
+                names: &mut names,
+                who: format!("`{}`", it.name),
+            };
+            for p in &it.parents {
+                for a in &p.args {
+                    seen.expr(a);
+                }
+            }
+            let d = &it.decls;
+            for (e, _) in [&d.cadence, &d.sight, &d.fuel, &d.food, &d.bite]
+                .into_iter()
+                .flatten()
+            {
+                seen.expr(e);
+            }
+            for n in &d.needs {
+                seen.expr(&n.max);
+            }
             for r in it
                 .rules
                 .iter()
@@ -338,9 +354,7 @@ impl<'a> Gen<'a> {
                 if let RuleItem::When(rule) = r {
                     let mut seen = Seen {
                         names: &mut names,
-                        who: it.name.clone(),
-                        here: rule.at.clone(),
-                        each: 0,
+                        who: format!("`{}`", it.name),
                     };
                     seen.cond(&rule.cond);
                     seen.stmts(&rule.body);
@@ -349,36 +363,29 @@ impl<'a> Gen<'a> {
             for m in &it.members {
                 let mut seen = Seen {
                     names: &mut names,
-                    who: it.name.clone(),
-                    here: m.at.clone(),
-                    each: 0,
+                    who: format!("`{}`", it.name),
                 };
                 seen.stmts(&m.body);
             }
         }
-        let mut sub_sets_look = false;
         for s in self.subs {
-            sub_sets_look |= sets_look(&s.body);
             let mut seen = Seen {
                 names: &mut names,
-                who: s.name.clone(),
-                here: s.at.clone(),
-                each: 0,
+                who: format!("sub `{}`", s.name),
             };
             seen.stmts(&s.body);
         }
         for c in self.consts {
             let mut seen = Seen {
                 names: &mut names,
-                who: c.name.clone(),
-                here: c.at.clone(),
-                each: 0,
+                who: format!("const `{}`", c.name),
             };
             seen.expr(&c.value);
         }
 
         // Each kind's code, followed.
         let mut sets_look_by_kind = Vec::with_capacity(self.kind_insts.len());
+        let mut becomes_by_kind = Vec::with_capacity(self.kind_insts.len());
         self.debug.makes = Vec::with_capacity(self.kind_insts.len());
         self.debug.kind_at = Vec::with_capacity(self.kind_insts.len());
         for k in 0..self.kind_insts.len() {
@@ -392,24 +399,29 @@ impl<'a> Gen<'a> {
                 .files
                 .iter()
                 .position(|f| *f == it.at.file)
-                .unwrap_or(0) as u16;
+                .map_or(0, |i| u16::try_from(i).expect("at most MAX_FILES files"));
             self.debug.kind_at.push((file, it.at.line, it.at.col));
             let mut w = Walk {
-                kind: k as u16,
+                kind: u16::try_from(k).expect("at most MAX_KINDS kinds"),
                 sight: i32::from(def.sight),
                 binds: Vec::new(),
-                ints: Vec::new(),
+                hidden: Vec::new(),
                 depth: 0,
                 eats: None,
                 drinks: None,
                 sets_look: false,
                 makes: BTreeSet::new(),
+                becomes: BTreeSet::new(),
+                each: 0,
+                each_call: None,
+                walks: 0,
             };
             for list in [&inst.reflex].into_iter().chain(&inst.state_lists) {
                 for rr in &list.rules {
                     self.params = self.scope_of(rr.owner);
                     self.here = rr.rule.at.clone();
                     let mark = w.binds.len();
+                    w.hidden.clear();
                     self.walk_cond(kinds, &mut w, &rr.rule.cond, &mut out);
                     self.walk_stmts(kinds, &mut w, &rr.rule.body, &mut out);
                     w.binds.truncate(mark);
@@ -439,11 +451,11 @@ impl<'a> Gen<'a> {
             }
             let cadence = def.cadence();
             for n in &def.needs {
-                if n.decays && n.vital && (n.max as u64) < cadence {
+                if n.decays && n.vital && (n.max as u64) <= cadence {
                     out.warn(
                         &it.at,
                         format!(
-                            "`{}`: need `{}` (max {}) empties before its first think (cadence {})",
+                            "`{}`: need `{}` (max {}) empties by its next think, even when refilled (cadence {})",
                             def.name,
                             n.name,
                             shown_ticks(n.max as u64),
@@ -452,7 +464,8 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            sets_look_by_kind.push(w.sets_look || sub_sets_look);
+            sets_look_by_kind.push(w.sets_look);
+            becomes_by_kind.push(w.becomes);
             self.debug.makes.push(w.makes.into_iter().collect());
         }
         self.params.clear();
@@ -466,12 +479,28 @@ impl<'a> Gen<'a> {
                 out.warn(
                     at,
                     format!(
-                        "`{who}` looks for `{tag}`, but no kind in this rule set is tagged `{tag}`"
+                        "{who} looks for `{tag}`, but no kind in this rule set is tagged `{tag}`"
                     ),
                 );
             }
         }
+        // A look set before a `become` stays with the new kind.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for j in 0..becomes_by_kind.len() {
+                if sets_look_by_kind[j] {
+                    for &k in &becomes_by_kind[j] {
+                        changed |= !std::mem::replace(&mut sets_look_by_kind[usize::from(k)], true);
+                    }
+                }
+            }
+        }
         for (kind, only, look, at, who) in &names.looks {
+            // Every actor starts at look 0.
+            if *look == 0 {
+                continue;
+            }
             let Some(k) = self.kind_id(kind) else {
                 continue;
             };
@@ -483,35 +512,27 @@ impl<'a> Gen<'a> {
             if !(k..end).any(|f| sets_look_by_kind[usize::from(f)]) {
                 out.warn(
                     at,
-                    format!(
-                        "`{who}` looks for `{kind}:{look}`, but no rule of `{kind}` sets `look`"
-                    ),
+                    format!("{who} looks for `{kind}:{look}`, but no rule of `{kind}` sets `look`"),
                 );
             }
         }
         for (ch, at, who) in &names.smells {
             if !names.marks.contains(ch) {
-                out.warn(at, format!("`{who}` smells `{ch}`, but nothing marks it"));
+                out.warn(at, format!("{who} smells `{ch}`, but nothing marks it"));
             }
         }
         if !names.signal_set {
             for (at, who) in &names.signal_reads {
                 out.warn(
                     at,
-                    format!("`{who}` reads `signal_of`, but no rule sets `signal`"),
+                    format!("{who} reads `signal_of`, but no rule sets `signal`"),
                 );
             }
-        }
-        for at in &names.each_actions {
-            out.warn(
-                at,
-                "an action inside `for each` traps when the loop finds a second cell".into(),
-            );
         }
 
         // Never used.
         let mut tags_told: BTreeSet<&str> = BTreeSet::new();
-        for it in items {
+        for (i, it) in items.iter().enumerate() {
             let owner = if it.is_trait { "trait" } else { "kind" };
             for (m, at) in &it.decls.mems {
                 if !names.all.contains(m) {
@@ -548,12 +569,14 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            for (i, st) in it.states.iter().enumerate() {
-                let first = i == 0
-                    && self
-                        .kind_insts
-                        .iter()
-                        .any(|&ki| self.insts[ki].states.first() == Some(&st.name));
+            for st in &it.states {
+                // Entered if a kind built from this item starts in it (its
+                // first state, which may be inherited).
+                let first = self.kind_insts.iter().any(|&ki| {
+                    let k = &self.insts[ki];
+                    (k.item == i || k.ancestors.iter().any(|&a| self.insts[a].item == i))
+                        && k.states.first() == Some(&st.name)
+                });
                 if !first && !names.nexts.contains(&st.name) {
                     out.warn(
                         &st.at,
@@ -587,6 +610,82 @@ impl<'a> Gen<'a> {
         out.0
     }
 
+    /// Warnings and notes about the compiled kinds, in kind order.
+    fn diagnose(&mut self, out: &mut Out) {
+        let items = self.items;
+        for k in 0..self.kind_insts.len() {
+            self.enter(k);
+            let ki = self.kind_insts[k];
+            let inst = self.insts[ki].clone();
+            // A rule that always holds and always ends the think hides every
+            // rule after it (and, among the reflexes, every state's rules).
+            let mut reflex_end: Option<&'a Rule> = None;
+            let lists: Vec<&RList<'a>> = [&inst.reflex]
+                .into_iter()
+                .chain(&inst.state_lists)
+                .collect();
+            for (li, list) in lists.iter().enumerate() {
+                if li > 0 {
+                    if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
+                        out.push(
+                            Level::Warning,
+                            &first.rule.at,
+                            format!(
+                                "never runs: the reflex rule at {}:{} always ends the think",
+                                end.at.file, end.at.line
+                            ),
+                        );
+                    }
+                    if reflex_end.is_some() {
+                        continue;
+                    }
+                }
+                for (i, rr) in list.rules.iter().enumerate() {
+                    self.owner = Some(rr.owner);
+                    self.params = self.scope_of(rr.owner);
+                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold_known(e, &rr.rule.at, |_| false).is_some_and(|v| v != 0));
+                    if always && self.ends_all(&rr.rule.body, false, 0, false) {
+                        if let Some(next) = list.rules.get(i + 1) {
+                            out.push(
+                                Level::Warning,
+                                &next.rule.at,
+                                format!(
+                                    "never runs: the rule at {}:{} always ends the think",
+                                    rr.rule.at.file, rr.rule.at.line
+                                ),
+                            );
+                        }
+                        if li == 0 {
+                            reflex_end = Some(rr.rule);
+                        }
+                        break;
+                    }
+                }
+            }
+            // Ancestors whose reflex rules this kind does not run.
+            for &a in &inst.ancestors {
+                let has_rules = items[self.insts[a].item]
+                    .rules
+                    .iter()
+                    .any(|r| matches!(r, RuleItem::When(_)));
+                if has_rules && !inst.reflex.sources.contains(&a) {
+                    let it = &items[inst.item];
+                    out.push(
+                        Level::Note,
+                        &it.at,
+                        format!(
+                            "`{}` does not run the reflex rules of `{}` (no `inherit` splices them)",
+                            it.name,
+                            self.inst_name(a)
+                        ),
+                    );
+                }
+            }
+        }
+        self.owner = None;
+        self.params.clear();
+    }
+
     /// What `p` matches here: a `pred` parameter's argument, a kind's family
     /// (or only it), the kinds carrying a tag.
     fn matcher(&self, kinds: &Kinds, w: &Walk, p: &Pred) -> Option<Match> {
@@ -617,7 +716,7 @@ impl<'a> Gen<'a> {
         }
         let bit = self.tags.iter().position(|t| t == name)?;
         Some(Match {
-            ids: (0..kinds.len() as u16)
+            ids: (0..u16::try_from(kinds.len()).expect("at most MAX_KINDS kinds"))
                 .filter(|&k| kinds.tag_bits[usize::from(k)] & (1 << bit) != 0)
                 .collect(),
             shown,
@@ -628,15 +727,18 @@ impl<'a> Gen<'a> {
     /// beyond the kind's sight it is clamped.
     fn radius(&self, w: &Walk, r: &Expr, at: &Pos, out: &mut Out) {
         let inst = &self.insts[self.kind_insts[usize::from(w.kind)]];
-        let v = match (self.fold(r), r) {
-            (Ok(v), _) => v,
-            (Err(_), Expr::Name(n, _)) if w.bound(n).is_none() => {
-                match inst.genes.iter().find(|g| g.name == *n) {
-                    Some(g) => g.hi,
-                    None => return,
+        let hidden = |n: &str| w.hidden.iter().any(|h| h == n);
+        let v = match self.fold_known(r, at, hidden) {
+            Some(v) => v,
+            None => match r {
+                Expr::Name(n, _) if w.bound(n).is_none() && !hidden(n) => {
+                    match inst.genes.iter().find(|g| g.name == *n) {
+                        Some(g) => g.hi,
+                        None => return,
+                    }
                 }
-            }
-            _ => return,
+                _ => return,
+            },
         };
         if v > w.sight {
             let kind = &self.items[inst.item].name;
@@ -658,6 +760,36 @@ impl<'a> Gen<'a> {
 
     fn walk_stmt(&mut self, kinds: &Kinds, w: &mut Walk, s: &'a Stmt, out: &mut Out) {
         let eater = &kinds.defs[usize::from(w.kind)].name;
+        // An action inside `for each` (`next` is not one).
+        let acts = match s {
+            Stmt::Move(_, at)
+            | Stmt::Drink(_, at)
+            | Stmt::Eat(_, at)
+            | Stmt::Hit(_, at)
+            | Stmt::Graze(_, at)
+            | Stmt::Transfer { at, .. }
+            | Stmt::Spawn { pos: at, .. }
+            | Stmt::Become { at, .. }
+            | Stmt::Idle(at)
+            | Stmt::Die(at) => Some(at),
+            _ => None,
+        };
+        if let Some(at) = acts
+            && w.each > 0
+        {
+            match &w.each_call {
+                Some((sub, call)) => out.warn(
+                    call,
+                    format!(
+                        "`{sub}` acts: a call inside `for each` traps when the loop finds a second cell"
+                    ),
+                ),
+                None => out.warn(
+                    at,
+                    "an action inside `for each` traps when the loop finds a second cell".into(),
+                ),
+            }
+        }
         match s {
             Stmt::Eat(t, at) | Stmt::Hit(t, at) | Stmt::Graze(t, at) => {
                 let verb = match s {
@@ -672,6 +804,27 @@ impl<'a> Gen<'a> {
                 if let Target::Named(n, _) = t
                     && let Some(Some(m)) = w.bound(n)
                 {
+                    // `eat` and `hit` reach the standing layer, `graze` the cover.
+                    let cover = |v: &u16| kinds.defs[usize::from(*v)].cover;
+                    if matches!(s, Stmt::Graze(..)) {
+                        if !m.ids.is_empty() && !m.ids.iter().any(cover) {
+                            out.warn(
+                                at,
+                                format!(
+                                    "`{eater}` grazes `{}`, which stands: `graze` reaches only ground cover",
+                                    m.shown
+                                ),
+                            );
+                        }
+                    } else if !m.ids.is_empty() && m.ids.iter().all(cover) {
+                        out.warn(
+                            at,
+                            format!(
+                                "`{eater}` {verb} `{}`, which is ground cover: `eat` and `hit` reach only the standing actor there (use `graze`)",
+                                m.shown
+                            ),
+                        );
+                    }
                     for &v in &m.ids {
                         let victim = &kinds.defs[usize::from(v)];
                         if victim.need_named("health").is_none() {
@@ -701,18 +854,30 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, e, out);
                 }
             }
-            Stmt::Become { kind, .. } => {
+            Stmt::Become { kind, at } => {
                 if let Some(k) = self.kind_id(kind) {
                     w.makes.insert(k);
+                    w.becomes.insert(k);
+                    if kinds.defs[usize::from(k)].cover != kinds.defs[usize::from(w.kind)].cover {
+                        out.warn(
+                            at,
+                            format!(
+                                "`{eater}` becomes `{kind}`, but a row cannot change layers: always REFUSED"
+                            ),
+                        );
+                    }
                 }
             }
             Stmt::Look(e) => {
                 w.sets_look = true;
                 self.walk_expr(kinds, w, e, out);
             }
+            Stmt::Let { name, value, .. } => {
+                self.walk_expr(kinds, w, value, out);
+                w.hidden.push(name.clone());
+            }
             Stmt::Set { value, .. }
             | Stmt::Assign { value, .. }
-            | Stmt::Let { value, .. }
             | Stmt::Signal(value)
             | Stmt::Mark(_, value, _) => self.walk_expr(kinds, w, value, out),
             Stmt::If { cond, then, els } => {
@@ -748,18 +913,40 @@ impl<'a> Gen<'a> {
                 self.radius(w, r, at, out);
                 let m = self.matcher(kinds, w, pred);
                 w.binds.push((bind.clone(), m));
+                w.each += 1;
                 self.walk_stmts(kinds, w, body, out);
+                w.each -= 1;
                 w.binds.pop();
             }
-            Stmt::Call { name, args, .. } => self.walk_call(kinds, w, name, args, out),
+            Stmt::Call { name, args, at } => self.walk_call(kinds, w, name, args, at, out),
             Stmt::Return { value, .. } => {
                 if let Some(e) = value {
                     self.walk_expr(kinds, w, e, out);
                 }
             }
-            Stmt::Transfer { target, amount, .. } => {
+            Stmt::Transfer {
+                give,
+                target,
+                amount,
+                at,
+                ..
+            } => {
                 self.walk_target(kinds, w, target, out);
                 self.walk_expr(kinds, w, amount, out);
+                if let Target::Named(n, _) = target
+                    && let Some(Some(m)) = w.bound(n)
+                    && !m.ids.is_empty()
+                    && m.ids.iter().all(|&v| kinds.defs[usize::from(v)].cover)
+                {
+                    let verb = if *give { "gives to" } else { "takes from" };
+                    out.warn(
+                        at,
+                        format!(
+                            "`{eater}` {verb} `{}`, which is ground cover: `take` and `give` reach only the standing actor there",
+                            m.shown
+                        ),
+                    );
+                }
             }
             Stmt::Move(t, _) => self.walk_target(kinds, w, t, out),
             Stmt::Idle(_) | Stmt::Die(_) | Stmt::Next(..) => {}
@@ -806,12 +993,12 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, a, out);
                 }
             }
-            Expr::Call { name, args, .. } => self.walk_call(kinds, w, name, args, out),
+            Expr::Call { name, args, at } => self.walk_call(kinds, w, name, args, at, out),
             Expr::Dist(t)
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
-            | Expr::SignalOf(t) => self.walk_target(kinds, w, t, out),
+            | Expr::SignalOf(t, _) => self.walk_target(kinds, w, t, out),
             Expr::Scent(_, t, _) => {
                 if let Some(t) = t {
                     self.walk_target(kinds, w, t, out);
@@ -846,11 +1033,27 @@ impl<'a> Gen<'a> {
         w: &mut Walk,
         name: &str,
         args: &'a [Arg],
+        at: &Pos,
         out: &mut Out,
     ) {
-        if w.depth >= 8 {
+        if w.depth as usize >= FRAMES {
             return;
         }
+        if w.walks >= WALKS {
+            if w.walks == WALKS {
+                w.walks += 1;
+                out.push(
+                    Level::Note,
+                    at,
+                    format!(
+                        "`{}`: the lint stopped following calls after {WALKS} sub walks",
+                        kinds.defs[usize::from(w.kind)].name
+                    ),
+                );
+            }
+            return;
+        }
+        w.walks += 1;
         let ki = self.kind_insts[usize::from(w.kind)];
         let (sub, owner): (&'a SubAst, Option<usize>) =
             match self.insts[ki].members.iter().find(|(n, ..)| n == name) {
@@ -862,58 +1065,60 @@ impl<'a> Gen<'a> {
             };
         let mut binds = Vec::new();
         let mut ints = Vec::new();
+        let hidden = |n: &str| w.hidden.iter().any(|h| h == n);
         for ((p, ty), a) in sub.params.iter().zip(args) {
             match (ty, a) {
                 (Ty::Pred, Arg::Pred(pred)) => {
                     binds.push((p.clone(), self.matcher(kinds, w, pred)))
                 }
                 (Ty::Pred, Arg::Name(n, at)) => {
-                    let pred = Pred::Kind(n.clone(), false, at.clone());
+                    let pred = match pred_word(n) {
+                        Some(p) if w.bound(n).is_none() => p,
+                        _ => Pred::Kind(n.clone(), false, at.clone()),
+                    };
                     binds.push((p.clone(), self.matcher(kinds, w, &pred)));
                 }
                 (Ty::Target, Arg::Name(n, _) | Arg::Target(Target::Named(n, _))) => {
                     binds.push((p.clone(), w.bound(n).cloned().flatten()));
                 }
                 (Ty::Int, Arg::Expr(e)) => {
-                    if let Ok(v) = self.fold(e) {
+                    if let Some(v) = self.fold_known(e, &self.here, hidden) {
                         ints.push((p.clone(), v));
                     }
                 }
                 (Ty::Int, Arg::Name(n, at)) => {
-                    if let Ok(v) = self.fold(&Expr::Name(n.clone(), at.clone())) {
+                    let e = Expr::Name(n.clone(), at.clone());
+                    if let Some(v) = self.fold_known(&e, at, hidden) {
                         ints.push((p.clone(), v));
                     }
                 }
                 _ => {}
             }
         }
+        let hidden = sub
+            .params
+            .iter()
+            .filter(|(p, _)| !ints.iter().any(|(i, _)| i == p))
+            .map(|(p, _)| p.clone())
+            .collect();
         let saved = (
             std::mem::replace(&mut w.binds, binds),
-            std::mem::take(&mut w.ints),
+            std::mem::replace(&mut w.hidden, hidden),
             self.params.clone(),
         );
+        let each_call = w.each_call.clone();
+        if w.each > 0 && w.each_call.is_none() {
+            w.each_call = Some((name.to_string(), at.clone()));
+        }
         // A member sub sees its owner's parameters; a file sub only its own.
         self.params = owner.map(|o| self.scope_of(o)).unwrap_or_default();
-        self.params.extend(ints.iter().cloned());
-        w.ints = ints;
+        self.params.extend(ints);
         w.depth += 1;
         self.walk_stmts(kinds, w, &sub.body, out);
         w.depth -= 1;
-        (w.binds, w.ints, self.params) = saved;
+        (w.binds, w.hidden, self.params) = saved;
+        w.each_call = each_call;
     }
-}
-
-/// Does this body (or anything nested in it) set `look`?
-fn sets_look(body: &[Stmt]) -> bool {
-    body.iter().any(|s| match s {
-        Stmt::Look(_) => true,
-        Stmt::If { then, els, .. } => sets_look(then) || sets_look(els),
-        Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
-            sets_look(body)
-        }
-        Stmt::Choose(arms) => arms.iter().any(|(_, b)| sets_look(b)),
-        _ => false,
-    })
 }
 
 /// Ticks as the rules write them: `30min`, `2h`, `1d`, else a count.
@@ -994,6 +1199,67 @@ mod tests {
                 .any(|d| d.contains("nothing marks") || d.contains("no rule sets")),
             "{got:?}"
         );
+        // A file sub that sets `look` counts only for the kinds that call it.
+        let got = lint(
+            "sub show() { look = 2 }
+             kind a { when true => idle }
+             kind b { when true => show() }
+             kind c { mem m
+               when nearest a:2 within 3 as o => m = 1
+               when nearest b:2 within 3 as o => m = 2 }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`c` looks for `a:2`, but no rule of `a` sets `look`")),
+            "{got:?}"
+        );
+        assert!(!got.iter().any(|d| d.contains("`b:2`")), "{got:?}");
+        let got = lint(
+            "sub show() { look = 1 }
+             kind q { when true => idle }
+             kind p { mem m  when nearest q:1 within 3 as o => m = 1 }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`p` looks for `q:1`, but no rule of `q` sets `look`")),
+            "{got:?}"
+        );
+        // Every actor starts at look 0, and `become` keeps the look.
+        let got = lint(
+            "kind a { sight 4 mem n
+               when nearest b:0 within 3 as t => move toward t
+               when n == 0 => { n = count a within 2 } }
+             kind b { when 1 => idle }",
+        );
+        assert!(!got.iter().any(|d| d.contains("sets `look`")), "{got:?}");
+        let chick = "kind chick { when 1 => idle }
+                     kind q { sight 4 mem m  when nearest chick:3 within 3 as t => { m = 1 } }";
+        let egg =
+            "kind egg { mem n  when n == 0 => { look = 3  n = 1 }  when n == 1 => become chick }\n";
+        let got = lint(&[egg, chick].concat());
+        assert!(!got.iter().any(|d| d.contains("sets `look`")), "{got:?}");
+        let got = lint(chick);
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`q` looks for `chick:3`, but no rule of `chick` sets `look`")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn a_read_in_a_file_sub_points_at_the_read() {
+        let got = lint(
+            "sub helper(t: target) {
+               return 1 +
+                 signal_of(t)
+             }
+             kind p { sight 4 mem n  when nearest p within 3 as t => { n = helper(t) } }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d == "3: sub `helper` reads `signal_of`, but no rule sets `signal`"),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1038,6 +1304,57 @@ mod tests {
     }
 
     #[test]
+    fn the_cover_and_standing_layers() {
+        let grass =
+            "kind grass { cover  need health max 5 decay 0 vital  food 1h  when true => idle }\n";
+        let got = lint(
+            &[
+                grass,
+                "kind goat { need food max 1d vital  when nearest grass within 1 as g => eat g }
+             kind cow { when nearest grass within 1 as g => hit g }
+             kind seed { need health max 1 decay 0 vital }
+             kind hen { need food max 1d vital  when nearest seed within 1 as s => graze s }
+             kind clover { cover  need nectar max 100 decay 0 }
+             kind bee { need nectar max 100 decay 0
+               when nearest clover within 1 as c => take c nectar 10 }
+             kind moth { mem n  when n == 0 => { n = 1  become grass } }",
+            ]
+            .concat(),
+        );
+        for want in [
+            "`goat` eats `grass`, which is ground cover: `eat` and `hit` reach only the standing actor there (use `graze`)",
+            "`cow` hits `grass`, which is ground cover",
+            "`hen` grazes `seed`, which stands: `graze` reaches only ground cover",
+            "`bee` takes from `clover`, which is ground cover: `take` and `give` reach only the standing actor there",
+            "`moth` becomes `grass`, but a row cannot change layers: always REFUSED",
+        ] {
+            assert!(got.iter().any(|d| d.contains(want)), "{want}: {got:?}");
+        }
+        let got = lint(
+            &[
+                grass,
+                "trait food_ { tags edible }
+             kind seed extends food_ { need health max 1 decay 0 vital  tags edible }
+             kind moss { cover  need health max 1 decay 0 vital  tags edible }
+             kind goat { need food max 1d vital
+               when nearest grass within 1 as g => graze g
+               when nearest seed within 1 as s => eat s
+               when nearest edible within 1 as e => eat e }
+             kind seedling { mem n  when n == 0 => { n = 1  become seed } }
+             kind bee { need nectar max 100 decay 0
+               when nearest seed within 1 as s => give s nectar 1 }",
+            ]
+            .concat(),
+        );
+        assert!(
+            !got.iter().any(|d| d.contains("ground cover")
+                || d.contains("which stands")
+                || d.contains("change layers")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
     fn a_radius_beyond_sight() {
         let bad = "trait looker(r) { when count water within r > 0 => idle }
                    sub scan(n) { if nearest free within n as c { move toward c } }
@@ -1065,13 +1382,31 @@ mod tests {
         let near = "kind owl { sight 8  gene reach = 6 from 1 to 8
                       when count water within reach > 0 => idle }";
         assert!(!has(near, "exceeds its sight"));
+        // A local or a sub's parameter hides a constant of the same name.
+        for good in [
+            "const w = 99 kind owl { when 1 => { let w = 2  let n = count owl within w  idle } }",
+            "const w = 99 sub scan(w) { if nearest free within w as c { move toward c } }
+             kind owl { when true => scan(hour) }",
+            "const w = 99 sub scan(w) { let n = count owl within w }
+             sub outer(w) { scan(w) } kind owl { when true => outer(hour) }",
+        ] {
+            assert!(!has(good, "exceeds its sight"), "{good}");
+        }
     }
 
     #[test]
-    fn a_need_that_empties_before_the_first_think() {
+    fn a_need_that_empties_between_thinks() {
         assert!(has(
             "kind moth { cadence 1024  need water max 30min vital }",
-            "`moth`: need `water` (max 30min) empties before its first think (cadence 1024 ticks)"
+            "`moth`: need `water` (max 30min) empties by its next think, even when refilled (cadence 1024 ticks)"
+        ));
+        assert!(has(
+            "kind moth { cadence 64  need water max 64 vital }",
+            "`moth`: need `water` (max 64 ticks) empties by its next think"
+        ));
+        assert!(!has(
+            "kind moth { cadence 64  need water max 65 vital }",
+            "empties"
         ));
         assert!(!has(
             "kind moth { cadence 64  need water max 30min vital }",
@@ -1096,6 +1431,43 @@ mod tests {
             "kind ant { mem n  when true => { for each free within 1 as c { n += 1 }  idle } }",
             "inside `for each`"
         ));
+        assert!(has(
+            "kind ant { when true => for each free within 1 as c { idle } }",
+            "an action inside `for each` traps"
+        ));
+        // A sub that acts, called in the loop: the warning is at the call.
+        let got = lint(
+            "sub flee(t: target) { move away t }
+             kind p { glyph \"p\" sight 4
+               when 1 => { for each p within 3 as t {
+                 flee(t) } } }",
+        );
+        assert!(
+            got.iter().any(|d| d
+                == "4: `flee` acts: a call inside `for each` traps when the loop finds a second cell"),
+            "{got:?}"
+        );
+        // `next` is not an action.
+        assert!(!has(
+            "kind ant { mem n  state A { when true => for each free within 1 as c { n += 1  next B } }  state B { when true => idle } }",
+            "inside `for each`"
+        ));
+    }
+
+    #[test]
+    fn a_sub_that_calls_itself_many_times_lints_quickly() {
+        // 16 calls a level, 8 levels deep: 16^8 walks, unless budgeted.
+        let text = format!(
+            "sub f(n) {{ if n > 0 {{ {} }} }}
+             kind r {{ mem m  when m == 0 => {{ f(1)  m = 1 }} }}",
+            "f(n - 1) ".repeat(16)
+        );
+        let got = lint(&text);
+        assert!(
+            got.iter()
+                .any(|d| d.contains("`r`: the lint stopped following calls after 65536 sub walks")),
+            "{got:?}"
+        );
     }
 
     #[test]
@@ -1136,5 +1508,48 @@ mod tests {
                       state B { when true => idle } }";
         let got = lint(good);
         assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn a_const_used_only_in_a_declaration() {
+        let got = lint(
+            "const S = 2 const R = 8 const C = 4 const M = 50 const F = 3 const B = 2 const U = 512 const Z = 1
+             trait looker(r) { when count water within r > 0 => idle }
+             kind owl extends looker(S) { sight R cadence C fuel U food F bite B
+               need food max M  need health max 5 decay 0 vital
+               inherit looker }",
+        );
+        for c in ["S", "R", "C", "M", "F", "B", "U"] {
+            let not = format!("const `{c}` is never used");
+            assert!(!got.iter().any(|d| d.contains(&not)), "{not}: {got:?}");
+        }
+        assert!(
+            got.iter().any(|d| d.contains("const `Z` is never used")),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn the_start_state_may_be_inherited() {
+        // k's states: t's first, so k starts in A though it lists B first.
+        let pack = "trait t { state A { when true => idle } }
+                    kind k extends t { state B { when true => idle }  state A { when true => idle } }";
+        let got = lint(pack);
+        assert!(!got.iter().any(|d| d.contains("state `A`")), "{got:?}");
+        assert!(
+            got.iter()
+                .any(|d| d.contains("state `B` of kind `k` is never entered")),
+            "{got:?}"
+        );
+        // Another kind that starts in a `B` does not enter k's.
+        let got = lint(&format!(
+            "{pack}\nkind u {{ state B {{ when true => idle }} }}"
+        ));
+        assert!(
+            got.iter()
+                .any(|d| d.contains("state `B` of kind `k` is never entered")),
+            "{got:?}"
+        );
+        assert!(!got.iter().any(|d| d.contains("of kind `u`")), "{got:?}");
     }
 }

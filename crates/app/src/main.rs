@@ -20,18 +20,24 @@
 //! where kinds start) instead of the built-in `scenarios/default.scenario`;
 //! `[width height seed]` override its size and seed. `lint` checks the
 //! scenario against the rules.
-//! `play` and `run` open the world in `save_dir` if one exists (scenario and
-//! size/seed args are then ignored), otherwise create it. A save opens
+//! `play`, `run` and `why` open the world in `save_dir` if one exists
+//! (scenario and size/seed args are then ignored), otherwise make it (`play`
+//! creates the directory; `run` and `why` create nothing on disk). A save opens
 //! under rules that number its kinds differently (matched by name). `run`
 //! never saves: run it twice, or with `WMC_THREADS=1` and again without,
 //! and the checksums must match. `show` and `run` are headless: a bare
 //! `bevy_ecs` world, no `App`.
+
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 use std::io::Write;
 use std::time::Instant;
 
 use anyhow::{Context, bail};
 use sim_core::actors::{Tally, life};
-use sim_core::scenario::{Check, Placement, Start};
+use sim_core::scenario::{Check, MAX_SIZE_CHUNKS, Placement, Start};
 use sim_core::time::Clock;
 use sim_core::{ChunkActors, ChunkCells, Feature, Ground, Kinds, LoadPolicy, Pos, Stage, Store};
 use sim_core::{Scenario, par, sim, stage};
@@ -51,6 +57,16 @@ struct Setup {
     scenario: Scenario,
     /// The scenario's file, for errors.
     name: String,
+}
+
+/// A command's save directory argument: there, and not an empty path (which
+/// would be the working directory).
+fn save_dir<'a>(arg: Option<&'a String>, command: &str) -> anyhow::Result<&'a str> {
+    let dir = arg.with_context(|| format!("{command} needs a save directory"))?;
+    if dir.is_empty() {
+        bail!("{command} needs a save directory, not an empty path");
+    }
+    Ok(dir)
 }
 
 /// Take `--flag` out of `args`: was it there?
@@ -75,7 +91,14 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Vec<String>> 
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `env::args` panics on one that is not UTF-8.
+    let mut args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| {
+            a.into_string()
+                .map_err(|a| anyhow::anyhow!("argument {a:?} is not UTF-8"))
+        })
+        .collect::<anyhow::Result<_>>()?;
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
     let strict = take_switch(&mut args, "--strict");
@@ -83,21 +106,31 @@ fn main() -> anyhow::Result<()> {
         let n: usize = n
             .parse()
             .ok()
-            .filter(|&n| n >= 1)
-            .context("--threads needs a count")?;
+            .filter(|n| (1..=par::MAX_THREADS).contains(n))
+            .with_context(|| format!("--threads needs a count from 1 to {}", par::MAX_THREADS))?;
         par::init_task_pool_with(Some(n));
+    } else {
+        // Checked here: the pool reads it when a world is made, and panics.
+        par::env_threads().map_err(anyhow::Error::msg)?;
+    }
+    // `-v` and negative coordinates start with one `-`, a flag with two.
+    if let Some(f) = args.iter().find(|a| a.starts_with("--")) {
+        bail!("unknown flag {f}");
+    }
+    if strict && args.first().map(String::as_str) != Some("lint") {
+        bail!("--strict is only for lint");
     }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
         Some("show") => show(&setup(&args[1..])?),
         Some("play") => {
-            let dir = args.get(1).context("play needs a save directory")?;
+            let dir = save_dir(args.get(1), "play")?;
             let s = setup(&args[2..])?;
             play::run(dir, &s.scenario, &s.name, &s.packs)
         }
         Some("run") => {
-            let dir = args.get(1).context("run needs a save directory")?;
+            let dir = save_dir(args.get(1), "run")?;
             let ticks = args
                 .get(2)
                 .context("run needs a tick count")?
@@ -108,7 +141,7 @@ fn main() -> anyhow::Result<()> {
         Some("why") => {
             let verbose = args.get(1).is_some_and(|a| a == "-v");
             let a = &args[1 + usize::from(verbose)..];
-            let dir = a.first().context("why needs a save directory")?;
+            let dir = save_dir(a.first(), "why")?;
             let coord = |i: usize, what: &str| -> anyhow::Result<i32> {
                 a.get(i)
                     .with_context(|| format!("why needs {what}"))?
@@ -130,17 +163,23 @@ fn main() -> anyhow::Result<()> {
         }
         Some("scenario") => {
             let f = args.get(1).context("scenario needs a scenario file")?;
+            if let Some(a) = args.get(2) {
+                bail!("scenario takes one file; unexpected {a:?}");
+            }
             scenario_test(f, &packs)
         }
         Some("lint") => {
-            let mut packs: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
-            if packs.is_empty()
-                && let Some(f) = file
-            {
-                packs = scenario(Some(f))?.packs;
-            }
+            // As for a new world: these, else `WMC_RULES`, else the scenario's.
+            let cli: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            let from_scenario = match file {
+                Some(f) => scenario(Some(f))?.packs,
+                None => Vec::new(),
+            };
+            let packs = app::packs_or(&cli, &from_scenario);
             if packs.is_empty() {
-                bail!("lint needs a rules directory or file, or a scenario that names its rules");
+                bail!(
+                    "lint needs a rules directory or file (or WMC_RULES), or a scenario that names its rules"
+                );
             }
             lint(&packs, file, strict)
         }
@@ -192,24 +231,45 @@ fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Re
     if let Some(seed) = num(2, "seed")? {
         s.seed = seed;
     }
+    if let Some(a) = args.get(3) {
+        bail!("unexpected argument {a:?} after [width height seed]");
+    }
+    // What a `size` line is held to (the scenario's own already was).
+    if s.width == 0 || s.height == 0 {
+        bail!("width and height are at least 1");
+    }
+    let chunks = u64::from(s.width.div_ceil(64)) * u64::from(s.height.div_ceil(64));
+    if chunks > MAX_SIZE_CHUNKS {
+        bail!(
+            "{}x{} is {chunks} chunks; a new world generates at most {MAX_SIZE_CHUNKS} up front",
+            s.width,
+            s.height
+        );
+    }
+    if let Some(m) = &s.map
+        && (s.width < m.width || s.height < m.height)
+    {
+        bail!(
+            "{}x{} is smaller than the map of {}, which is {}x{}",
+            s.width,
+            s.height,
+            file.unwrap_or("the scenario"),
+            m.width,
+            m.height
+        );
+    }
     Ok(Setup {
         packs,
         scenario: s,
-        name: file.unwrap_or("default.scenario").to_string(),
+        name: file.unwrap_or(app::DEFAULT_SCENARIO).to_string(),
     })
 }
 
 /// A new world of the setup's scenario under `kinds`; says which file does
 /// not fit.
 fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
-    sim::new_world_with(&setup.scenario, kinds).map_err(|e| {
-        let hint = if setup.name == "default.scenario" {
-            " (these rules need their own scenario: --scenario <file>)"
-        } else {
-            ""
-        };
-        anyhow::anyhow!("{}: {e}{hint}", setup.name)
-    })
+    sim::new_world_with(&setup.scenario, kinds)
+        .map_err(|e| app::new_world_error(&setup.name, setup.scenario.line_of(&e), e))
 }
 
 fn show(setup: &Setup) -> anyhow::Result<()> {
@@ -262,13 +322,15 @@ fn show(setup: &Setup) -> anyhow::Result<()> {
 }
 
 /// The world saved in `dir` with the chunks around its camera, else a new
-/// one of the setup (its initial region loaded). Never saved by the caller.
+/// one of the setup (its initial region loaded). Never saved by the caller,
+/// so it creates nothing on disk: no world there is a world in memory.
 fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
-    let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
+    let store = Store::at(dir);
     let kinds = app::rules_for(&store, &setup.packs, &setup.scenario.packs)?;
     Ok(
         match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
             Some(mut w) => {
+                app::say_skipped_starts(&w);
                 let camera = play::camera_for(&w, &store);
                 sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
                     .context("streaming chunks")?;
@@ -279,8 +341,9 @@ fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     )
 }
 
-/// `wmc why`: step `ticks`, then wait (up to a day) for the actor at `p`
-/// to be due, explain that think, and run it to show where it went.
+/// `wmc why`: step `ticks`, then wait (up to its cadence, at least a day)
+/// for the actor at `p` to be due, explain that think, and run it to show
+/// where it went.
 fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Result<()> {
     let mut world = open_or_new(dir, setup)?;
     for _ in 0..ticks {
@@ -295,26 +358,31 @@ fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Resul
         );
     };
     let uid = first.before.uid;
-    let mut at = p;
     let mut waited = 0u64;
-    while !sim::explain(&world, at).is_some_and(|e| e.due) {
-        if waited == sim_core::TICKS_PER_DAY {
-            bail!("it did not think within a day");
+    let (at, e) = loop {
+        let (at, cc, slot) =
+            sim::find_uid(&mut world, uid).context("it died or was eaten before its next think")?;
+        let e = sim::explain_slot(&world, cc, slot).expect("a loaded row");
+        if e.due {
+            break (at, e);
+        }
+        // Its own cadence (a `become` may change it), at least a day.
+        let limit = world
+            .resource::<Kinds>()
+            .def(e.row.kind)
+            .cadence()
+            .max(sim_core::TICKS_PER_DAY);
+        if waited >= limit {
+            bail!("it did not think within {limit} ticks");
         }
         sim::step(&mut world);
         waited += 1;
-        at =
-            sim::find_uid(&mut world, uid).context("it died or was eaten before its next think")?;
-    }
+    };
     let mut out = std::io::stdout().lock();
     if waited > 0 {
         writeln!(out, "(stepped {waited} ticks to its next think)")?;
     }
-    write!(
-        out,
-        "{}",
-        app::why::report(&world, at, ops).expect("found it there")
-    )?;
+    write!(out, "{}", app::why::report_of(&world, at, &e, ops))?;
     sim::step(&mut world);
     writeln!(out, "after   {}", app::why::after(&mut world, uid))?;
     Ok(())
@@ -377,7 +445,7 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
         "kind", "alive", "born", "became", "eaten", "died", "thinks", "ops/think", "traps"
     )?;
     for (i, name) in kinds.names().enumerate() {
-        let k = i as u16;
+        let k = u16::try_from(i).expect("kind ids are u16");
         let thinks = tally.get(k, life::THINKS);
         writeln!(
             out,
@@ -403,7 +471,10 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
     let s = scenario(Some(file))?;
     let kinds = app::compile(&app::packs_or(packs, &s.packs))?;
     app::warn(&kinds);
-    let mut world = sim::new_world_with(&s, kinds).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+    let mut world = sim::new_world_with(&s, kinds).map_err(|e| match s.line_of(&e) {
+        Some(line) => anyhow::anyhow!("{file}:{line}: {e}"),
+        None => anyhow::anyhow!("{file}: {e}"),
+    })?;
     let mut out = std::io::stdout().lock();
     let (mut checked, mut failed) = (0, 0);
     for c in &s.checks {
@@ -445,23 +516,38 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
 
 /// Compile rule packs and print their kind table and the author lint: the
 /// fast way to check a rules file before a world runs it. With a scenario,
-/// check that its starts fit the rules too, and which kinds never appear.
+/// check that its starts and its `expect` lines fit the rules too, which
+/// kinds never appear, and which starts lie outside the initial region.
 /// `strict`: any warning fails (for CI).
-fn lint(packs: &[String], scenario_file: Option<&str>, strict: bool) -> anyhow::Result<()> {
-    let paths: Vec<std::path::PathBuf> = packs.iter().map(Into::into).collect();
-    let kinds = app::compile(&paths)?;
+fn lint(
+    packs: &[std::path::PathBuf],
+    scenario_file: Option<&str>,
+    strict: bool,
+) -> anyhow::Result<()> {
+    let kinds = app::compile(packs)?;
     let scenario = match scenario_file {
         Some(f) => {
             let s = scenario(Some(f))?;
-            Placement::resolve(&s.starts, &kinds, &s.terrain())
-                .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+            Placement::resolve(&s.starts, &kinds, &s.terrain()).map_err(|e| {
+                match s.line_of(&e) {
+                    Some(line) => anyhow::anyhow!("{f}:{line}: {e}"),
+                    None => anyhow::anyhow!("{f}: {e}"),
+                }
+            })?;
+            for c in &s.checks {
+                if let Check::Expect { line, what, .. } = c {
+                    sim::check_expect(&kinds, what)
+                        .map_err(|e| anyhow::anyhow!("{f}:{line}: {e}"))?;
+                }
+            }
             Some((f, s))
         }
         None => None,
     };
     let mut diagnostics = kinds.debug.diagnostics.clone();
-    if let Some((_, s)) = &scenario {
+    if let Some((f, s)) = &scenario {
         diagnostics.extend(s.unseen(&kinds));
+        diagnostics.extend(s.outside_region(f));
     }
     let mut out = std::io::stdout().lock();
     if !kinds.debug.traits.is_empty() {

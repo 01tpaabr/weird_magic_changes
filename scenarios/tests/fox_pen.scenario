@@ -24,3 +24,4 @@ expect count chicken == 0          # both hens eaten
 expect eaten chicken == 2
 expect count fox == 2
 expect min food of fox > 23h       # a hen is a fox's day: each ate a whole one
+expect traps fox == 0              # no think ran out of fuel or faulted

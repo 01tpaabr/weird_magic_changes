@@ -10,12 +10,15 @@
 //! mems at 0), each gene by name (clamped to the new range; new ones at
 //! their default), the state by its name (else the first), each scent channel
 //! by its name (else empty). A kind cannot move between standing and ground
-//! cover (refused: restart).
+//! cover (refused: restart). The world's starts are all kept: one whose
+//! kind is gone places nobody (a share keeps its interval, so the others
+//! keep their cells) and starts again when the kind comes back.
 //!
 //! Saved chunks are rewritten on disk, every file, before the world file
 //! gets the new kind table, so a save directory never mixes two numberings.
-//! A crash in the middle of that rewrite leaves it mixed; it is not
-//! journalled.
+//! Every file is read and checked before the first is written: a bad one
+//! refuses the move with nothing written. An I/O error or a crash in the
+//! middle of the writes leaves it mixed; it is not journalled.
 //!
 //! Reload is a dev tool. It is an input the replay log does not record: a
 //! world that was reloaded is not reproducible from its seed alone.
@@ -24,10 +27,10 @@ use bevy_ecs::prelude::*;
 
 use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
-    Tally, flags,
+    Tally, flags, slot_u16,
 };
 use crate::rules::{GeneDef, Kinds};
-use crate::scenario::{Placement, present};
+use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
 use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, SCENT_CHANNELS, Stage};
 use crate::store::{SavedKind, Store};
@@ -42,6 +45,12 @@ pub struct Reload {
     pub rewritten: usize,
     /// The new rules hash.
     pub hash: u64,
+    /// Why the world file was not written, if it was not. The new rules are
+    /// installed all the same; the next save writes it.
+    pub world_file: Option<String>,
+    /// The starts naming a kind the new rules lack, as written: kept in
+    /// the save, they place nobody until the kind is back.
+    pub skipped_starts: Vec<String>,
 }
 
 /// Where one old kind's rows go.
@@ -121,7 +130,10 @@ impl Plan {
             t.states = od
                 .states
                 .iter()
-                .map(|s| ns.iter().position(|n| n == s).unwrap_or(0) as u8)
+                .map(|s| {
+                    let i = ns.iter().position(|n| n == s).unwrap_or(0);
+                    u8::try_from(i).expect("at most MAX_STATES states")
+                })
                 .collect();
             kinds.push(Some(t));
         }
@@ -167,7 +179,8 @@ impl Plan {
                 Some(t) => {
                     actors.pubs[slot].kind = t.kind;
                     let cover = row.flags & flags::COVER != 0;
-                    actors.layer(cover)[usize::from(row.cell)] = ActorId::pack(t.kind, slot as u16);
+                    actors.cells.layer_mut(cover)[usize::from(row.cell)] =
+                        ActorId::pack(t.kind, slot_u16(slot));
                     let old = actors.minds[slot];
                     let m = &mut actors.minds[slot];
                     for i in 0..NEED_SLOTS {
@@ -205,6 +218,8 @@ impl Plan {
 }
 
 /// Rewrite every chunk file in `store` through `plan`, in coordinate order.
+/// Every file is read and checked first, so a bad one refuses the whole
+/// rewrite with nothing written; then each is read again and written.
 /// Dropped rows are counted per old kind, except in the chunks `loaded`
 /// (their rows in memory are the ones that count). Returns the files
 /// rewritten.
@@ -214,21 +229,28 @@ pub fn rewrite_saved(
     loaded: &[ChunkCoord],
     dropped: &mut [usize],
 ) -> Result<usize, String> {
+    let coords = store
+        .saved_chunks()
+        .map_err(|e| format!("listing saved chunks: {e}"))?;
+    let read = |c: ChunkCoord| {
+        let saved = store.read_chunk(c).map_err(|e| e.to_string())?;
+        if let Some(s) = &saved {
+            s.data
+                .validate(plan.old_kinds())
+                .map_err(|e| format!("saved chunk {c:?}: {e}"))?;
+        }
+        Ok::<_, String>(saved)
+    };
+    for &c in &coords {
+        read(c)?;
+    }
     let mut scratch = vec![0usize; plan.old_kinds()];
     let mut rewritten = 0;
-    for c in store
-        .saved_chunks()
-        .map_err(|e| format!("listing saved chunks: {e}"))?
-    {
-        let Some(mut saved) = store
-            .read_chunk(c)
-            .map_err(|e| format!("reading saved chunk {c:?}: {e}"))?
-        else {
+    for c in coords {
+        let Some(mut saved) = read(c)? else {
             continue;
         };
         let d = &mut saved.data;
-        d.validate(plan.old_kinds())
-            .map_err(|e| format!("saved chunk {c:?}: {e}"))?;
         let counts = if loaded.contains(&c) {
             &mut scratch[..]
         } else {
@@ -245,9 +267,12 @@ pub fn rewrite_saved(
 
 /// Swap in `new` rules (see the module doc). With a `store`, every saved
 /// chunk is rewritten and the world file updated. On an error nothing in
-/// the world has changed yet, except for a failed disk rewrite part-way
-/// (reported; the chunks already rewritten are consistent with the new
-/// rules, which are then not installed).
+/// the world or the store has changed yet (a bad chunk file refuses the
+/// rewrite before any is written), except for a chunk write that fails
+/// part-way (reported; the chunks already rewritten are consistent with the
+/// new rules, which are then not installed). The world file is written last,
+/// after the new rules are installed: if that fails, the reload still
+/// happened and [`Reload::world_file`] says why (the next save writes it).
 pub fn reload_rules(
     world: &mut World,
     store: Option<&Store>,
@@ -263,7 +288,7 @@ pub fn reload_rules(
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);
-        let placement = Placement::resolve(&starts, &new, &c.terrain())?;
+        let placement = Placement::resolve_saved(&starts, &new, &c.terrain())?;
         (starts, placement)
     };
     let mut dropped = vec![0usize; old.len()];
@@ -285,7 +310,7 @@ pub fn reload_rules(
             meta.dirty = true;
         }
     }
-    let report = Reload {
+    let mut report = Reload {
         added: new
             .names()
             .filter(|n| old.by_name(n).is_none())
@@ -299,15 +324,18 @@ pub fn reload_rules(
             .collect(),
         rewritten,
         hash: new.hash,
+        world_file: None,
+        skipped_starts: absent(&starts, &new),
     };
     world.insert_resource(new);
     world.insert_resource(Tally::default());
     let mut c = world.resource_mut::<SimConfig>();
     (c.starts, c.placement) = (starts, placement);
     if let Some(store) = store {
-        store
+        report.world_file = store
             .write_meta(&crate::sim::meta(world))
-            .map_err(|e| format!("writing the world file: {e}"))?;
+            .err()
+            .map(|e| e.to_string());
     }
     Ok(report)
 }

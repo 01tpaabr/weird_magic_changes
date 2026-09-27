@@ -19,8 +19,9 @@ const FAST_SPEED: f64 = 56.0;
 const SMOOTHING: f64 = 0.07;
 /// Below this speed with no input the camera snaps to rest.
 const REST: f64 = 0.02;
-/// Keeps `cell()` inside `i32` with room for a viewport around it.
-const LIMIT: f64 = 1e9;
+/// The edge of the world (`sim_core::WORLD_EXTENT`): keeps `cell()` inside
+/// `i32` with room for a viewport around it.
+const LIMIT: f64 = sim_core::WORLD_EXTENT as f64;
 
 /// Direction the player is pushing: each axis -1, 0 or 1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -50,12 +51,11 @@ impl ViewCamera {
     }
 
     /// The cell under the centre of the view; the streaming focus.
+    // `update` and `load` hold x and y to ±LIMIT, well inside i32; past it
+    // (a test setting them) `as` saturates, which is the edge of the world.
+    #[allow(clippy::cast_possible_truncation)]
     pub fn cell(&self) -> Pos {
         Pos::new(self.x.floor() as i32, self.y.floor() as i32)
-    }
-
-    pub fn moving(&self) -> bool {
-        self.vx != 0.0 || self.vy != 0.0
     }
 
     /// Advance by `dt` seconds under `input`. Diagonals move at the same
@@ -85,9 +85,10 @@ impl ViewCamera {
         let mut it = text.split_whitespace().map(str::parse::<f64>);
         let x = it.next()?.ok()?;
         let y = it.next()?.ok()?;
+        // Held to the limit `update` keeps, so `cell()` stays in range.
         (x.is_finite() && y.is_finite()).then_some(Self {
-            x,
-            y,
+            x: x.clamp(-LIMIT, LIMIT),
+            y: y.clamp(-LIMIT, LIMIT),
             vx: 0.0,
             vy: 0.0,
         })
@@ -151,7 +152,7 @@ mod tests {
                 fast: false,
             },
         );
-        assert!(c.moving());
+        assert!(c.vy < 0.0);
         assert!(
             c.y < 0.5 && c.y > 0.5 - SPEED / 120.0,
             "first frame is eased, not full speed"
@@ -166,7 +167,7 @@ mod tests {
             },
         );
         run(&mut c, 1.0, Input::default());
-        assert!(!c.moving());
+        assert_eq!((c.vx, c.vy), (0.0, 0.0));
         let y_rest = c.y;
         run(&mut c, 1.0, Input::default());
         assert_eq!(c.y, y_rest);
@@ -206,9 +207,23 @@ mod tests {
         c.save(&dir).unwrap();
         let back = ViewCamera::load(&dir).unwrap();
         assert_eq!((back.x, back.y), (c.x, c.y));
-        assert!(!back.moving());
+        assert_eq!((back.vx, back.vy), (0.0, 0.0));
         fs::write(dir.join("camera.txt"), "10 -4\n").unwrap();
         assert_eq!(ViewCamera::load(&dir).unwrap().cell(), Pos::new(10, -4));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_far_camera_file_loads_inside_the_limit() {
+        // `cell()` saturated at i32::MAX, and the chunks streamed around it
+        // were past the i32 cell range.
+        let dir = std::env::temp_dir().join(format!("wmc-cam-far-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("camera.txt"), "1e300 -3e9\n").unwrap();
+        let c = ViewCamera::load(&dir).unwrap();
+        assert_eq!((c.x, c.y), (LIMIT, -LIMIT));
+        let lim = LIMIT as i32;
+        assert_eq!(c.cell(), Pos::new(lim, -lim));
         fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -1,22 +1,32 @@
 //! The rules compiler: text -> [`Kinds`] (`docs/ACTORS.md` §5).
 //!
-//! Three small passes over one file: a lexer (tokens with line and column),
-//! a recursive-descent parser (an AST per kind and per sub), and a code
-//! generator that drives [`Asm`]. Kinds are numbered in declaration order,
-//! files in sorted-name order, never directory order, so two processes agree
-//! on every kind id. Every error carries `file:line:col`; the sim never runs
-//! a program that did not compile.
+//! Passes: a lexer per file (tokens with line and column); a
+//! recursive-descent parser that adds each file's kinds, traits, subs,
+//! consts and tags to one item list; inheritance resolution (parents
+//! linearized; declarations, needs, mems, states and rule lists merged); a
+//! code generator that drives [`Asm`]; and the author lint (`lint`). Files
+//! go in sorted-name order, never directory order, and kinds are numbered
+//! in pre-order over the inheritance forest (roots in file then declaration
+//! order, each kind's children right after it), so two processes agree on
+//! every kind id and a family is one id range. Every error carries
+//! `file:line:col`; the sim never runs a program that did not compile.
 //!
-//! Subs are file-scope and shared by every kind, so inside a sub a name is a
-//! parameter or a local, never a need or a mem slot. A sub that `return`s a
+//! A file sub is shared by every kind, so inside it a name is a parameter,
+//! a local or a const, never a need or a mem slot. A member sub (a sub
+//! inside a trait or kind) is compiled per kind and sees that kind's needs,
+//! mems and states. A sub that `return`s a
 //! value anywhere is a function (usable in expressions), otherwise a
 //! procedure (a statement). Targets are `(dx, dy)` pairs: two stack values
 //! in flight, two locals at rest.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 
 use super::asm::{Asm, Label};
-use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
+use super::vm::{
+    Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
+};
 use super::{
     DEFAULT_COLOR, DebugInfo, Diagnostic, GeneDef, KindDef, Kinds, Level, NeedDef, RuleInfo,
 };
@@ -53,6 +63,14 @@ pub fn compile(file: &str, text: &str) -> Result<Kinds> {
 /// Compile several files as one rule set, in the order given (callers sort
 /// by name). Kind and sub names are global across files.
 pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
+    if let Some((name, _)) = files.get(MAX_FILES) {
+        return Err(CompileError {
+            file: name.to_string(),
+            line: 1,
+            col: 1,
+            msg: format!("at most {MAX_FILES} rules files in a rule set"),
+        });
+    }
     let mut items = Items::default();
     for (name, text) in files {
         let tokens = Lexer::new(name, text).lex()?;
@@ -60,6 +78,8 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
             file: name,
             tokens,
             at: 0,
+            depth: 0,
+            deepest: 0,
         };
         p.file(&mut items)?;
     }
@@ -67,53 +87,91 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
 }
 
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
-/// files, in sorted file-name order) or a single file; packs go in the
-/// order given, with one namespace across all of them (a name declared in
-/// two packs is an error naming both). With more than one pack, a file is
-/// named `pack/file.rules` in positions, `pack` being the directory's own
-/// name. The packs' absolute paths go in `debug.packs`: a save remembers
-/// them.
+/// files, in sorted file-name order; a directory with none is an error) or
+/// a single file; packs go in the order given, with one namespace across
+/// all of them (a name declared in two packs is an error naming both). A
+/// pack given twice loads once.
+/// With more than one pack, a directory's file is named `pack/file.rules`
+/// in positions, `pack` being the directory's own name; two files that
+/// would share a name take parent directories until they don't. The
+/// packs' absolute paths go in `debug.packs`: a save remembers them.
 pub fn compile_packs(
     packs: &[&std::path::Path],
 ) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
-    let mut texts: Vec<(String, String)> = Vec::new();
-    let mut abs = Vec::with_capacity(packs.len());
+    // Each pack once, where first given: a scenario's `rules` line and the
+    // same `--rules` are one pack.
+    let mut full_paths: Vec<(&std::path::Path, std::path::PathBuf)> = Vec::new();
     for pack in packs {
         let full = std::fs::canonicalize(pack).map_err(|e| format!("{}: {e}", pack.display()))?;
-        let files = if full.is_dir() {
-            let mut v: Vec<_> = std::fs::read_dir(&full)
+        if !full_paths.iter().any(|(_, f)| *f == full) {
+            full_paths.push((pack, full));
+        }
+    }
+    // Every file once, where first loaded, with how many trailing path
+    // components label it.
+    let mut files: Vec<(std::path::PathBuf, usize)> = Vec::new();
+    for (pack, full) in &full_paths {
+        if full.is_dir() {
+            let mut v: Vec<_> = std::fs::read_dir(full)
                 .map_err(|e| format!("{}: {e}", pack.display()))?
                 .filter_map(|e| e.ok().map(|e| e.path()))
                 .filter(|p| p.extension().is_some_and(|x| x == "rules"))
                 .collect();
+            if v.is_empty() {
+                return Err(format!("{}: holds no .rules files", pack.display()).into());
+            }
             v.sort();
-            v
-        } else {
-            vec![full.clone()]
-        };
-        let dir_name = full
-            .file_name()
-            .filter(|_| full.is_dir() && packs.len() > 1)
-            .map(|n| n.to_string_lossy().into_owned());
-        for p in files {
-            let file = p
-                .file_name()
-                .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-            let name = match &dir_name {
-                Some(d) => format!("{d}/{file}"),
-                None => file,
-            };
-            let text = std::fs::read_to_string(&p).map_err(|e| format!("{}: {e}", p.display()))?;
-            texts.push((name, text));
+            let k = if full_paths.len() > 1 { 2 } else { 1 };
+            for p in v {
+                if !files.iter().any(|(q, _)| *q == p) {
+                    files.push((p, k));
+                }
+            }
+        } else if !files.iter().any(|(q, _)| q == full) {
+            files.push((full.clone(), 1));
         }
-        abs.push(full.to_string_lossy().into_owned());
+    }
+    // A label names one file: while two are equal, each takes one more
+    // parent directory (`one/pk/a.rules`, `two/pk/a.rules`).
+    let parts = |p: &std::path::Path| -> Vec<String> {
+        p.components()
+            .filter_map(|c| match c {
+                std::path::Component::Normal(s) => Some(s.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect()
+    };
+    let label = |p: &std::path::Path, k: usize| {
+        let c = parts(p);
+        c[c.len().saturating_sub(k)..].join("/")
+    };
+    loop {
+        let labels: Vec<String> = files.iter().map(|(p, k)| label(p, *k)).collect();
+        let mut grew = false;
+        for (i, (p, k)) in files.iter_mut().enumerate() {
+            if labels.iter().filter(|l| **l == labels[i]).count() > 1 && *k < parts(p).len() {
+                *k += 1;
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let mut texts: Vec<(String, String)> = Vec::with_capacity(files.len());
+    for (p, k) in &files {
+        let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        texts.push((label(p, *k), text));
     }
     let files: Vec<(&str, &str)> = texts
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
         .collect();
     let mut kinds = compile_files(&files)?;
-    kinds.debug.packs = abs;
+    kinds.debug.packs = full_paths
+        .iter()
+        .map(|(_, f)| f.to_string_lossy().into_owned())
+        .collect();
     Ok(kinds)
 }
 
@@ -145,6 +203,7 @@ const SYMS: [&str; 23] = [
 
 struct Lexer<'a> {
     file: &'a str,
+    text: &'a str,
     src: &'a [u8],
     at: usize,
     line: u32,
@@ -155,6 +214,7 @@ impl<'a> Lexer<'a> {
     fn new(file: &'a str, text: &'a str) -> Self {
         Self {
             file,
+            text,
             src: text.as_bytes(),
             at: 0,
             line: 1,
@@ -171,17 +231,24 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// The byte `k` ahead, 0 past the end (a real NUL byte is also 0:
+    /// only [`Self::end`] says where the file ends).
     fn peek(&self, k: usize) -> u8 {
         self.src.get(self.at + k).copied().unwrap_or(0)
     }
 
+    fn end(&self) -> bool {
+        self.at >= self.src.len()
+    }
+
+    /// Columns count characters: a UTF-8 continuation byte adds none.
     fn bump(&mut self) -> u8 {
         let b = self.peek(0);
         self.at += 1;
         if b == b'\n' {
             self.line += 1;
             self.col = 1;
-        } else {
+        } else if b & 0xC0 != 0x80 {
             self.col += 1;
         }
         b
@@ -197,7 +264,7 @@ impl<'a> Lexer<'a> {
                         self.bump();
                     }
                     b'#' => {
-                        while !matches!(self.peek(0), b'\n' | 0) {
+                        while !self.end() && self.peek(0) != b'\n' {
                             self.bump();
                         }
                     }
@@ -206,9 +273,10 @@ impl<'a> Lexer<'a> {
             }
             let (line, col) = (self.line, self.col);
             let b = self.peek(0);
-            let tok = if b == 0 {
+            let tok = if self.end() {
                 Tok::Eof
             } else if b.is_ascii_digit() {
+                let start = self.at;
                 let mut v: i64 = 0;
                 while self.peek(0).is_ascii_digit() {
                     v = v * 10 + i64::from(self.bump() - b'0');
@@ -220,9 +288,22 @@ impl<'a> Lexer<'a> {
                 while self.peek(0).is_ascii_alphabetic() {
                     unit.push(char::from(self.bump()));
                 }
+                // `5_m` or `3h2` would lex as two tokens and may parse.
+                if self.peek(0).is_ascii_digit() || self.peek(0) == b'_' {
+                    let mut s = self.text[start..self.at].to_string();
+                    while self.peek(0).is_ascii_alphanumeric() || self.peek(0) == b'_' {
+                        s.push(char::from(self.bump()));
+                    }
+                    return Err(CompileError {
+                        file: self.file.to_string(),
+                        line,
+                        col,
+                        msg: format!("`{s}`: a number runs into a name"),
+                    });
+                }
                 let ticks = |t: u64| i32::try_from(t).ok();
                 match unit.as_str() {
-                    "" => Tok::Int(v as i32),
+                    "" => Tok::Int(i32::try_from(v).expect("checked against i32::MAX above")),
                     "min" => Tok::Time(
                         ticks(minutes(v as u64)).ok_or_else(|| self.err("time too long"))?,
                     ),
@@ -249,7 +330,8 @@ impl<'a> Lexer<'a> {
                             self.bump();
                             break;
                         }
-                        0 | b'\n' => return Err(self.err("unterminated string")),
+                        _ if self.end() => return Err(self.err("unterminated string")),
+                        b'\n' => return Err(self.err("unterminated string")),
                         _ => s.push(char::from(self.bump())),
                     }
                 }
@@ -261,7 +343,11 @@ impl<'a> Lexer<'a> {
                     .find(|s| s.len() == 2 && s.as_bytes() == two)
                     .or_else(|| SYMS.iter().find(|s| s.len() == 1 && s.as_bytes()[0] == b))
                     .copied()
-                    .ok_or_else(|| self.err(format!("unexpected character `{}`", char::from(b))))?;
+                    .ok_or_else(|| {
+                        let c = self.text.get(self.at..).and_then(|t| t.chars().next());
+                        let c = c.unwrap_or('?');
+                        self.err(format!("unexpected character `{}`", c.escape_debug()))
+                    })?;
                 for _ in 0..sym.len() {
                     self.bump();
                 }
@@ -569,6 +655,19 @@ enum Pred {
     Bare,
 }
 
+/// The words that are a predicate by themselves: the ground, a feature,
+/// `free`, `bare`.
+fn pred_word(n: &str) -> Option<Pred> {
+    Some(match n {
+        "free" => Pred::Free,
+        "bare" => Pred::Bare,
+        "water" => Pred::Ground(Ground::Water),
+        "soil" => Pred::Ground(Ground::Soil),
+        "rock" => Pred::Feature(Feature::Rock),
+        _ => return None,
+    })
+}
+
 #[derive(Debug, Clone)]
 enum Expr {
     Int(i32),
@@ -586,7 +685,7 @@ enum Expr {
     IsAt(Target, Pred),
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
-    SignalOf(Target),
+    SignalOf(Target, Pos),
     /// `scent(ch)` at the actor's cell, `scent(ch, t)` at a target.
     Scent(String, Option<Target>, Pos),
     /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
@@ -605,7 +704,42 @@ struct Parser<'a> {
     file: &'a str,
     tokens: Vec<Token>,
     at: usize,
+    /// How deep the tree being parsed is here, and the deepest level the
+    /// current operand reached: see [`Self::nested`] and [`Self::chained`].
+    depth: u32,
+    deepest: u32,
 }
+
+/// How deep one tree may be: a nesting and an operator in a chain are one
+/// level each (RULES §18). The parser, the code generator, lint and drop
+/// all recurse on the tree, so this is what keeps them on the stack.
+pub const MAX_DEPTH: u32 = 128;
+
+// The other limits of a rule set (RULES §18; `tests/docs.rs` holds the doc
+// to these).
+/// The widest `sight`: a search stays inside the 3x3 chunk halo.
+pub const MAX_SIGHT: u8 = 16;
+/// The most `fuel` a kind may declare, in ops per think.
+pub const MAX_FUEL: u32 = 4096;
+/// `state` blocks per kind.
+pub const MAX_STATES: usize = 64;
+/// Tags per rule set: a kind's tags are one `u64` bitset.
+pub const MAX_TAGS: usize = u64::BITS as usize;
+/// Kinds per rule set: ids are `u16`, and `Kinds` keeps `u16::MAX` free.
+pub const MAX_KINDS: usize = 65_534;
+/// Subs per rule set, a member sub once per kind that has it: `Call` takes
+/// a `u16`.
+pub const MAX_SUBS: usize = 65_536;
+/// Distinct constants outside the 16-bit immediates: the pool index is a
+/// `u16`.
+pub const MAX_POOL: usize = 65_536;
+/// Rules files per rule set: a rule's and a kind's file in [`DebugInfo`]
+/// is a `u16` index.
+pub const MAX_FILES: usize = 65_536;
+const _: () = assert!(
+    MAX_SUBS == 1 << u16::BITS && MAX_POOL == 1 << u16::BITS && MAX_FILES == 1 << u16::BITS
+);
+const _: () = assert!(MAX_KINDS == u16::MAX as usize - 1);
 
 fn sense_named(name: &str) -> Option<Sense> {
     Some(match name {
@@ -622,19 +756,18 @@ fn sense_named(name: &str) -> Option<Sense> {
         "hurt" => Sense::Hurt,
         "hurt_dir" => Sense::HurtDir,
         "result" => Sense::Result,
-        "ground" => Sense::Ground,
-        "feature" => Sense::Feature,
         "taken" => Sense::Taken,
         "trapped" => Sense::Trapped,
         _ => return None,
     })
 }
 
-// `water`, `soil`, `rock` and `free` are contextual: predicates after
+// `water`, `soil`, `rock` and `bare` are contextual: predicates after
 // `count`/`nearest`/`is`/`random`, plain names elsewhere (so a kind may
 // declare `need water`). `food` likewise: a declaration where a declaration
-// starts, a need name everywhere else (`need food`, `food < 12h`).
-const KEYWORDS: &[&str] = &[
+// starts, a need name everywhere else (`need food`, `food < 12h`). The
+// built-in functions, `free` among them, are reserved.
+pub const KEYWORDS: &[&str] = &[
     "kind",
     "sub",
     "glyph",
@@ -712,6 +845,15 @@ const KEYWORDS: &[&str] = &[
     "extends",
     "inherit",
     "only",
+    "min",
+    "abs",
+    "sign",
+    "clamp",
+    "rand",
+    "chance",
+    "dist",
+    "is",
+    "free",
 ];
 /// Words that start a declaration in a kind or trait body.
 const DECL_WORDS: [&str; 13] = [
@@ -835,13 +977,43 @@ impl Parser<'_> {
         }
     }
 
+    /// Parse with `f` one level deeper.
+    fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
+        if self.depth == MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        self.depth += 1;
+        self.deepest = self.deepest.max(self.depth);
+        let r = f(self);
+        self.depth -= 1;
+        r
+    }
+
+    /// One more operator in a chain: `l op r` is a level above the deeper of
+    /// `l` (which reached `left`) and `r`, so `a + b + c` is two levels.
+    fn chained(&mut self, left: u32) -> Result<()> {
+        self.deepest = self.deepest.max(left) + 1;
+        if self.deepest > MAX_DEPTH {
+            return Err(self.too_deep());
+        }
+        Ok(())
+    }
+
+    /// Nesting and chains share one budget, so either one running out may
+    /// be the other's doing: the error names both.
+    fn too_deep(&self) -> CompileError {
+        self.err(format!(
+            "nested too deep (at most {MAX_DEPTH} levels; each operator in a chain counts as one)"
+        ))
+    }
+
     fn int(&mut self, what: &str) -> Result<i32> {
-        match self.bump() {
-            Tok::Int(v) => Ok(v),
-            _ => {
-                self.at -= 1;
-                Err(self.err(format!("expected {what}, found {}", self.describe())))
+        match *self.peek() {
+            Tok::Int(v) => {
+                self.bump();
+                Ok(v)
             }
+            _ => Err(self.err(format!("expected {what}, found {}", self.describe()))),
         }
     }
 
@@ -855,6 +1027,7 @@ impl Parser<'_> {
                 let (name, at) = self.ident("constant name")?;
                 self.expect_sym("=")?;
                 let value = self.expr()?;
+                self.eat_sym(";");
                 items.consts.push(ConstAst { at, name, value });
             } else {
                 return Err(self.err(format!(
@@ -913,6 +1086,13 @@ impl Parser<'_> {
         let is_trait = self.is_kw("trait");
         self.bump(); // `kind` or `trait`
         let (name, at) = self.ident(if is_trait { "trait name" } else { "kind name" })?;
+        // `count water` is the ground: a kind of that name no pred could match.
+        if !is_trait && pred_word(&name).is_some() {
+            return Err(self.err_at(
+                &at,
+                format!("`{name}` is a predicate word, not a kind name"),
+            ));
+        }
         let mut params = Vec::new();
         if self.is_sym("(") {
             if !is_trait {
@@ -981,8 +1161,8 @@ impl Parser<'_> {
             if states.iter().any(|s| s.name == sname) {
                 return Err(self.err_at(&sat, format!("state `{sname}` declared twice")));
             }
-            if states.len() == 64 {
-                return Err(self.err_at(&sat, "at most 64 states per kind"));
+            if states.len() == MAX_STATES {
+                return Err(self.err_at(&sat, format!("at most {MAX_STATES} states per kind")));
             }
             self.expect_sym("{")?;
             let srules = self.rule_items()?;
@@ -1004,6 +1184,10 @@ impl Parser<'_> {
                 "declarations come first, before subs and rules".to_string()
             } else if self.is_kw("sub") {
                 "member subs come before the rules".to_string()
+            } else if !states.is_empty() && (self.is_kw("when") || self.is_kw("inherit")) {
+                "reflex rules (`when`, `inherit`) come before the states".to_string()
+            } else if !states.is_empty() {
+                format!("expected `state` or `}}`, found {}", self.describe())
             } else {
                 format!(
                     "expected `when`, `inherit`, `state` or `}}`, found {}",
@@ -1032,6 +1216,20 @@ impl Parser<'_> {
         loop {
             let p = self.pos();
             let not_in_trait = |what: &str| format!("a trait has no {what}: only a kind does");
+            // A single-valued declaration is given once per body.
+            let given = [
+                ("glyph", d.glyph.is_some()),
+                ("color", d.color.is_some()),
+                ("cover", d.cover),
+                ("cadence", d.cadence.is_some()),
+                ("sight", d.sight.is_some()),
+                ("fuel", d.fuel.is_some()),
+                ("food", d.food.is_some()),
+                ("bite", d.bite.is_some()),
+            ];
+            if let Some((w, _)) = given.iter().find(|(w, set)| *set && self.is_kw(w)) {
+                return Err(self.err_at(&p, format!("`{w}` declared twice")));
+            }
             if self.eat_kw("glyph") {
                 if is_trait {
                     return Err(self.err_at(&p, not_in_trait("glyph")));
@@ -1045,9 +1243,19 @@ impl Parser<'_> {
                     }
                 }
             } else if self.eat_kw("tags") {
+                // The list ends where the next thing in the body starts
+                // (`food` is not reserved but starts a declaration).
                 while let Tok::Name(n) = self.peek().clone() {
-                    if is_reserved(&n) {
+                    if DECL_WORDS.contains(&n.as_str())
+                        || ["when", "inherit", "state", "sub"].contains(&n.as_str())
+                    {
                         break;
+                    }
+                    if is_reserved(&n) {
+                        return Err(self.err(format!("`{n}` is a reserved word, not a tag")));
+                    }
+                    if pred_word(&n).is_some() {
+                        return Err(self.err(format!("`{n}` is a predicate word, not a tag")));
                     }
                     self.bump();
                     d.tags.push(n);
@@ -1070,7 +1278,11 @@ impl Parser<'_> {
                 }
                 // `color "#rrggbb"`
                 let c = match self.bump() {
-                    Tok::Str(s) if s.len() == 7 && s.starts_with('#') => {
+                    Tok::Str(s)
+                        if s.len() == 7
+                            && s.starts_with('#')
+                            && s[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+                    {
                         u32::from_str_radix(&s[1..], 16).ok()
                     }
                     _ => None,
@@ -1145,6 +1357,7 @@ impl Parser<'_> {
             } else {
                 return Ok(d);
             }
+            self.eat_sym(";");
         }
     }
 
@@ -1170,7 +1383,12 @@ impl Parser<'_> {
             let cond = self.cond()?;
             let arrow_line = self.pos().line;
             self.expect_sym("=>")?;
+            // One statement may end in `;`, as in a block; a block may not.
+            let single = !self.is_sym("{");
             let body = self.body()?;
+            if single {
+                self.eat_sym(";");
+            }
             rules.push(RuleItem::When(Box::new(Rule {
                 at,
                 arrow_line,
@@ -1185,7 +1403,7 @@ impl Parser<'_> {
         if self.is_sym("{") {
             self.block()
         } else {
-            Ok(vec![self.stmt()?])
+            Ok(vec![self.nested(Self::stmt)?])
         }
     }
 
@@ -1196,7 +1414,7 @@ impl Parser<'_> {
             if *self.peek() == Tok::Eof {
                 return Err(self.err("unclosed block"));
             }
-            stmts.push(self.stmt()?);
+            stmts.push(self.nested(Self::stmt)?);
             self.eat_sym(";");
         }
         self.expect_sym("}")?;
@@ -1210,7 +1428,7 @@ impl Parser<'_> {
             let then = self.block()?;
             let els = if self.eat_kw("else") {
                 if self.is_kw("if") {
-                    vec![self.stmt()?]
+                    vec![self.nested(Self::stmt)?]
                 } else {
                     self.block()?
                 }
@@ -1236,7 +1454,8 @@ impl Parser<'_> {
             return Ok(Stmt::Let { name, at, value });
         }
         if self.eat_kw("return") {
-            let value = if self.is_sym("}") || self.is_sym(";") {
+            // The value starts on the `return` line, or there is none.
+            let value = if self.is_sym("}") || self.is_sym(";") || self.pos().line != at.line {
                 None
             } else {
                 Some(self.expr()?)
@@ -1247,6 +1466,9 @@ impl Parser<'_> {
             self.expect_sym("{")?;
             let mut arms = Vec::new();
             while !self.is_sym("}") {
+                if *self.peek() == Tok::Eof {
+                    return Err(self.err_at(&at, "unclosed `choose`"));
+                }
                 let w = self.expr()?;
                 self.expect_sym(":")?;
                 let body = self.body()?;
@@ -1411,6 +1633,11 @@ impl Parser<'_> {
                         && matches!(self.peek2(), Tok::Sym(":")))
                 {
                     Arg::Pred(self.pred()?)
+                } else if self.is_kw("free")
+                    && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
+                {
+                    self.bump();
+                    Arg::Pred(Pred::Free)
                 } else if let Tok::Name(n) = self.peek().clone()
                     && !is_reserved(&n)
                     && matches!(self.peek2(), Tok::Sym(",") | Tok::Sym(")"))
@@ -1450,10 +1677,10 @@ impl Parser<'_> {
             return Ok(Target::Heading(Box::new(h)));
         }
         if self.eat_kw("toward") {
-            return Ok(Target::Toward(Box::new(self.target()?)));
+            return Ok(Target::Toward(Box::new(self.nested(Self::target)?)));
         }
         if self.eat_kw("away") {
-            return Ok(Target::Away(Box::new(self.target()?)));
+            return Ok(Target::Away(Box::new(self.nested(Self::target)?)));
         }
         if self.eat_kw("random") {
             self.expect_kw("free")?;
@@ -1480,26 +1707,34 @@ impl Parser<'_> {
 
     // cond := and_cond ("or" and_cond)*
     fn cond(&mut self) -> Result<Cond> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut c = self.and_cond()?;
         while self.eat_kw("or") {
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.and_cond()?;
+            self.chained(left)?;
             c = Cond::Or(Box::new(c), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
         Ok(c)
     }
 
     fn and_cond(&mut self) -> Result<Cond> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut c = self.not_cond()?;
         while self.eat_kw("and") {
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.not_cond()?;
+            self.chained(left)?;
             c = Cond::And(Box::new(c), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
         Ok(c)
     }
 
     fn not_cond(&mut self) -> Result<Cond> {
         if self.eat_kw("not") {
-            return Ok(Cond::Not(Box::new(self.not_cond()?)));
+            return Ok(Cond::Not(Box::new(self.nested(Self::not_cond)?)));
         }
         let at = self.pos();
         if self.eat_kw("nearest") {
@@ -1521,16 +1756,27 @@ impl Parser<'_> {
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
             // starting a comparison; parse as a cond and let expr-level
-            // parentheses handle the rest.
-            let save = self.at;
+            // parentheses handle the rest. If both fail, the error that got
+            // further into the tokens is the real one.
+            let save = (self.at, self.deepest);
             self.bump();
-            if let Ok(c) = self.cond()
-                && self.eat_sym(")")
-                && !self.starts_binop()
-            {
-                return Ok(c);
+            let mut cond_err = None;
+            match self.nested(Self::cond) {
+                Ok(c) => match self.expect_sym(")") {
+                    Ok(()) if !self.starts_binop() => return Ok(c),
+                    Ok(()) => {}
+                    Err(e) => cond_err = Some((self.at, e)),
+                },
+                Err(e) => cond_err = Some((self.at, e)),
             }
-            self.at = save;
+            (self.at, self.deepest) = save;
+            return match self.expr() {
+                Ok(e) => Ok(Cond::Expr(e)),
+                Err(e) => match cond_err {
+                    Some((at, ce)) if at > self.at => Err(ce),
+                    _ => Err(e),
+                },
+            };
         }
         Ok(Cond::Expr(self.expr()?))
     }
@@ -1542,20 +1788,14 @@ impl Parser<'_> {
     fn pred(&mut self) -> Result<Pred> {
         let at = self.pos();
         let only = self.eat_kw("only");
-        let not_a_kind = |what: &str| format!("`only` applies to a kind, not `{what}`");
-        for (word, p) in [
-            ("free", Pred::Free),
-            ("bare", Pred::Bare),
-            ("water", Pred::Ground(Ground::Water)),
-            ("soil", Pred::Ground(Ground::Soil)),
-            ("rock", Pred::Feature(Feature::Rock)),
-        ] {
-            if self.eat_kw(word) {
-                if only {
-                    return Err(self.err_at(&at, not_a_kind(word)));
-                }
-                return Ok(p);
+        if let Tok::Name(word) = self.peek().clone()
+            && let Some(p) = pred_word(&word)
+        {
+            self.bump();
+            if only {
+                return Err(self.err_at(&at, format!("`only` applies to a kind, not `{word}`")));
             }
+            return Ok(p);
         }
         let (name, ..) =
             self.ident("predicate (a kind, a tag, water, soil, rock, free or bare)")?;
@@ -1568,62 +1808,86 @@ impl Parser<'_> {
         Ok(Pred::Kind(name, only, at))
     }
 
-    // expr := cmp
-    fn expr(&mut self) -> Result<Expr> {
-        let mut e = self.additive()?;
-        loop {
-            let op = match self.peek() {
-                Tok::Sym("<") => OpCode::Lt,
-                Tok::Sym("<=") => OpCode::Le,
-                Tok::Sym("==") => OpCode::Eq,
-                Tok::Sym("!=") => OpCode::Ne,
-                Tok::Sym(">=") => OpCode::Ge,
-                Tok::Sym(">") => OpCode::Gt,
-                _ => return Ok(e),
-            };
-            self.bump();
-            let r = self.additive()?;
-            e = Expr::Bin(op, Box::new(e), Box::new(r));
+    fn cmp_op(&self) -> Option<OpCode> {
+        match self.peek() {
+            Tok::Sym("<") => Some(OpCode::Lt),
+            Tok::Sym("<=") => Some(OpCode::Le),
+            Tok::Sym("==") => Some(OpCode::Eq),
+            Tok::Sym("!=") => Some(OpCode::Ne),
+            Tok::Sym(">=") => Some(OpCode::Ge),
+            Tok::Sym(">") => Some(OpCode::Gt),
+            _ => None,
         }
     }
 
+    // expr := additive [cmp additive]: comparisons don't chain.
+    fn expr(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
+        let mut e = self.additive()?;
+        if let Some(op) = self.cmp_op() {
+            self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
+            let r = self.additive()?;
+            self.chained(left)?;
+            e = Expr::Bin(op, Box::new(e), Box::new(r));
+            if self.cmp_op().is_some() {
+                return Err(self.err(
+                    "comparisons don't chain: join two with `and` (`a < b and b < c`), \
+                     or parenthesise the first (`(a < b) < c` compares 0 or 1 with c)",
+                ));
+            }
+        }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
+    }
+
     fn additive(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.term()?;
         loop {
             let op = match self.peek() {
                 Tok::Sym("+") => OpCode::Add,
                 Tok::Sym("-") => OpCode::Sub,
-                _ => return Ok(e),
+                _ => break,
             };
             self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.term()?;
+            self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
     }
 
     fn term(&mut self) -> Result<Expr> {
+        let outer = std::mem::replace(&mut self.deepest, self.depth);
         let mut e = self.unary()?;
         loop {
             let op = match self.peek() {
                 Tok::Sym("*") => OpCode::Mul,
                 Tok::Sym("/") => OpCode::Div,
                 Tok::Sym("%") => OpCode::Mod,
-                _ => return Ok(e),
+                _ => break,
             };
             self.bump();
+            let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.unary()?;
+            self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
+        self.deepest = self.deepest.max(outer);
+        Ok(e)
     }
 
     fn unary(&mut self) -> Result<Expr> {
         if self.eat_sym("-") {
-            return Ok(match self.unary()? {
+            return Ok(match self.nested(Self::unary)? {
                 Expr::Int(v) => Expr::Int(v.wrapping_neg()),
                 e => Expr::Neg(Box::new(e)),
             });
         }
-        self.primary()
+        self.nested(Self::primary)
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -1658,7 +1922,8 @@ impl Parser<'_> {
                     "count" => {
                         let pred = self.pred()?;
                         self.expect_kw("within")?;
-                        let r = self.additive()?; // a radius, never a comparison
+                        // One term: an operator after it applies to the count.
+                        let r = self.unary()?;
                         Ok(Expr::Count(pred, Box::new(r)))
                     }
                     "rand" | "chance" => {
@@ -1709,7 +1974,7 @@ impl Parser<'_> {
                         Ok(if n == "look_of" {
                             Expr::LookOf(t)
                         } else {
-                            Expr::SignalOf(t)
+                            Expr::SignalOf(t, at)
                         })
                     }
                     "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" => {
@@ -1758,8 +2023,11 @@ impl Parser<'_> {
                     }
                 }
             }
-            _ => {
-                self.at -= 1;
+            t => {
+                // `bump` stays put at the end of the file.
+                if t != Tok::Eof {
+                    self.at -= 1;
+                }
                 Err(self.err(format!("expected an expression, found {}", self.describe())))
             }
         }
@@ -1775,7 +2043,24 @@ fn returns_value(body: &[Stmt]) -> bool {
             returns_value(body)
         }
         Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
-        _ => false,
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::Call { .. }
+        | Stmt::Idle(_)
+        | Stmt::Die(_)
+        | Stmt::Become { .. }
+        | Stmt::Spawn { .. }
+        | Stmt::Transfer { .. }
+        | Stmt::Move(..)
+        | Stmt::Drink(..)
+        | Stmt::Eat(..)
+        | Stmt::Hit(..)
+        | Stmt::Graze(..)
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..) => false,
     })
 }
 
@@ -1792,7 +2077,25 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
                 spawn_withs(body, out)
             }
             Stmt::Choose(arms) => arms.iter().for_each(|(_, b)| spawn_withs(b, out)),
-            _ => {}
+            Stmt::Spawn { .. }
+            | Stmt::Set { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Let { .. }
+            | Stmt::Call { .. }
+            | Stmt::Return { .. }
+            | Stmt::Idle(_)
+            | Stmt::Die(_)
+            | Stmt::Become { .. }
+            | Stmt::Transfer { .. }
+            | Stmt::Move(..)
+            | Stmt::Drink(..)
+            | Stmt::Eat(..)
+            | Stmt::Hit(..)
+            | Stmt::Graze(..)
+            | Stmt::Look(_)
+            | Stmt::Signal(_)
+            | Stmt::Mark(..)
+            | Stmt::Next(..) => {}
         }
     }
 }
@@ -1832,6 +2135,8 @@ struct Inst<'a> {
     /// Direct parents, and every ancestor in linearized order.
     parents: Vec<usize>,
     ancestors: Vec<usize>,
+    /// The longest chain of `extends` below it: 0 for a root.
+    depth: u32,
     glyph: Option<u8>,
     color: Option<u32>,
     cover: bool,
@@ -1895,6 +2200,12 @@ struct Gen<'a> {
     /// Checking traits on their own: declaration ranges are lenient and
     /// nothing compiled is kept.
     checking: bool,
+    /// The instance being resolved has arguments made from the trait
+    /// check's placeholder 1s: a trait it reaches twice is not reported.
+    placeholder: bool,
+    /// Instances that skipped such a conflict, or extend one that did: never
+    /// reused for one whose arguments are real.
+    lenient: Vec<usize>,
     locals: Vec<Local>,
     next_local: u8,
     /// Position for errors without a better one.
@@ -1914,6 +2225,13 @@ struct Gen<'a> {
     debug: DebugInfo,
     /// The state whose rules are being compiled (`None`: the reflexes).
     state: Option<u8>,
+    /// [`Gen::ends`] of a call, by (sub address, tables, depth, acts_only):
+    /// only looked up, never iterated.
+    ends_memo: RefCell<HashMap<(usize, Option<usize>, u32, bool), bool>>,
+    /// [`Gen::call_acts`] of a call, by (sub address, tables, depth).
+    acts_memo: RefCell<HashMap<(usize, Option<usize>, u32), bool>>,
+    /// Compiling a `when` condition: a sub called here must not act.
+    in_when: bool,
 }
 
 /// Does this statement emit an action? Its position, if so.
@@ -1929,7 +2247,62 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Eat(_, at)
         | Stmt::Hit(_, at)
         | Stmt::Graze(_, at) => Some(at),
-        _ => None,
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::If { .. }
+        | Stmt::While { .. }
+        | Stmt::Repeat { .. }
+        | Stmt::Choose(_)
+        | Stmt::Call { .. }
+        | Stmt::Return { .. }
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..)
+        | Stmt::ForEach { .. } => None,
+    }
+}
+
+/// Is this statement a `return`, or does it hold one? (Not through a call:
+/// a callee's `return` leaves only the callee.)
+fn may_return(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return { .. } => true,
+        Stmt::If { then, els, .. } => then.iter().chain(els).any(may_return),
+        Stmt::Choose(arms) => arms.iter().any(|(_, body)| body.iter().any(may_return)),
+        Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
+            body.iter().any(may_return)
+        }
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::Call { .. }
+        | Stmt::Idle(_)
+        | Stmt::Die(_)
+        | Stmt::Become { .. }
+        | Stmt::Spawn { .. }
+        | Stmt::Transfer { .. }
+        | Stmt::Move(..)
+        | Stmt::Drink(..)
+        | Stmt::Eat(..)
+        | Stmt::Hit(..)
+        | Stmt::Graze(..)
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..) => false,
+    }
+}
+
+/// Does a name `f` holds for appear where [`Gen::fold`] would read it?
+fn any_name(e: &Expr, f: &impl Fn(&str) -> bool) -> bool {
+    match e {
+        Expr::Name(n, _) => f(n),
+        Expr::Neg(a) => any_name(a, f),
+        Expr::Bin(_, a, b) => any_name(a, f) || any_name(b, f),
+        Expr::Fn(_, args) => args.iter().any(|a| any_name(a, f)),
+        _ => false,
     }
 }
 
@@ -1950,6 +2323,9 @@ impl<'a> Gen<'a> {
                 ..DebugInfo::default()
             },
             state: None,
+            ends_memo: RefCell::default(),
+            acts_memo: RefCell::default(),
+            in_when: false,
             items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
@@ -1970,6 +2346,8 @@ impl<'a> Gen<'a> {
             sub: None,
             params: Vec::new(),
             checking: false,
+            placeholder: false,
+            lenient: Vec::new(),
             locals: Vec::new(),
             next_local: 0,
             here: Pos {
@@ -2029,6 +2407,14 @@ impl<'a> Gen<'a> {
 
     fn generate(mut self) -> Result<Kinds> {
         let items = self.items;
+        // Kind ids and sub indices are u16 (`Kinds` keeps u16::MAX free);
+        // checked first, before the passes below that grow with the square.
+        if let Some(it) = items.iter().filter(|it| !it.is_trait).nth(MAX_KINDS) {
+            return Err(self.err(&it.at, format!("at most {MAX_KINDS} kinds in a rule set")));
+        }
+        if let Some(s) = self.subs.get(MAX_SUBS) {
+            return Err(self.err(&s.at, format!("at most {MAX_SUBS} subs in a rule set")));
+        }
         // Names: kinds and traits share one namespace; subs and consts
         // are global too (one namespace across every loaded file).
         for (i, it) in items.iter().enumerate() {
@@ -2052,6 +2438,16 @@ impl<'a> Gen<'a> {
                     format!(
                         "sub `{}` declared twice (first at {}:{})",
                         s.name, o.at.file, o.at.line
+                    ),
+                ));
+            }
+            if let Some(o) = self.item_named(&s.name) {
+                let what = if items[o].is_trait { "trait" } else { "kind" };
+                return Err(self.err(
+                    &s.at,
+                    format!(
+                        "`{}` is already a {what} (first at {}:{})",
+                        s.name, items[o].at.file, items[o].at.line
                     ),
                 ));
             }
@@ -2103,8 +2499,8 @@ impl<'a> Gen<'a> {
         }
         let member_subs = items.iter().flat_map(|it| it.members.iter());
         for s in self.subs.iter().chain(member_subs) {
-            let width: u32 = s.params.iter().map(|(_, t)| u32::from(t.width())).sum();
-            if width > FRAME_LOCALS as u32 {
+            let width: usize = s.params.iter().map(|(_, t)| usize::from(t.width())).sum();
+            if width > FRAME_LOCALS {
                 return Err(self.err(&s.at, format!("sub `{}` has too many parameters", s.name)));
             }
         }
@@ -2119,6 +2515,16 @@ impl<'a> Gen<'a> {
                         ),
                     ));
                 }
+                if let Some(o) = self.item_named(&m.name) {
+                    let what = if items[o].is_trait { "trait" } else { "kind" };
+                    return Err(self.err(
+                        &m.at,
+                        format!(
+                            "`{}`'s sub `{}` has the name of a {what} (first at {}:{})",
+                            it.name, m.name, items[o].at.file, items[o].at.line
+                        ),
+                    ));
+                }
             }
         }
         // Tags: global names, a bit each, never a kind's or a trait's name.
@@ -2128,9 +2534,20 @@ impl<'a> Gen<'a> {
                     let what = if items[o].is_trait { "trait" } else { "kind" };
                     return Err(self.err(&it.at, format!("tag `{t}` is also a {what}'s name")));
                 }
+                if let Some(o) = self.subs.iter().find(|s| s.name == *t) {
+                    return Err(self.err(
+                        &it.at,
+                        format!(
+                            "tag `{t}` is also a sub's name (first at {}:{})",
+                            o.at.file, o.at.line
+                        ),
+                    ));
+                }
                 if !self.tags.contains(t) {
-                    if self.tags.len() == 64 {
-                        return Err(self.err(&it.at, "at most 64 tags in a rule set"));
+                    if self.tags.len() == MAX_TAGS {
+                        return Err(
+                            self.err(&it.at, format!("at most {MAX_TAGS} tags in a rule set"))
+                        );
                     }
                     self.tags.push(t.clone());
                 }
@@ -2159,7 +2576,7 @@ impl<'a> Gen<'a> {
             if let Some(msg) = taken {
                 return Err(self.err(&c.at, msg));
             }
-            let v = self.fold(&c.value)?;
+            let v = self.fold(&c.value, &c.at)?;
             self.const_vals.push((c.name.clone(), v));
         }
         for it in items {
@@ -2190,8 +2607,12 @@ impl<'a> Gen<'a> {
             let ki = self.kind_insts[k];
             let mut here = Vec::new();
             for (name, ..) in &self.insts[ki].members {
-                let idx = u16::try_from(next_sub)
-                    .map_err(|_| self.err(&items[self.insts[ki].item].at, "too many subs"))?;
+                let idx = u16::try_from(next_sub).map_err(|_| {
+                    self.err(
+                        &items[self.insts[ki].item].at,
+                        format!("at most {MAX_SUBS} subs in a rule set, member subs included"),
+                    )
+                })?;
                 here.push((name.clone(), idx));
                 sub_names.push(format!("{}::{name}", self.inst_name(ki)));
                 next_sub += 1;
@@ -2216,9 +2637,12 @@ impl<'a> Gen<'a> {
         }
         // Traits on their own, whether or not a kind includes them.
         self.check_traits()?;
-        self.diagnose();
 
-        let code = std::mem::take(&mut self.asm).finish();
+        // The checks in rule, kind_code and sub_body keep every jump in
+        // 16 bits; this is only a backstop.
+        let code = std::mem::take(&mut self.asm)
+            .try_finish()
+            .map_err(|_| self.err(&self.here, "a jump too far for 16 bits: split the rules"))?;
         self.debug.subs = sub_names;
         self.debug.traits = items
             .iter()
@@ -2246,8 +2670,7 @@ impl<'a> Gen<'a> {
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
             .with_scents(std::mem::take(&mut self.scents));
-        let lint = self.lint(&kinds);
-        self.debug.diagnostics.extend(lint);
+        self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
 
@@ -2257,11 +2680,10 @@ impl<'a> Gen<'a> {
     /// its ancestors, merged declarations and rule lists. Memoized per
     /// (item, arguments).
     fn inst(&mut self, item: usize, args: Vec<i32>, stack: &mut Vec<usize>) -> Result<usize> {
-        if let Some(i) = self
-            .insts
-            .iter()
-            .position(|x| x.item == item && x.args == args)
-        {
+        if let Some(i) = (0..self.insts.len()).find(|&i| {
+            let x = &self.insts[i];
+            x.item == item && x.args == args && (self.placeholder || !self.lenient.contains(&i))
+        }) {
             return Ok(i);
         }
         let items = self.items;
@@ -2277,6 +2699,15 @@ impl<'a> Gen<'a> {
                 &it.at,
                 format!("`{}` extends itself: {}", it.name, chain.join(" -> ")),
             ));
+        }
+        // Each link is a recursion here and a merge of the whole ancestry:
+        // a chain is bounded like a tree's nesting.
+        let too_deep = format!(
+            "`{}`: a chain of `extends` more than {MAX_DEPTH} kinds and traits deep",
+            items[stack.first().copied().unwrap_or(item)].name
+        );
+        if stack.len() > MAX_DEPTH as usize {
+            return Err(self.err(&it.at, too_deep));
         }
         stack.push(item);
         let scope: Vec<(String, i32)> = it
@@ -2332,15 +2763,30 @@ impl<'a> Gen<'a> {
                 concrete = Some(&parent.name);
             }
             let saved = std::mem::replace(&mut self.params, scope.clone());
-            let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a)).collect();
+            let folded: Result<Vec<i32>> = p.args.iter().map(|a| self.fold(a, &p.at)).collect();
             self.params = saved;
-            let pinst = self.inst(pi, folded?, stack)?;
-            parents.push(pinst);
+            let named = |n: &str| scope.iter().any(|(s, _)| s == n);
+            let ph = self.placeholder && p.args.iter().any(|a| any_name(a, &named));
+            let was = std::mem::replace(&mut self.placeholder, ph);
+            let pinst = folded.and_then(|f| self.inst(pi, f, stack));
+            self.placeholder = was;
+            parents.push(pinst?);
         }
         stack.pop();
+        let depth = parents
+            .iter()
+            .map(|&p| self.insts[p].depth + 1)
+            .max()
+            .unwrap_or(0);
+        if depth > MAX_DEPTH {
+            return Err(self.err(&it.at, too_deep));
+        }
         // Linearize: each parent's ancestors, then the parent; the first
-        // occurrence wins. One trait, two argument lists: ambiguous.
+        // occurrence wins. One trait, two argument lists: ambiguous (not
+        // when this item's arguments are the trait check's placeholder 1s:
+        // a kind that really reaches both reports it).
         let mut ancestors: Vec<usize> = Vec::new();
+        let mut skipped = false;
         for &p in &parents {
             let chain: Vec<usize> = self.insts[p].ancestors.iter().copied().chain([p]).collect();
             for a in chain {
@@ -2351,6 +2797,10 @@ impl<'a> Gen<'a> {
                     .iter()
                     .find(|&&o| self.insts[o].item == self.insts[a].item)
                 {
+                    if self.placeholder {
+                        skipped = true;
+                        continue;
+                    }
                     let fmt = |i: usize| -> String {
                         let v: Vec<String> =
                             self.insts[i].args.iter().map(i32::to_string).collect();
@@ -2370,13 +2820,19 @@ impl<'a> Gen<'a> {
                 ancestors.push(a);
             }
         }
+        // Built on a lenient parent: lenient too, so a real lookup re-resolves.
+        skipped |= parents.iter().any(|p| self.lenient.contains(p));
         let me = self.insts.len();
         let saved = std::mem::replace(&mut self.params, scope);
         let inst = self.merge(item, args, parents, ancestors, me);
+        let inst = inst.map(|i| Inst { depth, ..i });
         self.params = saved;
         let inst = inst?;
         debug_assert_eq!(self.insts.len(), me, "merge resolves nothing new");
         self.insts.push(inst);
+        if skipped {
+            self.lenient.push(me);
+        }
         Ok(me)
     }
 
@@ -2392,7 +2848,7 @@ impl<'a> Gen<'a> {
         let Some((e, at)) = v else {
             return Ok(None);
         };
-        let x = self.fold(e)?;
+        let x = self.fold(e, at)?;
         if ok(x) {
             Ok(Some(x))
         } else if self.checking {
@@ -2459,25 +2915,25 @@ impl<'a> Gen<'a> {
                 |c| c >= 1 && (c as u32).is_power_of_two(),
                 "cadence must be a power of two (1, 2, 4, ...)",
             )?
-            .map(|c| c.trailing_zeros() as u8);
+            .map(|c| u8::try_from(c.trailing_zeros()).expect("a positive i32: < 31"));
         let sight = self
             .decl_num(
                 &d.sight,
-                |s| (0..=16).contains(&s),
-                "sight is 0 to 16 cells",
+                |s| (0..=i32::from(MAX_SIGHT)).contains(&s),
+                &format!("sight is 0 to {MAX_SIGHT} cells"),
             )?
-            .map(|s| s as u8);
+            .map(|s| u8::try_from(s).expect("0..=MAX_SIGHT, checked above"));
         let fuel = self
             .decl_num(
                 &d.fuel,
-                |f| (1..=4096).contains(&f),
-                "fuel is 1 to 4096 ops per think",
+                |f| (1..=MAX_FUEL as i32).contains(&f),
+                &format!("fuel is 1 to {MAX_FUEL} ops per think"),
             )?
             .map(|f| f as u32);
-        let food = self.decl_num(&d.food, |_| true, "")?;
+        let food = self.decl_num(&d.food, |f| f >= 0, "food is 0 or more ticks")?;
         let bite = self
             .decl_num(&d.bite, |b| (0..=255).contains(&b), "bite is 0 to 255")?
-            .map(|b| b as u8);
+            .map(|b| u8::try_from(b).expect("0..=255, checked above"));
         let glyph = self.pick(d.glyph, &parents, |i| i.glyph, "glyphs", item)?;
         let color = self.pick(d.color, &parents, |i| i.color, "colours", item)?;
         let cadence_shift = self.pick(cadence, &parents, |i| i.cadence_shift, "cadences", item)?;
@@ -2516,7 +2972,7 @@ impl<'a> Gen<'a> {
             }
         }
         for na in &d.needs {
-            let max = self.fold(&na.max)?;
+            let max = self.fold(&na.max, &na.at)?;
             if max < 1 && !self.checking {
                 return Err(self.err(&na.at, "a need's max is at least 1"));
             }
@@ -2637,8 +3093,11 @@ impl<'a> Gen<'a> {
                 states.push(s.clone());
             }
         }
-        if states.len() > 64 {
-            return Err(self.err(&it.at, format!("`{}` has more than 64 states", it.name)));
+        if states.len() > MAX_STATES {
+            return Err(self.err(
+                &it.at,
+                format!("`{}` has more than {MAX_STATES} states", it.name),
+            ));
         }
 
         // Member subs by name; the item's own override its parents'.
@@ -2697,6 +3156,7 @@ impl<'a> Gen<'a> {
             args,
             parents,
             ancestors,
+            depth: 0,
             glyph,
             color,
             cover,
@@ -2765,9 +3225,9 @@ impl<'a> Gen<'a> {
                 return Err(self.err(&ga.at, format!("gene `{n}` has the name of {what}")));
             }
             let (default, lo, hi) = (
-                self.fold(&ga.default)?,
-                self.fold(&ga.lo)?,
-                self.fold(&ga.hi)?,
+                self.fold(&ga.default, &ga.at)?,
+                self.fold(&ga.lo, &ga.at)?,
+                self.fold(&ga.hi, &ga.at)?,
             );
             // Lenient while checking traits (parameters bound to 1): a
             // range or default that only holds for real arguments.
@@ -2951,7 +3411,7 @@ impl<'a> Gen<'a> {
         }
         self.item_ids = vec![None; items.len()];
         for (id, &k) in order.iter().enumerate() {
-            self.item_ids[k] = Some(id as u16);
+            self.item_ids[k] = Some(u16::try_from(id).expect("checked in generate"));
         }
         self.kind_insts = order
             .iter()
@@ -2966,7 +3426,7 @@ impl<'a> Gen<'a> {
 
     /// Compile in the context of kind `k`: its tables and member subs.
     fn enter(&mut self, k: usize) {
-        self.kind = Some(k as u16);
+        self.kind = Some(u16::try_from(k).expect("checked in generate"));
         self.cur = Some(self.kind_insts[k]);
         self.members_here = self.member_index[k].clone();
     }
@@ -2985,15 +3445,32 @@ impl<'a> Gen<'a> {
         // starts in the first; a state out of range runs no rules.
         self.debug.states.push(inst.states.clone());
         for (s, list) in inst.state_lists.iter().enumerate() {
-            self.state = Some(s as u8);
+            let state = u8::try_from(s).expect("at most MAX_STATES states");
+            self.state = Some(state);
             let skip = self.asm.label();
+            let guard_pc = self.asm.here();
             self.asm
                 .sense(Sense::State)
-                .push(s as i32)
+                .push(i32::from(state))
                 .op(OpCode::Eq)
                 .jz(skip);
             self.rule_list(list)?;
             self.asm.halt().bind(skip);
+            // The guard's jump skips the whole state: 16 bits.
+            if self.asm.here() - guard_pc > i16::MAX as u32 {
+                let name = &inst.states[s];
+                let at = std::iter::once(inst.item)
+                    .chain(inst.ancestors.iter().map(|&a| self.insts[a].item))
+                    .find_map(|i| self.items[i].states.iter().find(|st| st.name == *name))
+                    .map_or(&it.at, |st| &st.at);
+                return Err(self.err(
+                    at,
+                    format!(
+                        "state `{name}` of `{}` compiles to more than 32767 ops: split it",
+                        it.name
+                    ),
+                ));
+            }
         }
         self.asm.halt();
         let tags = inst.tags.iter().fold(0u64, |bits, t| {
@@ -3009,7 +3486,7 @@ impl<'a> Gen<'a> {
             .iter()
             .find_map(|&p| self.item_ids[self.insts[p].item]);
         Ok(KindDef {
-            id: k as u16,
+            id: u16::try_from(k).expect("checked in generate"),
             name: it.name.clone(),
             glyph: inst.glyph.unwrap_or(b'?'),
             tags,
@@ -3021,7 +3498,7 @@ impl<'a> Gen<'a> {
             needs: inst.needs.clone(),
             mems: inst.mems.clone(),
             genes: inst.genes.clone(),
-            states: inst.states.len().max(1) as u8,
+            states: u8::try_from(inst.states.len().max(1)).expect("at most MAX_STATES states"),
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
             cover: inst.cover,
@@ -3055,7 +3532,8 @@ impl<'a> Gen<'a> {
         self.locals.clear();
         self.next_local = 0;
         for (name, ty) in &s.params {
-            let slot = self.alloc_local(&s.at, ty.width())?;
+            self.hides(name, &format!("parameter `{name}` of `{}`", s.name), &s.at)?;
+            let slot = self.alloc_local(&s.at, ty.width().into())?;
             self.locals.push(Local {
                 name: name.clone(),
                 slot,
@@ -3068,6 +3546,22 @@ impl<'a> Gen<'a> {
             self.asm.push(0).ret(true);
         } else {
             self.asm.ret(false);
+        }
+        if self.asm.here() - entry > i16::MAX as u32 {
+            return Err(self.err(
+                &s.at,
+                format!("sub `{}` compiles to more than 32767 ops: split it", s.name),
+            ));
+        }
+        let peak = self.asm.take_peak();
+        if peak as usize > STACK {
+            return Err(self.err(
+                &s.at,
+                format!(
+                    "sub `{}` needs {peak} stack values; the VM has {STACK}: nest less deeply or split the expression with `let`",
+                    s.name
+                ),
+            ));
         }
         self.sub = None;
         Ok(entry)
@@ -3100,7 +3594,10 @@ impl<'a> Gen<'a> {
             if !it.is_trait {
                 continue;
             }
-            let ti = self.inst(i, vec![1; it.params.len()], &mut Vec::new())?;
+            self.placeholder = !it.params.is_empty();
+            let ti = self.inst(i, vec![1; it.params.len()], &mut Vec::new());
+            self.placeholder = false;
+            let ti = ti?;
             let inst = self.insts[ti].clone();
             self.kind = None;
             self.cur = Some(ti);
@@ -3115,7 +3612,7 @@ impl<'a> Gen<'a> {
             };
             self.rule_list(&own(&inst.reflex))?;
             for (s, list) in inst.state_lists.iter().enumerate() {
-                self.state = Some(s as u8);
+                self.state = Some(u8::try_from(s).expect("at most MAX_STATES states"));
                 self.rule_list(&own(list))?;
             }
             for (_, owner, sub) in inst.members.iter().filter(|m| m.1 == ti) {
@@ -3127,128 +3624,58 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
-    /// Warnings and notes about the compiled kinds, in kind order.
-    fn diagnose(&mut self) {
-        let items = self.items;
-        let mut out: Vec<Diagnostic> = Vec::new();
-        let push = |out: &mut Vec<Diagnostic>, level: Level, at: &Pos, msg: String| {
-            let d = Diagnostic {
-                level,
-                file: at.file.clone(),
-                line: at.line,
-                col: at.col,
-                msg,
-            };
-            if !out.contains(&d) {
-                out.push(d);
-            }
-        };
-        for k in 0..self.kind_insts.len() {
-            self.enter(k);
-            let ki = self.kind_insts[k];
-            let inst = self.insts[ki].clone();
-            // A rule that always holds and always ends the think hides every
-            // rule after it (and, among the reflexes, every state's rules).
-            let mut reflex_end: Option<&'a Rule> = None;
-            let lists: Vec<&RList<'a>> = [&inst.reflex]
-                .into_iter()
-                .chain(&inst.state_lists)
-                .collect();
-            for (li, list) in lists.iter().enumerate() {
-                if li > 0 {
-                    if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
-                        push(
-                            &mut out,
-                            Level::Warning,
-                            &first.rule.at,
-                            format!(
-                                "never runs: the reflex rule at {}:{} always ends the think",
-                                end.at.file, end.at.line
-                            ),
-                        );
-                    }
-                    if reflex_end.is_some() {
-                        continue;
-                    }
-                }
-                for (i, rr) in list.rules.iter().enumerate() {
-                    self.owner = Some(rr.owner);
-                    self.params = self.scope_of(rr.owner);
-                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold(e).is_ok_and(|v| v != 0));
-                    if always && self.ends_all(&rr.rule.body, false, 0) {
-                        if let Some(next) = list.rules.get(i + 1) {
-                            push(
-                                &mut out,
-                                Level::Warning,
-                                &next.rule.at,
-                                format!(
-                                    "never runs: the rule at {}:{} always ends the think",
-                                    rr.rule.at.file, rr.rule.at.line
-                                ),
-                            );
-                        }
-                        if li == 0 {
-                            reflex_end = Some(rr.rule);
-                        }
-                        break;
-                    }
-                }
-            }
-            // Ancestors whose reflex rules this kind does not run.
-            for &a in &inst.ancestors {
-                let has_rules = items[self.insts[a].item]
-                    .rules
-                    .iter()
-                    .any(|r| matches!(r, RuleItem::When(_)));
-                if has_rules && !inst.reflex.sources.contains(&a) {
-                    let it = &items[inst.item];
-                    push(
-                        &mut out,
-                        Level::Note,
-                        &it.at,
-                        format!(
-                            "`{}` does not run the reflex rules of `{}` (no `inherit` splices them)",
-                            it.name,
-                            self.inst_name(a)
-                        ),
-                    );
-                }
-            }
-        }
-        self.owner = None;
-        self.params.clear();
-        self.debug.diagnostics = out;
-    }
-
     /// Does this statement end the think on every path: an action (and, if
-    /// not `acts_only`, a `next`)? Conservative: loops never count, and a
-    /// call counts only through subs that do, eight calls deep.
-    fn ends(&self, s: &Stmt, acts_only: bool, depth: u32) -> bool {
+    /// not `acts_only`, a `next`)? Conservative: loops never count, a call
+    /// counts only through subs that do, eight calls deep, and a `choose`
+    /// weight only if it is a constant nothing here may hide (`lets`: a
+    /// `let` of this body is in scope; inside a callee, its parameters are).
+    fn ends(&self, s: &Stmt, acts_only: bool, depth: u32, lets: bool) -> bool {
         match s {
             Stmt::Next(..) => !acts_only,
             Stmt::If { then, els, .. } => {
                 !els.is_empty()
-                    && self.ends_all(then, acts_only, depth)
-                    && self.ends_all(els, acts_only, depth)
+                    && self.ends_all(then, acts_only, depth, lets)
+                    && self.ends_all(els, acts_only, depth, lets)
             }
             Stmt::Choose(arms) => {
                 !arms.is_empty()
                     && arms.iter().all(|(w, body)| {
-                        self.fold(w).is_ok_and(|w| w > 0) && self.ends_all(body, acts_only, depth)
+                        self.fold_known(w, &self.here, |_| lets || depth > 0)
+                            .is_some_and(|w| w > 0)
+                            && self.ends_all(body, acts_only, depth, lets)
                     })
             }
             Stmt::Call { name, .. } => {
-                depth < 8
-                    && self
-                        .callee(name)
-                        .is_some_and(|sub| self.ends_all(&sub.body, acts_only, depth + 1))
+                // A callee's answer depends only on it, the tables and the
+                // depth (inside it every name is unknown): remembered.
+                (depth as usize) < FRAMES
+                    && self.callee(name).is_some_and(|sub| {
+                        let key = (std::ptr::from_ref(sub) as usize, self.cur, depth, acts_only);
+                        if let Some(&v) = self.ends_memo.borrow().get(&key) {
+                            return v;
+                        }
+                        let v = self.ends_all(&sub.body, acts_only, depth + 1, false);
+                        self.ends_memo.borrow_mut().insert(key, v);
+                        v
+                    })
             }
             _ => action_at(s).is_some(),
         }
     }
 
-    fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32) -> bool {
-        body.iter().any(|s| self.ends(s, acts_only, depth))
+    /// In order: a statement that ends the think before any that may
+    /// `return` out of the sub.
+    fn ends_all(&self, body: &[Stmt], acts_only: bool, depth: u32, lets: bool) -> bool {
+        let lets = lets || body.iter().any(|s| matches!(s, Stmt::Let { .. }));
+        for s in body {
+            if self.ends(s, acts_only, depth, lets) {
+                return true;
+            }
+            if may_return(s) {
+                return false;
+            }
+        }
+        false
     }
 
     /// The sub a call named `name` reaches here: a member sub of the
@@ -3261,6 +3688,96 @@ impl<'a> Gen<'a> {
         }
         let subs = self.subs;
         subs.iter().find(|s| s.name == name)
+    }
+
+    /// May a call of `name` here act or `next`, on any path? Follows every
+    /// call in its body, in statements and in expressions, eight deep.
+    fn call_acts(&self, name: &str, depth: u32) -> bool {
+        (depth as usize) < FRAMES
+            && self.callee(name).is_some_and(|sub| {
+                let key = (std::ptr::from_ref(sub) as usize, self.cur, depth);
+                if let Some(&v) = self.acts_memo.borrow().get(&key) {
+                    return v;
+                }
+                let v = sub.body.iter().any(|s| self.stmt_acts(s, depth + 1));
+                self.acts_memo.borrow_mut().insert(key, v);
+                v
+            })
+    }
+
+    fn stmt_acts(&self, s: &Stmt, depth: u32) -> bool {
+        let body = |b: &[Stmt]| b.iter().any(|s| self.stmt_acts(s, depth));
+        match s {
+            Stmt::Next(..) => true,
+            _ if action_at(s).is_some() => true,
+            Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
+                self.expr_acts(value, depth)
+            }
+            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Mark(_, e, _) => self.expr_acts(e, depth),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
+            Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
+            Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
+            Stmt::Repeat { count, body: b } => self.expr_acts(count, depth) || body(b),
+            Stmt::ForEach { r, body: b, .. } => self.expr_acts(r, depth) || body(b),
+            Stmt::Choose(arms) => arms
+                .iter()
+                .any(|(w, b)| self.expr_acts(w, depth) || body(b)),
+            Stmt::Call { name, args, .. } => {
+                self.args_act(args, depth) || self.call_acts(name, depth)
+            }
+            _ => false,
+        }
+    }
+
+    fn cond_acts(&self, c: &Cond, depth: u32) -> bool {
+        match c {
+            Cond::Expr(e) | Cond::Nearest { r: e, .. } | Cond::Sniff { r: e, .. } => {
+                self.expr_acts(e, depth)
+            }
+            Cond::And(a, b) | Cond::Or(a, b) => {
+                self.cond_acts(a, depth) || self.cond_acts(b, depth)
+            }
+            Cond::Not(a) => self.cond_acts(a, depth),
+        }
+    }
+
+    fn expr_acts(&self, e: &Expr, depth: u32) -> bool {
+        match e {
+            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Count(_, a) => {
+                self.expr_acts(a, depth)
+            }
+            Expr::Bin(_, a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
+            Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
+            Expr::Dist(t)
+            | Expr::FreeAt(t)
+            | Expr::IsAt(t, _)
+            | Expr::LookOf(t)
+            | Expr::SignalOf(t, _)
+            | Expr::Scent(_, Some(t), _) => self.target_acts(t, depth),
+            Expr::Call { name, args, .. } => {
+                self.args_act(args, depth) || self.call_acts(name, depth)
+            }
+            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Scent(..) => {
+                false
+            }
+        }
+    }
+
+    fn target_acts(&self, t: &Target, depth: u32) -> bool {
+        match t {
+            Target::Heading(e) => self.expr_acts(e, depth),
+            Target::At(a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
+            Target::Toward(t) | Target::Away(t) => self.target_acts(t, depth),
+            _ => false,
+        }
+    }
+
+    fn args_act(&self, args: &[Arg], depth: u32) -> bool {
+        args.iter().any(|a| match a {
+            Arg::Expr(e) => self.expr_acts(e, depth),
+            Arg::Target(t) => self.target_acts(t, depth),
+            Arg::Pred(_) | Arg::Name(..) => false,
+        })
     }
 
     fn rule_list(&mut self, list: &RList<'a>) -> Result<()> {
@@ -3279,10 +3796,28 @@ impl<'a> Gen<'a> {
         self.next_local = 0;
         let next = self.asm.label();
         let cond_pc = self.asm.here();
+        self.in_when = true;
         self.cond(&rule.cond, next, true)?;
+        self.in_when = false;
         let body_pc = self.asm.here();
         self.stmts(&rule.body)?;
         self.asm.end_rule().bind(next);
+        // Its jumps are 16 bits.
+        if self.asm.here() - cond_pc > i16::MAX as u32 {
+            return Err(self.err(
+                &rule.at,
+                "rule body too long: it compiles to more than 32767 ops; split it",
+            ));
+        }
+        let peak = self.asm.take_peak();
+        if peak as usize > STACK {
+            return Err(self.err(
+                &rule.at,
+                format!(
+                    "this rule needs {peak} stack values; the VM has {STACK}: nest less deeply or split the expression with `let`"
+                ),
+            ));
+        }
         let file = self
             .files
             .iter()
@@ -3313,7 +3848,7 @@ impl<'a> Gen<'a> {
         self.debug.rules.push(RuleInfo {
             kind: self.kind.unwrap_or(0),
             state: self.state,
-            file: file as u16,
+            file: u16::try_from(file).expect("at most MAX_FILES files"),
             line: rule.at.line,
             text,
             cond_pc,
@@ -3326,7 +3861,7 @@ impl<'a> Gen<'a> {
     /// The channel of scent `name`, numbered on first use.
     fn scent(&mut self, name: &str, at: &Pos) -> Result<u8> {
         if let Some(i) = self.scents.iter().position(|s| s == name) {
-            return Ok(i as u8);
+            return Ok(u8::try_from(i).expect("at most SCENT_CHANNELS scents"));
         }
         if self.scents.len() == SCENT_CHANNELS {
             return Err(self.err(
@@ -3338,7 +3873,7 @@ impl<'a> Gen<'a> {
             ));
         }
         self.scents.push(name.to_string());
-        Ok((self.scents.len() - 1) as u8)
+        Ok(u8::try_from(self.scents.len() - 1).expect("at most SCENT_CHANNELS scents"))
     }
 
     fn const_value(&self, n: &str) -> Option<i32> {
@@ -3349,17 +3884,19 @@ impl<'a> Gen<'a> {
     }
 
     /// Fold a `const` expression: numbers, other constants, arithmetic,
-    /// comparisons and the pure functions. Same results as the VM.
-    fn fold(&self, e: &Expr) -> Result<i32> {
+    /// comparisons and the pure functions. Same results as the VM
+    /// (`folded_constants_match_the_vm` checks). `at`: where to report
+    /// anything else.
+    fn fold(&self, e: &Expr, at: &Pos) -> Result<i32> {
         Ok(match e {
             Expr::Int(v) => *v,
             Expr::Name(n, at) => self
                 .param(n)
                 .or_else(|| self.const_value(n))
                 .ok_or_else(|| self.err(at, format!("`{n}` is not a constant declared above")))?,
-            Expr::Neg(a) => self.fold(a)?.wrapping_neg(),
+            Expr::Neg(a) => self.fold(a, at)?.wrapping_neg(),
             Expr::Bin(op, a, b) => {
-                let (x, y) = (self.fold(a)?, self.fold(b)?);
+                let (x, y) = (self.fold(a, at)?, self.fold(b, at)?);
                 match op {
                     OpCode::Add => x.wrapping_add(y),
                     OpCode::Sub => x.wrapping_sub(y),
@@ -3373,13 +3910,14 @@ impl<'a> Gen<'a> {
                     OpCode::Eq => i32::from(x == y),
                     OpCode::Ne => i32::from(x != y),
                     OpCode::Ge => i32::from(x >= y),
-                    _ => i32::from(x > y),
+                    OpCode::Gt => i32::from(x > y),
+                    op => unreachable!("{op:?} is not an operator"),
                 }
             }
             Expr::Fn(op, args) => {
                 let v = args
                     .iter()
-                    .map(|a| self.fold(a))
+                    .map(|a| self.fold(a, at))
                     .collect::<Result<Vec<_>>>()?;
                 match op {
                     OpCode::Min => v[0].min(v[1]),
@@ -3390,20 +3928,39 @@ impl<'a> Gen<'a> {
                     OpCode::Clamp => v[1],
                     OpCode::Pack => v[0].wrapping_mul(256).wrapping_add(v[1] & 0xFF),
                     OpCode::Hi => v[0] >> 8,
-                    _ => i32::from(v[0] as u8 as i8),
+                    OpCode::Lo => (v[0] << 24) >> 24,
+                    op => unreachable!("{op:?} is not a pure function"),
                 }
             }
             _ => {
-                let at = self.here.clone();
                 return Err(self.err(
-                    &at,
+                    at,
                     "a constant must be a number, other constants and arithmetic",
                 ));
             }
         })
     }
 
-    fn push_int(&mut self, v: i32) {
+    /// [`Self::fold`] for the analyses, which may only warn or refuse
+    /// less: `None` if a name in `e` may not be the constant. A local, a
+    /// need or a mem of that name hides it, and so does any name `hidden`
+    /// says may be one.
+    fn fold_known(&self, e: &Expr, at: &Pos, hidden: impl Fn(&str) -> bool) -> Option<i32> {
+        let shadows = |n: &str| {
+            hidden(n)
+                || self.local(n).is_some()
+                || self.cur.is_some_and(|c| {
+                    let i = &self.insts[c];
+                    i.needs.iter().any(|d| d.name == n) || i.mems.iter().any(|m| m == n)
+                })
+        };
+        if any_name(e, &shadows) {
+            return None;
+        }
+        self.fold(e, at).ok()
+    }
+
+    fn push_int(&mut self, v: i32) -> Result<()> {
         if let Ok(imm) = i16::try_from(v) {
             self.asm.push(i32::from(imm));
         } else {
@@ -3414,14 +3971,21 @@ impl<'a> Gen<'a> {
                     self.pool.len() - 1
                 }
             };
-            self.asm
-                .push_k(u16::try_from(idx).expect("constant pool fits u16"));
+            let Ok(idx) = u16::try_from(idx) else {
+                return Err(self.err(
+                    &self.here,
+                    format!("too many distinct constants outside -32768..32767 (max {MAX_POOL})"),
+                ));
+            };
+            self.asm.push_k(idx);
         }
+        Ok(())
     }
 
-    fn alloc_local(&mut self, at: &Pos, n: u8) -> Result<u8> {
+    fn alloc_local(&mut self, at: &Pos, n: usize) -> Result<u8> {
         let slot = self.next_local;
-        if usize::from(slot) + usize::from(n) > FRAME_LOCALS {
+        let end = usize::from(slot) + n;
+        if end > FRAME_LOCALS {
             return Err(self.err(
                 at,
                 format!(
@@ -3429,7 +3993,7 @@ impl<'a> Gen<'a> {
                 ),
             ));
         }
-        self.next_local += n;
+        self.next_local = u8::try_from(end).expect("at most FRAME_LOCALS");
         Ok(slot)
     }
 
@@ -3449,7 +4013,7 @@ impl<'a> Gen<'a> {
             .needs
             .iter()
             .position(|d| d.name == n)
-            .map(|i| i as u8)
+            .map(|i| u8::try_from(i).expect("at most NEED_SLOTS needs"))
     }
 
     fn mem_slot(&self, n: &str) -> Option<u8> {
@@ -3461,7 +4025,28 @@ impl<'a> Gen<'a> {
             .mems
             .iter()
             .position(|m| m == n)
-            .map(|i| i as u8)
+            .map(|i| u8::try_from(i).expect("at most MEM_SLOTS mems"))
+    }
+
+    /// A local, binding or parameter (`what`) named `n` would hide a need,
+    /// mem slot or gene this code sees: refused, as for a trait parameter.
+    fn hides(&self, n: &str, what: &str, at: &Pos) -> Result<()> {
+        match self.owner {
+            Some(o)
+                if self.need_slot(n).is_some()
+                    || self.mem_slot(n).is_some()
+                    || self.gene_slot(n).is_some() =>
+            {
+                Err(self.err(
+                    at,
+                    format!(
+                        "{what} has the name of a need, mem slot or gene of `{}`",
+                        self.inst_name(o)
+                    ),
+                ))
+            }
+            _ => Ok(()),
+        }
     }
 
     fn gene_slot(&self, n: &str) -> Option<u8> {
@@ -3473,7 +4058,7 @@ impl<'a> Gen<'a> {
             .genes
             .iter()
             .position(|g| g.name == n)
-            .map(|i| i as u8)
+            .map(|i| u8::try_from(i).expect("at most GENE_SLOTS genes"))
     }
 
     /// A trait parameter in scope.
@@ -3530,6 +4115,7 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
                 self.pred(pred)?;
                 self.expr(r)?;
@@ -3550,9 +4136,10 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
                 let c = self.scent(ch, at)?;
-                self.push_int(i32::from(c));
+                self.push_int(i32::from(c))?;
                 self.expr(r)?;
                 self.asm.sniff(slot).jz(on_false);
                 self.locals.push(Local {
@@ -3617,7 +4204,7 @@ impl<'a> Gen<'a> {
                             format!("`only` applies to a kind, not the tag `{name}`"),
                         ));
                     }
-                    pred::TAG_BASE + bit as i32
+                    pred::TAG_BASE + i32::try_from(bit).expect("at most MAX_TAGS tags")
                 } else {
                     return Err(self.err(at, format!("unknown kind or tag `{name}`")));
                 }
@@ -3629,7 +4216,7 @@ impl<'a> Gen<'a> {
                 }
             },
         };
-        self.push_int(v);
+        self.push_int(v)?;
         Ok(())
     }
 
@@ -3682,13 +4269,12 @@ impl<'a> Gen<'a> {
                 self.asm.sense(Sense::Y).op(OpCode::Sub);
             }
             Target::RandomFree => {
-                // A free neighbour chosen by the ring's rotated start; (0, 0)
-                // when there is none (the move is then BLOCKED).
+                // A free neighbour chosen by the ring's rotated start, whatever
+                // the sight; (0, 0) when there is none (the move is then BLOCKED).
                 let here = self.here.clone();
                 let tmp = self.alloc_local(&here, 2)?;
                 self.asm.push(0).store(tmp).push(0).store(tmp + 1);
-                self.push_int(pred::FREE);
-                self.asm.push(1).nearest(tmp).op(OpCode::Pop);
+                self.asm.random_free(tmp).op(OpCode::Pop);
                 self.asm.load(tmp).load(tmp + 1);
                 self.next_local = tmp;
             }
@@ -3698,14 +4284,14 @@ impl<'a> Gen<'a> {
 
     fn expr(&mut self, e: &Expr) -> Result<()> {
         match e {
-            Expr::Int(v) => self.push_int(*v),
+            Expr::Int(v) => self.push_int(*v)?,
             Expr::Sense(s) => {
                 self.asm.sense(*s);
             }
             Expr::Name(n, at) => {
                 if let Some(l) = self.local(n) {
                     match l.ty {
-                        Ty::Int | Ty::Pred => {
+                        Ty::Int => {
                             let slot = l.slot;
                             self.asm.load(slot);
                         }
@@ -3713,6 +4299,14 @@ impl<'a> Gen<'a> {
                             return Err(self.err(
                                 at,
                                 format!("`{n}` is a target: use `{n}.dx`, `{n}.dy` or `dist({n})`"),
+                            ));
+                        }
+                        Ty::Pred => {
+                            return Err(self.err(
+                                at,
+                                format!(
+                                    "`{n}` is a predicate: use it in count, nearest, is or for each"
+                                ),
                             ));
                         }
                     }
@@ -3723,7 +4317,7 @@ impl<'a> Gen<'a> {
                 } else if let Some(i) = self.gene_slot(n) {
                     self.asm.gene(i);
                 } else if let Some(v) = self.param(n).or_else(|| self.const_value(n)) {
-                    self.push_int(v);
+                    self.push_int(v)?;
                 } else {
                     return Err(self.unknown_name(at, n));
                 }
@@ -3785,7 +4379,7 @@ impl<'a> Gen<'a> {
                 }
                 self.asm.scent_at(c);
             }
-            Expr::SignalOf(t) => {
+            Expr::SignalOf(t, _) => {
                 self.target(t)?;
                 self.asm.op(OpCode::SignalAt);
             }
@@ -3833,8 +4427,15 @@ impl<'a> Gen<'a> {
                 .iter()
                 .position(|s| s.name == name)
                 .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
-            (i as u16, &subs[i])
+            (u16::try_from(i).expect("checked in generate"), &subs[i])
         };
+        // The action would survive a false condition (docs/RULES.md §4).
+        if self.in_when && self.call_acts(name, 0) {
+            return Err(self.err(
+                at,
+                format!("`{name}` may act or `next`: a sub called in a `when` condition must not"),
+            ));
+        }
         if args.len() != sub.params.len() {
             return Err(self.err(
                 at,
@@ -3855,13 +4456,15 @@ impl<'a> Gen<'a> {
                 (Ty::Target, Arg::Name(n, p)) => {
                     self.target(&Target::Named(n.clone(), p.clone()))?;
                 }
-                (Ty::Pred, Arg::Name(n, p)) => {
-                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?
+                (Ty::Pred, Arg::Name(n, p) | Arg::Expr(Expr::Name(n, p))) => {
+                    // `water` is the ground, unless a local shadows it.
+                    let pr = match pred_word(n) {
+                        Some(pr) if self.local(n).is_none() => pr,
+                        _ => Pred::Kind(n.clone(), false, p.clone()),
+                    };
+                    self.pred(&pr)?;
                 }
                 (Ty::Pred, Arg::Pred(pr)) => self.pred(pr)?,
-                (Ty::Pred, Arg::Expr(Expr::Name(n, p))) => {
-                    self.pred(&Pred::Kind(n.clone(), false, p.clone()))?;
-                }
                 (ty, _) => {
                     return Err(self.err(
                         at,
@@ -3870,7 +4473,9 @@ impl<'a> Gen<'a> {
                             match ty {
                                 Ty::Int => "an integer",
                                 Ty::Target => "a target",
-                                Ty::Pred => "a predicate (a kind or tag name)",
+                                Ty::Pred => {
+                                    "a predicate (a kind, a tag, water, soil, rock, free or bare)"
+                                }
                             }
                         ),
                     ));
@@ -3878,6 +4483,9 @@ impl<'a> Gen<'a> {
             }
         }
         self.asm.call(idx, width);
+        if sub.returns {
+            self.asm.returned();
+        }
         Ok(sub.returns)
     }
 
@@ -3886,6 +4494,8 @@ impl<'a> Gen<'a> {
         // same list: a second action, certain; refused here rather than
         // trapped at run time.
         let mut acted: Option<Option<u32>> = None;
+        // Likewise a second `next` in the list: the first one's line.
+        let mut chose: Option<u32> = None;
         for s in body {
             if let (Some(line), Some(at)) = (acted, action_at(s)) {
                 let earlier = line.map_or(String::new(), |l| format!(" at line {l}"));
@@ -3896,8 +4506,17 @@ impl<'a> Gen<'a> {
                     ),
                 ));
             }
+            if let Stmt::Next(_, at) = s {
+                if let Some(line) = chose {
+                    return Err(self.err(
+                        at,
+                        format!("a second `next`: the think already chose a state at line {line}"),
+                    ));
+                }
+                chose = Some(at.line);
+            }
             self.stmt(s)?;
-            if acted.is_none() && self.ends(s, true, 0) {
+            if acted.is_none() && self.ends(s, true, 0, false) {
                 acted = Some(stmt_line(s));
             }
         }
@@ -3961,6 +4580,7 @@ impl<'a> Gen<'a> {
                 if self.local(name).is_some() {
                     return Err(self.err(at, format!("`{name}` is already bound")));
                 }
+                self.hides(name, &format!("local `{name}`"), at)?;
                 self.expr(value)?;
                 let slot = self.alloc_local(at, 1)?;
                 self.asm.store(slot);
@@ -4042,7 +4662,7 @@ impl<'a> Gen<'a> {
             }
             Stmt::Become { kind, at } => {
                 let id = self.concrete(kind, at)?;
-                self.push_int(i32::from(id));
+                self.push_int(i32::from(id))?;
                 self.asm.act(Action::Become);
             }
             Stmt::Spawn {
@@ -4052,7 +4672,7 @@ impl<'a> Gen<'a> {
                 with,
             } => {
                 let id = self.concrete(kind, pos)?;
-                self.push_int(i32::from(id));
+                self.push_int(i32::from(id))?;
                 self.target(at)?;
                 if !with.is_empty() {
                     // The kind's first two slots, in its layout order.
@@ -4068,7 +4688,7 @@ impl<'a> Gen<'a> {
                             .and_then(|(n, _)| with.iter().find(|w| w.0 == *n))
                         {
                             Some((_, e, _)) => self.expr(e)?,
-                            None => self.push_int(0),
+                            None => self.push_int(0)?,
                         }
                     }
                     self.asm.op(OpCode::SpawnWith);
@@ -4092,7 +4712,7 @@ impl<'a> Gen<'a> {
                     self.err(at, format!("`{verb}`: this kind has no need `{need}`"))
                 })?;
                 self.target(target)?;
-                self.push_int(i32::from(slot));
+                self.push_int(i32::from(slot))?;
                 self.expr(amount)?;
                 self.asm
                     .act(if *give { Action::Give } else { Action::Take });
@@ -4150,7 +4770,8 @@ impl<'a> Gen<'a> {
                     .iter()
                     .position(|st| st == name)
                     .expect("the owner's states are the kind's");
-                self.asm.next(s as u8);
+                self.asm
+                    .next(u8::try_from(s).expect("at most MAX_STATES states"));
             }
             Stmt::ForEach {
                 pred,
@@ -4162,8 +4783,9 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 self.scoped(|g| {
-                    let base = g.alloc_local(at, FOR_EACH_LOCALS)?;
+                    let base = g.alloc_local(at, FOR_EACH_LOCALS.into())?;
                     g.pred(pred)?;
                     g.asm.store(base + 3);
                     g.expr(r)?;
@@ -4192,31 +4814,29 @@ impl<'a> Gen<'a> {
         let n = arms.len();
         let here = self.here.clone();
         self.scoped(|g| {
-            let base = g.alloc_local(&here, (n + 1) as u8)?;
-            let draw = base + n as u8;
+            let base = g.alloc_local(&here, n + 1)?;
+            // alloc_local has already held n to 15.
+            let n = u8::try_from(n).expect("at most FRAME_LOCALS arms");
+            let draw = base + n;
+            // Each weight is capped at i32::MAX / n, so the total cannot wrap.
+            let cap = i32::MAX / i32::from(n);
             g.asm.push(0);
-            for (i, (w, _)) in arms.iter().enumerate() {
+            for (i, (w, _)) in (0u8..).zip(arms) {
                 g.expr(w)?;
-                g.asm.push(0).op(OpCode::Max).store(base + i as u8);
-                g.asm.load(base + i as u8).op(OpCode::Add);
+                g.asm.push(0).op(OpCode::Max);
+                g.push_int(cap)?;
+                g.asm.op(OpCode::Min).store(base + i);
+                g.asm.load(base + i).op(OpCode::Add);
             }
             g.asm.op(OpCode::Rand).store(draw);
             let end = g.asm.label();
-            for (i, (_, body)) in arms.iter().enumerate() {
+            for (i, (_, body)) in (0u8..).zip(arms) {
                 let skip = g.asm.label();
-                g.asm
-                    .load(draw)
-                    .load(base + i as u8)
-                    .op(OpCode::Lt)
-                    .jz(skip);
+                g.asm.load(draw).load(base + i).op(OpCode::Lt).jz(skip);
                 g.scoped(|g| g.stmts(body))?;
                 g.asm.jmp(end).bind(skip);
                 if i + 1 < n {
-                    g.asm
-                        .load(draw)
-                        .load(base + i as u8)
-                        .op(OpCode::Sub)
-                        .store(draw);
+                    g.asm.load(draw).load(base + i).op(OpCode::Sub).store(draw);
                 }
             }
             g.asm.bind(end);
@@ -4226,1171 +4846,6 @@ impl<'a> Gen<'a> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::rules::vm::Op;
-
-    fn compile_ok(text: &str) -> Kinds {
-        compile("t.rules", text).unwrap_or_else(|e| panic!("{e}"))
-    }
-
-    fn compile_err(text: &str) -> String {
-        compile("t.rules", text)
-            .err()
-            .map(|e| e.to_string())
-            .expect("should not compile")
-    }
-
-    #[test]
-    fn plants_file_compiles_to_the_hand_assembled_program() {
-        let text = crate::rules::builtin::ORACLE_PLANTS;
-        let compiled = compile("plants.rules", text).unwrap_or_else(|e| panic!("{e}"));
-        let expected = crate::rules::builtin::hand_assembled();
-        let ops = |k: &Kinds| {
-            k.code
-                .iter()
-                .map(|o| format!("{o:?}"))
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        assert_eq!(ops(&compiled), ops(&expected));
-        assert_eq!(compiled.consts, expected.consts);
-        assert_eq!(compiled.defs, expected.defs);
-        assert_eq!(compiled.hash, expected.hash);
-    }
-
-    #[test]
-    fn lexer_handles_times_strings_symbols_and_comments() {
-        let toks = Lexer::new(
-            "t",
-            "kind x { # c\n glyph \"T\" 6h 30min 2d 7 => >= += c.dx }",
-        )
-        .lex()
-        .unwrap();
-        let kinds: Vec<Tok> = toks.into_iter().map(|t| t.tok).collect();
-        assert_eq!(
-            kinds,
-            vec![
-                Tok::Name("kind".into()),
-                Tok::Name("x".into()),
-                Tok::Sym("{"),
-                Tok::Name("glyph".into()),
-                Tok::Str("T".into()),
-                Tok::Time(hours(6) as i32),
-                Tok::Time(minutes(30) as i32),
-                Tok::Time(days(2) as i32),
-                Tok::Int(7),
-                Tok::Sym("=>"),
-                Tok::Sym(">="),
-                Tok::Sym("+="),
-                Tok::Name("c".into()),
-                Tok::Sym("."),
-                Tok::Name("dx".into()),
-                Tok::Sym("}"),
-                Tok::Eof,
-            ]
-        );
-        assert!(compile_err("kind a { glyph \"a\" 3w }").contains("unknown unit"));
-        assert!(compile_err("kind a { glyph \"ab\" }").contains("one printable"));
-        assert!(
-            compile_err("kind a { glyph \"a\" when 1 => x = $ }").contains("unexpected character")
-        );
-    }
-
-    #[test]
-    fn errors_carry_positions_and_name_the_problem() {
-        assert_eq!(
-            compile_err("kind a {\n  need water max 1h\n  when watter > 0 => idle\n}"),
-            "t.rules:3:8: unknown name `watter` (not a need, mem slot, gene or binding of this kind)"
-        );
-        assert!(compile_err("kind a { cadence 3 }").contains("power of two"));
-        assert!(compile_err("kind a { sight 40 }").contains("0 to 16"));
-        assert!(compile_err("kind a { need w max 1h need w max 2h }").contains("declared twice"));
-        assert!(compile_err("kind a { mem m, m }").contains("declared twice"));
-        assert!(compile_err("kind a { when 1 => become b }").contains("unknown kind `b`"));
-        assert!(compile_err("kind a { when 1 => spawn a at c }").contains("unknown name `c`"));
-        assert!(compile_err("kind a { when 1 => light = 2 }").contains("reserved word"));
-        assert!(
-            compile_err("kind a { when nearest free within 1 as c or 1 => idle }")
-                .contains("top-level conjunct")
-        );
-        assert!(
-            compile_err("kind a { when not nearest free within 1 as c => idle }")
-                .contains("top-level conjunct")
-        );
-        assert!(compile_err("kind a { when 1 => idle } kind a { }").contains("declared twice"));
-        assert!(
-            compile_err("kind a { when 1 => idle\n glyph \"x\" }")
-                .contains("declarations come first")
-        );
-        assert!(compile_err("kind a { when 1 => { idle").contains("unclosed block"));
-        assert!(compile_err("kind a { when min(1) > 0 => idle }").contains("takes 2 arguments"));
-        assert!(compile_err("kind a { need n max 1h mem n }").contains("declared twice"));
-        let many: String = (0..5).map(|i| format!("need n{i} max 1h ")).collect();
-        assert!(compile_err(&format!("kind a {{ {many} }}")).contains("has 5 needs, at most 4"));
-        // The radius binds tighter than a comparison.
-        let k = compile_ok("kind a { when count water within 2 > 0 => idle }");
-        let ops: Vec<OpCode> = k.code.iter().map(|o| o.code).collect();
-        assert_eq!(
-            &ops[..5],
-            &[
-                OpCode::Push,
-                OpCode::Push,
-                OpCode::Count,
-                OpCode::Push,
-                OpCode::Gt
-            ]
-        );
-        // Subs and targets.
-        assert!(compile_err("kind a { when 1 => f(1) }").contains("unknown sub `f`"));
-        assert!(
-            compile_err("sub f(n) { } kind a { when 1 => f(1, 2) }")
-                .contains("takes 1 arguments, 2 given")
-        );
-        assert!(
-            compile_err("sub f(t: target) { } kind a { when 1 => f(3) }")
-                .contains("must be a target")
-        );
-        assert!(
-            compile_err("sub f(n) { } kind a { when f(3) > 0 => idle }")
-                .contains("returns nothing")
-        );
-        assert!(compile_err("sub f(n) { return } sub f(m) { }").contains("sub `f` declared twice"));
-        assert!(compile_err("kind a { mem m when 1 => return 3 }").contains("outside a sub"));
-        assert!(
-            compile_err("sub f() { water = 1 } kind a { need water max 1h }")
-                .contains("cannot assign")
-        );
-        assert!(
-            compile_err("sub f() { let a = water } kind a { need water max 1h }")
-                .contains("sees only its parameters")
-        );
-        assert!(
-            compile_err("kind a { when nearest free within 1 as c => c = 2 }")
-                .contains("not an integer local")
-        );
-        assert!(
-            compile_err("kind a { when nearest free within 1 as c => let v = c }")
-                .contains("is a target")
-        );
-        assert!(compile_err("kind a { when 1 => move toward 3 }").contains("expected a target"));
-        assert!(
-            compile_err("kind a { when 1 => { let v = 1  let v = 2 } }").contains("already bound")
-        );
-    }
-
-    #[test]
-    fn defaults_and_declarations_land_in_the_def() {
-        let k = compile_ok(
-            "kind a { }\nkind b { glyph \"b\" cadence 16 sight 7 fuel 99 food 2h bite 3 tags meat feed need w max 3d decay 1 need h max 5 decay 0 vital mem p, q }",
-        );
-        let a = &k.defs[0];
-        assert_eq!(
-            (a.glyph, a.cadence_shift, a.sight, a.fuel, a.food, a.bite),
-            (b'?', 3, 4, 512, 0, 1)
-        );
-        let b = &k.defs[1];
-        assert_eq!(
-            (b.glyph, b.cadence_shift, b.sight, b.fuel, b.food, b.bite),
-            (b'b', 4, 7, 99, hours(2) as i32, 3)
-        );
-        assert_eq!(b.needs.len(), 2);
-        assert!(b.needs[0].decays && !b.needs[0].vital);
-        assert!(!b.needs[1].decays && b.needs[1].vital);
-        assert_eq!(b.mems, vec!["p", "q"]);
-        assert_eq!(b.entry, 1); // kind a's program is one Halt
-        assert_eq!(k.code[0].code, OpCode::Halt);
-    }
-
-    #[test]
-    fn conditions_short_circuit_and_bindings_scope_to_the_rule() {
-        let k = compile_ok(
-            "kind a { mem m\n when (m > 1 or m < -1) and not m == 0 => m = 0\n when nearest free within 1 as c and m > 0 => spawn a at c\n when 1 => if m > 5 { m = 5 } else if m < 0 { m = 0 } else { idle } }",
-        );
-        let c = &k.code;
-        let ops: Vec<OpCode> = c.iter().map(|o| o.code).collect();
-        let mut i = 0;
-        let expect = |i: &mut usize, want: &[OpCode]| {
-            assert_eq!(&ops[*i..*i + want.len()], want, "at op {i}");
-            *i += want.len();
-        };
-        expect(
-            &mut i,
-            &[
-                OpCode::Mem,
-                OpCode::Push,
-                OpCode::Gt,
-                OpCode::Jz,
-                OpCode::Jmp,
-            ],
-        );
-        expect(&mut i, &[OpCode::Mem, OpCode::Push, OpCode::Lt, OpCode::Jz]);
-        expect(
-            &mut i,
-            &[
-                OpCode::Mem,
-                OpCode::Push,
-                OpCode::Eq,
-                OpCode::Jz,
-                OpCode::Jmp,
-            ],
-        );
-        expect(&mut i, &[OpCode::Push, OpCode::SetMem, OpCode::EndRule]);
-        expect(
-            &mut i,
-            &[OpCode::Push, OpCode::Push, OpCode::Nearest, OpCode::Jz],
-        );
-        expect(&mut i, &[OpCode::Mem, OpCode::Push, OpCode::Gt, OpCode::Jz]);
-        expect(
-            &mut i,
-            &[
-                OpCode::Push,
-                OpCode::Load,
-                OpCode::Load,
-                OpCode::Act,
-                OpCode::EndRule,
-            ],
-        );
-        assert_eq!(c[i - 4], Op::new(OpCode::Load, 0, 0));
-        assert_eq!(c[i - 3], Op::new(OpCode::Load, 1, 0));
-        expect(&mut i, &[OpCode::Push, OpCode::Jz]);
-        expect(
-            &mut i,
-            &[
-                OpCode::Mem,
-                OpCode::Push,
-                OpCode::Gt,
-                OpCode::Jz,
-                OpCode::Push,
-                OpCode::SetMem,
-                OpCode::Jmp,
-            ],
-        );
-        expect(
-            &mut i,
-            &[
-                OpCode::Mem,
-                OpCode::Push,
-                OpCode::Lt,
-                OpCode::Jz,
-                OpCode::Push,
-                OpCode::SetMem,
-                OpCode::Jmp,
-            ],
-        );
-        expect(&mut i, &[OpCode::Act, OpCode::EndRule, OpCode::Halt]);
-        assert_eq!(i, ops.len());
-    }
-
-    #[test]
-    fn subs_targets_and_loops_compile_and_run() {
-        use crate::actors::{ActorMind, ChunkActors};
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
-        use bytemuck::Zeroable;
-        let k = compile_ok(
-            "sub twice(n) { return n * 2 }
-             sub far(t: target) { return dist(t) > 3 }
-             sub count_free(r) { let n = 0  let i = 0  while i < r { n += count free within i  i += 1 }  return n }
-             sub go(t: target) { if free(toward t) { move toward t } else { move random free } }
-             kind a { mem a, b, c, d, e, f
-               when 1 => { a = twice(21)  b = far(at(x + 5, y))  c = count_free(2)  d = 0  repeat 4 { d += 3 } }
-               when nearest water within 8 as w => { e = w.dx * 100 + w.dy  f = is(w, water) + dist(w) * 10 }
-               when 1 => go(north) }",
-        );
-        assert_eq!(k.subs.len(), 4);
-        let mut cells = ChunkCells::default();
-        cells.ground[10 * 64 + 13] = Ground::Water; // 2 east of the actor at (11, 10)
-        let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let mut mind = ActorMind::zeroed();
-        let ctx = Ctx {
-            halo: &halo,
-            kind: &k.defs[0],
-            cell: 10 * 64 + 11,
-            pos: WorldPos::new(11, 10),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
-        // Rule 1 has no action: falls through; rule 2 neither; rule 3 moves.
-        let out = vm::think(&k, ctx, &mut mind);
-        assert_eq!(out.trap, None, "{out:?}");
-        assert_eq!(out.action, Action::Move);
-        assert_eq!((out.dx, out.dy), (0, -1));
-        // count_free(2): radius 0 is the 1x1 square (nobody stands in this
-        // bare test's occupant array, so 1), radius 1 the 3x3 (9). Total 10.
-        assert_eq!(&mind.mem[..6], &[42, 1, 10, 12, 200, 1 + 20]);
-    }
-
-    #[test]
-    fn states_consts_looks_signals_and_for_each_compile_and_run() {
-        use crate::actors::{ActorMind, ActorPub, ChunkActors};
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ActorId, ChunkCells, Pos as WorldPos};
-        use bytemuck::Zeroable;
-        let k = compile_ok(
-            "const LOAD = 30min
-             const TWICE = LOAD * 2 + min(1, 2)
-             sub tally(what: pred) { let n = 0  for each what within 3 as f { n += 1 + look_of(f) }  return n }
-             kind a { mem s, n, m, p, h, l
-               when s == 1 => { s = 2  next B }
-               state A {
-                 when true => { n = tally(a:3)  m = tally(a)  p = pack(-3, 5)  h = hi(p)  l = lo(p)
-                                s = TWICE  signal = p  look = 4  next B }
-               }
-               state B {
-                 when nearest a:3 within 2 as f => { s = signal_of(f)  idle }
-                 when true => die
-               } }",
-        );
-        assert_eq!(k.defs[0].states, 2);
-        // Self at (10, 10); a:3 two east, a:0 one north-west, a:3 out of reach.
-        let mut cells = ChunkCells::default();
-        let mut actors = ChunkActors::default();
-        for (slot, (x, y, look, signal)) in [
-            (10, 10, 0, 0),
-            (12, 10, 3, 77),
-            (9, 9, 0, 0),
-            (20, 20, 3, 0),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let cell = y * 64 + x;
-            cells.occupant[cell] = ActorId::pack(0, slot as u16);
-            actors.rows.push(ActorPub {
-                cell: cell as u16,
-                look,
-                signal,
-                ..ActorPub::zeroed()
-            });
-        }
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let ctx = Ctx {
-            halo: &halo,
-            kind: &k.defs[0],
-            cell: 10 * 64 + 10,
-            pos: WorldPos::new(10, 10),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
-        // State A (the first): the loops, the bytes, the effects, `next`.
-        let mut mind = ActorMind::zeroed();
-        let out = vm::think(&k, ctx, &mut mind);
-        assert_eq!(out.trap, None, "{out:?}");
-        assert_eq!(out.action, Action::Idle);
-        assert_eq!(
-            (out.next, out.look, out.signal),
-            (Some(1), Some(4), Some(-763))
-        );
-        // tally(a:3) = 1 + 3; tally(a) = (1 + 3) + (1 + 0); pack/hi/lo round-trip.
-        assert_eq!(&mind.mem[..6], &[901, 4, 5, -763, -3, 5]);
-        // State B: reads the neighbour's signal through `a:3`.
-        mind.state = 1;
-        let out = vm::think(&k, ctx, &mut mind);
-        assert_eq!((out.trap, out.action, out.next), (None, Action::Idle, None));
-        assert_eq!(mind.mem[0], 77);
-        // The reflex runs first, in any state.
-        mind.mem[0] = 1;
-        let out = vm::think(&k, ctx, &mut mind);
-        assert_eq!((out.next, mind.mem[0]), (Some(1), 2));
-        // Nothing to see: B falls to `die`.
-        let empty = ChunkActors::default();
-        let bare = ChunkCells::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&bare, &empty)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let out = vm::think(&k, Ctx { halo: &halo, ..ctx }, &mut mind);
-        assert_eq!(out.action, Action::Die);
-
-        let errs = [
-            (
-                "kind a { state S { when true => next T } }",
-                "has no state `T`",
-            ),
-            (
-                "sub f() { next S }  kind a { state S { when true => f() } }",
-                "`next` inside a sub",
-            ),
-            (
-                "kind a { mem m  when true => m = 1 }  const C = m",
-                "not a constant declared above",
-            ),
-            (
-                "const C = 1  const C = 2",
-                "const `C` declared twice (first at t.rules:1)",
-            ),
-            (
-                "kind a { tags t  when nearest t:1 within 2 as v => idle }",
-                "`t` is not a kind",
-            ),
-            (
-                "kind a { state S { } state S { } }",
-                "state `S` declared twice",
-            ),
-        ];
-        for (text, want) in errs {
-            let e = compile_err(text);
-            assert!(e.contains(want), "{text}: {e}");
-        }
-    }
-
-    #[test]
-    fn choose_draws_once_and_large_constants_use_the_pool() {
-        let k = compile_ok(
-            "kind a { mem m\n when 1 => choose { 3: m = 1  2: m = 2 }\n when m > 100000 => m = 3d }",
-        );
-        assert_eq!(k.consts, vec![100_000, days(3) as i32]);
-        let rand = k.code.iter().filter(|o| o.code == OpCode::Rand).count();
-        assert_eq!(rand, 1);
-        use crate::actors::ChunkActors;
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
-        use bytemuck::Zeroable;
-        let cells = ChunkCells::default();
-        let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let mut counts = [0; 3];
-        for uid in 0..500u64 {
-            let mut mind = crate::actors::ActorMind::zeroed();
-            let ctx = Ctx {
-                halo: &halo,
-                kind: &k.defs[0],
-                cell: 100,
-                pos: WorldPos::new(36, 1),
-                tick: 77,
-                rng: vm::rng_base(3, 77, uid),
-                look: 0,
-                signal: 0,
-            };
-            let out = vm::think(&k, ctx, &mut mind);
-            assert_eq!(out.trap, None);
-            counts[mind.mem[0] as usize] += 1;
-        }
-        assert_eq!(counts[0], 0);
-        assert!(counts[1] > 240 && counts[1] < 360, "{counts:?}");
-        assert!(counts[2] > 140 && counts[2] < 260, "{counts:?}");
-    }
-
-    /// Lines of kind `k`'s rules in scan order, with the trait or parent
-    /// each came from.
-    fn rule_lines(k: &Kinds, kind: &str) -> Vec<(Option<u8>, u32, Option<String>)> {
-        let id = k.by_name(kind).unwrap().id;
-        k.debug
-            .rules
-            .iter()
-            .filter(|r| r.kind == id)
-            .map(|r| (r.state, r.line, r.via.clone()))
-            .collect()
-    }
-
-    /// A halo over one bare chunk, for running a think in a test.
-    fn run_think(
-        k: &Kinds,
-        kind: &str,
-        mind: &mut crate::actors::ActorMind,
-    ) -> crate::rules::vm::Outcome {
-        use crate::actors::ChunkActors;
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
-        let cells = ChunkCells::default();
-        let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let ctx = Ctx {
-            halo: &halo,
-            kind: k.by_name(kind).unwrap(),
-            cell: 100,
-            pos: WorldPos::new(36, 1),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
-        vm::think(k, ctx, mind)
-    }
-
-    /// `spawn K ... with` names the memory it sets. Those names take K's
-    /// first slots, where a spawn's two values land, whatever K inherits.
-    #[test]
-    fn spawn_with_names_the_memory_it_sets() {
-        use bytemuck::Zeroable;
-        let k = compile_ok(
-            "trait walker { mem heading, detour }
-             kind bee extends walker { mem trip, home_x, home_y  when true => idle }
-             kind hive { when true => spawn bee at random free with (home_y = 5, home_x = x) }
-             kind queen { when true => spawn bee at random free with (home_x = 9) }",
-        );
-        let bee = k.by_name("bee").unwrap();
-        assert_eq!(bee.mems, ["home_y", "home_x", "heading", "detour", "trip"]);
-        let mut m = crate::actors::ActorMind::zeroed();
-        let out = run_think(&k, "hive", &mut m);
-        assert_eq!((out.action, out.with), (Action::Spawn, [5, 36]));
-        let out = run_think(&k, "queen", &mut m);
-        assert_eq!(out.with, [0, 9], "home_x is slot 1; home_y stays zero");
-        for (text, want) in [
-            (
-                "kind b { } kind h { when true => spawn b at random free with (7, x) }",
-                "`with` names the memory it sets: `with (home_x = x, home_y = y)`",
-            ),
-            (
-                "kind b { mem m } kind h { when true => spawn b at random free with (n = 1) }",
-                "`spawn b ... with`: `b` has no memory `n`",
-            ),
-            (
-                "kind b { mem m } kind h { when true => spawn b at random free with (m = 1, m = 2) }",
-                "`with` sets `m` twice",
-            ),
-            (
-                "kind b { mem p, q, r }
-                 kind h { when true => spawn b at random free with (p = 1, q = 2) }
-                 kind g { when true => spawn b at random free with (r = 3) }",
-                "spawns of `b` set three memory slots with `with` (p, q, r): at most two per kind",
-            ),
-            (
-                "kind b { mem p, q, r } kind h { when true => spawn b at random free with (p = 1, q = 2, r = 3) }",
-                "`with` sets at most two memory slots",
-            ),
-        ] {
-            let e = compile_err(text);
-            assert!(e.contains(want), "{text}: {e}");
-        }
-    }
-
-    #[test]
-    fn traits_merge_declarations_in_linearized_order() {
-        let k = compile_ok(
-            "trait mover { cadence 2  sight 6  tags animal  need food max 1d vital  mem heading }
-             trait drinker(t) { tags thirsty  need water max t vital  mem knows_water }
-             kind hen extends mover, drinker(4h) {
-               glyph \"h\"  sight 8  need health max 20 decay 0 vital  mem last_egg }
-             kind chick extends hen { glyph \"c\"  need water max 2h vital }",
-        );
-        let hen = k.by_name("hen").unwrap();
-        assert_eq!((hen.glyph, hen.cadence_shift, hen.sight), (b'h', 1, 8));
-        let needs: Vec<(&str, i32)> = hen.needs.iter().map(|n| (n.name.as_str(), n.max)).collect();
-        assert_eq!(needs, [("food", 21600), ("water", 3600), ("health", 20)]);
-        assert_eq!(hen.mems, ["heading", "knows_water", "last_egg"]);
-        assert_eq!(hen.tags, 0b11);
-        assert_eq!(hen.parent, None);
-        // The chick keeps every slot where the hen has it; its water is its own.
-        let chick = k.by_name("chick").unwrap();
-        let needs: Vec<(&str, i32)> = chick
-            .needs
-            .iter()
-            .map(|n| (n.name.as_str(), n.max))
-            .collect();
-        assert_eq!(needs, [("food", 21600), ("water", 1800), ("health", 20)]);
-        assert_eq!((chick.glyph, chick.sight, chick.tags), (b'c', 8, 0b11));
-        assert_eq!(chick.parent, Some(hen.id));
-        assert_eq!(k.debug.traits, ["mover", "drinker"]);
-        assert_eq!(
-            k.debug.parents[usize::from(hen.id)],
-            ["mover", "drinker(3600)"]
-        );
-        // A parent's tables change nothing for kinds without parents.
-        assert_eq!(k.family_end[usize::from(hen.id)], chick.id + 1);
-    }
-
-    #[test]
-    fn inherit_splices_where_written_and_appends_when_absent() {
-        let k = compile_ok(
-            "trait t1 { when hour == 1 => idle }
-             trait t2 { when hour == 2 => idle }
-             kind a extends t1, t2 {
-               when hour == 3 => idle
-               inherit t2
-               when hour == 4 => idle
-             }
-             kind b extends t1, t2 { when hour == 5 => idle }
-             kind c extends a { when hour == 6 => idle  inherit }",
-        );
-        let t = |v: Option<&str>| v.map(str::to_string);
-        assert_eq!(
-            rule_lines(&k, "a"),
-            [(None, 4, None), (None, 2, t(Some("t2"))), (None, 6, None)]
-        );
-        assert_eq!(
-            rule_lines(&k, "b"),
-            [
-                (None, 8, None),
-                (None, 1, t(Some("t1"))),
-                (None, 2, t(Some("t2")))
-            ]
-        );
-        // `inherit` alone splices the parent's list as the parent runs it:
-        // without t1, which `a` left out.
-        assert_eq!(
-            rule_lines(&k, "c"),
-            [
-                (None, 9, None),
-                (None, 4, t(Some("a"))),
-                (None, 2, t(Some("t2"))),
-                (None, 6, t(Some("a")))
-            ]
-        );
-        let notes: Vec<&str> = k
-            .debug
-            .diagnostics
-            .iter()
-            .filter(|d| d.level == Level::Note)
-            .map(|d| d.msg.as_str())
-            .collect();
-        assert_eq!(
-            notes,
-            [
-                "`a` does not run the reflex rules of `t1` (no `inherit` splices them)",
-                "`c` does not run the reflex rules of `t1` (no `inherit` splices them)"
-            ]
-        );
-    }
-
-    #[test]
-    fn state_blocks_merge_by_name() {
-        let k = compile_ok(
-            "trait walker {
-               state WALK { when hour == 1 => idle }
-               state REST { when hour == 2 => idle }
-             }
-             kind k extends walker {
-               state REST { when hour == 3 => idle  inherit }
-               state EAT { when hour == 4 => next WALK }
-             }",
-        );
-        let id = usize::from(k.by_name("k").unwrap().id);
-        assert_eq!(k.debug.states[id], ["WALK", "REST", "EAT"]);
-        assert_eq!(k.defs[id].states, 3);
-        let w = |v: &str| Some(v.to_string());
-        assert_eq!(
-            rule_lines(&k, "k"),
-            [
-                (Some(0), 2, w("walker")),
-                (Some(1), 6, None),
-                (Some(1), 3, w("walker")),
-                (Some(2), 7, None)
-            ]
-        );
-        // `next WALK` in the kind's own state is state 0.
-        let next = k.code.iter().find(|o| o.code == OpCode::Next).unwrap();
-        assert_eq!(next.a, 0);
-    }
-
-    #[test]
-    fn trait_parameters_fold_per_instantiation() {
-        use crate::actors::ActorMind;
-        use bytemuck::Zeroable;
-        let k = compile_ok(
-            "const HOUR = 1h
-             trait thirsty(t) { need water max t * 2 vital  when water < t => water = t }
-             kind a extends thirsty(2 * HOUR) { }
-             kind b extends thirsty(6h) { }",
-        );
-        assert_eq!(k.by_name("a").unwrap().needs[0].max, 3600);
-        assert_eq!(k.by_name("b").unwrap().needs[0].max, 10800);
-        for (kind, want) in [("a", 1800), ("b", 5400)] {
-            let mut m = ActorMind::zeroed();
-            let out = run_think(&k, kind, &mut m);
-            assert_eq!(out.trap, None);
-            assert_eq!(m.needs[0], want, "{kind}");
-        }
-        assert!(
-            compile_err("trait t(v) { when 1 => v = 2 } kind a extends t(1) { }")
-                .contains("cannot assign to `v`: it is a constant")
-        );
-    }
-
-    #[test]
-    fn genes_are_read_by_name_merge_like_needs_and_are_never_written() {
-        use crate::actors::ActorMind;
-        use bytemuck::Zeroable;
-        // The trait's default and range come from its parameters; checked
-        // alone with every parameter bound to 1, the default is outside
-        // the range, which must not refuse the trait.
-        let k = compile_ok(
-            "trait drinker(thirsty) {
-               need water max 4h vital
-               gene thirst = thirsty from 30min to 6h
-               when water < thirst => water = thirst
-             }
-             kind a extends drinker(2h) { gene fear = -1 from -5 to 12 }
-             kind b extends drinker(1h) { gene thirst = 3h from 1h to 4h }",
-        );
-        let a = k.by_name("a").unwrap();
-        let g = |name: &str, default, lo, hi| GeneDef {
-            name: name.into(),
-            default,
-            lo,
-            hi,
-        };
-        assert_eq!(
-            a.genes,
-            [g("thirst", 1800, 450, 5400), g("fear", -1, -5, 12)]
-        );
-        assert_eq!(
-            k.by_name("b").unwrap().genes,
-            [g("thirst", 2700, 900, 3600)],
-            "a redeclaration overrides in place"
-        );
-        assert!(k.code.iter().any(|o| o.code == OpCode::Gene));
-        // Each actor reads its own value, whatever the default says.
-        let mut m = ActorMind::zeroed();
-        m.needs[0] = 1; // a vital need at 0 dies before any rule runs
-        m.genes[0] = 700;
-        assert_eq!(run_think(&k, "a", &mut m).trap, None);
-        assert_eq!(m.needs[0], 700);
-
-        let err = |t: &str| compile_err(t);
-        assert!(
-            err("kind a { gene g = 5 from 1 to 9  when 1 => g = 2 }")
-                .contains("cannot assign to `g`: it is a gene (inherited, never written)")
-        );
-        assert!(err("kind a { gene g = 5 from 9 to 1 }").contains("the low end comes first"));
-        assert!(err("kind a { gene g = 10 from 1 to 9 }").contains("starts at 10, outside 1 to 9"));
-        assert!(
-            err("kind a { gene g = 1 from 1 to 9  gene g = 2 from 1 to 9 }")
-                .contains("declared twice")
-        );
-        assert!(err("kind a { mem g  gene g = 1 from 1 to 9 }").contains("declared twice"));
-        assert!(err("kind a { gene g = 1 from 1 9 }").contains("expected `to`"));
-        assert!(
-            err("const G = 3 kind a { gene G = 1 from 1 to 9 }")
-                .contains("gene `G` has the name of a constant")
-        );
-        assert!(
-            err("trait t(v) { gene v = 1 from 1 to 9 } kind a extends t(1) { }")
-                .contains("gene `v` has the name of a parameter")
-        );
-        assert!(
-            err("kind a { gene b = 1 from 1 to 9 } kind b { }")
-                .contains("gene `b` has the name of a kind or trait")
-        );
-        assert!(
-            err("kind a { tags meat  gene meat = 1 from 1 to 9 }")
-                .contains("gene `meat` has the name of a tag")
-        );
-        assert!(
-            err("trait t { need g max 1h } kind a extends t { gene g = 1 from 1 to 9 }")
-                .contains("gene `g` has the name of a need")
-        );
-        assert!(
-            err(
-                "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
-                     kind a extends t, u { }"
-            )
-            .contains("inherits gene `g` from `t` and `u`, declared differently")
-        );
-        compile_ok(
-            "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
-             kind a extends t, u { gene g = 3 from 1 to 9 }",
-        );
-        let many: String = (0..9)
-            .map(|i| format!("gene g{i} = 0 from 0 to 1 "))
-            .collect();
-        assert!(err(&format!("kind a {{ {many} }}")).contains("has 9 genes, at most 8"));
-        // A trait reads only the genes it or its ancestors declare.
-        let e =
-            err("trait t { when fear > 1 => idle } kind a extends t { gene fear = 1 from 0 to 9 }");
-        assert!(
-            e.contains("`t` uses `fear`, which it does not declare (a trait or parent kind sees only its own needs, mems and genes)"),
-            "{e}"
-        );
-    }
-
-    #[test]
-    fn member_subs_see_their_kinds_needs_and_compile_per_kind() {
-        use crate::actors::ActorMind;
-        use bytemuck::Zeroable;
-        let k = compile_ok(
-            "trait eater { need food max 1d vital }
-             trait sipper {
-               need water max 4h vital
-               sub sip(n) { water = water + n }
-               when water < 1h => { sip(30min)  idle }
-             }
-             kind a extends eater, sipper { }
-             kind b extends sipper { }
-             kind c extends sipper { sub sip(n) { water = 3h } }",
-        );
-        // Water is slot 1 in `a`, slot 0 in `b` and `c`: one sub, compiled per kind.
-        assert_eq!(k.by_name("a").unwrap().need_named("water"), Some(1));
-        assert_eq!(k.by_name("b").unwrap().need_named("water"), Some(0));
-        for (kind, slot, want) in [("a", 1, 450), ("b", 0, 450), ("c", 0, 2700)] {
-            let mut m = ActorMind::zeroed();
-            m.needs = [100; 4];
-            m.needs[slot] = 0;
-            let out = run_think(&k, kind, &mut m);
-            assert_eq!(out.trap, None, "{kind}");
-            assert_eq!(m.needs[slot], want, "{kind}");
-        }
-        assert!(k.debug.subs.contains(&"a::sip".to_string()));
-        assert!(k.debug.subs.contains(&"c::sip".to_string()));
-    }
-
-    #[test]
-    fn family_numbering_is_preorder_by_file_then_declaration() {
-        let k = compile_ok(
-            "kind hen extends bird { }
-             kind animal { }
-             kind plant { }
-             kind bird extends animal { }
-             kind fox extends animal { }
-             kind tree extends plant { }",
-        );
-        assert_eq!(
-            k.names().collect::<Vec<_>>(),
-            ["animal", "bird", "hen", "fox", "plant", "tree"]
-        );
-        assert_eq!(k.family_end, [4, 3, 3, 4, 6, 6]);
-        let parents: Vec<Option<u16>> = k.defs.iter().map(|d| d.parent).collect();
-        assert_eq!(parents, [None, Some(0), Some(1), Some(0), None, Some(4)]);
-        // `only` and families in predicates.
-        let k = compile_ok(
-            "kind animal { }
-             kind bird extends animal {
-               when nearest animal within 1 as a => idle
-               when nearest only animal within 1 as a => idle
-               when nearest bird:2 within 1 as a => idle
-               when nearest only bird:2 within 1 as a => idle
-             }",
-        );
-        let pushes: Vec<i32> = k
-            .code
-            .windows(3)
-            .filter(|w| w[2].code == OpCode::Nearest)
-            .map(|w| match w[0].code {
-                OpCode::PushK => k.consts[w[0].imm as u16 as usize],
-                _ => i32::from(w[0].imm),
-            })
-            .collect();
-        assert_eq!(
-            pushes,
-            [
-                0,
-                pred::ONLY,
-                pred::kind_look(1, 2),
-                pred::kind_look(1, 2) + pred::ONLY
-            ]
-        );
-    }
-
-    #[test]
-    fn extends_errors_name_the_problem() {
-        let errs = [
-            ("kind a extends zz { }", "unknown trait or kind `zz`"),
-            (
-                "kind a extends b { } kind b extends a { }",
-                "extends itself: a -> b -> a",
-            ),
-            (
-                "trait a extends b { } trait b extends a { }",
-                "extends itself",
-            ),
-            (
-                "kind a { } kind b { } kind c extends a, b { }",
-                "extends two kinds, `a` and `b`",
-            ),
-            (
-                "kind a { } trait t extends a { }",
-                "trait `t` can extend only traits",
-            ),
-            (
-                "trait t(v) { } kind a extends t { }",
-                "takes 1 argument, 0 given",
-            ),
-            (
-                "kind a { } kind b extends a(1) { }",
-                "kind `a` takes no arguments",
-            ),
-            (
-                "trait t(v) { } trait u extends t(1) { } kind a extends u, t(2) { }",
-                "reaches trait `t` twice, with (1) and (2)",
-            ),
-            (
-                "trait t { } kind a { inherit t }",
-                "`t` is not an ancestor of `a`",
-            ),
-            (
-                "trait t { when true => idle } kind a extends t { inherit t  inherit t }",
-                "`inherit t` twice",
-            ),
-            (
-                "trait t { } kind a extends t { state S { inherit t } }",
-                "`t` has no state `S`",
-            ),
-            ("trait t { glyph \"x\" }", "a trait has no glyph"),
-            ("trait t { color \"#ffffff\" }", "a trait has no colour"),
-            ("kind a(v) { }", "a kind takes no parameters"),
-            (
-                "trait t { when food < 1 => idle } kind a extends t { need food max 1d }",
-                "`t` uses `food`, which it does not declare",
-            ),
-            ("trait t { when zz > 1 => idle }", "unknown name `zz`"),
-            (
-                "trait t { } kind a { when nearest t within 1 as v => idle }",
-                "`t` is a trait",
-            ),
-            (
-                "trait t { } kind a { when 1 => spawn t at north }",
-                "only a kind can be spawned",
-            ),
-            (
-                "kind a { tags z  when nearest only z within 1 as v => idle }",
-                "`only` applies to a kind",
-            ),
-            (
-                "kind a { when nearest only water within 1 as v => idle }",
-                "`only` applies to a kind",
-            ),
-            (
-                "trait t { when 1 => f() } kind a extends t { sub f() { idle } }",
-                "`t` calls `f`, which it does not define",
-            ),
-            (
-                "sub f() { } kind a { sub f() { } }",
-                "has the name of a file sub",
-            ),
-            ("const X = 1  trait t(X) { }", "hides the constant `X`"),
-            (
-                "trait p { need w max 1h } trait q { need w max 2h } kind a extends p, q { }",
-                "inherits need `w` from `p` and `q`",
-            ),
-            (
-                "trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { }",
-                "inherits different cadences from `p` and `q`",
-            ),
-            (
-                "trait p { sub f() { } } trait q { sub f() { } } kind a extends p, q { }",
-                "inherits sub `f` from both `p` and `q`",
-            ),
-            (
-                "trait t { when 1 => next S } kind a extends t { state S { } }",
-                "trait `t` has no state `S`",
-            ),
-            ("trait t { } kind t { }", "kind `t` declared twice"),
-            (
-                "trait t { need a max 1h need b max 1h need c max 1h need d max 1h need e max 1h }",
-                "has 5 needs",
-            ),
-            (
-                "kind a { when 1 => idle  sub f() { } }",
-                "member subs come before the rules",
-            ),
-        ];
-        for (text, want) in errs {
-            let e = compile_err(text);
-            assert!(e.contains(want), "{text}\n  got: {e}");
-        }
-        // A redeclaration settles parents that disagree.
-        compile_ok(
-            "trait p { need w max 1h } trait q { need w max 2h } kind a extends p, q { need w max 3h }",
-        );
-        compile_ok("trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { cadence 8 }");
-    }
-
-    #[test]
-    fn straight_line_second_action_is_an_error() {
-        for text in [
-            "kind a { when 1 => { idle  move north } }",
-            "kind a { when 1 => { if hour > 1 { idle } else { die }  move north } }",
-            "sub f() { idle } kind a { when 1 => { f()  move north } }",
-            "kind a { when 1 => { choose { 1: idle  2: die }  move north } }",
-        ] {
-            let e = compile_err(text);
-            assert!(e.contains("a second action"), "{text}: {e}");
-        }
-        let e = compile_err("kind a {\n when 1 => {\n idle\n move north } }");
-        assert!(e.starts_with("t.rules:4:2:"), "{e}");
-        assert!(e.contains("already acted at line 3"), "{e}");
-        // Conservative: a branch that may not act, or a `next`, is fine.
-        compile_ok("kind a { when 1 => { if hour > 1 { idle }  move north } }");
-        compile_ok("kind a { when 1 => { next S  move north } state S { } }");
-        compile_ok("kind a { when 1 => { choose { 1: idle  0: look = 1 }  move north } }");
-    }
-
-    #[test]
-    fn unreachable_rule_warning_is_conservative() {
-        let warnings = |text: &str| -> Vec<String> {
-            compile_ok(text)
-                .debug
-                .diagnostics
-                .iter()
-                .filter(|d| d.level == Level::Warning)
-                .map(ToString::to_string)
-                .collect()
-        };
-        assert_eq!(
-            warnings("kind a { when true => idle\n when hour > 1 => die }"),
-            ["t.rules:2:2: warning: never runs: the rule at t.rules:1 always ends the think"]
-        );
-        assert!(warnings("kind a { when true => look = 1\n when hour > 1 => die }").is_empty());
-        assert!(warnings("kind a { when hour > 1 => idle\n when true => die }").is_empty());
-        assert!(
-            warnings("kind a { when true => { if hour > 1 { idle } }\n when 1 => die }").is_empty()
-        );
-        assert_eq!(
-            warnings("kind a { when true => idle\n state S { when 1 => die } }"),
-            [
-                "t.rules:2:12: warning: never runs: the reflex rule at t.rules:1 always ends the think"
-            ]
-        );
-        // Through inheritance: the trait's rule hides the kind's.
-        assert_eq!(
-            warnings(
-                "trait t { when 2 > 1 => idle }\nkind a extends t { inherit t\n when hour > 1 => die }"
-            ),
-            ["t.rules:3:2: warning: never runs: the rule at t.rules:1 always ends the think"]
-        );
-        // One warning per rule, not one per kind that includes it.
-        assert_eq!(
-            warnings(
-                "trait t { when true => idle\n when hour > 1 => die }\nkind a extends t { }\nkind b extends t { }"
-            )
-            .len(),
-            1
-        );
-    }
-
-    #[test]
-    fn a_directory_compiles_in_sorted_file_order() {
-        let dir = std::env::temp_dir().join(format!("wmc-rules-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("b.rules"), "kind bee { when 1 => become ant }").unwrap();
-        std::fs::write(dir.join("a.rules"), "kind ant { }").unwrap();
-        std::fs::write(dir.join("notes.txt"), "kind ignored { }").unwrap();
-        let k = compile_packs(&[&dir]).unwrap();
-        assert_eq!(k.names().collect::<Vec<_>>(), vec!["ant", "bee"]);
-        let abs = std::fs::canonicalize(&dir).unwrap();
-        assert_eq!(k.debug.packs, [abs.to_string_lossy()]);
-        std::fs::write(dir.join("c.rules"), "kind ant { }").unwrap();
-        let err = compile_packs(&[&dir]).unwrap_err().to_string();
-        assert!(
-            err.starts_with("c.rules:1:6: kind `ant` declared twice (first at a.rules:1)"),
-            "{err}"
-        );
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    /// Packs are file lists in the order given: a later pack's kinds come
-    /// after an earlier one's, may extend them and call their subs, and a
-    /// name declared in two packs is an error naming both files.
-    #[test]
-    fn packs_merge_in_order_and_duplicates_name_both_files() {
-        let root = std::env::temp_dir().join(format!("wmc-packs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
-        let (base, wild) = (root.join("base"), root.join("wild"));
-        std::fs::create_dir_all(&base).unwrap();
-        std::fs::create_dir_all(&wild).unwrap();
-        std::fs::write(base.join("b.rules"), "kind hen { }\nsub rest() { idle }").unwrap();
-        std::fs::write(base.join("a.rules"), "trait walker { }").unwrap();
-        std::fs::write(
-            wild.join("a.rules"),
-            "kind wolf extends walker { when true => rest() }\nkind pup extends hen { }",
-        )
-        .unwrap();
-        let single = root.join("lone.rules");
-        std::fs::write(&single, "kind moth { }").unwrap();
-        let k = compile_packs(&[&base, &wild, &single]).unwrap();
-        // Pre-order: `pup` right after its parent `hen`.
-        assert_eq!(
-            k.names().collect::<Vec<_>>(),
-            ["hen", "pup", "wolf", "moth"]
-        );
-        assert_eq!(k.debug.packs.len(), 3);
-        assert_eq!(
-            k.debug.files,
-            ["base/a.rules", "base/b.rules", "wild/a.rules", "lone.rules"]
-        );
-        // Two packs, one name: both positions, pack-qualified.
-        std::fs::write(wild.join("b.rules"), "\nkind hen { }").unwrap();
-        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
-        assert!(
-            err.starts_with(
-                "wild/b.rules:2:6: kind `hen` declared twice (first at base/b.rules:1)"
-            ),
-            "{err}"
-        );
-        std::fs::write(wild.join("b.rules"), "const N = 1\nsub rest() { idle }").unwrap();
-        let err = compile_packs(&[&base, &wild]).unwrap_err().to_string();
-        assert!(
-            err.contains("sub `rest` declared twice (first at base/b.rules:2)"),
-            "{err}"
-        );
-        let err = compile_packs(&[&base, &root.join("gone")])
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("gone"), "{err}");
-        std::fs::remove_dir_all(&root).unwrap();
-    }
-}
+mod props;
+#[cfg(test)]
+mod tests;

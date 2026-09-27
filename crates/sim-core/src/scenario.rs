@@ -39,7 +39,12 @@ use std::fmt;
 
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
-use crate::stage::{ChunkCoord, Feature, Ground, Pos};
+use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16};
+
+mod expect;
+pub use expect::{check_expect, expect, expect_family};
+#[cfg(test)]
+mod fuzz;
 
 /// A cell's placement draw is out of this: the top 24 bits of a cell hash,
 /// exact in integers. A share `n / d` is `n * PLACE_ONE / d` of it.
@@ -47,6 +52,15 @@ pub const PLACE_ONE: u32 = 1 << 24;
 
 /// The most cells a drawn map may hold.
 const MAP_CELLS: usize = 1 << 24;
+
+/// The most chunks `size` may generate at creation (4096 x 4096 cells,
+/// about 600 MB); the rest generates as the camera reaches it.
+pub const MAX_SIZE_CHUNKS: u64 = 4096;
+
+// A `size` or a drawn map is at most this many chunks, or cells, in a
+// line: inside the world's extent without a check of its own.
+const _: () = assert!(MAX_SIZE_CHUNKS * CHUNK_SIZE as u64 <= WORLD_EXTENT as u64);
+const _: () = assert!(MAP_CELLS <= WORLD_EXTENT as usize);
 
 /// Where a kind starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,7 +98,8 @@ impl Start {
     pub fn share(&self) -> u32 {
         match self {
             Start::Share { num, den, .. } => {
-                (u64::from(*num) * u64::from(PLACE_ONE) / u64::from(*den)) as u32
+                let share = u64::from(*num) * u64::from(PLACE_ONE) / u64::from(*den);
+                u32::try_from(share).expect("num <= den: parse and load refuse the rest")
             }
             Start::At { .. } => 0,
         }
@@ -171,8 +186,8 @@ pub enum Expect {
         op: Op,
         n: i64,
     },
-    /// `born|became|eaten|died [only] K OP N`: the life counters so far
-    /// (`counter` is an `actors::life` index).
+    /// `born|became|eaten|died|thinks|traps [only] K OP N`: the life
+    /// counters so far (`counter` is an `actors::life` index).
     Tally {
         counter: usize,
         who: Who,
@@ -180,7 +195,8 @@ pub enum Expect {
         n: i64,
     },
     /// `min|max|sum|mean NAME of [only] K OP V`: a need, memory or gene
-    /// over every actor of the kind.
+    /// over every actor of the kind (`mean` rounds down). With none alive
+    /// it fails, whatever `OP V` says.
     Value {
         agg: Agg,
         name: String,
@@ -231,7 +247,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
 
 /// The words after `expect`.
 fn expectation(rest: &str) -> Result<Expect, String> {
-    const FORMS: &str = "expected `expect count|born|became|eaten|died [only] KIND OP N`, `expect min|max|sum|mean NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
+    const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|mean NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
     let words: Vec<&str> = rest.split_whitespace().collect();
     // `OP V` ending the line at `words[i..]`.
     let op_value = |i: usize| -> Result<(Op, i64), String> {
@@ -250,6 +266,8 @@ fn expectation(rest: &str) -> Result<Expect, String> {
         "became" => Some(crate::actors::life::BECAME),
         "eaten" => Some(crate::actors::life::EATEN),
         "died" => Some(crate::actors::life::DIED),
+        "thinks" => Some(crate::actors::life::THINKS),
+        "traps" => Some(crate::actors::life::TRAPS),
         _ => None,
     };
     let agg = |w: &str| match w {
@@ -290,21 +308,11 @@ fn expectation(rest: &str) -> Result<Expect, String> {
             v,
         });
     }
-    if first == "at" {
-        let tail = rest.trim_start().strip_prefix("at").unwrap_or("").trim();
-        let close = tail.find(')').ok_or(FORMS)?;
-        let nums: Vec<&str> = tail[..close]
-            .trim_start_matches('(')
-            .split(',')
-            .map(str::trim)
-            .collect();
-        let (Ok(x), Ok(y)) = (
-            nums.first().copied().unwrap_or("").parse::<i32>(),
-            nums.get(1).copied().unwrap_or("").parse::<i32>(),
-        ) else {
-            return Err(FORMS.into());
-        };
-        let after: Vec<&str> = tail[close + 1..].split_whitespace().collect();
+    if first == "at" || first.starts_with("at(") {
+        let tail = rest.trim_start().strip_prefix("at").unwrap_or("");
+        let (x, y, after) = xy(tail).ok_or(FORMS)?;
+        in_world(x, y)?;
+        let after: Vec<&str> = after.split_whitespace().collect();
         let who = match after[..] {
             ["nobody"] => None,
             _ => match who_at(&after, 0) {
@@ -336,6 +344,9 @@ pub struct Scenario {
     pub height: u32,
     pub params: GenParams,
     pub starts: Vec<Start>,
+    /// Each start's line in the file, for errors: its `start` line, or
+    /// the map row that draws it. Nothing a world keeps.
+    pub start_lines: Vec<u32>,
     /// Drawn cells from `(0, 0)`, and what lies beyond them.
     pub map: Option<DrawnMap>,
     /// A scenario test's `run` and `expect` lines (`wmc scenario`); nothing
@@ -366,6 +377,30 @@ impl fmt::Display for ScenarioError {
 
 impl std::error::Error for ScenarioError {}
 
+/// Starts that do not fit the rules or the terrain ([`Placement::resolve`]),
+/// or a world too large to create: why, and which start (an index into
+/// the starts; `None` when it is about no one start).
+/// [`Scenario::line_of`] turns the index into a line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StartError {
+    pub start: Option<usize>,
+    pub msg: String,
+}
+
+impl fmt::Display for StartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.msg)
+    }
+}
+
+impl std::error::Error for StartError {}
+
+impl From<StartError> for String {
+    fn from(e: StartError) -> String {
+        e.msg
+    }
+}
+
 impl Default for Scenario {
     /// Seed 42, 80 x 24 cells, default terrain, nobody.
     fn default() -> Self {
@@ -375,6 +410,7 @@ impl Default for Scenario {
             height: 24,
             params: GenParams::default(),
             starts: Vec::new(),
+            start_lines: Vec::new(),
             map: None,
             checks: Vec::new(),
             packs: Vec::new(),
@@ -414,15 +450,59 @@ fn value(w: &str) -> Option<i32> {
         return None;
     }
     let n: u64 = w[..digits].parse().ok()?;
+    // Checked: `n` is anything the text says, and `time::days` would overflow.
     let ticks = match &w[digits..] {
-        "" => n,
-        "min" => crate::time::minutes(n),
-        "h" => crate::time::hours(n),
-        "d" => crate::time::days(n),
-        _ => return None,
-    };
+        "" => Some(n),
+        "min" => n.checked_mul(crate::time::TICKS_PER_MINUTE),
+        "h" => n.checked_mul(crate::time::TICKS_PER_HOUR),
+        "d" => n.checked_mul(crate::time::TICKS_PER_DAY),
+        _ => None,
+    }?;
     let v = i32::try_from(ticks).ok()?;
     Some(if neg { -v } else { v })
+}
+
+/// A need's value as ticks and in its largest whole unit, as a scenario
+/// writes it: `21600 (1d)`, `1350 (90min)`, `7`.
+fn ticks(v: i32) -> String {
+    let t = i64::from(v);
+    for (per, unit) in [
+        (crate::time::TICKS_PER_DAY, "d"),
+        (crate::time::TICKS_PER_HOUR, "h"),
+        (crate::time::TICKS_PER_MINUTE, "min"),
+    ] {
+        let per = per as i64;
+        if t != 0 && t % per == 0 {
+            return format!("{v} ({}{unit})", t / per);
+        }
+    }
+    v.to_string()
+}
+
+/// `(X, Y)` at the start of `text`: the two coordinates, and the text after
+/// the `)`. Shared by `start ... at` and `expect at`.
+fn xy(text: &str) -> Option<(i32, i32, &str)> {
+    let inner = text.trim_start().strip_prefix('(')?;
+    let close = inner.find(')')?;
+    let (x, y) = inner[..close].split_once(',')?;
+    Some((
+        x.trim().parse().ok()?,
+        y.trim().parse().ok()?,
+        &inner[close + 1..],
+    ))
+}
+
+/// `(x, y)` is inside the world's extent ([`WORLD_EXTENT`]), else why not.
+/// Shared by `start ... at`, `expect at` and the starts of a save.
+pub fn in_world(x: i32, y: i32) -> Result<(), String> {
+    if Pos::new(x, y).in_world() {
+        return Ok(());
+    }
+    Err(format!(
+        "({x}, {y}) is outside the world: x and y run from {} to {}",
+        -WORLD_EXTENT,
+        WORLD_EXTENT - 1
+    ))
 }
 
 /// `with (name = v, ...)`: the needs and memory a start sets, by name.
@@ -501,6 +581,41 @@ impl Scenario {
             .collect()
     }
 
+    /// The author lint's other scenario check: a note for each explicit
+    /// start outside the initial region (`[0, size)` in whole chunks). Only
+    /// `play` streams out to it; the headless commands never place it.
+    /// `file` is the scenario's, for the notes (which have no line).
+    pub fn outside_region(&self, file: &str) -> Vec<Diagnostic> {
+        let side =
+            |cells: u32| i64::from(cells.div_ceil(CHUNK_SIZE as u32)) * i64::from(CHUNK_SIZE);
+        let (w, h) = (side(self.width), side(self.height));
+        self.starts
+            .iter()
+            .filter_map(|s| match s {
+                Start::At { kind, x, y, .. }
+                    if !(0..w).contains(&i64::from(*x)) || !(0..h).contains(&i64::from(*y)) =>
+                {
+                    Some(Diagnostic {
+                        level: Level::Note,
+                        file: file.to_string(),
+                        line: 0,
+                        col: 0,
+                        msg: format!(
+                            "`start {kind} at ({x}, {y})` is outside the initial region {w}x{h}: only `play` reaches it by streaming; `run`, `why`, `show` and scenario tests never place it"
+                        ),
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The line of the start a [`Placement::resolve`] error names, if it
+    /// names one and this scenario was parsed from a file.
+    pub fn line_of(&self, e: &StartError) -> Option<u32> {
+        e.start.and_then(|i| self.start_lines.get(i).copied())
+    }
+
     /// The world's ground: its seed's noise under its drawn map.
     pub fn terrain(&self) -> Terrain<'_> {
         Terrain {
@@ -510,21 +625,29 @@ impl Scenario {
         }
     }
 
-    /// Parse a scenario's text. Unknown statements and terrain fields,
-    /// shares that are not `0 < n / d <= 1`, two shares for one kind,
-    /// shares summing above one, and a map that does not fit its legend or
-    /// its size are errors. Kind, need and memory names are checked later,
+    /// Parse a scenario's text. Unknown statements and terrain fields, a
+    /// second `seed`, `size`, `outside` or terrain field, shares that are
+    /// not `0 < n / d <= 1` or place nobody (below `1 / PLACE_ONE`), two
+    /// shares for one kind,
+    /// shares summing above one, a map that does not fit its legend or
+    /// its size, and a legend entry the map never uses are errors. Kind, need and memory names are checked later,
     /// against the rules ([`Placement::resolve`]).
     pub fn parse(file: &str, text: &str) -> Result<Scenario, ScenarioError> {
         let mut s = Scenario::default();
         let mut total = 0u64;
+        let mut seed_line: Option<u32> = None;
         let mut size_line: Option<u32> = None;
+        // Where each terrain field was set, in `GenParams` order.
+        let mut terrain_lines: [Option<u32>; 4] = [None; 4];
         let mut rows: Option<(u32, Vec<(u32, String)>)> = None;
         let mut legend: Option<(u32, Vec<(u8, Legend, u32)>)> = None;
         let mut outside: Option<(u32, Option<u8>)> = None;
+        // A byte-order mark is no part of the first statement.
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         let mut lines = text.lines().enumerate();
         while let Some((n, raw)) = lines.next() {
-            let line_no = n as u32 + 1;
+            // Past 2^32 lines, the last line number.
+            let line_no = u32::try_from(n + 1).unwrap_or(u32::MAX);
             let line = raw.split('#').next().unwrap_or("").trim();
             if line.is_empty() {
                 continue;
@@ -543,6 +666,13 @@ impl Scenario {
             };
             match head {
                 "seed" => {
+                    if let Some(first) = seed_line {
+                        return Err(err(
+                            line_no,
+                            format!("a second `seed` (first at line {first})"),
+                        ));
+                    }
+                    seed_line = Some(line_no);
                     s.seed = rest
                         .first()
                         .and_then(|w| w.parse().ok())
@@ -552,19 +682,31 @@ impl Scenario {
                     }
                 }
                 "size" => {
+                    if let Some(first) = size_line {
+                        return Err(err(
+                            line_no,
+                            format!("a second `size` (first at line {first})"),
+                        ));
+                    }
                     let (w, h) = (
                         int(rest.first(), "`size W H`")?,
                         int(rest.get(1), "`size W H`")?,
                     );
-                    if rest.len() != 2
-                        || w < 1
-                        || h < 1
-                        || w > i64::from(u32::MAX)
-                        || h > i64::from(u32::MAX)
-                    {
+                    let (2, Ok(w @ 1..), Ok(h @ 1..)) =
+                        (rest.len(), u32::try_from(w), u32::try_from(h))
+                    else {
                         return Err(err(line_no, "expected `size W H`, both at least 1".into()));
+                    };
+                    if u64::from(w).div_ceil(64) * u64::from(h).div_ceil(64) > MAX_SIZE_CHUNKS {
+                        return Err(err(
+                            line_no,
+                            format!(
+                                "`size W H` generates at most {MAX_SIZE_CHUNKS} chunks \
+                                 (4096 x 4096 cells) at creation; the rest streams in"
+                            ),
+                        ));
                     }
-                    (s.width, s.height) = (w as u32, h as u32);
+                    (s.width, s.height) = (w, h);
                     size_line = Some(line_no);
                 }
                 "terrain" => {
@@ -585,11 +727,11 @@ impl Scenario {
                                 "water_scale is a size in cells, above 0".into(),
                             ));
                         }
-                        let field = match pair[0] {
-                            "water_scale" => &mut s.params.water_scale,
-                            "water_level" => &mut s.params.water_level,
-                            "rock_on_soil" => &mut s.params.rock_on_soil,
-                            "rock_on_water" => &mut s.params.rock_on_water,
+                        let (i, field) = match pair[0] {
+                            "water_scale" => (0, &mut s.params.water_scale),
+                            "water_level" => (1, &mut s.params.water_level),
+                            "rock_on_soil" => (2, &mut s.params.rock_on_soil),
+                            "rock_on_water" => (3, &mut s.params.rock_on_water),
                             other => {
                                 return Err(err(
                                     line_no,
@@ -599,6 +741,13 @@ impl Scenario {
                                 ));
                             }
                         };
+                        if let Some(first) = terrain_lines[i] {
+                            return Err(err(
+                                line_no,
+                                format!("`{}` set twice (first at line {first})", pair[0]),
+                            ));
+                        }
+                        terrain_lines[i] = Some(line_no);
                         *field = v;
                     }
                 }
@@ -632,27 +781,13 @@ impl Scenario {
                     }
                     let tail = rest[1..].join(" ");
                     if let Some(at) = tail.strip_prefix("at") {
-                        let (pos, with) = match at.find("with") {
-                            Some(i) => {
-                                (&at[..i], with_list(&at[i..]).map_err(|m| err(line_no, m))?)
-                            }
-                            None => (at, Vec::new()),
-                        };
-                        let nums: Vec<&str> = pos
-                            .trim()
-                            .trim_start_matches('(')
-                            .trim_end_matches(')')
-                            .split(',')
-                            .map(str::trim)
-                            .collect();
-                        let (x, y) = match nums[..] {
-                            [x, y] => (x.parse::<i32>(), y.parse::<i32>()),
-                            _ => {
-                                return Err(err(line_no, "expected `start KIND at (X, Y)`".into()));
-                            }
-                        };
-                        let (Ok(x), Ok(y)) = (x, y) else {
-                            return Err(err(line_no, "expected `start KIND at (X, Y)`".into()));
+                        let (x, y, after) = xy(at).ok_or_else(|| {
+                            err(line_no, "expected `start KIND at (X, Y)`".into())
+                        })?;
+                        in_world(x, y).map_err(|m| err(line_no, format!("`{kind}` at {m}")))?;
+                        let with = match after.trim() {
+                            "" => Vec::new(),
+                            after => with_list(after).map_err(|m| err(line_no, m))?,
                         };
                         s.starts.push(Start::At {
                             kind: kind.to_string(),
@@ -660,6 +795,7 @@ impl Scenario {
                             y,
                             with,
                         });
+                        s.start_lines.push(line_no);
                     } else {
                         let parts: Vec<&str> = tail.split('/').map(str::trim).collect();
                         let (num, den) = match parts[..] {
@@ -683,11 +819,20 @@ impl Scenario {
                             num,
                             den,
                         };
+                        if start.share() == 0 {
+                            return Err(err(
+                                line_no,
+                                format!(
+                                    "`{num} / {den}` is below 1 / {PLACE_ONE}, the smallest share"
+                                ),
+                            ));
+                        }
                         total += u64::from(start.share());
                         if total > u64::from(PLACE_ONE) {
                             return Err(err(line_no, "the shares add up to more than 1".into()));
                         }
                         s.starts.push(start);
+                        s.start_lines.push(line_no);
                     }
                 }
                 "map" => {
@@ -710,7 +855,7 @@ impl Scenario {
                             break;
                         }
                         if !row.is_empty() {
-                            drawn.push((m as u32 + 1, row.to_string()));
+                            drawn.push((u32::try_from(m + 1).unwrap_or(u32::MAX), row.to_string()));
                         }
                     }
                     if drawn.is_empty() {
@@ -733,7 +878,7 @@ impl Scenario {
                         let Some((m, raw)) = lines.next() else {
                             return Err(err(line_no, "`legend {` is never closed".into()));
                         };
-                        let at = m as u32 + 1;
+                        let at = u32::try_from(m + 1).unwrap_or(u32::MAX);
                         let entry = raw.trim();
                         if entry == "}" {
                             break;
@@ -809,6 +954,12 @@ impl Scenario {
                             ));
                         }
                     };
+                    if let Some((first, _)) = outside {
+                        return Err(err(
+                            line_no,
+                            format!("a second `outside` (first at line {first})"),
+                        ));
+                    }
                     outside = Some((line_no, fill));
                 }
                 "rules" => {
@@ -865,6 +1016,15 @@ impl Scenario {
         let Some((_, entries)) = legend else {
             return Err(err(map_line, "a map needs a legend".into()));
         };
+        for (y, (at, row)) in drawn.iter().enumerate() {
+            if let Some((x, c)) = row.chars().enumerate().find(|(_, c)| !c.is_ascii()) {
+                return Err(err(
+                    *at,
+                    format!("`{c}` at ({x}, {y}): map cells are ASCII characters"),
+                ));
+            }
+        }
+        // All ASCII: a byte is a cell.
         let width = drawn[0].1.len();
         for (at, row) in &drawn {
             if row.len() != width {
@@ -881,7 +1041,8 @@ impl Scenario {
         if width * height > MAP_CELLS {
             return Err(err(map_line, format!("a map of at most {MAP_CELLS} cells")));
         }
-        let (w, h) = (width as u32, height as u32);
+        let fits = |n: usize| u32::try_from(n).expect("at most MAP_CELLS cells");
+        let (w, h) = (fits(width), fits(height));
         if let Some(at) = size_line
             && (s.width < w || s.height < h)
         {
@@ -893,9 +1054,23 @@ impl Scenario {
                 ),
             ));
         }
+        if size_line.is_none()
+            && u64::from(w.div_ceil(64)) * u64::from(h.div_ceil(64)) > MAX_SIZE_CHUNKS
+        {
+            return Err(err(
+                map_line,
+                format!(
+                    "a map covers at most {MAX_SIZE_CHUNKS} chunks (4096 x 4096 cells); \
+                     this one is {w} x {h}"
+                ),
+            ));
+        }
         let mut cells = Vec::with_capacity(width * height);
-        for (y, (at, row)) in drawn.iter().enumerate() {
-            for (x, b) in row.bytes().enumerate() {
+        let mut used = [false; 256];
+        // At most MAP_CELLS cells, so x and y are i32s.
+        for (y, (at, row)) in (0i32..).zip(&drawn) {
+            for (x, b) in (0i32..).zip(row.bytes()) {
+                used[usize::from(b)] = true;
                 let Some((_, what, _)) = entries.iter().find(|e| e.0 == b) else {
                     return Err(err(
                         *at,
@@ -911,13 +1086,20 @@ impl Scenario {
                         cells.push(DrawnMap::encode(Ground::Soil, Feature::None));
                         s.starts.push(Start::At {
                             kind: kind.clone(),
-                            x: x as i32,
-                            y: y as i32,
+                            x,
+                            y,
                             with: with.clone(),
                         });
+                        s.start_lines.push(*at);
                     }
                 }
             }
+        }
+        if let Some((key, _, at)) = entries.iter().find(|e| !used[usize::from(e.0)]) {
+            return Err(err(
+                *at,
+                format!("`{}` is in the legend but not on the map", char::from(*key)),
+            ));
         }
         if size_line.is_none() {
             (s.width, s.height) = (w, h);
@@ -964,8 +1146,14 @@ impl DrawnMap {
         Some((g, f))
     }
 
-    /// Every byte a cell, and one per cell.
+    /// Every byte a cell, one per cell, and every cell inside the world.
     pub fn validate(&self) -> Result<(), String> {
+        if self.width > WORLD_EXTENT.unsigned_abs() || self.height > WORLD_EXTENT.unsigned_abs() {
+            return Err(format!(
+                "a {} x {} map reaches outside the world ({WORLD_EXTENT} cells each way)",
+                self.width, self.height
+            ));
+        }
         if self.cells.len() != self.width as usize * self.height as usize {
             return Err(format!(
                 "a {} x {} map with {} cells",
@@ -999,13 +1187,36 @@ impl DrawnMap {
     }
 }
 
-/// The starts naming a kind `kinds` defines (hot reload drops the others:
-/// a kind that is gone starts nowhere).
+/// A save's starts as `kinds` sees them (hot reload and opening a save):
+/// each `with` kept to the needs and mems its kind still has, a need
+/// clamped to its range, as the rows are. A start naming a kind the rules
+/// do not define is kept as written ([`absent`]): it places nobody
+/// ([`Placement::resolve_saved`]), and starts again when the kind is back.
 pub fn present(starts: &[Start], kinds: &Kinds) -> Vec<Start> {
+    let mut out = Vec::new();
+    for s in starts {
+        let mut s = s.clone();
+        if let (Some(def), Start::At { with, .. }) = (kinds.by_name(s.kind()), &mut s) {
+            with.retain_mut(|(name, v)| match def.need_named(name) {
+                Some(i) => {
+                    *v = (*v).clamp(0, def.needs[i].max);
+                    true
+                }
+                None => def.mems.iter().any(|m| m == name),
+            });
+        }
+        out.push(s);
+    }
+    out
+}
+
+/// The starts naming no kind of `kinds`, as written: what
+/// [`Placement::resolve_saved`] skips.
+pub fn absent(starts: &[Start], kinds: &Kinds) -> Vec<String> {
     starts
         .iter()
-        .filter(|s| kinds.by_name(s.kind()).is_some())
-        .cloned()
+        .filter(|s| kinds.by_name(s.kind()).is_none())
+        .map(Start::to_string)
         .collect()
 }
 
@@ -1036,34 +1247,70 @@ pub struct Explicit {
 pub struct Placement {
     /// Cumulative upper bounds in the order the shares are written: a
     /// walkable cell whose draw is below a bound, and not below the
-    /// previous one, starts that kind.
-    bounds: Vec<(u32, Placed)>,
+    /// previous one, starts that kind (`None`: a saved share whose kind
+    /// the rules lack, which keeps its interval and places nobody).
+    bounds: Vec<(u32, Option<Placed>)>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
 }
 
 impl Placement {
     /// Resolve `starts` against `kinds` for a world of `terrain`. A start
-    /// naming a kind the rules do not define (all of them are listed) or a
-    /// trait, one on a cell that is not walkable, two on one cell, and a
-    /// `with` naming what the kind lacks or a need beyond its range refuse
-    /// it.
+    /// naming a kind the rules do not define (all of them are listed, at
+    /// the first such start) or a trait, one on a cell that is not
+    /// walkable, two on one cell, and a `with` naming what the kind lacks
+    /// or a need beyond its range refuse it. The error says which
+    /// start. For a new world.
     pub fn resolve(
         starts: &[Start],
         kinds: &Kinds,
         terrain: &Terrain,
-    ) -> Result<Placement, String> {
+    ) -> Result<Placement, StartError> {
+        Self::resolve_as(starts, kinds, terrain, false)
+    }
+
+    /// [`resolve`](Self::resolve) for a saved world's starts (opening it,
+    /// reloading its rules): a start naming a kind the rules do not define
+    /// is skipped ([`absent`] lists them), a share keeping its interval so
+    /// the others keep their cells.
+    pub fn resolve_saved(
+        starts: &[Start],
+        kinds: &Kinds,
+        terrain: &Terrain,
+    ) -> Result<Placement, StartError> {
+        Self::resolve_as(starts, kinds, terrain, true)
+    }
+
+    fn resolve_as(
+        starts: &[Start],
+        kinds: &Kinds,
+        terrain: &Terrain,
+        saved: bool,
+    ) -> Result<Placement, StartError> {
         let mut missing: Vec<&str> = Vec::new();
-        let mut shares: Vec<(Placed, u32)> = Vec::new();
-        let mut explicit = Vec::new();
-        for s in starts {
+        let mut first_missing = None;
+        let mut shares: Vec<(Option<Placed>, u32)> = Vec::new();
+        // Each with its index in `starts`, for the error.
+        let mut explicit: Vec<(Explicit, usize)> = Vec::new();
+        for (at, s) in starts.iter().enumerate() {
+            let err = |msg: String| StartError {
+                start: Some(at),
+                msg,
+            };
             let Some(def) = kinds.by_name(s.kind()) else {
+                if saved {
+                    if let Start::Share { .. } = s {
+                        shares.push((None, s.share()));
+                    }
+                    continue;
+                }
                 if kinds.debug.traits.iter().any(|t| t == s.kind()) {
-                    return Err(format!("`{s}`: `{}` is a trait, not a kind", s.kind()));
+                    return Err(err(format!("`{}` is a trait, not a kind", s.kind())));
                 }
                 if !missing.contains(&s.kind()) {
                     missing.push(s.kind());
                 }
+                first_missing.get_or_insert(at);
                 continue;
             };
             let placed = Placed {
@@ -1071,76 +1318,97 @@ impl Placement {
                 cover: def.cover,
             };
             match s {
-                Start::Share { .. } => shares.push((placed, s.share())),
-                Start::At { x, y, with, .. } => {
+                Start::Share { .. } => shares.push((Some(placed), s.share())),
+                Start::At { kind, x, y, with } => {
+                    in_world(*x, *y).map_err(|m| err(format!("`{kind}` at {m}")))?;
+                    // Not quoted as a `start` line: a map may have drawn it.
                     let (g, f) = terrain.cell(*x, *y);
                     if f.blocks() {
-                        return Err(format!("`{s}` is on rock"));
+                        return Err(err(format!("`{kind}` at ({x}, {y}) is on rock")));
                     }
                     if !g.walkable() {
-                        return Err(format!("`{s}` is on water"));
+                        return Err(err(format!("`{kind}` at ({x}, {y}) is on water")));
                     }
                     let (mut needs, mut mems, mut genes) = (Vec::new(), Vec::new(), Vec::new());
                     for (name, v) in with {
                         if let Some(i) = def.need_named(name) {
                             let max = def.needs[i].max;
                             if !(0..=max).contains(v) {
-                                return Err(format!("`{s}`: `{name}` holds 0 to {max}"));
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `{name} = {}`: `{name}` holds 0 to {}",
+                                    ticks(*v),
+                                    ticks(max)
+                                )));
                             }
-                            needs.push((i as u8, *v));
+                            needs.push((u8::try_from(i).expect("at most NEED_SLOTS"), *v));
                         } else if let Some(i) = def.mems.iter().position(|m| m == name) {
-                            mems.push((i as u8, *v));
+                            mems.push((u8::try_from(i).expect("at most MEM_SLOTS"), *v));
                         } else if let Some(i) = def.gene_named(name) {
                             let g = &def.genes[i];
                             if !(g.lo..=g.hi).contains(v) {
-                                return Err(format!(
-                                    "`{s}`: gene `{name}` runs from {} to {}",
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `{name} = {v}`: gene `{name}` runs from {} to {}",
                                     g.lo, g.hi
-                                ));
+                                )));
                             }
-                            genes.push((i as u8, *v));
+                            genes.push((u8::try_from(i).expect("at most GENE_SLOTS"), *v));
                         } else {
-                            return Err(format!(
-                                "`{s}`: `{}` has no need, memory or gene `{name}`",
+                            return Err(err(format!(
+                                "`{}` has no need, memory or gene `{name}`",
                                 def.name
-                            ));
+                            )));
                         }
                     }
                     let (chunk, i) = Pos::new(*x, *y).split();
-                    explicit.push(Explicit {
-                        chunk,
-                        cell: i as u16,
-                        placed,
-                        needs,
-                        mems,
-                        genes,
-                    });
+                    explicit.push((
+                        Explicit {
+                            chunk,
+                            cell: cell_u16(i),
+                            placed,
+                            needs,
+                            mems,
+                            genes,
+                        },
+                        at,
+                    ));
                 }
             }
         }
         if !missing.is_empty() {
-            return Err(format!(
-                "the scenario starts kinds the rules do not define: {}",
-                missing.join(", ")
-            ));
+            return Err(StartError {
+                start: first_missing,
+                msg: format!(
+                    "the scenario starts kinds the rules do not define: {}",
+                    missing.join(", ")
+                ),
+            });
         }
         let mut bounds = Vec::with_capacity(shares.len());
         let mut upto = 0u64;
         for (placed, share) in shares {
             upto += u64::from(share);
             if upto > u64::from(PLACE_ONE) {
-                return Err("the shares add up to more than 1".into());
+                return Err(StartError {
+                    start: None,
+                    msg: "the shares add up to more than 1".into(),
+                });
             }
-            bounds.push((upto as u32, placed));
+            let upto = u32::try_from(upto).expect("at most PLACE_ONE, checked above");
+            bounds.push((upto, placed));
         }
-        explicit.sort_by_key(|e| (e.chunk.y, e.chunk.x, e.cell));
+        // Stable: of two starts on one cell, the later is the error.
+        explicit.sort_by_key(|(e, _)| (e.chunk.y, e.chunk.x, e.cell));
         if let Some(w) = explicit
             .windows(2)
-            .find(|w| (w[0].chunk, w[0].cell) == (w[1].chunk, w[1].cell))
+            .find(|w| (w[0].0.chunk, w[0].0.cell) == (w[1].0.chunk, w[1].0.cell))
         {
-            let p = w[0].chunk.cell(usize::from(w[0].cell));
-            return Err(format!("two starts at ({}, {})", p.x, p.y));
+            let p = w[0].0.chunk.cell(usize::from(w[0].0.cell));
+            return Err(StartError {
+                start: Some(w[1].1),
+                msg: format!("two starts at ({}, {})", p.x, p.y),
+            });
         }
+        let explicit = explicit.into_iter().map(|(e, _)| e).collect();
         Ok(Placement { bounds, explicit })
     }
 
@@ -1151,12 +1419,12 @@ impl Placement {
         self.bounds
             .iter()
             .find(|&&(upto, _)| u < upto)
-            .map(|&(_, p)| p)
+            .and_then(|&(_, p)| p)
     }
 
-    /// Any shares at all?
+    /// Any shares that place a kind?
     pub fn has_shares(&self) -> bool {
-        !self.bounds.is_empty()
+        self.bounds.iter().any(|&(_, p)| p.is_some())
     }
 
     /// The explicit starts in chunk `c`, by cell.
@@ -1212,6 +1480,7 @@ mod tests {
                 },
             ]
         );
+        assert_eq!(s.start_lines, [6, 7, 8, 9]);
         assert_eq!(s.starts[1].share(), PLACE_ONE / 400);
         assert_eq!(
             s.starts[3].to_string(),
@@ -1237,7 +1506,9 @@ mod tests {
              expect at (77, -3) hive
              expect at (1, 2) nobody
              expect checksum 8e1fd4fd7f84a868
-             expect state 00ff",
+             expect state 00ff
+             expect traps hen == 0             # the counters `wmc run` prints too
+             expect thinks only fox > 3",
         )
         .unwrap();
         let who = |kind: &str, only| Who {
@@ -1287,6 +1558,18 @@ mod tests {
                 },
                 &Expect::Checksum(0x8e1f_d4fd_7f84_a868),
                 &Expect::State(0xff),
+                &Expect::Tally {
+                    counter: crate::actors::life::TRAPS,
+                    who: who("hen", false),
+                    op: Op::Eq,
+                    n: 0
+                },
+                &Expect::Tally {
+                    counter: crate::actors::life::THINKS,
+                    who: who("fox", true),
+                    op: Op::Gt,
+                    n: 3
+                },
             ]
         );
         match &s.checks[2] {
@@ -1312,6 +1595,9 @@ mod tests {
             ("expect max food chicken > 1", "expected `expect count"),
             ("expect at 3 chicken", "expected `expect count"),
             ("expect at (1, 2) hen fox", "expected `expect count"),
+            ("expect at 5, 5) chicken", "expected `expect count"),
+            ("expect at (6, 6, 99) chicken", "expected `expect count"),
+            ("expect at ((6, 6)) chicken", "expected `expect count"),
             ("expect checksum zz", "`zz` is not a hex checksum"),
             ("expect nothing", "expected `expect count"),
         ] {
@@ -1335,6 +1621,27 @@ mod tests {
             ),
             ("start a 1 / 2\nstart b 2 / 3", "add up to more than 1"),
             ("start hive at 3", "expected `start KIND at (X, Y)`"),
+            ("start hive at 3, 4", "expected `start KIND at (X, Y)`"),
+            ("start hive at ((3, 4", "expected `start KIND at (X, Y)`"),
+            ("start hive at 3, 4)", "expected `start KIND at (X, Y)`"),
+            ("start hive at (3, 4, 5)", "expected `start KIND at (X, Y)`"),
+            (
+                "start hive at (1000000000, 0)",
+                "t:1: `hive` at (1000000000, 0) is outside the world: x and y run from -1000000000 to 999999999",
+            ),
+            (
+                "seed 1\nstart hive at (0, -1000000001) with (food = 1)",
+                "t:2: `hive` at (0, -1000000001) is outside the world",
+            ),
+            (
+                "start hive at (-2147483648, 2147483647)",
+                "is outside the world",
+            ),
+            (
+                "run 1\nexpect at (999999999, 1000000000) nobody",
+                "t:2: (999999999, 1000000000) is outside the world",
+            ),
+            ("expect at (-1000000001, 0) hive", "is outside the world"),
             ("spawn fox", "unknown statement `spawn`"),
             (
                 "mutation 0 / 5",
@@ -1361,12 +1668,91 @@ mod tests {
                 "`with` sets `food` twice",
             ),
             ("start 9lives at (1, 2)", "`9lives` is not a kind name"),
+            ("run 99999999999999999d", "expected `run T`"),
+            (
+                "start fox at (1, 2) with (food = 18000000000000000000min)",
+                "is not a number or a time",
+            ),
+            (
+                "expect min food of fox > 100000000000000000h",
+                "is not a number or a time",
+            ),
+            (
+                "size 100000000 100000000",
+                "t:1: `size W H` generates at most 4096 chunks",
+            ),
+            ("size 4294967295 1", "at most 4096 chunks"),
+            (
+                "start chicken 1 / 20000000",
+                "t:1: `1 / 20000000` is below 1 / 16777216, the smallest share",
+            ),
+            ("start chicken 1 / 4294967295", "the smallest share"),
+            ("seed 1\nseed 2", "t:2: a second `seed` (first at line 1)"),
+            (
+                "size 8 8\nsize 9 9",
+                "t:2: a second `size` (first at line 1)",
+            ),
+            (
+                "terrain water_level 0.1\nterrain water_level 0.2",
+                "t:2: `water_level` set twice (first at line 1)",
+            ),
+            (
+                "terrain rock_on_soil 0 rock_on_soil 1",
+                "t:1: `rock_on_soil` set twice (first at line 1)",
+            ),
         ] {
             let e = Scenario::parse("t", text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
         }
+        // `at(` without a space is `at (`, in both statements.
+        let tight = Scenario::parse("t", "start hive at(3, 4)\nexpect at(3, 4) hive").unwrap();
+        assert_eq!(tight.starts, [Start::at("hive", 3, 4)]);
+        assert!(matches!(
+            tight.checks[..],
+            [Check::Expect {
+                what: Expect::At { x: 3, y: 4, .. },
+                ..
+            }]
+        ));
+        // The last cells inside the world are fine.
+        let edge =
+            "start hive at (999999999, -1000000000)\nexpect at (-1000000000, 999999999) nobody";
+        let edge = Scenario::parse("t", edge).unwrap();
+        assert_eq!(
+            edge.starts,
+            [Start::at("hive", 999_999_999, -1_000_000_000)]
+        );
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
+        Scenario::parse("t", "size 4096 4096").unwrap();
+        let least = Scenario::parse("t", "start chicken 1 / 16777216").unwrap();
+        assert_eq!(least.starts[0].share(), 1);
+        // Different terrain fields on several lines add up.
+        let t = Scenario::parse("t", "terrain water_level 0.1\nterrain rock_on_soil 0").unwrap();
+        assert_eq!((t.params.water_level, t.params.rock_on_soil), (0.1, 0.0));
+    }
+
+    /// A byte-order mark (some editors write one) is not part of line 1.
+    #[test]
+    fn a_leading_bom_is_skipped() {
+        assert_eq!(Scenario::parse("t", "\u{feff}seed 3\n").unwrap().seed, 3);
+    }
+
+    /// A time too large for ticks is no value, not an overflow (a dev
+    /// panic, a silent wrap in release: `576460752303423489d` is `1d`).
+    #[test]
+    fn times_past_u64_are_no_value() {
+        for w in [
+            "999999999999999999d",
+            "99999999999999999h",
+            "1229782938247303442min",
+            "576460752303423489d",
+            "-576460752303423489d",
+        ] {
+            assert_eq!(value(w), None, "{w}");
+        }
+        assert_eq!(value("1d"), Some(21600));
+        assert_eq!(value("-90min"), Some(-1350));
     }
 
     const PEN: &str = "seed 3
@@ -1412,6 +1798,7 @@ legend {
                 Start::at("chicken", 2, 2),
             ]
         );
+        assert_eq!(s.start_lines, [6, 6], "a drawn start's line is its row's");
         assert_eq!(m.at(1, 1), Some((Ground::Soil, Feature::Rock)));
         assert_eq!(m.at(0, 0), Some((Ground::Water, Feature::None)));
         assert_eq!(m.at(-5, 90), Some((Ground::Soil, Feature::None)), "outside");
@@ -1429,6 +1816,10 @@ legend {
         // A size that matches is fine; the terrain under a map is the map.
         let sized = Scenario::parse("t", &format!("size 7 4\n{PEN}")).unwrap();
         assert_eq!(sized.map, s.map);
+        // So is a larger one: the rest is `outside` (or noise).
+        let larger = Scenario::parse("t", &format!("size 200 200\n{PEN}")).unwrap();
+        assert_eq!((larger.width, larger.height), (200, 200));
+        assert_eq!(larger.map, s.map);
         let p = GenParams::default();
         let t = s.terrain();
         assert_eq!(t.cell(3, 1), (Ground::Soil, Feature::Rock));
@@ -1487,6 +1878,29 @@ legend {
                 format!("map {{\n..\n}}\nmap {{\n..\n}}\n{legend}"),
                 "a second map",
             ),
+            (
+                format!("map {{\né.\n..\n}}\n{legend}"),
+                "t:2: `é` at (0, 0): map cells are ASCII characters",
+            ),
+            (format!("map {{\n.é\n}}\n{legend}"), "`é` at (1, 0)"),
+            (
+                format!("outside soil\noutside water\nmap {{\n..\n}}\n{legend}"),
+                "t:2: a second `outside` (first at line 1)",
+            ),
+            (
+                format!("map {{\n{}\n}}\n{legend}", ".".repeat(64 * 4096 + 1)),
+                "t:1: a map covers at most 4096 chunks",
+            ),
+            // A legend entry the map never draws: a typo'd kind or `with`
+            // would never be checked, or a drawing was forgotten.
+            (
+                format!("map {{\n..\n}}\n{legend}"),
+                "t:6: `C` is in the legend but not on the map",
+            ),
+            (
+                "map {\n..\n}\nlegend {\n  . soil\n  # rock   # unused\n}".to_string(),
+                "t:6: `#` is in the legend but not on the map",
+            ),
         ] {
             let e = Scenario::parse("t", &text).unwrap_err().to_string();
             assert!(e.contains(want), "{text}: {e}");
@@ -1519,14 +1933,18 @@ legend {
         assert_eq!(pl.placed(PLACE_ONE / 4 * 3), None);
         assert!(pl.has_shares() && !Placement::default().has_shares());
         let e = Placement::resolve(
-            &parse("start wolf 1 / 9\nstart fox at (1, 1)\nstart wolf at (2, 2)"),
+            &parse("start a 1 / 9\nstart wolf 1 / 9\nstart fox at (1, 1)\nstart wolf at (2, 2)"),
             &k,
             &t,
         )
         .unwrap_err();
-        assert!(e.contains("do not define: wolf, fox"), "{e}");
+        assert!(e.msg.contains("do not define: wolf, fox"), "{e}");
+        assert_eq!(e.start, Some(1), "the first start of a missing kind");
         let e = Placement::resolve(&parse("start t 1 / 9"), &k, &t).unwrap_err();
-        assert!(e.contains("`t` is a trait"), "{e}");
+        assert_eq!(
+            (e.start, e.msg.as_str()),
+            (Some(0), "`t` is a trait, not a kind")
+        );
         // Explicit starts: walkable cells only, one start per cell, found by chunk.
         let find = |c: ChunkCoord, want: fn(Ground, Feature) -> bool| {
             (0..CHUNK_CELLS)
@@ -1558,11 +1976,17 @@ legend {
         assert_eq!(pl.explicit_in(there), [only(there, local(far))]);
         assert!(pl.explicit_in(ChunkCoord::new(1, 0)).is_empty());
         for (cell, what) in [(wet, "is on water"), (rock, "is on rock")] {
-            let e = Placement::resolve(&[at(cell)], &k, &t).unwrap_err();
-            assert!(e.contains(what), "{e}");
+            let e = Placement::resolve(&[at(dry), at(cell)], &k, &t).unwrap_err();
+            assert_eq!(
+                (e.start, e.msg),
+                (Some(1), format!("`b` at ({}, {}) {what}", cell.0, cell.1))
+            );
         }
-        let e = Placement::resolve(&[at(dry), at(dry)], &k, &t).unwrap_err();
-        assert_eq!(e, format!("two starts at ({}, {})", dry.0, dry.1));
+        let e = Placement::resolve(&[at(dry), at(far), at(dry)], &k, &t).unwrap_err();
+        assert_eq!(
+            (e.start, e.msg),
+            (Some(2), format!("two starts at ({}, {})", dry.0, dry.1))
+        );
     }
 
     /// `with` on a start names needs and memory; the map's terrain decides
@@ -1588,50 +2012,119 @@ legend {
         );
         assert_eq!((e[1].cell, &e[1].needs[..]), (2 * 64 + 1, &[(0, 1800)][..]));
         assert_eq!((e[2].cell, e[2].placed.kind), (2 * 64 + 2, 0));
-        for (extra, want) in [
-            ("start fox at (0, 0)", "`start fox at (0, 0)` is on water"),
-            ("start fox at (3, 2)", "is on rock"),
+        // An error names its start, and the start its line: the `start`
+        // line, or the map row that draws it. A need is shown in units.
+        let last = PEN.lines().count() as u32 + 1;
+        for (extra, want, line) in [
+            ("start fox at (0, 0)", "`fox` at (0, 0) is on water", last),
+            ("start fox at (3, 2)", "`fox` at (3, 2) is on rock", last),
             (
                 "start fox at (5, 1) with (food = 2d)",
-                "`food` holds 0 to 21600",
+                "`fox` at (5, 1) with `food = 43200 (2d)`: `food` holds 0 to 21600 (1d)",
+                last,
+            ),
+            (
+                "start fox at (5, 1) with (food = -90min)",
+                "`fox` at (5, 1) with `food = -1350 (-90min)`: `food` holds 0 to 21600 (1d)",
+                last,
             ),
             (
                 "start fox at (5, 1) with (sleep = 1)",
                 "`fox` has no need, memory or gene `sleep`",
+                last,
             ),
-            ("start chicken at (2, 2)", "two starts at (2, 2)"),
+            ("start chicken at (2, 2)", "two starts at (2, 2)", 6),
         ] {
             let s = Scenario::parse("t", &format!("{PEN}{extra}\n")).unwrap();
             let e = Placement::resolve(&s.starts, &k, &s.terrain()).unwrap_err();
-            assert!(e.contains(want), "{extra}: {e}");
+            assert_eq!(
+                (e.msg.as_str(), s.line_of(&e)),
+                (want, Some(line)),
+                "{extra}"
+            );
         }
+        // A drawn start is not quoted as a `start` line the file lacks.
+        let s = Scenario::parse("t", &PEN.replace("food = 2h", "food = 30h")).unwrap();
+        let e = Placement::resolve(&s.starts, &k, &s.terrain()).unwrap_err();
+        assert_eq!(
+            (e.msg.as_str(), s.line_of(&e)),
+            (
+                "`fox` at (1, 2) with `food = 27000 (30h)`: `food` holds 0 to 21600 (1d)",
+                Some(6)
+            )
+        );
     }
 
+    /// A `water_scale` below 1 is legal (lakes finer than a cell: terrain
+    /// like noise); 0 is not.
     #[test]
-    fn present_keeps_the_starts_of_kinds_there() {
-        let k = crate::rules::compile("t.rules", "kind a { }").unwrap();
+    fn a_water_scale_below_one_parses() {
+        let s = Scenario::parse("t", "terrain water_scale 0.25\n").unwrap();
+        assert_eq!(s.params.water_scale, 0.25);
+        let e = Scenario::parse("t", "terrain water_scale 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("above 0"), "{e}");
+    }
+
+    /// A saved start of a kind the rules lack is kept, and skipped: a share
+    /// keeps its interval, so the shares after it keep their cells, and an
+    /// explicit start places nobody. A new world refuses both.
+    #[test]
+    fn a_saved_start_of_a_missing_kind_is_kept_and_places_nobody() {
+        let k = crate::rules::compile("t.rules", "trait t { }\nkind a { }\nkind c { }").unwrap();
         let starts = Scenario::parse(
             "t",
-            "start a 1 / 2\nstart b 1 / 4\nstart b at (0, 0)\nstart a at (1, 1)",
+            "start c 1 / 8\nstart b 1 / 4\nstart a 1 / 2\nstart b at (0, 0)\nstart t at (1, 1)\nstart a at (0, 0)",
         )
         .unwrap()
         .starts;
-        assert_eq!(present(&starts, &k), [starts[0].clone(), starts[3].clone()]);
+        assert_eq!(present(&starts, &k), starts);
+        assert_eq!(
+            absent(&starts, &k),
+            ["start b 1 / 4", "start b at (0, 0)", "start t at (1, 1)"]
+        );
+        let p = GenParams {
+            water_level: 0.0,
+            rock_on_soil: 0.0,
+            rock_on_water: 0.0,
+            ..GenParams::default()
+        };
+        let e = Placement::resolve(&starts, &k, &noise(1, &p)).unwrap_err();
+        assert_eq!(
+            (e.msg.as_str(), e.start),
+            ("`t` is a trait, not a kind", Some(4))
+        );
+        let pl = Placement::resolve_saved(&starts, &k, &noise(1, &p)).unwrap();
+        let (a, c) = (k.by_name("a").unwrap().id, k.by_name("c").unwrap().id);
+        let kind = |u: u32| pl.placed(u).map(|p| p.kind);
+        let eighth = PLACE_ONE / 8;
+        assert_eq!(kind(0), Some(c));
+        assert_eq!(kind(eighth), None, "b's interval");
+        assert_eq!(kind(3 * eighth - 1), None);
+        assert_eq!(kind(3 * eighth), Some(a), "a keeps its cells");
+        assert_eq!(kind(7 * eighth - 1), Some(a));
+        assert_eq!(kind(7 * eighth), None);
+        let at = pl.explicit_in(ChunkCoord::new(0, 0));
+        assert_eq!((at.len(), at[0].cell, at[0].placed.kind), (1, 0, a));
+        // Only missing kinds' shares: nothing to place.
+        let only_b = Scenario::parse("t", "start b 1 / 2").unwrap().starts;
+        let pl = Placement::resolve_saved(&only_b, &k, &noise(1, &p)).unwrap();
+        assert!(!pl.has_shares() && pl.placed(0).is_none());
     }
 
-    /// The scenarios in docs/RULES.md §14 parse and fit the built-in rules.
+    /// Hot reload keeps a start's `with` to what its kind still has, and
+    /// its needs within the new range, as it does the rows.
     #[test]
-    fn the_rules_md_scenarios_parse_and_resolve() {
-        let doc = include_str!("../../../docs/RULES.md");
-        let from = doc.find("## 14. Scenarios").unwrap();
-        let to = doc.find("## 15. Packs").unwrap();
-        let blocks: Vec<&str> = doc[from..to].split("```").skip(1).step_by(2).collect();
-        assert_eq!(blocks.len(), 3);
-        for text in blocks {
-            let s = Scenario::parse("RULES.md", text).unwrap_or_else(|e| panic!("{e}"));
-            Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain())
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
+    fn present_drops_and_clamps_what_with_sets() {
+        let k = crate::rules::compile("t.rules", "kind fox { need food max 10h vital }").unwrap();
+        let starts = Scenario::parse("t", "start fox at (1, 1) with (food = 20h, chase = 3)")
+            .unwrap()
+            .starts;
+        let want = Scenario::parse("t", "start fox at (1, 1) with (food = 9000)")
+            .unwrap()
+            .starts;
+        assert_eq!(present(&starts, &k), want);
     }
 
     /// Every built-in kind appears in the default world; the fox pen starts
@@ -1651,6 +2144,39 @@ legend {
         assert_eq!(names, ["flower", "hive", "bee", "grass", "seed", "tree"]);
         let d = &pen.unseen(&k)[0];
         assert_eq!((d.file.as_str(), d.line), ("bees.rules", 18));
+    }
+
+    #[test]
+    fn starts_outside_the_initial_region_get_a_note() {
+        let s = Scenario::parse(
+            "g",
+            "size 80 24
+             start fox at (-1, 3)
+             start hive at (200, 10)
+             start bee at (100, 10)     # inside: the region is whole chunks, 128 x 64
+             start chicken at (5, 5)
+             start seed 1 / 4",
+        )
+        .unwrap();
+        let notes = s.outside_region("g");
+        let msgs: Vec<&str> = notes.iter().map(|d| d.msg.as_str()).collect();
+        assert_eq!(msgs.len(), 2, "{msgs:?}");
+        assert!(msgs[0].starts_with("`start fox at (-1, 3)` is outside the initial region 128x64"));
+        assert!(msgs[1].starts_with("`start hive at (200, 10)`"));
+        // No line to point at: `file: note:`, not `file:0:0: note:`.
+        assert!(
+            notes[0]
+                .to_string()
+                .starts_with("g: note: `start fox at (-1, 3)` is outside"),
+            "{}",
+            notes[0]
+        );
+        assert!(
+            notes
+                .iter()
+                .all(|d| d.level == Level::Note && d.file == "g")
+        );
+        assert!(Scenario::builtin().outside_region("b").is_empty());
     }
 
     #[test]

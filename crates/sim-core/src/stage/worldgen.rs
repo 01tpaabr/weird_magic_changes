@@ -27,12 +27,15 @@ pub const STREAM_ROCK: u64 = 0x0002;
 // 0x0003 and 0x0005 were per-kind placement streams; retired, never reuse.
 pub const STREAM_UID: u64 = 0x0004;
 pub const STREAM_PLACE: u64 = 0x0006;
+/// Run-time ground-cover births; never reuse.
+pub const STREAM_UID_COVER: u64 = 0x0007;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenParams {
-    /// Noise feature size in cells. Larger = bigger, smoother lakes.
+    /// Noise feature size in cells, above 0. Larger = bigger, smoother
+    /// lakes; below about 1, finer than a cell: terrain like noise.
     pub water_scale: f32,
     /// Fraction of cells that end up water, roughly (noise is in `[0, 1]`).
     pub water_level: f32,
@@ -123,11 +126,7 @@ pub fn generate_chunk(
                 uid: hash_cell(seed, STREAM_UID, p.x, p.y),
                 ..ActorMind::zeroed()
             };
-            if cover {
-                out.actors_mut().push_cover(i, kind, mind);
-            } else {
-                out.actors_mut().push(i, kind, mind);
-            }
+            out.actors_mut().push_in(i, kind, mind, cover);
         }
     }
 }
@@ -199,8 +198,18 @@ fn value_noise(seed: u64, stream: u64, x: f32, y: f32) -> f32 {
     let y0 = y.floor();
     let fx = smoothstep(x - x0);
     let fy = smoothstep(y - y0);
+    // `as` saturates far out (a tiny `water_scale`); the lattice is only a
+    // hash input, so its `+ 1` wraps rather than overflows.
+    #[allow(clippy::cast_possible_truncation)]
     let (ix, iy) = (x0 as i32, y0 as i32);
-    let l = |dx: i32, dy: i32| unit_f32(hash_cell(seed, stream, ix + dx, iy + dy));
+    let l = |dx: i32, dy: i32| {
+        unit_f32(hash_cell(
+            seed,
+            stream,
+            ix.wrapping_add(dx),
+            iy.wrapping_add(dy),
+        ))
+    };
     let top = lerp(l(0, 0), l(1, 0), fx);
     let bot = lerp(l(0, 1), l(1, 1), fx);
     lerp(top, bot, fy)
@@ -463,6 +472,25 @@ mod tests {
                 let n = fbm2(3, STREAM_GROUND, x as f32 / 5.0, y as f32 / 5.0);
                 assert!((0.0..=1.0).contains(&n), "{n}");
             }
+        }
+    }
+
+    /// Noise finer than a cell, or a cell at the edge of `i32`, puts the
+    /// lattice at `i32::MAX`: its `+ 1` neighbour wraps instead of
+    /// overflowing, the same in dev and release.
+    #[test]
+    fn tiny_water_scale_and_far_cells_do_not_overflow() {
+        for (scale, x, y) in [
+            (1e-9, 63, 0),
+            (1e-8, 64, 0),
+            (1e-37, 1, 1),
+            (1.0, i32::MAX, i32::MAX),
+        ] {
+            let p = GenParams {
+                water_scale: scale,
+                ..GenParams::default()
+            };
+            assert_eq!(gen_cell(1, &p, x, y), gen_cell(1, &p, x, y));
         }
     }
 }

@@ -21,7 +21,7 @@ pub mod systems;
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells};
+use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, cell_u16};
 
 pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, Tally, life};
 
@@ -35,6 +35,16 @@ pub const GENE_SLOTS: usize = 8;
 /// Rows reserved per chunk when it is loaded. Growth past this is chunk-level
 /// and amortised (a `Vec` doubling), never a per-actor allocation.
 pub const RESERVE: usize = 256;
+
+/// A row index as the `u16` slot an [`ActorId`] and an effect keep: a chunk
+/// has at most one row per cell in each layer.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // below 2 * CHUNK_CELLS, which fits
+pub fn slot_u16(slot: usize) -> u16 {
+    debug_assert!(slot < 2 * CHUNK_CELLS, "row {slot}: more than two per cell");
+    slot as u16
+}
+const _: () = assert!(2 * CHUNK_CELLS <= 1 << u16::BITS);
 
 /// Bits of [`ActorPub::flags`].
 pub mod flags {
@@ -61,7 +71,8 @@ pub struct ActorPub {
     pub stagger: u16,
     /// Rule-written, readable by others (`signal_of`). What an actor broadcasts.
     pub signal: i16,
-    /// Rule-written appearance byte: palette variant and the `kind:look` predicate.
+    /// Rule-written public byte that other actors read (`kind:look`,
+    /// `look_of`) and `wmc why` shows; the renderer does not draw it.
     pub look: u8,
     /// See [`flags`].
     pub flags: u8,
@@ -73,7 +84,8 @@ pub struct ActorPub {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Pod, Zeroable)]
 pub struct ActorMind {
     /// Identity across ticks and chunks. Worldgen rows: `hash_cell(seed,
-    /// STREAM_UID, x, y)`; run-time spawns fold in the tick.
+    /// STREAM_UID, x, y)`; run-time spawns fold in the tick, and cover
+    /// children hash with `STREAM_UID_COVER` instead.
     pub uid: u64,
     /// Tick the actor came to be (wrapping); `age = tick - born`.
     pub born: u32,
@@ -152,15 +164,18 @@ impl ActorsMut<'_> {
         self.push_in(cell, kind, mind, true)
     }
 
-    fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
-        let layer = self.layer(cover);
+    /// [`ActorsMut::push`] or [`ActorsMut::push_cover`], by `cover`.
+    pub fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
+        let layer = self.cells.layer_mut(cover);
         assert!(layer[cell].is_none(), "cell {cell} is occupied");
         let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
-        self.layer(cover)[cell] = ActorId::pack(kind, slot);
+        layer[cell] = ActorId::pack(kind, slot);
+        #[allow(clippy::cast_possible_truncation)] // the uid's low bits: truncation is the point
+        let stagger = mind.uid as u16;
         self.pubs.push(ActorPub {
-            cell: cell as u16,
+            cell: cell_u16(cell),
             kind,
-            stagger: mind.uid as u16,
+            stagger,
             signal: 0,
             look: 0,
             flags: if cover { flags::COVER } else { 0 },
@@ -170,15 +185,6 @@ impl ActorsMut<'_> {
         slot
     }
 
-    #[inline]
-    pub fn layer(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
-        if cover {
-            &mut self.cells.cover
-        } else {
-            &mut self.cells.occupant
-        }
-    }
-
     /// Flag a row dead and free its cell. The row stays until [`compact`].
     ///
     /// [`compact`]: ActorsMut::compact
@@ -186,7 +192,7 @@ impl ActorsMut<'_> {
         let p = self.pubs[slot];
         if p.flags & flags::DEAD == 0 {
             self.pubs[slot].flags |= flags::DEAD;
-            self.layer(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
+            self.cells.layer_mut(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
         }
     }
 
@@ -203,8 +209,8 @@ impl ActorsMut<'_> {
             self.minds.swap_remove(i);
             if i < self.pubs.len() {
                 let moved = self.pubs[i];
-                self.layer(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
-                    ActorId::pack(moved.kind, i as u16);
+                self.cells.layer_mut(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
+                    ActorId::pack(moved.kind, slot_u16(i));
             }
         }
     }
@@ -241,12 +247,8 @@ pub fn validate(
         if cell >= CHUNK_CELLS {
             return Err(format!("row {slot} is on cell {cell}, outside the chunk"));
         }
-        let layer = if p.flags & flags::COVER != 0 {
-            &cells.cover
-        } else {
-            &cells.occupant
-        };
-        let want = ActorId::pack(p.kind, slot as u16);
+        let layer = cells.layer(p.flags & flags::COVER != 0);
+        let want = ActorId::pack(p.kind, slot_u16(slot));
         if layer[cell] != want {
             return Err(format!(
                 "cell {cell} holds {:?}, row {slot} expects {want:?}",

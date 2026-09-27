@@ -9,6 +9,11 @@
 //! - [`packs`], [`compile`], [`rules_for`]: which rules the app runs (packs
 //!   from `--rules` or `WMC_RULES`, a save's own packs, or the built-in ones).
 //! - [`why`]: `wmc why`, one actor's think explained.
+
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 pub mod camera;
 pub mod clock;
 pub mod play;
@@ -21,12 +26,17 @@ use anyhow::Context;
 use sim_core::{Kinds, Store};
 
 /// The rule packs a session asked for: the `--rules` paths, else
-/// `WMC_RULES` (paths separated by `:`), else none.
+/// `WMC_RULES` (paths separated by `:`; empty entries are skipped, so an
+/// empty `WMC_RULES` is none), else none.
 pub fn packs(cli: &[String]) -> Vec<PathBuf> {
     if !cli.is_empty() {
         return cli.iter().map(PathBuf::from).collect();
     }
-    std::env::var_os("WMC_RULES").map_or_else(Vec::new, |v| std::env::split_paths(&v).collect())
+    std::env::var_os("WMC_RULES").map_or_else(Vec::new, |v| {
+        std::env::split_paths(&v)
+            .filter(|p| !p.as_os_str().is_empty())
+            .collect()
+    })
 }
 
 /// The packs for a new world: the session's ([`packs`]), else the ones its
@@ -73,7 +83,8 @@ pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::
             packs = saved;
         } else {
             eprintln!(
-                "rules: the save's packs are missing ({}); using the built-in rules",
+                "rules: the save's packs are missing ({}); using the built-in rules \
+                 (saving will keep them)",
                 gone.iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()
@@ -90,6 +101,19 @@ pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::
         );
     }
     Ok(kinds)
+}
+
+/// Says on stderr which of an opened save's starts name a kind the rules
+/// lack: the save keeps them, and they place nobody until the kind is back.
+pub fn say_skipped_starts(world: &bevy::prelude::World) {
+    let starts = &world.resource::<sim_core::SimConfig>().starts;
+    let skipped = sim_core::scenario::absent(starts, world.resource::<Kinds>());
+    if !skipped.is_empty() {
+        eprintln!(
+            "starts: skipped, the rules lack their kinds (the save keeps them): {}",
+            skipped.join(", ")
+        );
+    }
 }
 
 /// The author lint's warnings about `kinds`, once on stderr (`wmc lint`
@@ -112,6 +136,26 @@ pub fn warn(kinds: &Kinds) {
     }
 }
 
+/// The name of the built-in scenario, for messages.
+pub const DEFAULT_SCENARIO: &str = "default.scenario";
+
+/// A new world from the scenario `name` failed with `e`: say which file
+/// (and line, when `e` is about one start: [`Scenario::line_of`]) does not
+/// fit, and when it is the built-in one, that the rules need their own.
+///
+/// [`Scenario::line_of`]: sim_core::Scenario::line_of
+pub fn new_world_error(name: &str, line: Option<u32>, e: impl std::fmt::Display) -> anyhow::Error {
+    let hint = if name == DEFAULT_SCENARIO {
+        " (these rules need their own scenario: --scenario <file>)"
+    } else {
+        ""
+    };
+    match line {
+        Some(line) => anyhow::anyhow!("{name}:{line}: {e}{hint}"),
+        None => anyhow::anyhow!("{name}: {e}{hint}"),
+    }
+}
+
 /// Paths for a message: `a, b`.
 pub fn shown(paths: &[PathBuf]) -> String {
     paths
@@ -119,4 +163,28 @@ pub fn shown(paths: &[PathBuf]) -> String {
         .map(|p| p.display().to_string())
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Rules that do not fit the built-in scenario are told to bring their
+    /// own; a scenario file that does not fit is only named.
+    #[test]
+    fn a_new_world_error_hints_at_a_scenario_for_the_default_one() {
+        let e = new_world_error(DEFAULT_SCENARIO, None, "x").to_string();
+        assert!(
+            e.starts_with("default.scenario: x") && e.contains("--scenario <file>"),
+            "{e}"
+        );
+        assert_eq!(
+            new_world_error("a.scenario", None, "x").to_string(),
+            "a.scenario: x"
+        );
+        assert_eq!(
+            new_world_error("a.scenario", Some(4), "x").to_string(),
+            "a.scenario:4: x"
+        );
+    }
 }
