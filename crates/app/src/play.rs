@@ -54,7 +54,7 @@ const MIN_CELL_LOGICAL: u32 = 6;
 const MAX_CELL_LOGICAL: u32 = 64;
 const ZOOM_STEP: i32 = 2;
 /// Rows reserved under the map for status text.
-const STATUS_ROWS: usize = 4;
+const STATUS_ROWS: u32 = 4;
 /// Longest frame time fed to the camera: a stall becomes a small step, not a leap.
 const MAX_DT: f64 = 0.1;
 /// Sim time per frame. The rest of a 60 Hz frame is for streaming and drawing;
@@ -268,8 +268,11 @@ pub struct MapLayout {
 pub fn map_layout(camera: &ViewCamera, cell: usize, width: usize, height: usize) -> MapLayout {
     let cell_i = cell as i64;
     let corner = |center: f64, extent: usize| -> (i64, usize) {
+        // The camera holds its centre to ±1e9 cells: in pixels, far inside i64.
+        #[allow(clippy::cast_possible_truncation)]
         let px = (center * cell as f64 - extent as f64 / 2.0).round() as i64;
-        (px.div_euclid(cell_i), px.rem_euclid(cell_i) as usize)
+        let shift = usize::try_from(px.rem_euclid(cell_i)).expect("in 0..cell");
+        (px.div_euclid(cell_i), shift)
     };
     let (ox, shift_x) = corner(camera.x, width);
     let (oy, shift_y) = corner(camera.y, height);
@@ -401,12 +404,15 @@ fn layout(
     {
         o.scale = scale;
     }
+    // `Zoom` holds the cell to a few dozen logical pixels and the scale is a
+    // DPI factor: a small whole number of pixels, at least 1.
+    #[allow(clippy::cast_possible_truncation)]
     let cell = ((zoom.cell_logical as f32) * scale).round().max(1.0) as u32;
     if glyphs.cell != cell {
         glyphs.tileset = images.add(GlyphAtlas::build(cell).tileset());
         glyphs.cell = cell;
     }
-    let status_h = (STATUS_ROWS as u32 * cell).min(height);
+    let status_h = (STATUS_ROWS * cell).min(height);
     let map_h = height - status_h;
     let map = map_layout(&camera, cell as usize, width as usize, map_h as usize);
     let status_cols = width.div_ceil(cell);
@@ -421,16 +427,19 @@ fn layout(
         status_cols,
         status_h,
     };
-    let (cols, rows) = (map.cols as u32, map.rows as u32);
+    let (cols, rows) = (
+        u32::try_from(map.cols).expect("the map is a window wide"),
+        u32::try_from(map.rows).expect("the map is a window tall"),
+    );
     let Grids { map: m, status: s } = &mut *grids;
     if (m.cols, m.rows, m.cell) != (cols, rows, cell) {
         m.configure(&mut commands, cols, rows, cell, &glyphs.tileset);
     }
-    if (s.cols, s.rows, s.cell) != (status_cols, STATUS_ROWS as u32, cell) {
+    if (s.cols, s.rows, s.cell) != (status_cols, STATUS_ROWS, cell) {
         s.configure(
             &mut commands,
             status_cols,
-            STATUS_ROWS as u32,
+            STATUS_ROWS,
             cell,
             &glyphs.tileset,
         );
@@ -444,7 +453,10 @@ fn stream_and_tick(world: &mut World) {
     let focus = world.resource::<ViewCamera>().cell();
     let pending = std::mem::take(&mut *world.resource_mut::<Pending>());
 
-    let policy = policy_for(layout.map.cols as u32, layout.map.rows as u32);
+    let policy = policy_for(
+        u32::try_from(layout.map.cols).expect("the map is a window wide"),
+        u32::try_from(layout.map.rows).expect("the map is a window tall"),
+    );
     let streamed = world.resource_scope(|world, store: Mut<Store>| {
         sim::ensure_loaded(world, focus, policy, Some(&store))
     });
@@ -590,8 +602,8 @@ fn render_frame(
     frames.map.resize(map.cols, map.rows);
     let view = Viewport {
         origin: map.origin,
-        width: map.cols as u32,
-        height: map.rows as u32,
+        width: u32::try_from(map.cols).expect("the map is a window wide"),
+        height: u32::try_from(map.rows).expect("the map is a window tall"),
     };
     let light = brightness(time::daylight(tick.0));
     render_cells(
@@ -626,7 +638,7 @@ fn render_frame(
     );
     frames
         .status
-        .resize(layout.status_cols as usize, STATUS_ROWS);
+        .resize(layout.status_cols as usize, STATUS_ROWS as usize);
     frames.status.put_text(0, &status, TEXT_FG, TEXT_BG);
     let (alive, events) = life_lines(&kinds, &tally, &rows);
     frames.status.put_text(1, &alive, TEXT_FG, TEXT_BG);
@@ -665,7 +677,7 @@ fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (Stri
     ] {
         let parts: Vec<String> = (0..kinds.len())
             .filter_map(|k| {
-                let n = tally.get(k as u16, event);
+                let n = tally.get(u16::try_from(k).expect("kind ids are u16"), event);
                 (n > 0).then(|| format!("{}{n}", glyph(k)))
             })
             .collect();
