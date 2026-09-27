@@ -317,6 +317,7 @@ impl<'a> Gen<'a> {
     pub(super) fn lint(&mut self, kinds: &Kinds) -> Vec<Diagnostic> {
         let items = self.items;
         let mut out = Out::default();
+        self.diagnose(&mut out);
 
         // The rule set as a whole.
         let mut names = Names::default();
@@ -596,6 +597,82 @@ impl<'a> Gen<'a> {
             }
         }
         out.0
+    }
+
+    /// Warnings and notes about the compiled kinds, in kind order.
+    fn diagnose(&mut self, out: &mut Out) {
+        let items = self.items;
+        for k in 0..self.kind_insts.len() {
+            self.enter(k);
+            let ki = self.kind_insts[k];
+            let inst = self.insts[ki].clone();
+            // A rule that always holds and always ends the think hides every
+            // rule after it (and, among the reflexes, every state's rules).
+            let mut reflex_end: Option<&'a Rule> = None;
+            let lists: Vec<&RList<'a>> = [&inst.reflex]
+                .into_iter()
+                .chain(&inst.state_lists)
+                .collect();
+            for (li, list) in lists.iter().enumerate() {
+                if li > 0 {
+                    if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
+                        out.push(
+                            Level::Warning,
+                            &first.rule.at,
+                            format!(
+                                "never runs: the reflex rule at {}:{} always ends the think",
+                                end.at.file, end.at.line
+                            ),
+                        );
+                    }
+                    if reflex_end.is_some() {
+                        continue;
+                    }
+                }
+                for (i, rr) in list.rules.iter().enumerate() {
+                    self.owner = Some(rr.owner);
+                    self.params = self.scope_of(rr.owner);
+                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold_known(e, &rr.rule.at, |_| false).is_some_and(|v| v != 0));
+                    if always && self.ends_all(&rr.rule.body, false, 0, false) {
+                        if let Some(next) = list.rules.get(i + 1) {
+                            out.push(
+                                Level::Warning,
+                                &next.rule.at,
+                                format!(
+                                    "never runs: the rule at {}:{} always ends the think",
+                                    rr.rule.at.file, rr.rule.at.line
+                                ),
+                            );
+                        }
+                        if li == 0 {
+                            reflex_end = Some(rr.rule);
+                        }
+                        break;
+                    }
+                }
+            }
+            // Ancestors whose reflex rules this kind does not run.
+            for &a in &inst.ancestors {
+                let has_rules = items[self.insts[a].item]
+                    .rules
+                    .iter()
+                    .any(|r| matches!(r, RuleItem::When(_)));
+                if has_rules && !inst.reflex.sources.contains(&a) {
+                    let it = &items[inst.item];
+                    out.push(
+                        Level::Note,
+                        &it.at,
+                        format!(
+                            "`{}` does not run the reflex rules of `{}` (no `inherit` splices them)",
+                            it.name,
+                            self.inst_name(a)
+                        ),
+                    );
+                }
+            }
+        }
+        self.owner = None;
+        self.params.clear();
     }
 
     /// What `p` matches here: a `pred` parameter's argument, a kind's family

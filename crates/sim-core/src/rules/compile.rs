@@ -2516,7 +2516,6 @@ impl<'a> Gen<'a> {
         }
         // Traits on their own, whether or not a kind includes them.
         self.check_traits()?;
-        self.diagnose();
 
         // The checks in rule, kind_code and sub_body keep every jump in
         // 16 bits; this is only a backstop.
@@ -2550,8 +2549,7 @@ impl<'a> Gen<'a> {
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
             .with_scents(std::mem::take(&mut self.scents));
-        let lint = self.lint(&kinds);
-        self.debug.diagnostics.extend(lint);
+        self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
 
@@ -3337,99 +3335,6 @@ impl<'a> Gen<'a> {
             }
         }
         Ok(())
-    }
-
-    /// Warnings and notes about the compiled kinds, in kind order.
-    fn diagnose(&mut self) {
-        let items = self.items;
-        let mut out: Vec<Diagnostic> = Vec::new();
-        let push = |out: &mut Vec<Diagnostic>, level: Level, at: &Pos, msg: String| {
-            let d = Diagnostic {
-                level,
-                file: at.file.clone(),
-                line: at.line,
-                col: at.col,
-                msg,
-            };
-            if !out.contains(&d) {
-                out.push(d);
-            }
-        };
-        for k in 0..self.kind_insts.len() {
-            self.enter(k);
-            let ki = self.kind_insts[k];
-            let inst = self.insts[ki].clone();
-            // A rule that always holds and always ends the think hides every
-            // rule after it (and, among the reflexes, every state's rules).
-            let mut reflex_end: Option<&'a Rule> = None;
-            let lists: Vec<&RList<'a>> = [&inst.reflex]
-                .into_iter()
-                .chain(&inst.state_lists)
-                .collect();
-            for (li, list) in lists.iter().enumerate() {
-                if li > 0 {
-                    if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
-                        push(
-                            &mut out,
-                            Level::Warning,
-                            &first.rule.at,
-                            format!(
-                                "never runs: the reflex rule at {}:{} always ends the think",
-                                end.at.file, end.at.line
-                            ),
-                        );
-                    }
-                    if reflex_end.is_some() {
-                        continue;
-                    }
-                }
-                for (i, rr) in list.rules.iter().enumerate() {
-                    self.owner = Some(rr.owner);
-                    self.params = self.scope_of(rr.owner);
-                    let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold_known(e, &rr.rule.at, |_| false).is_some_and(|v| v != 0));
-                    if always && self.ends_all(&rr.rule.body, false, 0, false) {
-                        if let Some(next) = list.rules.get(i + 1) {
-                            push(
-                                &mut out,
-                                Level::Warning,
-                                &next.rule.at,
-                                format!(
-                                    "never runs: the rule at {}:{} always ends the think",
-                                    rr.rule.at.file, rr.rule.at.line
-                                ),
-                            );
-                        }
-                        if li == 0 {
-                            reflex_end = Some(rr.rule);
-                        }
-                        break;
-                    }
-                }
-            }
-            // Ancestors whose reflex rules this kind does not run.
-            for &a in &inst.ancestors {
-                let has_rules = items[self.insts[a].item]
-                    .rules
-                    .iter()
-                    .any(|r| matches!(r, RuleItem::When(_)));
-                if has_rules && !inst.reflex.sources.contains(&a) {
-                    let it = &items[inst.item];
-                    push(
-                        &mut out,
-                        Level::Note,
-                        &it.at,
-                        format!(
-                            "`{}` does not run the reflex rules of `{}` (no `inherit` splices them)",
-                            it.name,
-                            self.inst_name(a)
-                        ),
-                    );
-                }
-            }
-        }
-        self.owner = None;
-        self.params.clear();
-        self.debug.diagnostics = out;
     }
 
     /// Does this statement end the think on every path: an action (and, if
