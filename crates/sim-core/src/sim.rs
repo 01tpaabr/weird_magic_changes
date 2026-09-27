@@ -30,7 +30,7 @@ use crate::actors::{ActorMind, ActorsMut, ChunkActors, ChunkMinds, CrossScratch,
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{
-    Agg, DrawnMap, Expect, MAX_SIZE_CHUNKS, Placement, Scenario, Start, Who, present,
+    Agg, DrawnMap, Expect, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, Who, present,
 };
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
@@ -192,17 +192,20 @@ pub fn tick(world: &World) -> u64 {
 /// Turn an installed world into a fresh one made from `scenario`, its
 /// initial region loaded. Same scenario and rules => bit-identical world.
 /// An error, and nothing changed, if the scenario's starts do not fit the
-/// rules ([`Placement::resolve`]) or its size is more than
-/// [`MAX_SIZE_CHUNKS`].
-pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), String> {
+/// rules ([`Placement::resolve`], which says which start) or its size is
+/// more than [`MAX_SIZE_CHUNKS`].
+pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), StartError> {
     let (w, h) = (scenario.width, scenario.height);
     let chunks =
         u64::from(w.div_ceil(CHUNK_SIZE as u32)) * u64::from(h.div_ceil(CHUNK_SIZE as u32));
     if chunks > MAX_SIZE_CHUNKS {
-        return Err(format!(
-            "size {w}x{h} is {chunks} chunks; a new world generates at most \
-             {MAX_SIZE_CHUNKS} chunks up front (the rest streams in)"
-        ));
+        return Err(StartError {
+            start: None,
+            msg: format!(
+                "size {w}x{h} is {chunks} chunks; a new world generates at most \
+                 {MAX_SIZE_CHUNKS} chunks up front (the rest streams in)"
+            ),
+        });
     }
     let placement = Placement::resolve(
         &scenario.starts,
@@ -237,7 +240,7 @@ pub fn new_world(scenario: &Scenario) -> World {
 
 /// [`new_world`] with a compiled rule set; an error if the scenario does
 /// not fit it.
-pub fn new_world_with(scenario: &Scenario, kinds: Kinds) -> Result<World, String> {
+pub fn new_world_with(scenario: &Scenario, kinds: Kinds) -> Result<World, StartError> {
     crate::par::init_task_pool();
     let mut world = World::new();
     install_with(&mut world, kinds);
@@ -891,7 +894,8 @@ mod tests {
             ..cfg(1)
         };
         let e = new_world_with(&huge, Kinds::builtin()).unwrap_err();
-        assert!(e.contains("at most 4096 chunks"), "{e}");
+        assert!(e.msg.contains("at most 4096 chunks"), "{e}");
+        assert_eq!(e.start, None, "not about a start");
         let w = new_world(&Scenario {
             width: 0,
             height: 0,
@@ -2757,14 +2761,12 @@ mod tests {
                 },
             )
             .unwrap_err()
+            .msg
         };
         let wet = cells_where(6, 1, |g, f| !g.walkable() && !f.blocks())[0];
         let rock = cells_where(6, 1, |_, f| f.blocks())[0];
         let e = refused(format!("start hive at ({}, {})", wet.x, wet.y));
-        assert_eq!(
-            e,
-            format!("`start hive at ({}, {})` is on water", wet.x, wet.y)
-        );
+        assert_eq!(e, format!("`hive` at ({}, {}) is on water", wet.x, wet.y));
         let e = refused(format!("start hive at ({}, {})", rock.x, rock.y));
         assert!(e.ends_with("is on rock"), "{e}");
         let e = refused("start wolf 1 / 9\nstart chicken 1 / 9\nstart gnu at (0, 0)".into());

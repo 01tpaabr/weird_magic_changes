@@ -95,7 +95,8 @@ pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyh
     let world = app.world_mut();
     sim::install_with(world, kinds);
     if !sim::open(world, &store).context("reading save")? {
-        sim::create(world, scenario).map_err(|e| crate::new_world_error(name, e))?;
+        sim::create(world, scenario)
+            .map_err(|e| crate::new_world_error(name, scenario.line_of(&e), e))?;
         store
             .write_meta(&sim::meta(world))
             .context("writing save meta")?;

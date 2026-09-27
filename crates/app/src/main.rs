@@ -242,7 +242,8 @@ fn config(packs: Vec<String>, file: Option<&str>, args: &[String]) -> anyhow::Re
 /// A new world of the setup's scenario under `kinds`; says which file does
 /// not fit.
 fn new_world(setup: &Setup, kinds: Kinds) -> anyhow::Result<World> {
-    sim::new_world_with(&setup.scenario, kinds).map_err(|e| app::new_world_error(&setup.name, e))
+    sim::new_world_with(&setup.scenario, kinds)
+        .map_err(|e| app::new_world_error(&setup.name, setup.scenario.line_of(&e), e))
 }
 
 fn show(setup: &Setup) -> anyhow::Result<()> {
@@ -442,7 +443,10 @@ fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
     let s = scenario(Some(file))?;
     let kinds = app::compile(&app::packs_or(packs, &s.packs))?;
     app::warn(&kinds);
-    let mut world = sim::new_world_with(&s, kinds).map_err(|e| anyhow::anyhow!("{file}: {e}"))?;
+    let mut world = sim::new_world_with(&s, kinds).map_err(|e| match s.line_of(&e) {
+        Some(line) => anyhow::anyhow!("{file}:{line}: {e}"),
+        None => anyhow::anyhow!("{file}: {e}"),
+    })?;
     let mut out = std::io::stdout().lock();
     let (mut checked, mut failed) = (0, 0);
     for c in &s.checks {
@@ -496,8 +500,12 @@ fn lint(
     let scenario = match scenario_file {
         Some(f) => {
             let s = scenario(Some(f))?;
-            Placement::resolve(&s.starts, &kinds, &s.terrain())
-                .map_err(|e| anyhow::anyhow!("{f}: {e}"))?;
+            Placement::resolve(&s.starts, &kinds, &s.terrain()).map_err(|e| {
+                match s.line_of(&e) {
+                    Some(line) => anyhow::anyhow!("{f}:{line}: {e}"),
+                    None => anyhow::anyhow!("{f}: {e}"),
+                }
+            })?;
             for c in &s.checks {
                 if let Check::Expect { line, what, .. } = c {
                     sim::check_expect(&kinds, what)

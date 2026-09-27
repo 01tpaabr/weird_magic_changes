@@ -130,3 +130,46 @@ fn unused_arguments_are_refused() {
     assert!(ok, "{out}{err}");
     assert!(!Path::new(dir).exists(), "run never saves");
 }
+
+/// A start that does not fit the rules is refused at its line, by `lint
+/// --scenario`, `scenario` and a new world alike: the `start` line, or the
+/// map row that draws it (not quoted as a `start` line the file lacks),
+/// with a need in its units.
+#[test]
+fn a_start_that_does_not_fit_names_its_line() {
+    let dir = scratch("start-line");
+    let f = dir.join("hungry.scenario");
+    std::fs::write(
+        &f,
+        "seed 3\noutside soil\nmap {\n  ...\n  .F.\n}\nlegend {\n  . soil\n  F fox with (food = 30h)\n}\n",
+    )
+    .unwrap();
+    let f = f.to_str().unwrap();
+    let want =
+        format!("{f}:5: `fox` at (1, 1) with `food = 27000 (30h)`: `food` holds 0 to 21600 (1d)");
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let save = dir.join("save");
+    for args in [
+        vec!["lint", rules.to_str().unwrap(), "--scenario", f],
+        vec!["scenario", f],
+        vec!["run", save.to_str().unwrap(), "1", "--scenario", f],
+    ] {
+        let (ok, out, err) = wmc(&args);
+        assert!(!ok && err.contains(&want), "{args:?}: {out}{err}");
+    }
+    std::fs::write(
+        dir.join("two.scenario"),
+        "seed 3\nstart hive 1 / 2\nstart wolf 1 / 4\n",
+    )
+    .unwrap();
+    let two = dir.join("two.scenario");
+    let (ok, _, err) = wmc(&["scenario", two.to_str().unwrap()]);
+    assert!(
+        !ok && err.contains(&format!(
+            "{}:3: the scenario starts kinds the rules do not define: wolf",
+            two.display()
+        )),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}

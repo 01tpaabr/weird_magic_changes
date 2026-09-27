@@ -121,15 +121,20 @@ pub fn warn(kinds: &Kinds) {
 pub const DEFAULT_SCENARIO: &str = "default.scenario";
 
 /// A new world from the scenario `name` failed with `e`: say which file
-/// does not fit, and when it is the built-in one, that the rules need
-/// their own.
-pub fn new_world_error(name: &str, e: impl std::fmt::Display) -> anyhow::Error {
+/// (and line, when `e` is about one start: [`Scenario::line_of`]) does not
+/// fit, and when it is the built-in one, that the rules need their own.
+///
+/// [`Scenario::line_of`]: sim_core::Scenario::line_of
+pub fn new_world_error(name: &str, line: Option<u32>, e: impl std::fmt::Display) -> anyhow::Error {
     let hint = if name == DEFAULT_SCENARIO {
         " (these rules need their own scenario: --scenario <file>)"
     } else {
         ""
     };
-    anyhow::anyhow!("{name}: {e}{hint}")
+    match line {
+        Some(line) => anyhow::anyhow!("{name}:{line}: {e}{hint}"),
+        None => anyhow::anyhow!("{name}: {e}{hint}"),
+    }
 }
 
 /// Paths for a message: `a, b`.
@@ -149,14 +154,18 @@ mod tests {
     /// own; a scenario file that does not fit is only named.
     #[test]
     fn a_new_world_error_hints_at_a_scenario_for_the_default_one() {
-        let e = new_world_error(DEFAULT_SCENARIO, "x").to_string();
+        let e = new_world_error(DEFAULT_SCENARIO, None, "x").to_string();
         assert!(
             e.starts_with("default.scenario: x") && e.contains("--scenario <file>"),
             "{e}"
         );
         assert_eq!(
-            new_world_error("a.scenario", "x").to_string(),
+            new_world_error("a.scenario", None, "x").to_string(),
             "a.scenario: x"
+        );
+        assert_eq!(
+            new_world_error("a.scenario", Some(4), "x").to_string(),
+            "a.scenario:4: x"
         );
     }
 }
