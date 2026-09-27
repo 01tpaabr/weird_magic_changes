@@ -8,19 +8,31 @@
 //! these wrappers make the default.
 //!
 //! The pool is a process-wide singleton. [`init_task_pool`] sizes it from
-//! `WMC_THREADS` (default: all cores); the first initialiser in a process
-//! wins, so `WMC_THREADS=1 wmc run ...` vs the default is the thread-count
-//! gate for the whole binary.
+//! `WMC_THREADS` (default: all cores; anything but a count of 1 or more
+//! panics); the first initialiser in a process wins, so `WMC_THREADS=1 wmc
+//! run ...` vs the default is the thread-count gate for the whole binary.
 
 use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 
-/// Thread count requested through the environment, if any.
+/// Thread count requested through the environment, if any. Panics on a
+/// value that is not one: a mistyped `WMC_THREADS=1` would otherwise run
+/// on all cores and the thread-count gate would compare a run with itself.
 pub fn threads_from_env() -> Option<usize> {
-    std::env::var("WMC_THREADS")
-        .ok()?
-        .parse()
-        .ok()
-        .filter(|&n| n >= 1)
+    parse_threads(std::env::var("WMC_THREADS").ok().as_deref()).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `WMC_THREADS`'s value: unset or empty is `None` (all cores), else a
+/// count of 1 or more.
+fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
+    match v {
+        None | Some("") => Ok(None),
+        Some(v) => match v.trim().parse() {
+            Ok(n) if n >= 1 => Ok(Some(n)),
+            _ => Err(format!(
+                "WMC_THREADS=`{v}` is not a thread count (1 or more)"
+            )),
+        },
+    }
 }
 
 /// Make sure the compute pool exists, sized from `WMC_THREADS` when set.
@@ -127,6 +139,17 @@ pub fn par_for(n: usize, batch: usize, f: impl Fn(usize) + Sync) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bad_thread_count_is_refused() {
+        assert!(parse_threads(Some("l")).is_err());
+        assert!(parse_threads(Some("0")).is_err());
+        assert!(parse_threads(Some("-1")).is_err());
+        assert_eq!(parse_threads(Some(" 1")), Ok(Some(1)));
+        assert_eq!(parse_threads(Some("8")), Ok(Some(8)));
+        assert_eq!(parse_threads(Some("")), Ok(None));
+        assert_eq!(parse_threads(None), Ok(None));
+    }
 
     #[test]
     fn par_map_preserves_order_for_every_batch_size() {
