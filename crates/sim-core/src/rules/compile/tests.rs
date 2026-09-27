@@ -1468,6 +1468,34 @@ fn extends_errors_name_the_problem() {
     compile_ok("trait p { cadence 2 } trait q { cadence 4 } kind a extends p, q { cadence 8 }");
 }
 
+/// A chain of `extends` is resolved by recursion, one level per link: the
+/// parser's nesting limit does not bound it, so its own limit does. 3000
+/// traits in a chain overflowed the stack, and 3000 kinds took most of a
+/// minute (each resolves its whole ancestry).
+#[test]
+fn a_chain_of_extends_is_at_most_128_long() {
+    let chain = |word: &str, n: usize| {
+        let mut t = format!("{word} x0 {{ }}\n");
+        for i in 1..n {
+            t += &format!("{word} x{i} extends x{} {{ }}\n", i - 1);
+        }
+        t
+    };
+    compile_ok(&(chain("trait", 128) + "kind k extends x127 { }"));
+    compile_ok(&chain("kind", 129));
+    let err = compile_err(&(chain("trait", 3000) + "kind k extends x2999 { }"));
+    assert!(err.contains("more than 128 kinds and traits deep"), "{err}");
+    let err = compile_err(&chain("kind", 3000));
+    assert!(err.contains("more than 128 kinds and traits deep"), "{err}");
+    // Written child first, a kind chain is one deep recursion too.
+    let mut t = String::new();
+    for i in (1..3000).rev() {
+        t += &format!("kind x{i} extends x{} {{ }}\n", i - 1);
+    }
+    t += "kind x0 { }";
+    assert!(compile_err(&t).contains("more than 128 kinds and traits deep"));
+}
+
 #[test]
 fn a_constant_that_is_not_one_is_reported_where_it_stands() {
     let kind = "kind a { glyph \"a\" when true => idle }";

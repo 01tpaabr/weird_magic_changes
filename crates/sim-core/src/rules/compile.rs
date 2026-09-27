@@ -2068,6 +2068,8 @@ struct Inst<'a> {
     /// Direct parents, and every ancestor in linearized order.
     parents: Vec<usize>,
     ancestors: Vec<usize>,
+    /// The longest chain of `extends` below it: 0 for a root.
+    depth: u32,
     glyph: Option<u8>,
     color: Option<u32>,
     cover: bool,
@@ -2630,6 +2632,15 @@ impl<'a> Gen<'a> {
                 format!("`{}` extends itself: {}", it.name, chain.join(" -> ")),
             ));
         }
+        // Each link is a recursion here and a merge of the whole ancestry:
+        // a chain is bounded like a tree's nesting.
+        let too_deep = format!(
+            "`{}`: a chain of `extends` more than {MAX_DEPTH} kinds and traits deep",
+            items[stack.first().copied().unwrap_or(item)].name
+        );
+        if stack.len() > MAX_DEPTH as usize {
+            return Err(self.err(&it.at, too_deep));
+        }
         stack.push(item);
         let scope: Vec<(String, i32)> = it
             .params
@@ -2694,6 +2705,14 @@ impl<'a> Gen<'a> {
             parents.push(pinst?);
         }
         stack.pop();
+        let depth = parents
+            .iter()
+            .map(|&p| self.insts[p].depth + 1)
+            .max()
+            .unwrap_or(0);
+        if depth > MAX_DEPTH {
+            return Err(self.err(&it.at, too_deep));
+        }
         // Linearize: each parent's ancestors, then the parent; the first
         // occurrence wins. One trait, two argument lists: ambiguous (not
         // when this item's arguments are the trait check's placeholder 1s:
@@ -2738,6 +2757,7 @@ impl<'a> Gen<'a> {
         let me = self.insts.len();
         let saved = std::mem::replace(&mut self.params, scope);
         let inst = self.merge(item, args, parents, ancestors, me);
+        let inst = inst.map(|i| Inst { depth, ..i });
         self.params = saved;
         let inst = inst?;
         debug_assert_eq!(self.insts.len(), me, "merge resolves nothing new");
@@ -3064,6 +3084,7 @@ impl<'a> Gen<'a> {
             args,
             parents,
             ancestors,
+            depth: 0,
             glyph,
             color,
             cover,
