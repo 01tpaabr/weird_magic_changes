@@ -2098,8 +2098,8 @@ struct Gen<'a> {
     /// The instance being resolved has arguments made from the trait
     /// check's placeholder 1s: a trait it reaches twice is not reported.
     placeholder: bool,
-    /// Instances that skipped such a conflict: never reused for one whose
-    /// arguments are real.
+    /// Instances that skipped such a conflict, or extend one that did: never
+    /// reused for one whose arguments are real.
     lenient: Vec<usize>,
     locals: Vec<Local>,
     next_local: u8,
@@ -2690,6 +2690,8 @@ impl<'a> Gen<'a> {
                 ancestors.push(a);
             }
         }
+        // Built on a lenient parent: lenient too, so a real lookup re-resolves.
+        skipped |= parents.iter().any(|p| self.lenient.contains(p));
         let me = self.insts.len();
         let saved = std::mem::replace(&mut self.params, scope);
         let inst = self.merge(item, args, parents, ancestors, me);
@@ -5623,6 +5625,9 @@ mod tests {
             format!("{pack} trait w(k) extends t(1) {{ }}"),
             format!("{pack} trait top extends w(3) {{ }} trait w(k) extends t(1) {{ }}"),
             format!("trait w extends t(1) {{ }} {pack}"),
+            format!("{pack} trait w(k) extends t(k) {{ }} trait top extends w(1) {{ }}"),
+            format!("{pack} trait top extends w(1) {{ }} trait w(k) extends t(k) {{ }}"),
+            format!("{pack} trait w(k) extends t(k) {{ }} kind top extends w(1) {{ }}"),
         ] {
             let e = compile_err(&text);
             assert!(e.contains("`t` reaches trait `u` twice"), "{text}: {e}");
