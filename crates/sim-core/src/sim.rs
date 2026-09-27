@@ -120,6 +120,12 @@ pub struct StreamStats {
     pub written: usize,
 }
 
+/// Saved chunks that failed to read or check while streaming, sorted: left
+/// unloaded and never generated over, so their files stay as they are.
+/// [`ensure_loaded`] reports each once and skips it from then on.
+#[derive(Resource, Debug, Clone, Default)]
+pub struct Unreadable(pub Vec<ChunkCoord>);
+
 // ---- schedule --------------------------------------------------------------------------
 
 /// Give a world everything the sim needs: the `Stage` directory, a zero
@@ -137,6 +143,7 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     world.init_resource::<CrossScratch>();
     world.init_resource::<crate::actors::Tally>();
     world.init_resource::<PendingRemap>();
+    world.init_resource::<Unreadable>();
     world.insert_resource(kinds);
     let mut schedule = Schedule::new(SimTick);
     schedule.set_build_settings(ScheduleBuildSettings {
@@ -226,7 +233,8 @@ pub fn create(world: &mut World, scenario: &Scenario) -> Result<(), StartError> 
     let coords: Vec<ChunkCoord> = (0..cy)
         .flat_map(|y| (0..cx).map(move |x| ChunkCoord::new(x, y)))
         .collect();
-    load_chunks(world, &coords, None).expect("no store, no io");
+    let (_, _, bad) = load_chunks(world, &coords, None);
+    assert!(bad.is_empty(), "no store, nothing unreadable");
     Ok(())
 }
 
@@ -407,7 +415,9 @@ pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
 /// Bring the chunks around `focus` into memory and drop far ones.
 /// Load order is coordinate order; unload order likewise; both are
 /// independent of thread count. Without a store, dirty chunks are never
-/// unloaded (nothing could bring them back).
+/// unloaded (nothing could bring them back). A saved chunk that fails to
+/// read or check is left unloaded ([`Unreadable`]) while the rest load and
+/// unload: then the error lists the files.
 pub fn ensure_loaded(
     world: &mut World,
     focus: Pos,
@@ -425,16 +435,17 @@ pub fn ensure_loaded(
     let mut wanted = Vec::new();
     {
         let stage = world.resource::<Stage>();
+        let bad = &world.resource::<Unreadable>().0;
         for y in fc.y - policy.load..=fc.y + policy.load {
             for x in fc.x - policy.load..=fc.x + policy.load {
                 let c = ChunkCoord::new(x, y);
-                if !stage.is_loaded(c) {
+                if !stage.is_loaded(c) && !bad.contains(&c) {
                     wanted.push(c);
                 }
             }
         }
     }
-    let (g, r) = load_chunks(world, &wanted, store)?;
+    let (g, r, bad) = load_chunks(world, &wanted, store);
     stats.generated = g;
     stats.read = r;
 
@@ -461,11 +472,22 @@ pub fn ensure_loaded(
         stage::remove(world, c);
         stats.unloaded += 1;
     }
+    if !bad.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "saved chunks that do not read, left unloaded: {}",
+                bad.join("; ")
+            ),
+        ));
+    }
     Ok(stats)
 }
 
 /// Load `coords` (none may be loaded already): from the store when saved
-/// there, generated otherwise. Returns `(generated, read)`.
+/// there, generated otherwise. Returns `(generated, read, unreadable)`: a
+/// saved chunk that fails to read or check is neither loaded nor
+/// generated, but added to [`Unreadable`] and described (with its file).
 ///
 /// Actor rows are stamped here. A loaded chunk was frozen from the tick it
 /// was written (`last_ticked`) until now: its rows' `last_think` and `born`
@@ -480,7 +502,7 @@ fn load_chunks(
     world: &mut World,
     coords: &[ChunkCoord],
     store: Option<&Store>,
-) -> io::Result<(usize, usize)> {
+) -> (usize, usize, Vec<String>) {
     let now = tick(world);
     // A save opened under other rules: its rows are checked against the
     // kind table they were written with, then remapped.
@@ -490,12 +512,25 @@ fn load_chunks(
         .map_or(world.resource::<Kinds>().len(), Plan::old_kinds);
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
+    let mut bad = Vec::new();
     for &c in coords {
-        match store.map(|s| s.read_chunk(c)).transpose()?.flatten() {
-            Some(mut saved) => {
-                saved.data.validate(nkinds).map_err(|e| {
-                    io::Error::new(io::ErrorKind::InvalidData, format!("chunk {c:?}: {e}"))
-                })?;
+        let saved = store.map(|s| {
+            let saved = s.read_chunk(c).map_err(|e| e.to_string())?;
+            if let Some(d) = &saved {
+                d.data
+                    .validate(nkinds)
+                    .map_err(|e| format!("{}: {e}", s.chunk_path(c).display()))?;
+            }
+            Ok::<_, String>(saved)
+        });
+        match saved.transpose().map(Option::flatten) {
+            Err(e) => {
+                bad.push(e);
+                let list = &mut world.resource_mut::<Unreadable>().0;
+                list.push(c);
+                list.sort_by_key(|c| (c.y, c.x));
+            }
+            Ok(Some(mut saved)) => {
                 if let Some(plan) = &remap {
                     let d = &mut saved.data;
                     plan.apply(&mut d.cells, &mut d.actors.rows, &mut d.minds.rows, &mut []);
@@ -518,7 +553,7 @@ fn load_chunks(
                 stage::insert(world, c, saved.data, inhabited);
                 read += 1;
             }
-            None => to_gen.push(c),
+            Ok(None) => to_gen.push(c),
         }
     }
     // Every chunk is a pure function of (terrain, coord, placement):
@@ -553,7 +588,7 @@ fn load_chunks(
         let inhabited = !data.actors.rows.is_empty();
         stage::insert(world, *c, data, inhabited);
     }
-    Ok((to_gen.len(), read))
+    (to_gen.len(), read, bad)
 }
 
 /// Re-run the think of whoever is at `p` (standing, else ground cover)
@@ -2627,6 +2662,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("unknown kind"), "{err}");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A saved chunk that fails to read is left unloaded and never
+    /// generated over: the rest of the batch reads and generates, far
+    /// chunks unload, the error names its file, and later passes skip it.
+    #[test]
+    fn an_unreadable_chunk_is_left_unloaded_and_the_rest_streams() {
+        let store = tmp_store("unreadable");
+        let mut w = new_world(&populated(4));
+        save(&mut w, &store).unwrap();
+        let file = store.dir().join("chunks").join("1_0.wmcc");
+        std::fs::write(&file, b"WMCC").unwrap();
+        let mut back = open_world(&store).unwrap().unwrap();
+        let near = LoadPolicy { load: 1, unload: 1 };
+        ensure_loaded(&mut back, Pos::new(1000, 1000), near, Some(&store)).unwrap();
+        let e = ensure_loaded(&mut back, Pos::new(70, 10), near, Some(&store))
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("1_0.wmcc") && !e.contains("0_0.wmcc"), "{e}");
+        let loaded = |w: &World, x, y| w.resource::<Stage>().is_loaded(ChunkCoord::new(x, y));
+        assert!(!loaded(&back, 1, 0));
+        assert!(loaded(&back, 0, 0) && loaded(&back, 2, 1), "read");
+        assert!(loaded(&back, 1, -1) && loaded(&back, 2, -1), "generated");
+        assert!(!loaded(&back, 15, 15), "unloaded");
+        ensure_loaded(&mut back, Pos::new(70, 10), near, Some(&store)).unwrap();
+        assert!(!loaded(&back, 1, 0));
+        save(&mut back, &store).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b"WMCC");
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

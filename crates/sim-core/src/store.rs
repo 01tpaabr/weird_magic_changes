@@ -155,7 +155,7 @@ impl Store {
         Ok(out)
     }
 
-    fn chunk_path(&self, c: ChunkCoord) -> PathBuf {
+    pub fn chunk_path(&self, c: ChunkCoord) -> PathBuf {
         self.dir
             .join("chunks")
             .join(format!("{}_{}.wmcc", c.x, c.y))
