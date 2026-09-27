@@ -423,14 +423,20 @@ start hive at (77, 103)                        # exactly there
 | `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks, at most 4096 of them (4096 x 4096 cells); the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
-| `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
-| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
+| `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
 
 `seed`, `size`, `map`, `legend` and `outside` come once, and each terrain field once (several
 `terrain` lines add up); `rules` and `start` lines add up.
+
+**The edge of the world.** The world is a billion cells each way from (0, 0): x and y run
+from -1000000000 to 999999999. A position past that in a `start` or `expect` line is an
+error on its line, and so is one in a save. Nothing past the edge ever loads, so to an actor
+standing at it the cells beyond read like an unloaded chunk: rock, nobody there, and a move
+or spawn there is `BLOCKED`. The camera stops at the edge too.
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
@@ -499,7 +505,7 @@ expect became chick == 1
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K (no actor: the check fails) |
-| `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell |
+| `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
 `OP` is one of `== != < <= > >=`. A kind means its family, as in the rules; `only K` means
@@ -674,6 +680,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | rules files per rule set | 65536 |
 | a chain of `extends` | 128 kinds and traits below the one that extends them |
 | chunks a scenario's `size` generates at creation | 4096 (4096 x 4096 cells) |
+| cells each way from (0, 0) | 1000000000 (x and y run from -1000000000 to 999999999; beyond, rock and nobody, §14) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,

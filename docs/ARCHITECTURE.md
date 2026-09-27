@@ -1,6 +1,6 @@
 # Architecture
 
-Status: Stage (chunked, unbounded terrain grid), streaming, persistence, a windowed
+Status: Stage (chunked terrain grid, a billion cells each way), streaming, persistence, a windowed
 ASCII renderer with a WASD camera, and the time model (integer ticks, day/night, speed
 control) are built, on **Bevy 0.19** since 2026-09-23 (decision 27). Actors are designed
 (`ACTORS.md`, decisions 28-37) and built in its §11 order (steps 1-8 done: step 8 made rules, scenarios and packs the input). This file records
@@ -18,7 +18,7 @@ decisions that are already made and the shape the design must fit into. Rows sup
 | 6 | dev profile = opt-level 1, dependencies opt-level 3, Bevy dynamically linked | opt-level 0 sim is unusable; Bevy at opt-level 3 once, relinked in seconds. The dev binary only runs via `cargo run`/`make run` (rpath) | If debug builds get too slow: `--profile fast` |
 | 7 | `target-cpu=native` | Sim runs where it's built, for now | When shipping binaries: switch to baseline + runtime dispatch |
 | 8 | Commits on `main`, pushed to `origin` (github.com/01tpaabr/weird_magic_changes, since 2026-09-24) | Solo, early; the remote is a backup and a place to read from another machine | When a second contributor appears: branches + PRs |
-| 9 | Stage is an **unbounded** grid stored as 64x64 **chunks**; each chunk holds one contiguous array per layer (`ChunkCells`); cell coords are `i32` | The initial map has a known size but the world must grow in any direction and stream; a chunk is at once the parallel unit, the streaming unit and the save unit. Replaced the flat row-major `Vec` + row-band design of the first Stage commit | If a system needs finer parallel granularity than a chunk: split inside the chunk by rows, never re-layout |
+| 9 | Stage is a grid stored as 64x64 **chunks**, generated on demand in any direction; each chunk holds one contiguous array per layer (`ChunkCells`); cell coords are `i32`, inside `[-WORLD_EXTENT, WORLD_EXTENT)` = a billion cells each way (Q10: nothing past it loads, scenarios and saves refuse positions past it) | The initial map has a known size but the world must grow in any direction and stream; a chunk is at once the parallel unit, the streaming unit and the save unit. Replaced the flat row-major `Vec` + row-band design of the first Stage commit. The extent (was: unbounded, which wrapped silently past 2^25 chunks) keeps every chunk inside and each neighbour of one representable, and any two positions' difference inside an `i32` | If a system needs finer parallel granularity than a chunk: split inside the chunk by rows, never re-layout |
 | 10 | A loaded chunk is a **Bevy entity** with `ChunkCoord` + `ChunkCells` + `ChunkMeta` components (was: a slab with a free list); `Stage` is the directory: `HashMap<ChunkCoord, Entity>` for lookup only and `active` = `(coord, entity)` sorted by coord, the **only** iteration order allowed to affect results | Bevy stores each component type in one dense table column, so `Query<&mut ChunkCells>` *is* the slab and `par_iter_mut` the phase. Entity ids and table order depend on load history; sorting by coordinate makes every merge and the checksum independent of them. Separate components let a double-buffered phase read `CellsPrev` while writing `ChunkCells` | If the hash lookup shows up in profiles: swap for a 2-level array keyed by chunk coord |
 | 11 | Two terrain layers: `Ground` (what a cell is: Soil/Water) and `Feature` (what rests on it: None/Rock) | Rock on soil and rock on water are the same rock; keeps enum products from exploding | If features need per-cell state beyond a tag: add a parallel `Vec` for that state |
 | 12 | At most one actor per cell (`occupant: Vec<ActorId>`, `ActorId::NONE` = empty); since 32, plus at most one ground-cover actor (`cover`) | Movement/collision become a per-cell ownership question with no spatial index | If stacking is a game requirement: occupant becomes a head index into a per-actor linked list |
@@ -63,6 +63,7 @@ the engine's clock; there is no `unsafe` in the repository.
 
 ```
 world cell (x, y): i32     chunk = (x >> 6, y >> 6)      local = (y & 63) * 64 + (x & 63)
+extent: x, y in [-WORLD_EXTENT, WORLD_EXTENT) = [-10^9, 10^9)     chunks in [-CHUNK_EXTENT, CHUNK_EXTENT) = [-15625000, 15625000)
 
 chunk entity: ChunkCoord { x, y }                              immutable component
               ChunkCells { ground: [Ground; 4096]   u8   Soil | Water
@@ -84,6 +85,16 @@ to change. Per-cell scalars (moisture, heat, mana...) are further arrays in `Chu
 
 Streaming per frame (`app/window.rs`): load radius = chunks needed to cover half the view + 1,
 unload radius = load + 2. Unload of a dirty chunk writes it; without a store, dirty chunks stay.
+
+The world's edge (`stage::WORLD_EXTENT`, 10^9 cells, a whole number of chunks): `ensure_loaded`
+clamps its focus to the nearest cell inside and cuts its load square there, so no chunk past
+it is ever generated or read. To an actor in an edge chunk the chunk beyond is simply not
+loaded: its cells read as rock with nobody, a move or spawn there is `BLOCKED` (the halo and
+Migrate treat it like any unloaded chunk; no extra check in the tick). The inputs that name
+positions are held to it: a scenario's `start ... at` and `expect at` (an error on the line),
+a save's starts, initial size, drawn map and chunk file names (the save is refused),
+`place_actor` and `explain` (`wmc why`) at a cell outside (nothing there). The app camera stops
+at the same 10^9.
 
 ## Open questions (fill in as the design lands)
 

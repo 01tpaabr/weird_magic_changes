@@ -452,6 +452,10 @@ fn the_limits_table_is_the_codes() {
             "chunks a scenario's `size` generates at creation".into(),
             vec![MAX_SIZE_CHUNKS as i64],
         ),
+        (
+            "cells each way from (0, 0)".into(),
+            vec![i64::from(sim_core::WORLD_EXTENT)],
+        ),
     ];
     let md = doc("RULES.md");
     let mut seen = Vec::new();
@@ -562,6 +566,16 @@ fn the_numbers_in_the_prose_are_the_codes() {
             ),
             format!("a `for each` {FOR_EACH_LOCALS}"),
             format!("{MAX_SIZE_CHUNKS} ({side} x {side} cells)"),
+            format!(
+                "x and y run from {} to {}. A position past",
+                -sim_core::WORLD_EXTENT,
+                sim_core::WORLD_EXTENT - 1
+            ),
+            format!(
+                "(x and y from {} to {})",
+                -sim_core::WORLD_EXTENT,
+                sim_core::WORLD_EXTENT - 1
+            ),
         ],
     );
     let actors = doc("ACTORS.md");
