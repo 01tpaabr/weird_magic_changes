@@ -47,7 +47,7 @@ kind seed {
 Files compile in file-name order. Kinds are numbered in pre-order: roots in file then
 declaration order, each kind's children right after it, so a family is one range of ids
 (`wmc lint` prints the numbering). Kind, sub, const, tag and scent names are global across all
-files. `#` starts a comment. `;` between statements is optional. A kind says nothing about
+files. `#` starts a comment. `;` after a statement, a declaration or a `const` is optional. A kind says nothing about
 where it starts in a new world: a scenario does (§14).
 The formal grammar, token by token, is `GRAMMAR.md`.
 

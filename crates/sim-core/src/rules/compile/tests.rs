@@ -684,6 +684,39 @@ fn a_return_takes_a_value_only_on_its_own_line() {
     compile_ok("sub g(v) { return v +\n 1 }\nkind a { mem m  when true => { m = g(2)  idle } }");
 }
 
+/// `;` is optional: after a statement, a rule's single-statement body, a
+/// declaration and a `const`, once. Not after a block body or an item.
+#[test]
+fn a_semicolon_may_end_a_rule_a_declaration_and_a_const() {
+    let with = compile_ok(
+        "const C = 3;\n\
+         kind a { glyph \"a\"; color \"#102030\"; cover; tags t u; cadence 4; sight 2;\n\
+         fuel 99; food 1h; bite 2; need h max C decay 0 vital; mem m, n;\n\
+         when m > 0 => idle;\n\
+         when true => { m = 1; move north; }\n\
+         state S { when true => if m > 0 { idle }; } }",
+    );
+    let without = compile_ok(
+        "const C = 3\n\
+         kind a { glyph \"a\" color \"#102030\" cover tags t u cadence 4 sight 2\n\
+         fuel 99 food 1h bite 2 need h max C decay 0 vital mem m, n\n\
+         when m > 0 => idle\n\
+         when true => { m = 1  move north }\n\
+         state S { when true => if m > 0 { idle } } }",
+    );
+    assert_eq!(with.hash, without.hash);
+    for (text, want) in [
+        ("kind a { when true => idle;; }", "1:28:"),
+        ("kind a { when true => { idle }; }", "1:31:"),
+        ("kind a { mem m;; }", "1:16:"),
+        ("const C = 1;;", "1:13:"),
+        ("kind a { };", "1:11:"),
+    ] {
+        let e = compile_err(text);
+        assert!(e.starts_with(&format!("t.rules:{want}")), "{text}: {e}");
+    }
+}
+
 /// Only a file sub is refused `next`: a member sub is its kind's own.
 #[test]
 fn a_member_sub_may_next() {

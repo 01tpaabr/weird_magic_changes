@@ -1013,6 +1013,7 @@ impl Parser<'_> {
                 let (name, at) = self.ident("constant name")?;
                 self.expect_sym("=")?;
                 let value = self.expr()?;
+                self.eat_sym(";");
                 items.consts.push(ConstAst { at, name, value });
             } else {
                 return Err(self.err(format!(
@@ -1318,6 +1319,7 @@ impl Parser<'_> {
             } else {
                 return Ok(d);
             }
+            self.eat_sym(";");
         }
     }
 
@@ -1343,7 +1345,12 @@ impl Parser<'_> {
             let cond = self.cond()?;
             let arrow_line = self.pos().line;
             self.expect_sym("=>")?;
+            // One statement may end in `;`, as in a block; a block may not.
+            let single = !self.is_sym("{");
             let body = self.body()?;
+            if single {
+                self.eat_sym(";");
+            }
             rules.push(RuleItem::When(Box::new(Rule {
                 at,
                 arrow_line,

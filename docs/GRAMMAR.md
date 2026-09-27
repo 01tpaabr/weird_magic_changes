@@ -73,17 +73,17 @@ IDENT = NAME that is not a reserved word
 
 ```
 file      = { item | sub | const } EOF
-const     = "const" IDENT "=" expr
+const     = "const" IDENT "=" expr [ ";" ]
 item      = kind | trait
 kind      = "kind" IDENT [ extends ] body_
 trait     = "trait" IDENT [ "(" [ IDENT { "," IDENT } ] ")" ] [ extends ] body_
 extends   = "extends" parent { "," parent }
 parent    = IDENT [ "(" [ expr { "," expr } ] ")" ]
-body_     = "{" { decl } { sub } rule_list { state } "}"
+body_     = "{" { decl [ ";" ] } { sub } rule_list { state } "}"
 state     = "state" IDENT "{" rule_list "}"
 rule_list = { rule | inherit }
 inherit   = "inherit" [ IDENT ]
-rule      = "when" cond "=>" ( block | stmt )
+rule      = "when" cond "=>" ( block | stmt [ ";" ] )
 sub       = "sub" IDENT "(" [ param { "," param } ] ")" block
 param     = IDENT [ ":" ( "target" | "pred" ) ]
 ```
@@ -118,7 +118,7 @@ TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*
 - **Where a tag list ends.** It takes NAMEs until one that starts something else: a
   declaration word (`food` included), `sub`, `when`, `inherit`, `state`, or any non-NAME
-  token (`}`). A reserved word or a predicate word inside the list is an error. An empty
+  token (`;`, `}`). A reserved word or a predicate word inside the list is an error. An empty
   `tags` is allowed.
 - The numbers are `additive`, not `expr`: a comparison cannot follow them (§6).
 
@@ -151,9 +151,9 @@ arm   = expr ":" ( block | stmt ) [ ";" ]
 
 - `if`, `while`, `repeat` and `for each` bodies are always a block; a rule body and a
   `choose` arm are a block or one statement.
-- **`;`** may follow a statement inside a block and a `choose` arm, once. It is not accepted
-  after a rule's single-statement body, a declaration, a `const` or an item (`when c =>
-  idle;` is an error).
+- **`;`** may follow a statement inside a block, a `choose` arm, a rule's single-statement
+  body (`when c => idle;`), a declaration and a `const`, once. It is not accepted after a
+  rule's block body, a sub, a state or an item (`when c => { idle };` is an error).
 - **Newlines** matter in one place: **a `return`'s value starts on the `return` line.** A
   `return` followed on its line by nothing, a comment, `;` or `}` returns nothing, and the
   next line is the next statement or arm. Everywhere else a newline is whitespace.

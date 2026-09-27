@@ -248,6 +248,12 @@ impl<'a> G<'a> {
         }
     }
 
+    /// The optional `;` after a rule's single statement, a declaration or
+    /// a `const`: now and then.
+    fn semi(&mut self) -> &'static str {
+        if self.maybe(20) { ";" } else { "" }
+    }
+
     fn op(&mut self, ops: &[&str]) -> String {
         let o = self.one(ops);
         if self.maybe(20) {
@@ -533,8 +539,9 @@ impl<'a> G<'a> {
         let mut out = String::new();
         for i in 0..self.consts.len() {
             let v = self.const_expr_upto(3, i);
+            let semi = self.semi();
             let sep = self.sep();
-            out += &format!("const {} = {v}{sep}", self.consts[i]);
+            out += &format!("const {} = {v}{semi}{sep}", self.consts[i]);
         }
         let mut order: Vec<usize> = (0..self.owners.len()).collect();
         // Items may come in any order: names are global.
@@ -574,6 +581,7 @@ impl<'a> G<'a> {
         for d in decls {
             s += self.sep();
             s += &d;
+            s += self.semi();
         }
         let files = self.files.clone();
         // A redefinition calls only file subs: calling what it replaces
@@ -844,14 +852,15 @@ impl<'a> G<'a> {
                 1 => format!("chance({})", 1 + self.n(99)),
                 _ => self.cond(true, 1),
             };
-            return format!("when {c} => {}", self.action(2));
+            let a = self.action(2);
+            return format!("when {c} => {a}{}", self.semi());
         }
         let c = self.cond(true, 2);
         let stmts = self.stmts(3, true);
         if stmts.len() == 1 && self.maybe(60) {
             let (st, _) = &stmts[0];
             // A bare `return` ends at the line's end: the next rule is on the next.
-            format!("when {c} => {st}")
+            format!("when {c} => {st}{}", self.semi())
         } else {
             let b = self.render_block(stmts);
             format!("when {c} => {b}")
@@ -1461,7 +1470,10 @@ impl<'a> G<'a> {
                 0 => out += &self.syntax_item(false),
                 1 => out += &self.syntax_item(true),
                 2 => out += &self.syntax_sub(),
-                _ => out += &format!("const {} = {}", self.pool(&[]), self.expr(3)),
+                _ => {
+                    let (name, value) = (self.pool(&[]), self.expr(3));
+                    out += &format!("const {name} = {value}{}", self.semi());
+                }
             }
             out += self.sep();
         }
@@ -1564,6 +1576,7 @@ impl<'a> G<'a> {
         for d in decls {
             s += self.sep();
             s += &d;
+            s += self.semi();
         }
         let k = self.n(3);
         for m in self.pool_distinct(k, &[]) {
