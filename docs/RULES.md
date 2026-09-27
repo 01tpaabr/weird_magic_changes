@@ -123,7 +123,10 @@ condition turns out false. In a body, `v = step()` and `if step() > 0 { }` are f
 
 ```
 kind bee {
-  ...
+  glyph "b"
+  need food   max 4h vital
+  need nectar max 1h decay 0          # the crop
+  mem home_x, home_y                  # the hive sets them when it spawns the bee
   when food < 2h and nectar > 0 => { nectar -= 2min  food += 30min }   # a reflex, in every state
   state FORAGE {
     when nectar >= LOAD => next HOME
