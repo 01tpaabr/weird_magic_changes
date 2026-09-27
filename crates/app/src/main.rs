@@ -83,8 +83,8 @@ fn main() -> anyhow::Result<()> {
         let n: usize = n
             .parse()
             .ok()
-            .filter(|&n| n >= 1)
-            .context("--threads needs a count")?;
+            .filter(|n| (1..=par::MAX_THREADS).contains(n))
+            .with_context(|| format!("--threads needs a count from 1 to {}", par::MAX_THREADS))?;
         par::init_task_pool_with(Some(n));
     } else {
         // Checked here: the pool reads it when a world is made, and panics.

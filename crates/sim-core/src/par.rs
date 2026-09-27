@@ -8,7 +8,7 @@
 //! these wrappers make the default.
 //!
 //! The pool is a process-wide singleton. [`init_task_pool`] sizes it from
-//! `WMC_THREADS` (default: all cores; anything but a count of 1 or more
+//! `WMC_THREADS` (default: all cores; anything but a count of 1 to 1024
 //! panics, and `wmc` refuses it before that); the first initialiser in a
 //! process wins (`wmc --threads N` over `WMC_THREADS`), so `WMC_THREADS=1
 //! wmc run ...` vs the default is the thread-count gate for the whole binary.
@@ -22,16 +22,21 @@ pub fn threads_from_env() -> Option<usize> {
     parse_threads(std::env::var("WMC_THREADS").ok().as_deref()).unwrap_or_else(|e| panic!("{e}"))
 }
 
+/// The most threads a pool may have. Far past any core count; the pool
+/// panics when the system will not start one, and macOS stops at about
+/// 6000 a process.
+pub const MAX_THREADS: usize = 1024;
+
 /// `WMC_THREADS`'s value: unset or empty is `None` (all cores), else a
-/// count of 1 or more. `wmc` checks it with this before it makes a world,
-/// so a bad one is an error there, not a panic.
+/// count of 1 to [`MAX_THREADS`]. `wmc` checks it with this before it makes
+/// a world, so a bad one is an error there, not a panic.
 pub fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
     match v {
         None | Some("") => Ok(None),
         Some(v) => match v.trim().parse() {
-            Ok(n) if n >= 1 => Ok(Some(n)),
+            Ok(n) if (1..=MAX_THREADS).contains(&n) => Ok(Some(n)),
             _ => Err(format!(
-                "WMC_THREADS=`{v}` is not a thread count (1 or more)"
+                "WMC_THREADS=`{v}` is not a thread count (1 to {MAX_THREADS})"
             )),
         },
     }
@@ -126,6 +131,8 @@ mod tests {
         assert!(parse_threads(Some("l")).is_err());
         assert!(parse_threads(Some("0")).is_err());
         assert!(parse_threads(Some("-1")).is_err());
+        assert!(parse_threads(Some("1025")).is_err());
+        assert_eq!(parse_threads(Some("1024")), Ok(Some(MAX_THREADS)));
         assert_eq!(parse_threads(Some(" 1")), Ok(Some(1)));
         assert_eq!(parse_threads(Some("8")), Ok(Some(8)));
         assert_eq!(parse_threads(Some("")), Ok(None));

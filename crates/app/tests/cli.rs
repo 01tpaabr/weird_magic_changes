@@ -475,3 +475,41 @@ fn a_bad_wmc_threads_is_an_error_and_threads_overrides_it() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// More threads than the system will start is an error, not a panic where
+/// the pool fails to spawn them; 64 (the determinism gate's) run.
+#[test]
+fn a_thread_count_past_the_most_is_an_error() {
+    let dir = odd_fixtures("threads-max");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["scenario", "tiny.scenario", "--threads", "100000"],
+    );
+    assert!(
+        code == Some(1) && err.contains("--threads needs a count from 1 to 1024"),
+        "{code:?}\n{out}{err}"
+    );
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[("WMC_THREADS", "100000")],
+        &["scenario", "tiny.scenario"],
+    );
+    assert!(
+        code == Some(1) && err.contains("WMC_THREADS=`100000` is not a thread count (1 to 1024)"),
+        "{code:?}\n{out}{err}"
+    );
+    for env in [&[][..], &[("WMC_THREADS", "64")]] {
+        let args: &[&str] = if env.is_empty() {
+            &["scenario", "tiny.scenario", "--threads", "64"]
+        } else {
+            &["scenario", "tiny.scenario"]
+        };
+        let (code, out, err) = wmc_in(&dir, env, args);
+        assert!(
+            code == Some(0) && out.contains("(64 threads)"),
+            "{code:?}\n{out}{err}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
