@@ -695,6 +695,103 @@ pub fn checksum(world: &mut World) -> u64 {
     crate::rng::splitmix64(crate::rng::splitmix64(stage::checksum(world) ^ t) ^ rules)
 }
 
+/// What every world holds between two ticks, for tests and the simulation
+/// fuzzer: the stage directory and the chunk entities agree; every chunk's
+/// rows pass [`crate::actors::validate`] (one row per occupied cell of each
+/// layer, each pointing back); every row stands on a walkable cell, in the
+/// layer its kind says, with only the flags a row may keep between ticks,
+/// the stagger of its uid, its needs in `0..=max` (unused slots 0), unused
+/// mem slots 0, a state of its kind, and clocks not past now. The first
+/// broken one, said. [`unique_uids`] is the other half.
+#[cfg(test)]
+pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
+    use crate::actors::{MEM_SLOTS, NEED_SLOTS, flags};
+    let mut q = world.query::<(Entity, &ChunkCoord, &ChunkCells, &ChunkActors, &ChunkMinds)>();
+    let world: &World = world;
+    let (kinds, stage) = (world.resource::<Kinds>(), world.resource::<Stage>());
+    let now = tick(world) as u32;
+    let mut chunks = 0;
+    for (e, &c, cells, a, m) in q.iter(world) {
+        chunks += 1;
+        if stage.entity(c) != Some(e) {
+            return Err(format!("chunk {c:?} is not the stage's entity for it"));
+        }
+        crate::actors::validate(cells, &a.rows, &m.rows, kinds.len())
+            .map_err(|e| format!("chunk {c:?}: {e}"))?;
+        for (slot, (r, mind)) in a.rows.iter().zip(&m.rows).enumerate() {
+            let def = kinds.def(r.kind);
+            let at = c.cell(usize::from(r.cell));
+            let bad = |what: String| {
+                Err(format!(
+                    "{} (uid {:x}, row {slot} of chunk {c:?}) at ({}, {}): {what}",
+                    def.name, mind.uid, at.x, at.y
+                ))
+            };
+            if !cells.walkable(usize::from(r.cell)) {
+                return bad("on a cell that is not walkable".into());
+            }
+            if r.flags & !(flags::WAKE | flags::COVER) != 0 {
+                return bad(format!("flags {:#04x}", r.flags));
+            }
+            if (r.flags & flags::COVER != 0) != def.cover {
+                return bad("in the other layer than its kind's".into());
+            }
+            if r.stagger != mind.uid as u16 {
+                return bad(format!("stagger {:#x}", r.stagger));
+            }
+            for i in 0..NEED_SLOTS {
+                let max = def.needs.get(i).map_or(0, |n| n.max);
+                if !(0..=max).contains(&mind.needs[i]) {
+                    return bad(format!(
+                        "need slot {i} is {}, out of 0..={max}",
+                        mind.needs[i]
+                    ));
+                }
+            }
+            if let Some(i) = (def.mems.len()..MEM_SLOTS).find(|&i| mind.mem[i] != 0) {
+                return bad(format!(
+                    "mem slot {i} is {}, past its {} mems",
+                    mind.mem[i],
+                    def.mems.len()
+                ));
+            }
+            if mind.state >= def.states.max(1) {
+                return bad(format!("state {} of {}", mind.state, def.states));
+            }
+            if mind.born > now || mind.last_think > now {
+                return bad(format!(
+                    "born {} and thought {}, after now ({now})",
+                    mind.born, mind.last_think
+                ));
+            }
+        }
+    }
+    if chunks != stage.loaded_count() {
+        return Err(format!(
+            "{chunks} chunk entities, {} on the stage",
+            stage.loaded_count()
+        ));
+    }
+    Ok(())
+}
+
+/// No two rows share a uid. Rows born in a world never do; a save from
+/// before cover births hashed apart (`STREAM_UID_COVER`) may hold twins,
+/// which the tick tolerates.
+#[cfg(test)]
+pub(crate) fn unique_uids(world: &mut World) -> Result<(), String> {
+    let mut uids: Vec<u64> = world
+        .query::<&ChunkMinds>()
+        .iter(world)
+        .flat_map(|m| m.rows.iter().map(|r| r.uid))
+        .collect();
+    uids.sort_unstable();
+    match uids.windows(2).find(|w| w[0] == w[1]) {
+        Some(w) => Err(format!("two rows have uid {:x}", w[0])),
+        None => Ok(()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1112,16 +1209,8 @@ mod tests {
     }
 
     fn check_invariants(w: &mut World) {
-        let kinds = w.resource::<Kinds>().len();
-        for (cells, a, m) in w
-            .query::<(&ChunkCells, &ChunkActors, &ChunkMinds)>()
-            .iter(w)
-        {
-            crate::actors::validate(cells, &a.rows, &m.rows, kinds).unwrap();
-            for r in &a.rows {
-                assert!(cells.walkable(usize::from(r.cell)));
-            }
-        }
+        invariants(w).unwrap();
+        unique_uids(w).unwrap();
     }
 
     /// Chickens wander, drink and cross chunk borders for a game day with
@@ -1816,7 +1905,7 @@ mod tests {
             newborn(&kinds, tuft, 0x77, now)
         ));
         step(&mut w);
-        check_invariants(&mut w);
+        invariants(&mut w).unwrap(); // the twins stay twins
         let all = rows(&mut w);
         assert!(all.iter().all(|r| r.1 != sprout), "{all:?}");
         let at = |k: u16| all.iter().find(|r| r.1 == k).unwrap().2;
