@@ -916,7 +916,7 @@ impl Parser<'_> {
     /// Parse with `f` one level deeper.
     fn nested<T>(&mut self, f: impl FnOnce(&mut Self) -> Result<T>) -> Result<T> {
         if self.depth == MAX_DEPTH {
-            return Err(self.err(format!("nested too deep (at most {MAX_DEPTH} levels)")));
+            return Err(self.too_deep());
         }
         self.depth += 1;
         self.deepest = self.deepest.max(self.depth);
@@ -930,11 +930,17 @@ impl Parser<'_> {
     fn chained(&mut self, left: u32) -> Result<()> {
         self.deepest = self.deepest.max(left) + 1;
         if self.deepest > MAX_DEPTH {
-            return Err(self.err(format!(
-                "expression too long (at most {MAX_DEPTH} levels, an operator in a chain is one)"
-            )));
+            return Err(self.too_deep());
         }
         Ok(())
+    }
+
+    /// Nesting and chains share one budget, so either one running out may
+    /// be the other's doing: the error names both.
+    fn too_deep(&self) -> CompileError {
+        self.err(format!(
+            "nested too deep (at most {MAX_DEPTH} levels; each operator in a chain counts as one)"
+        ))
     }
 
     fn int(&mut self, what: &str) -> Result<i32> {
@@ -4609,15 +4615,26 @@ mod tests {
         deep(rule("(".repeat(5000)), "nested too deep");
         deep(rule("-".repeat(20000) + "m"), "nested too deep");
         deep(rule("not ".repeat(10000) + "m"), "nested too deep");
-        deep(rule("1 + ".repeat(70000) + "m"), "too long");
-        deep(rule("m > 0 and ".repeat(10000) + "m"), "too long");
+        // Nesting and chains share one budget, so one message names both.
+        let both = "nested too deep (at most 128 levels; each operator in a chain counts as one)";
+        deep(rule("1 + ".repeat(70000) + "m"), both);
+        deep(rule("m > 0 and ".repeat(10000) + "m"), both);
+        deep(rule("(".repeat(127) + "m" + &")".repeat(127)), both);
+        deep(
+            format!(
+                "kind a {{ mem m\n when true => {}idle{} }}",
+                "if m > 0 { ".repeat(127),
+                " }".repeat(127)
+            ),
+            both,
+        );
         // Parentheses that each hold a chain: the tree is as deep as the
         // chains added up, so a chain's operators count as levels.
         let mut e = "m".to_string();
         for j in 0..100 {
             e = format!("({e}{})", " + 1".repeat(j));
         }
-        deep(rule(e), "too long");
+        deep(rule(e), both);
         deep(
             format!("kind a {{\n when true => {}", "if true { ".repeat(1000)),
             "nested too deep",
