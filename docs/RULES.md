@@ -282,7 +282,7 @@ Effects combine with the action and don't end the think.
 | `taken` | something was taken from it since its last think |
 | `trapped` | its last think ran out of fuel or faulted |
 | `scent(CH)`, `scent(CH, t)` | scent channel CH here, or at target t |
-| `count pred within r` | matching cells in the square of radius r, **own cell included** |
+| `count pred within r` | matching cells in the square of radius r, **own cell included**. The radius is one term (a number, a name, a call or a parenthesised expression): `count fox within 3 - 1` is the count minus one; write `within (R - 1)` for a sum |
 | `free(t)` | the cell is walkable and nobody stands there |
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
 | `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover; 0 for nobody |

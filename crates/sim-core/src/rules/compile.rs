@@ -1820,7 +1820,8 @@ impl Parser<'_> {
                     "count" => {
                         let pred = self.pred()?;
                         self.expect_kw("within")?;
-                        let r = self.additive()?; // a radius, never a comparison
+                        // One term: an operator after it applies to the count.
+                        let r = self.unary()?;
                         Ok(Expr::Count(pred, Box::new(r)))
                     }
                     "rand" | "chance" => {
@@ -5498,6 +5499,34 @@ mod tests {
     /// A constant folds to what the VM computes for the same expression
     /// (lets are not folded), for every operator and pure function on
     /// edge operands.
+    #[test]
+    fn a_count_radius_is_one_term() {
+        let code = |cond: &str| {
+            compile_ok(&format!(
+                "const R = 3 kind a {{ sight 8  when {cond} => idle }}"
+            ))
+            .code
+        };
+        // An operator after the radius applies to the count.
+        assert_eq!(
+            code("count a within 3 - 1 > 2"),
+            code("(count a within 3) - 1 > 2")
+        );
+        assert_eq!(
+            code("count a within R + count a within 1 > 0"),
+            code("(count a within R) + (count a within 1) > 0")
+        );
+        assert_eq!(
+            code("count a within -R * 2 > 0"),
+            code("(count a within -R) * 2 > 0")
+        );
+        // Radius arithmetic takes parentheses.
+        assert_ne!(
+            code("count a within (3 - 1) > 2"),
+            code("(count a within 3) - 1 > 2")
+        );
+    }
+
     #[test]
     fn folded_constants_match_the_vm() {
         use bytemuck::Zeroable;
