@@ -1130,18 +1130,16 @@ impl DrawnMap {
     }
 }
 
-/// The starts naming a kind `kinds` defines (hot reload and opening a save
-/// drop the others: a kind that is gone starts nowhere), each `with` kept
-/// to the needs and mems its kind still has, a need clamped to its range,
-/// as the rows are.
+/// A save's starts as `kinds` sees them (hot reload and opening a save):
+/// each `with` kept to the needs and mems its kind still has, a need
+/// clamped to its range, as the rows are. A start naming a kind the rules
+/// do not define is kept as written ([`absent`]): it places nobody
+/// ([`Placement::resolve_saved`]), and starts again when the kind is back.
 pub fn present(starts: &[Start], kinds: &Kinds) -> Vec<Start> {
     let mut out = Vec::new();
     for s in starts {
-        let Some(def) = kinds.by_name(s.kind()) else {
-            continue;
-        };
         let mut s = s.clone();
-        if let Start::At { with, .. } = &mut s {
+        if let (Some(def), Start::At { with, .. }) = (kinds.by_name(s.kind()), &mut s) {
             with.retain_mut(|(name, v)| match def.need_named(name) {
                 Some(i) => {
                     *v = (*v).clamp(0, def.needs[i].max);
@@ -1153,6 +1151,16 @@ pub fn present(starts: &[Start], kinds: &Kinds) -> Vec<Start> {
         out.push(s);
     }
     out
+}
+
+/// The starts naming no kind of `kinds`, as written: what
+/// [`Placement::resolve_saved`] skips.
+pub fn absent(starts: &[Start], kinds: &Kinds) -> Vec<String> {
+    starts
+        .iter()
+        .filter(|s| kinds.by_name(s.kind()).is_none())
+        .map(Start::to_string)
+        .collect()
 }
 
 /// A kind as worldgen places it.
@@ -1180,8 +1188,9 @@ pub struct Explicit {
 pub struct Placement {
     /// Cumulative upper bounds in the order the shares are written: a
     /// walkable cell whose draw is below a bound, and not below the
-    /// previous one, starts that kind.
-    bounds: Vec<(u32, Placed)>,
+    /// previous one, starts that kind (`None`: a saved share whose kind
+    /// the rules lack, which keeps its interval and places nobody).
+    bounds: Vec<(u32, Option<Placed>)>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
 }
@@ -1191,15 +1200,37 @@ impl Placement {
     /// naming a kind the rules do not define (all of them are listed, at
     /// the first such start) or a trait, one on a cell that is not
     /// walkable, two on one cell, and a `with` naming what the kind lacks
-    /// or a need beyond its range refuse it. The error says which start.
+    /// or a need beyond its range refuse it. The error says which
+    /// start. For a new world.
     pub fn resolve(
         starts: &[Start],
         kinds: &Kinds,
         terrain: &Terrain,
     ) -> Result<Placement, StartError> {
+        Self::resolve_as(starts, kinds, terrain, false)
+    }
+
+    /// [`resolve`](Self::resolve) for a saved world's starts (opening it,
+    /// reloading its rules): a start naming a kind the rules do not define
+    /// is skipped ([`absent`] lists them), a share keeping its interval so
+    /// the others keep their cells.
+    pub fn resolve_saved(
+        starts: &[Start],
+        kinds: &Kinds,
+        terrain: &Terrain,
+    ) -> Result<Placement, StartError> {
+        Self::resolve_as(starts, kinds, terrain, true)
+    }
+
+    fn resolve_as(
+        starts: &[Start],
+        kinds: &Kinds,
+        terrain: &Terrain,
+        saved: bool,
+    ) -> Result<Placement, StartError> {
         let mut missing: Vec<&str> = Vec::new();
         let mut first_missing = None;
-        let mut shares: Vec<(Placed, u32)> = Vec::new();
+        let mut shares: Vec<(Option<Placed>, u32)> = Vec::new();
         // Each with its index in `starts`, for the error.
         let mut explicit: Vec<(Explicit, usize)> = Vec::new();
         for (at, s) in starts.iter().enumerate() {
@@ -1208,6 +1239,12 @@ impl Placement {
                 msg,
             };
             let Some(def) = kinds.by_name(s.kind()) else {
+                if saved {
+                    if let Start::Share { .. } = s {
+                        shares.push((None, s.share()));
+                    }
+                    continue;
+                }
                 if kinds.debug.traits.iter().any(|t| t == s.kind()) {
                     return Err(err(format!("`{}` is a trait, not a kind", s.kind())));
                 }
@@ -1222,7 +1259,7 @@ impl Placement {
                 cover: def.cover,
             };
             match s {
-                Start::Share { .. } => shares.push((placed, s.share())),
+                Start::Share { .. } => shares.push((Some(placed), s.share())),
                 Start::At { kind, x, y, with } => {
                     // Not quoted as a `start` line: a map may have drawn it.
                     let (g, f) = terrain.cell(*x, *y);
@@ -1311,12 +1348,12 @@ impl Placement {
         self.bounds
             .iter()
             .find(|&&(upto, _)| u < upto)
-            .map(|&(_, p)| p)
+            .and_then(|&(_, p)| p)
     }
 
-    /// Any shares at all?
+    /// Any shares that place a kind?
     pub fn has_shares(&self) -> bool {
-        !self.bounds.is_empty()
+        self.bounds.iter().any(|&(_, p)| p.is_some())
     }
 
     /// The explicit starts in chunk `c`, by cell.
@@ -1911,16 +1948,50 @@ legend {
         );
     }
 
+    /// A saved start of a kind the rules lack is kept, and skipped: a share
+    /// keeps its interval, so the shares after it keep their cells, and an
+    /// explicit start places nobody. A new world refuses both.
     #[test]
-    fn present_keeps_the_starts_of_kinds_there() {
-        let k = crate::rules::compile("t.rules", "kind a { }").unwrap();
+    fn a_saved_start_of_a_missing_kind_is_kept_and_places_nobody() {
+        let k = crate::rules::compile("t.rules", "trait t { }\nkind a { }\nkind c { }").unwrap();
         let starts = Scenario::parse(
             "t",
-            "start a 1 / 2\nstart b 1 / 4\nstart b at (0, 0)\nstart a at (1, 1)",
+            "start c 1 / 8\nstart b 1 / 4\nstart a 1 / 2\nstart b at (0, 0)\nstart t at (1, 1)\nstart a at (0, 0)",
         )
         .unwrap()
         .starts;
-        assert_eq!(present(&starts, &k), [starts[0].clone(), starts[3].clone()]);
+        assert_eq!(present(&starts, &k), starts);
+        assert_eq!(
+            absent(&starts, &k),
+            ["start b 1 / 4", "start b at (0, 0)", "start t at (1, 1)"]
+        );
+        let p = GenParams {
+            water_level: 0.0,
+            rock_on_soil: 0.0,
+            rock_on_water: 0.0,
+            ..GenParams::default()
+        };
+        let e = Placement::resolve(&starts, &k, &noise(1, &p)).unwrap_err();
+        assert_eq!(
+            (e.msg.as_str(), e.start),
+            ("`t` is a trait, not a kind", Some(4))
+        );
+        let pl = Placement::resolve_saved(&starts, &k, &noise(1, &p)).unwrap();
+        let (a, c) = (k.by_name("a").unwrap().id, k.by_name("c").unwrap().id);
+        let kind = |u: u32| pl.placed(u).map(|p| p.kind);
+        let eighth = PLACE_ONE / 8;
+        assert_eq!(kind(0), Some(c));
+        assert_eq!(kind(eighth), None, "b's interval");
+        assert_eq!(kind(3 * eighth - 1), None);
+        assert_eq!(kind(3 * eighth), Some(a), "a keeps its cells");
+        assert_eq!(kind(7 * eighth - 1), Some(a));
+        assert_eq!(kind(7 * eighth), None);
+        let at = pl.explicit_in(ChunkCoord::new(0, 0));
+        assert_eq!((at.len(), at[0].cell, at[0].placed.kind), (1, 0, a));
+        // Only missing kinds' shares: nothing to place.
+        let only_b = Scenario::parse("t", "start b 1 / 2").unwrap().starts;
+        let pl = Placement::resolve_saved(&only_b, &k, &noise(1, &p)).unwrap();
+        assert!(!pl.has_shares() && pl.placed(0).is_none());
     }
 
     /// Hot reload keeps a start's `with` to what its kind still has, and

@@ -303,6 +303,7 @@ fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     Ok(
         match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
             Some(mut w) => {
+                app::say_skipped_starts(&w);
                 let camera = play::camera_for(&w, &store);
                 sim::ensure_loaded(&mut w, camera.cell(), LoadPolicy::default(), Some(&store))
                     .context("streaming chunks")?;

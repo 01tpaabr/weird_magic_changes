@@ -94,7 +94,9 @@ pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyh
     let kinds = crate::rules_for(&store, packs, &scenario.packs)?;
     let world = app.world_mut();
     sim::install_with(world, kinds);
-    if !sim::open(world, &store).context("reading save")? {
+    if sim::open(world, &store).context("reading save")? {
+        crate::say_skipped_starts(world);
+    } else {
         sim::create(world, scenario)
             .map_err(|e| crate::new_world_error(name, scenario.line_of(&e), e))?;
         store
@@ -532,6 +534,12 @@ fn reload(world: &mut World) -> String {
             }
             if r.rewritten > 0 {
                 text.push_str(&format!(" | {} saved chunks rewritten", r.rewritten));
+            }
+            if !r.skipped_starts.is_empty() {
+                text.push_str(&format!(
+                    " | starts skipped (kept): {}",
+                    r.skipped_starts.join(", ")
+                ));
             }
             if let Some(e) = &r.world_file {
                 text.push_str(&format!(

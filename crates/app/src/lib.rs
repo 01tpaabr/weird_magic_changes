@@ -97,6 +97,19 @@ pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::
     Ok(kinds)
 }
 
+/// Says on stderr which of an opened save's starts name a kind the rules
+/// lack: the save keeps them, and they place nobody until the kind is back.
+pub fn say_skipped_starts(world: &bevy::prelude::World) {
+    let starts = &world.resource::<sim_core::SimConfig>().starts;
+    let skipped = sim_core::scenario::absent(starts, world.resource::<Kinds>());
+    if !skipped.is_empty() {
+        eprintln!(
+            "starts: skipped, the rules lack their kinds (the save keeps them): {}",
+            skipped.join(", ")
+        );
+    }
+}
+
 /// The author lint's warnings about `kinds`, once on stderr (`wmc lint`
 /// prints them with the notes).
 pub fn warn(kinds: &Kinds) {

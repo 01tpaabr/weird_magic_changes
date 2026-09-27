@@ -256,9 +256,11 @@ pub fn new_world_with(scenario: &Scenario, kinds: Kinds) -> Result<World, StartE
 /// (another set of packs, a newer version of one) are fine: every chunk
 /// read from the store is remapped as it loads ([`reload::Plan`]), and the
 /// first write to the store moves the whole directory over ([`settle`]).
-/// The saved starts follow them the same way ([`present`]).
-/// Opening never writes. A save with a kind the rules do not define, or
-/// one that moved between standing and ground cover, is refused.
+/// The saved starts follow them the same way ([`present`]); a start
+/// naming a kind the rules lack is kept, and places nobody
+/// ([`Placement::resolve_saved`]). Opening never writes. A save with a
+/// kind the rules do not define, or one that moved between standing and
+/// ground cover, is refused.
 pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
     let Some(m) = store.read_meta()? else {
         return Ok(false);
@@ -290,7 +292,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
     // The saved starts follow the rules as the rows do (a need past its
     // new max is clamped, a mem that is gone dropped).
     let starts = present(&m.starts, kinds);
-    let placement = Placement::resolve(&starts, kinds, &terrain)
+    let placement = Placement::resolve_saved(&starts, kinds, &terrain)
         .map_err(|e| bad(format!("the save's starts: {e}")))?;
     world.insert_resource(SimConfig {
         seed: m.seed,
@@ -2848,32 +2850,57 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
-    /// Hot reload resolves the scenario's starts against the new rules: a
-    /// kind that moved keeps its share by name, a kind that is gone starts
-    /// nowhere, and the save header keeps what is left.
+    /// Hot reload keeps the scenario's starts whole: a kind that moved keeps
+    /// its share by name, a kind that is gone places nobody while the share
+    /// after it keeps its cells, the save keeps its starts, and it starts
+    /// again when it comes back.
     #[test]
-    fn reload_resolves_the_starts_again() {
+    fn reload_keeps_the_starts_of_a_kind_that_is_gone() {
         use crate::reload::reload_rules;
         use crate::rules::compile;
+        use crate::stage::CHUNK_CELLS;
         let a = compile("a.rules", "kind a { glyph \"a\" }\nkind b { glyph \"b\" }").unwrap();
         let b = compile("b.rules", "kind b { glyph \"B\" }\nkind d { glyph \"d\" }").unwrap();
         let s = Scenario {
             starts: starts("start a 1 / 4\nstart b 1 / 2"),
             ..cfg(2)
         };
+        // The cells of kind `name` in chunk `c`.
+        let cells_of = |w: &World, c: ChunkCoord, name: &str| -> Vec<usize> {
+            let id = w.resource::<Kinds>().by_name(name).unwrap().id;
+            let cells = stage::chunk(w, c).unwrap();
+            (0..CHUNK_CELLS)
+                .filter(|&i| cells.layer(false)[i].unpack().is_some_and(|(k, _)| k == id))
+                .collect()
+        };
         let store = tmp_store("reload-starts");
-        let mut w = new_world_with(&s, a).unwrap();
+        let mut w = new_world_with(&s, a.clone()).unwrap();
         save(&mut w, &store).unwrap();
-        reload_rules(&mut w, Some(&store), b.clone()).unwrap();
-        let c = w.resource::<SimConfig>().clone();
-        assert_eq!(c.starts, starts("start b 1 / 2"));
-        // Chunks generated from now on start `b` (now kind 0), never `d`.
-        let far = LoadPolicy { load: 1, unload: 1 };
-        ensure_loaded(&mut w, Pos::new(-2000, 0), far, Some(&store)).unwrap();
+        let r = reload_rules(&mut w, Some(&store), b.clone()).unwrap();
+        assert_eq!(r.skipped_starts, ["start a 1 / 4"]);
+        assert_eq!(w.resource::<SimConfig>().starts, s.starts);
+        // Chunks generated from now on start `b` (now kind 0) on the cells
+        // it had under a.rules, never `a` or `d`.
+        let (far, near) = (Pos::new(-2000, 0), LoadPolicy { load: 1, unload: 1 });
+        ensure_loaded(&mut w, far, near, Some(&store)).unwrap();
+        let mut fresh = new_world_with(&s, a.clone()).unwrap();
+        ensure_loaded(&mut fresh, far, near, None).unwrap();
+        let c = far.split().0;
+        assert!(cells_of(&fresh, c, "b").len() > 1000);
+        assert_eq!(cells_of(&w, c, "b"), cells_of(&fresh, c, "b"));
         let n = count_kinds(&mut w);
         assert!(n[0] > 1000 && n[1] == 0, "{n:?}");
         let back = open_world_with(&store, b).unwrap().unwrap();
-        assert_eq!(back.resource::<SimConfig>().starts, c.starts);
+        assert_eq!(back.resource::<SimConfig>().starts, s.starts);
+        // `a` is back: it starts again in new ground.
+        let r = reload_rules(&mut w, Some(&store), a).unwrap();
+        assert!(r.skipped_starts.is_empty(), "{r:?}");
+        let east = Pos::new(2000, 0);
+        ensure_loaded(&mut w, east, near, Some(&store)).unwrap();
+        ensure_loaded(&mut fresh, east, near, None).unwrap();
+        let c = east.split().0;
+        assert!(cells_of(&w, c, "a").len() > 500);
+        assert_eq!(cells_of(&w, c, "a"), cells_of(&fresh, c, "a"));
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

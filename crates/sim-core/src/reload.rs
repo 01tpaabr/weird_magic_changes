@@ -9,7 +9,9 @@
 //! carries over by name (clamped to the new max; new needs start full, new
 //! mems at 0), the state by its name (else the first), each scent channel
 //! by its name (else empty). A kind cannot move between standing and ground
-//! cover (refused: restart).
+//! cover (refused: restart). The world's starts are all kept: one whose
+//! kind is gone places nobody (a share keeps its interval, so the others
+//! keep their cells) and starts again when the kind comes back.
 //!
 //! Saved chunks are rewritten on disk, every file, before the world file
 //! gets the new kind table, so a save directory never mixes two numberings.
@@ -26,7 +28,7 @@ use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
 };
 use crate::rules::Kinds;
-use crate::scenario::{Placement, present};
+use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
 use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, SCENT_CHANNELS, Stage};
 use crate::store::{SavedKind, Store};
@@ -44,6 +46,9 @@ pub struct Reload {
     /// Why the world file was not written, if it was not. The new rules are
     /// installed all the same; the next save writes it.
     pub world_file: Option<String>,
+    /// The starts naming a kind the new rules lack, as written: kept in
+    /// the save, they place nobody until the kind is back.
+    pub skipped_starts: Vec<String>,
 }
 
 /// Where one old kind's rows go.
@@ -263,7 +268,7 @@ pub fn reload_rules(
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);
-        let placement = Placement::resolve(&starts, &new, &c.terrain())?;
+        let placement = Placement::resolve_saved(&starts, &new, &c.terrain())?;
         (starts, placement)
     };
     let mut dropped = vec![0usize; old.len()];
@@ -300,6 +305,7 @@ pub fn reload_rules(
         rewritten,
         hash: new.hash,
         world_file: None,
+        skipped_starts: absent(&starts, &new),
     };
     world.insert_resource(new);
     world.insert_resource(Tally::default());

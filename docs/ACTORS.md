@@ -78,8 +78,11 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   its ground (`map`, `legend`, `outside`, step 8e): drawn cells replace the noise, kind
   characters become explicit starts. Resolved against the loaded kind table into a
   `Placement` at create and at every open; a start naming a kind the rules lack, a trait,
-  or a cell that is not walkable refuses the world. The save header keeps the starts by
-  name and the drawn map.
+  or a cell that is not walkable refuses a new world. The save header keeps the starts by
+  name and the drawn map. A saved world's starts resolve leniently (open and hot reload): a
+  start of a kind the rules lack is skipped and reported, a share keeping its interval so
+  the others keep their cells, and stays in the header, so the kind starts again when it
+  is back.
 - **Migration**: a move into another chunk goes to the source `Outbox`; `Migrate` walks
   `stage.active()`, copies the *current* row into the target (damage taken this tick travels
   with it), writes the target's occupant, flags the source DEAD. An unloaded target is a
@@ -136,7 +139,9 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
   channel by its name. Saved chunks that are not loaded are rewritten the same way and
   `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
-  with the old). Moving a kind between standing and ground cover is refused. A compile error
+  with the old). The starts stay whole: a removed kind's start places nobody (reported),
+  its share keeping its interval, and starts again when the kind is back. Moving a kind
+  between standing and ground cover is refused. A compile error
   changes nothing and shows on the status bar. A reload is not a recorded input: a reloaded
   world does not replay from its seed.
 - **Needs on `become`**: consumable needs (ticks-until-empty) carry over by name, clamped

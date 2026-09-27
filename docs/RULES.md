@@ -479,8 +479,8 @@ expect became chick == 1
 K alone (`expect count only chick == 1`).
 
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
-define, or a trait, refuses the world, and so does one on water or rock, two on one cell, or
-a `with` its kind lacks or past a need's range. The error gives the start's line (a drawn
+define, or a trait, refuses the new world (a save's are skipped, §15), and so does one on
+water or rock, two on one cell, or a `with` its kind lacks or past a need's range. The error gives the start's line (a drawn
 kind's is its map row) and a need in its units: ``pen.scenario:5: `fox` at (1, 1) with
 `food = 27000 (30h)`: `food` holds 0 to 21600 (1d)``. `wmc lint <rules> --scenario <file>` checks that,
 and the kinds, needs and memories its `expect` lines name, without making one. `show`, `play`, `run` and `why` take `--scenario <file>` when they create
@@ -531,7 +531,10 @@ does. Kinds, needs, memory, states and scent channels are matched **by name**, s
 keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
 writes to the save, the whole directory moves over to the new numbering, and from then on it
 belongs to the new set of packs. Rules that lack one of the save's kinds are refused with the
-list, and so is a kind that turned from standing into ground cover, or back.
+list, and so is a kind that turned from standing into ground cover, or back. A saved start
+naming a kind the rules lack (its rows went in a reload, below) is skipped, said so on
+stderr, and kept in the save: its share keeps its slice of the draw, so the other kinds
+keep their cells, and the kind starts again in new ground when it is back.
 
 ## 16. The vocabulary
 
@@ -620,7 +623,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and
   changes nothing. Actors keep kind, needs, memory, state and scent by name. Rows of a kind
   you removed are dropped: the one way to take a kind out of a save. Saved chunks are
-  rewritten to match.
+  rewritten to match. Its starts stay in the save and place nobody (`starts skipped` on the
+  status bar) until the kind is back (§15).
 
 ## 18. Limits
 

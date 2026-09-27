@@ -108,6 +108,32 @@ fn a_save_remembers_its_packs_and_opens_by_name() {
     std::fs::remove_dir_all(&root).unwrap();
 }
 
+/// A save whose starts name a kind the rules lack opens: those starts are
+/// skipped, said so on stderr, and kept in the save.
+#[test]
+fn a_save_keeps_the_starts_of_a_kind_the_rules_lack() {
+    let root = std::env::temp_dir().join(format!("wmc-skipped-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let store = Store::open(&root).unwrap();
+    let mut w = sim::new_world(&Scenario::builtin());
+    sim::save(&mut w, &store).unwrap();
+    let mut meta = store.read_meta().unwrap().unwrap();
+    let wolves = Scenario::parse("w", "start wolf 1 / 100\nstart wolf at (3, 3)").unwrap();
+    meta.starts.splice(0..0, wolves.starts);
+    store.write_meta(&meta).unwrap();
+    let (ok, _, err) = wmc(&["run", store.dir().to_str().unwrap(), "10"]);
+    assert!(ok, "{err}");
+    assert!(
+        err.contains(
+            "starts: skipped, the rules lack their kinds (the save keeps them): \
+             start wolf 1 / 100, start wolf at (3, 3)"
+        ),
+        "{err}"
+    );
+    assert_eq!(store.read_meta().unwrap().unwrap(), meta);
+    std::fs::remove_dir_all(&root).unwrap();
+}
+
 /// `lint` honours `WMC_RULES` like every command, and a pack on its command
 /// line wins over it as `--rules` does.
 #[test]
