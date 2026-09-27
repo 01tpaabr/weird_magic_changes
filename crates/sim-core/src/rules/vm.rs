@@ -219,10 +219,6 @@ pub enum Sense {
     HurtDir,
     /// Result of the last action (see [`Result`])
     Result,
-    /// Own cell's ground, as a predicate value
-    Ground,
-    /// Own cell's feature, as a predicate value
-    Feature,
     /// 1 if something was taken from this actor since its last think
     Taken,
     /// 1 if the last think trapped (fuel out, a second action, a fault)
@@ -231,7 +227,7 @@ pub enum Sense {
 
 impl Sense {
     /// Every sense, in numbering order.
-    pub const ALL: [Sense; 17] = [
+    pub const ALL: [Sense; 15] = [
         Self::Light,
         Self::Age,
         Self::X,
@@ -245,8 +241,6 @@ impl Sense {
         Self::Hurt,
         Self::HurtDir,
         Self::Result,
-        Self::Ground,
-        Self::Feature,
         Self::Taken,
         Self::Trapped,
     ];
@@ -741,14 +735,6 @@ impl Machine<'_> {
             Sense::Hurt => i32::from(self.mind.hurt),
             Sense::HurtDir => i32::from(self.mind.hurt_dir),
             Sense::Result => i32::from(self.mind.events & result::MASK),
-            Sense::Ground => {
-                let (cells, _, i) = c.halo.at(lx(c.cell), ly(c.cell), 0, 0).expect("own chunk");
-                pred::ground(cells.ground[i] as u8)
-            }
-            Sense::Feature => {
-                let (cells, _, i) = c.halo.at(lx(c.cell), ly(c.cell), 0, 0).expect("own chunk");
-                pred::feature(cells.feature[i] as u8)
-            }
             Sense::Taken => i32::from(self.mind.events & event::TAKEN != 0),
             Sense::Trapped => i32::from(self.mind.events & event::FUEL != 0),
         }
@@ -1684,7 +1670,6 @@ mod tests {
         a.sense(Sense::Light).set_mem(0);
         a.sense(Sense::X).set_mem(1);
         a.sense(Sense::Y).set_mem(2);
-        a.sense(Sense::Ground).set_mem(3);
         a.sense(Sense::Hour).set_mem(4);
         a.push(pred::ground(1)).push(2).op(OpCode::Count).set_mem(5); // water within 2
         a.push(pred::feature(1))
@@ -1708,7 +1693,6 @@ mod tests {
         assert_eq!(m.needs[1], 0);
         assert_eq!(m.mem[0], i32::from(daylight(1000)));
         assert_eq!((m.mem[1], m.mem[2]), (11, 10));
-        assert_eq!(m.mem[3], pred::ground(0));
         assert_eq!(m.mem[4], i32::from(Clock::at(1000).hour));
         assert_eq!(m.mem[5], 1);
         assert_eq!(m.mem[6], 1);

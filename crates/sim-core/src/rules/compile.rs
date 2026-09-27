@@ -695,8 +695,6 @@ fn sense_named(name: &str) -> Option<Sense> {
         "hurt" => Sense::Hurt,
         "hurt_dir" => Sense::HurtDir,
         "result" => Sense::Result,
-        "ground" => Sense::Ground,
-        "feature" => Sense::Feature,
         "taken" => Sense::Taken,
         "trapped" => Sense::Trapped,
         _ => return None,
@@ -4803,6 +4801,28 @@ mod tests {
         // Still built-ins, and the contextual words still name needs.
         compile_ok(
             "kind a { glyph \"a\" need water max 1d need soil max 1d mem m\n when water < 1h and soil > 0 and chance(50) and free(here) and is(here, water) => m = min(abs(sign(-5)), clamp(rand(3), 0, dist(here))) }",
+        );
+    }
+
+    #[test]
+    fn ground_and_feature_are_not_senses() {
+        for (text, want) in [
+            (
+                "kind a { when ground == soil => idle }",
+                "unknown name `ground`",
+            ),
+            (
+                "kind a { when feature > 0 => idle }",
+                "unknown name `feature`",
+            ),
+        ] {
+            let e = compile_err(text);
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        // `is` asks instead, and the words are free for a kind's names.
+        compile_ok(
+            "kind a { mem ground  mem feature\n \
+             when is(here, water) and not is(here, rock) => { ground = 1  feature = 2 } }",
         );
     }
 

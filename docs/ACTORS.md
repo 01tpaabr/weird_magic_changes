@@ -154,7 +154,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
-| here / at | `ground`, `feature`, `scent(ch)`; `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
+| here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
 

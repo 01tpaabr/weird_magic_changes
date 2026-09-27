@@ -276,11 +276,10 @@ Effects combine with the action and don't end the think.
 | `result`, `blocked`, `missed`, `refused` | the last action's outcome |
 | `taken` | something was taken from it since its last think |
 | `trapped` | its last think ran out of fuel or faulted |
-| `ground`, `feature` | own cell's ground (`water`/`soil`) and feature (`rock`) |
 | `scent(CH)`, `scent(CH, t)` | scent channel CH here, or at target t |
 | `count pred within r` | matching cells in the square of radius r, **own cell included** |
 | `free(t)` | the cell is walkable and nobody stands there |
-| `is(t, pred)` | the cell matches pred (`is(here, grass)`) |
+| `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
 | `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover; 0 for nobody |
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
@@ -631,7 +630,7 @@ Reserved words can't name a need, mem, local, kind, sub or constant. They are ev
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
 `rand`, `chance`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
-`ground`, `feature`, `taken`, `trapped`). `wmc lint` says so when you hit one. `water`,
+`taken`, `trapped`). `wmc lint` says so when you hit one. `water`,
 `soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`. But
 `water`, `soil`, `rock` and `bare` always mean the predicate where one is read, so they can't
 name a kind or a tag.
