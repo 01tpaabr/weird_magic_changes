@@ -832,7 +832,7 @@ struct Transfer {
 /// of the target is first decayed to now. The target of a `take` that
 /// moved anything gets `TAKEN` and wakes. `None` if the mover died this tick (its
 /// intent is void); else the mover's result: MISSED (nobody there, or dead
-/// now), REFUSED (the target has no such need), OK.
+/// now), REFUSED (the target has no such need), BLOCKED (nothing moved), OK.
 fn transfer(
     kinds: &Kinds,
     stage: &Stage,
@@ -884,7 +884,7 @@ fn transfer(
         t.amount.min(dv.max(0)).min((smax - sv).max(0))
     };
     if moved == 0 {
-        return Some(result::OK); // nothing moved: nobody saw a take
+        return Some(result::BLOCKED); // nothing moved: nobody saw a take
     }
     let (sv, dv) = if t.give {
         (sv - moved, dv + moved)

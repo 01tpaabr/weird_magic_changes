@@ -399,8 +399,9 @@ Movement and adjacency are 8-neighbour (matching Chebyshev vision); `move toward
    of the tick (Resolve sends them all here, in-chunk ones too), in key order: the target
    is whoever stands on the adjacent cell and is still alive (else MISSED) and must have a
    need of the same name (else REFUSED), decayed to now; `take` moves up to the amount
-   from it, `give` to it, never more than the source holds nor past the receiver's max. A
-   taken-from actor gets `taken` and wakes, if anything moved. A mover that died this tick
+   from it, `give` to it, never more than the source holds nor past the receiver's max
+   (OK; BLOCKED if nothing moved, as for a `move`). A taken-from actor gets `taken` and
+   wakes, if anything moved. A mover that died this tick
    moves nothing. (Damage is summed on one thread here rather than per chunk in Resolve:
    bites are rare next to thinks, and the sequential sum needs no cross-chunk credit pass;
    the per-chunk split is the hatch if Exchange ever shows in a profile.)

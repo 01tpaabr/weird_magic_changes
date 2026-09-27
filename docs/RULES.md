@@ -252,8 +252,8 @@ the next think as `result` (`OK`, `BLOCKED`, `MISSED`, `REFUSED`), or as the sho
 | `eat t` | bites the standing actor at adjacent cell t, which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
 | `hit t` | like `eat`, without the food |
 | `graze t` | like `eat`, on the ground cover at t, adjacent or `here` |
-| `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes, if anything moved |
-| `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover |
+| `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes, if anything moved. `BLOCKED` if nothing moved (own NEED full, the target's empty, or `n` is 0) |
+| `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover. `BLOCKED` if nothing moved |
 
 Bites land before anyone moves, on either side of a chunk border, in key order. Several
 eaters of one victim each get the share they took. Transfers are settled after bites, also

@@ -1592,11 +1592,13 @@ mod tests {
     }
 
     /// A `take` that moves nothing (the taker is full, or the target
-    /// empty) is not a take: the target sees no `taken` and does not wake.
+    /// empty) is not a take: the target sees no `taken` and does not wake,
+    /// and the taker reads BLOCKED. So does a `give` that moves nothing.
     #[test]
     fn a_take_that_moves_nothing_is_not_seen() {
         use crate::actors::systems::newborn;
         use crate::rules::compile;
+        use crate::rules::vm::result;
         let kinds = compile(
             "t.rules",
             "kind pot { glyph \"P\"  cadence 1024
@@ -1605,7 +1607,9 @@ mod tests {
                when taken => { seen += 1  idle } }
              kind bee { glyph \"b\"  cadence 1
                need honey max 50 decay 0
-               mem done
+               mem done, took, gave
+               when done == 2 => { done = 3  gave = result }
+               when done == 1 => { done = 2  took = result  give east honey 10 }
                when done == 0 => { done = 1  take east honey 10 }
                when true => idle }",
         )
@@ -1630,7 +1634,8 @@ mod tests {
         let all = rows(&mut w);
         for uid in [0xC1, 0xC2] {
             let [b, p] = [uid, uid + 0x100].map(|u| all.iter().find(|r| r.0 == u).unwrap().3);
-            assert_eq!(b.mem[0], 1, "bee {uid:x} took");
+            let blocked = i32::from(result::BLOCKED);
+            assert_eq!(&b.mem[..3], &[3, blocked, blocked], "bee {uid:x}");
             assert_eq!(p.mem[0], 0, "pot of {uid:x} saw no take");
             assert_eq!(p.events & crate::rules::vm::event::TAKEN, 0);
         }
