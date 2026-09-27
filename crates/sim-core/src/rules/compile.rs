@@ -4625,4 +4625,6 @@ impl<'a> Gen<'a> {
 }
 
 #[cfg(test)]
+mod props;
+#[cfg(test)]
 mod tests;

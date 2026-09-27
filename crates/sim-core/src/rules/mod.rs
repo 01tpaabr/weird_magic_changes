@@ -10,6 +10,8 @@
 pub mod asm;
 pub mod builtin;
 pub mod compile;
+#[cfg(test)]
+pub mod gen_rules;
 pub mod vm;
 
 use bevy_ecs::prelude::*;
