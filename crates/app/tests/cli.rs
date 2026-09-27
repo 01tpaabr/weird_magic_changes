@@ -14,7 +14,8 @@ fn wmc(args: &[&str]) -> (bool, String, String) {
     (out.status.success(), text(&out.stdout), text(&out.stderr))
 }
 
-/// A fresh scratch directory for one test.
+/// A fresh scratch directory for one test; the test removes it when it
+/// passes.
 fn scratch(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("wmc-cli-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -47,6 +48,7 @@ fn why_follows_ground_cover_under_a_walker() {
     assert!(ok, "{err}");
     assert!(out.contains("grass at (2, 1)"), "{out}");
     assert!(out.contains("thinks every 256 ticks, due now"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// `why` waits as long as the actor's cadence, not just a day.
@@ -78,4 +80,5 @@ fn why_waits_out_a_cadence_longer_than_a_day() {
     assert!(ok, "{err}");
     assert!(out.contains("stone at (3, 3)"), "{out}");
     assert!(out.contains("thinks every 32768 ticks, due now"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }
