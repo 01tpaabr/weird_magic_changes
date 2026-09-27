@@ -81,9 +81,10 @@ impl ViewCamera {
         let mut it = text.split_whitespace().map(str::parse::<f64>);
         let x = it.next()?.ok()?;
         let y = it.next()?.ok()?;
+        // Held to the limit `update` keeps, so `cell()` stays in range.
         (x.is_finite() && y.is_finite()).then_some(Self {
-            x,
-            y,
+            x: x.clamp(-LIMIT, LIMIT),
+            y: y.clamp(-LIMIT, LIMIT),
             vx: 0.0,
             vy: 0.0,
         })
@@ -205,6 +206,20 @@ mod tests {
         assert_eq!((back.vx, back.vy), (0.0, 0.0));
         fs::write(dir.join("camera.txt"), "10 -4\n").unwrap();
         assert_eq!(ViewCamera::load(&dir).unwrap().cell(), Pos::new(10, -4));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_far_camera_file_loads_inside_the_limit() {
+        // `cell()` saturated at i32::MAX, and the chunks streamed around it
+        // were past the i32 cell range.
+        let dir = std::env::temp_dir().join(format!("wmc-cam-far-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("camera.txt"), "1e300 -3e9\n").unwrap();
+        let c = ViewCamera::load(&dir).unwrap();
+        assert_eq!((c.x, c.y), (LIMIT, -LIMIT));
+        let lim = LIMIT as i32;
+        assert_eq!(c.cell(), Pos::new(lim, -lim));
         fs::remove_dir_all(&dir).unwrap();
     }
 }
