@@ -136,8 +136,9 @@ kind bee {
 }
 ```
 
-An actor starts in the first state. `next NAME` switches for the next think and ends this one
-like an action; it can be combined with one action (`{ next FORAGE  move toward f }`), and
+An actor starts in the first state; in a kind that extends others, the first in the merged
+order: the parents' states, then the kind's own (§6). `next NAME` switches for the next
+think and ends this one like an action; it can be combined with one action (`{ next FORAGE  move toward f }`), and
 a second `next` in the same block is an error.
 `become` starts the new kind in its first state. `next` isn't allowed inside a file sub (a
 member sub may use it, §6).
@@ -193,7 +194,9 @@ kind lamb extends sheep {                 # everything a sheep is, except what i
 - **Subs:** a sub inside a trait or kind is a *member sub*. It sees that trait's needs,
   memory and states, and may `take`, `give` and `next`. A kind can redefine a member sub,
   and the trait's rules then call the kind's version.
-- **States:** by name. A state the kind does not declare is inherited whole.
+- **States:** by name, the parents' first, then the kind's new ones, so a kind that
+  extends a trait with states starts in the trait's first state, even if the kind writes
+  another state first. A state the kind does not declare is inherited whole.
 
 **Where inherited rules run.** Each rule list, the reflexes and each state, is resolved on
 its own:

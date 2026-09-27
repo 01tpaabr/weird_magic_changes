@@ -5773,6 +5773,14 @@ mod tests {
         // `next WALK` in the kind's own state is state 0.
         let next = k.code.iter().find(|o| o.code == OpCode::Next).unwrap();
         assert_eq!(next.a, 0);
+        // Parents' states first, whatever order the kind writes them in:
+        // it starts in WALK.
+        let k = compile_ok(
+            "trait walker { state WALK { }  state REST { } }
+             kind k extends walker { state EAT { }  state REST { }  state WALK { } }",
+        );
+        let id = usize::from(k.by_name("k").unwrap().id);
+        assert_eq!(k.debug.states[id], ["WALK", "REST", "EAT"]);
     }
 
     #[test]
