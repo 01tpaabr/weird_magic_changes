@@ -20,7 +20,7 @@ use crate::rng::splitmix64;
 use crate::stage::{
     ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos, SCENT_CHANNELS,
 };
-use crate::time::{Clock, daylight};
+use crate::time::{Clock, daylight, stamp};
 
 use super::{KindDef, Kinds};
 
@@ -454,6 +454,8 @@ impl Want {
         };
         // `k`'s family: `k` and every kind that extends it, one id range.
         let range = |k: i32| -> (u16, u16) {
+            // `k` is below TAG_BASE or masked to 16 bits: it fits.
+            #[allow(clippy::cast_possible_truncation)]
             let lo = k as u16;
             let hi = if exact {
                 u32::from(lo) + 1
@@ -462,7 +464,7 @@ impl Want {
                     .get(usize::from(lo))
                     .map_or(u32::from(lo) + 1, |&e| u32::from(e))
             };
-            (lo, hi.min(u32::from(u16::MAX)) as u16)
+            (lo, u16::try_from(hi).unwrap_or(u16::MAX))
         };
         if p >= pred::LOOK_BASE {
             let v = p - pred::LOOK_BASE;
@@ -546,8 +548,8 @@ impl<'a> Halo<'a> {
         get: impl Fn(ChunkCoord) -> Option<(&'a ChunkCells, &'a ChunkActors)>,
     ) -> Halo<'a> {
         let mut chunks = [None; 9];
-        for (i, slot) in chunks.iter_mut().enumerate() {
-            let (ox, oy) = ((i % 3) as i32 - 1, (i / 3) as i32 - 1);
+        for (i, slot) in (0i32..).zip(chunks.iter_mut()) {
+            let (ox, oy) = (i % 3 - 1, i / 3 - 1);
             *slot = get(ChunkCoord::new(c.x + ox, c.y + oy));
         }
         Halo {
@@ -715,6 +717,14 @@ impl Machine<'_> {
         v
     }
 
+    /// A draw in `0..n`, for `n > 0`.
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)] // the remainder is below n, an i32
+    fn draw_below(&mut self, n: i32) -> i32 {
+        debug_assert!(n > 0);
+        (self.draw() % n as u64) as i32
+    }
+
     #[inline]
     fn spend(&mut self, n: u32) -> Result<(), Trap> {
         if self.fuel < n {
@@ -729,7 +739,7 @@ impl Machine<'_> {
         let c = &self.ctx;
         match s {
             Sense::Light => i32::from(daylight(c.tick)),
-            Sense::Age => (c.tick as u32).wrapping_sub(self.mind.born) as i32,
+            Sense::Age => stamp(c.tick).wrapping_sub(self.mind.born) as i32,
             Sense::X => c.pos.x,
             Sense::Y => c.pos.y,
             Sense::Hour => i32::from(Clock::at(c.tick).hour),
@@ -775,7 +785,7 @@ impl Machine<'_> {
         let want = self.ctx.halo.want(pred);
         for ring in 1..=r {
             let n = 8 * ring;
-            let start = (self.draw() % n as u64) as i32;
+            let start = self.draw_below(n);
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
                 if self.ctx.halo.test(lx, ly, dx, dy, want) {
@@ -816,7 +826,7 @@ impl Machine<'_> {
         let mut best = (0u8, 0, 0);
         for ring in 1..=r {
             let n = 8 * ring;
-            let start = (self.draw() % n as u64) as i32;
+            let start = self.draw_below(n);
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
                 let v = self.ctx.halo.scent(lx, ly, dx, dy, ch);
@@ -896,22 +906,22 @@ impl Machine<'_> {
                 let need = self.pop()?;
                 let dy = self.pop()?;
                 let dx = self.pop()?;
-                let need = usize::try_from(need).map_err(|_| Trap::BadNeed)?;
-                if need >= self.ctx.kind.needs.len() {
+                let need = u8::try_from(need).map_err(|_| Trap::BadNeed)?;
+                if usize::from(need) >= self.ctx.kind.needs.len() {
                     return Err(Trap::BadNeed);
                 }
-                self.out.need = need as u8;
+                self.out.need = need;
                 self.out.amount = amount.max(0);
-                self.out.dx = dx.clamp(-127, 127) as i8;
-                self.out.dy = dy.clamp(-127, 127) as i8;
+                self.out.dx = clamp_i8(dx);
+                self.out.dy = clamp_i8(dy);
             }
             Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
                 // Far targets are fine: Think reduces a move to one step,
                 // Resolve refuses a bite that is not adjacent.
-                self.out.dx = dx.clamp(-127, 127) as i8;
-                self.out.dy = dy.clamp(-127, 127) as i8;
+                self.out.dx = clamp_i8(dx);
+                self.out.dy = clamp_i8(dy);
             }
         }
         // `Idle` is an explicit action too: it ends the rule.
@@ -1098,11 +1108,7 @@ impl Machine<'_> {
                     }
                     O::Rand => {
                         let n = self.pop()?;
-                        let v = if n <= 0 {
-                            0
-                        } else {
-                            (self.draw() % n as u64) as i32
-                        };
+                        let v = if n <= 0 { 0 } else { self.draw_below(n) };
                         self.push(v)?;
                     }
                     O::Chance => {
@@ -1197,8 +1203,9 @@ impl Machine<'_> {
                     O::Halt => break 'op true,
                     O::SetSignal => {
                         let v = self.pop()?;
-                        self.out.signal =
-                            Some(v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16);
+                        #[allow(clippy::cast_possible_truncation)] // clamped to the i16 range
+                        let v = v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
+                        self.out.signal = Some(v);
                     }
                     O::LookAt | O::SignalAt => {
                         let dy = self.pop()?;
@@ -1222,7 +1229,7 @@ impl Machine<'_> {
                     }
                     O::Lo => {
                         let v = self.pop()?;
-                        self.push(i32::from(v as u8 as i8))?;
+                        self.push((v << 24) >> 24)?; // the low byte, sign-extended
                     }
                     O::ForEach => {
                         let found = self.for_each(op.a)?;
@@ -1256,7 +1263,7 @@ impl Machine<'_> {
             };
             if TRACE {
                 trace.push(Step {
-                    pc: at as u32,
+                    pc: u32::try_from(at).expect("Asm::here: a program fits u32"),
                     op,
                     top: self.sp.checked_sub(1).map(|i| self.stack[i]),
                     fuel: self.fuel,
@@ -1269,17 +1276,26 @@ impl Machine<'_> {
     }
 }
 
+/// A target's offset, clamped to 127 each way.
+#[inline]
+#[allow(clippy::cast_possible_truncation)] // clamped to the i8 range
+fn clamp_i8(v: i32) -> i8 {
+    v.clamp(-127, 127) as i8
+}
+
 #[inline]
 fn jump(pc: usize, imm: i16) -> Result<usize, Trap> {
     usize::try_from(pc as i64 + i64::from(imm)).map_err(|_| Trap::BadPc)
 }
 
 #[inline]
+#[allow(clippy::cast_possible_truncation)] // a cell is below CHUNK_CELLS
 pub(crate) fn lx(cell: usize) -> i32 {
     (cell as i32) & (CHUNK_SIZE - 1)
 }
 
 #[inline]
+#[allow(clippy::cast_possible_truncation)] // a cell is below CHUNK_CELLS
 pub(crate) fn ly(cell: usize) -> i32 {
     (cell as i32) >> CHUNK_BITS
 }
@@ -1314,10 +1330,10 @@ pub const DIRS8: [(i32, i32); 8] = [
 /// 0 for `(0, 0)` or anything that is not a unit step.
 #[inline]
 pub fn dir_index(dx: i32, dy: i32) -> u8 {
-    DIRS8
-        .iter()
-        .position(|&d| d == (dx, dy))
-        .map_or(0, |i| i as u8 + 1)
+    (1..)
+        .zip(DIRS8)
+        .find(|&(_, d)| d == (dx, dy))
+        .map_or(0, |(i, _)| i)
 }
 
 /// The RNG stream base for `uid` at `tick`: every draw of the think is
@@ -1375,7 +1391,7 @@ fn think_with<const TRACE: bool>(
         // The op that trapped (none for a bad pc), so `wmc why` shows where.
         if TRACE && let Some(&op) = program.code.get(m.at) {
             trace.push(Step {
-                pc: m.at as u32,
+                pc: u32::try_from(m.at).expect("Asm::here: a program fits u32"),
                 op,
                 top: m.sp.checked_sub(1).map(|i| m.stack[i]),
                 fuel: m.fuel,
@@ -1399,7 +1415,7 @@ pub fn decay(kind: &KindDef, mind: &mut ActorMind, tick: u64) -> bool {
         mind.needs[i] = need_now(mind.needs[i], need.decays, tick, mind.last_think);
         dead |= need.vital && mind.needs[i] <= 0;
     }
-    mind.last_think = tick as u32;
+    mind.last_think = stamp(tick);
     dead
 }
 
@@ -1407,8 +1423,8 @@ pub fn decay(kind: &KindDef, mind: &mut ActorMind, tick: u64) -> bool {
 /// `last_think` if it decays, never below 0. What [`decay`] writes.
 pub fn need_now(v: i32, decays: bool, tick: u64, last_think: u32) -> i32 {
     if decays {
-        let elapsed = i64::from((tick as u32).wrapping_sub(last_think));
-        (i64::from(v) - elapsed).max(0) as i32
+        let elapsed = stamp(tick).wrapping_sub(last_think);
+        v.saturating_sub_unsigned(elapsed).max(0)
     } else {
         v
     }
@@ -1709,6 +1725,34 @@ mod tests {
             run(a.finish(), vec![], vec![], &mut mind()).trap,
             Some(Trap::BadNeed)
         );
+    }
+
+    #[test]
+    fn lo_is_the_low_byte_sign_extended() {
+        let cases = [
+            (0, 0),
+            (127, 127),
+            (128, -128),
+            (255, -1),
+            (256, 0),
+            (-1, -1),
+            (-129, 127),
+            (0x1234_5680, -128),
+            (i32::MIN, 0),
+            (i32::MAX, -1),
+        ];
+        let mut a = Asm::new();
+        let mut consts = Vec::new();
+        for (i, &(v, _)) in cases.iter().enumerate() {
+            consts.push(v);
+            a.push_k(i as u16).op(OpCode::Lo).set_mem(i as u8);
+        }
+        a.halt();
+        let mut m = mind();
+        assert_eq!(run(a.finish(), consts, vec![], &mut m).trap, None);
+        for (i, &(v, want)) in cases.iter().enumerate() {
+            assert_eq!(m.mem[i], want, "lo({v})");
+        }
     }
 
     #[test]
