@@ -399,7 +399,7 @@ impl<'a> Gen<'a> {
                 .files
                 .iter()
                 .position(|f| *f == it.at.file)
-                .unwrap_or(0) as u16;
+                .map_or(0, |i| u16::try_from(i).expect("at most MAX_FILES files"));
             self.debug.kind_at.push((file, it.at.line, it.at.col));
             let mut w = Walk {
                 kind: k as u16,

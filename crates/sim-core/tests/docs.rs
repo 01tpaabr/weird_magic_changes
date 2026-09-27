@@ -446,6 +446,7 @@ fn the_limits_table_is_the_codes() {
             "kinds, subs per rule set".into(),
             vec![n(MAX_KINDS), n(MAX_SUBS)],
         ),
+        ("rules files per rule set".into(), vec![n(MAX_FILES)]),
         ("a chain of `extends`".into(), vec![i64::from(MAX_DEPTH)]),
         (
             "chunks a scenario's `size` generates at creation".into(),

@@ -759,6 +759,24 @@ fn more_than_65534_kinds_or_65536_subs_is_an_error() {
 }
 
 #[test]
+fn more_than_65536_rules_files_is_an_error() {
+    // A rule's and a kind's file is a u16 index: file 65536 was file 0.
+    let names: Vec<String> = (0..=65_536).map(|i| format!("f{i}.rules")).collect();
+    let mut files: Vec<(&str, &str)> = names.iter().map(|n| (n.as_str(), "")).collect();
+    files[65_536].1 = "kind k { mem v\n when true => v = 1 }\n";
+    let e = compile_files(&files).unwrap_err().to_string();
+    assert!(
+        e.starts_with("f65536.rules:1:1:") && e.contains("at most 65536 rules files"),
+        "{e}"
+    );
+    files.remove(0);
+    let k = compile_files(&files).unwrap_or_else(|e| panic!("{e}"));
+    let file = |i: u16| k.debug.files[usize::from(i)].as_str();
+    assert_eq!(file(k.debug.rules[0].file), "f65536.rules");
+    assert_eq!(file(k.debug.kind_at[0].0), "f65536.rules");
+}
+
+#[test]
 fn a_choose_with_too_many_arms_is_refused() {
     compile_ok(&format!(
         "kind a {{ mem v  when true => choose {{ {} }} }}",

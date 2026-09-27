@@ -665,6 +665,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | compiled size of one rule, one state's rules, one sub | 32767 ops (jumps are 16 bits; split what is longer) |
 | distinct constants outside -32768..32767 per rule set | 65536 |
 | kinds, subs per rule set | 65534, 65536 (each kind's member subs count once per kind that has them) |
+| rules files per rule set | 65536 |
 | a chain of `extends` | 128 kinds and traits below the one that extends them |
 | chunks a scenario's `size` generates at creation | 4096 (4096 x 4096 cells) |
 

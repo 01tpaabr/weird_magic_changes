@@ -61,6 +61,14 @@ pub fn compile(file: &str, text: &str) -> Result<Kinds> {
 /// Compile several files as one rule set, in the order given (callers sort
 /// by name). Kind and sub names are global across files.
 pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
+    if let Some((name, _)) = files.get(MAX_FILES) {
+        return Err(CompileError {
+            file: name.to_string(),
+            line: 1,
+            col: 1,
+            msg: format!("at most {MAX_FILES} rules files in a rule set"),
+        });
+    }
     let mut items = Items::default();
     for (name, text) in files {
         let tokens = Lexer::new(name, text).lex()?;
@@ -712,7 +720,12 @@ pub const MAX_SUBS: usize = 65_536;
 /// Distinct constants outside the 16-bit immediates: the pool index is a
 /// `u16`.
 pub const MAX_POOL: usize = 65_536;
-const _: () = assert!(MAX_SUBS == 1 << u16::BITS && MAX_POOL == 1 << u16::BITS);
+/// Rules files per rule set: a rule's and a kind's file in [`DebugInfo`]
+/// is a `u16` index.
+pub const MAX_FILES: usize = 65_536;
+const _: () = assert!(
+    MAX_SUBS == 1 << u16::BITS && MAX_POOL == 1 << u16::BITS && MAX_FILES == 1 << u16::BITS
+);
 const _: () = assert!(MAX_KINDS == u16::MAX as usize - 1);
 
 fn sense_named(name: &str) -> Option<Sense> {
@@ -3650,7 +3663,7 @@ impl<'a> Gen<'a> {
         self.debug.rules.push(RuleInfo {
             kind: self.kind.unwrap_or(0),
             state: self.state,
-            file: file as u16,
+            file: u16::try_from(file).expect("at most MAX_FILES files"),
             line: rule.at.line,
             text,
             cond_pc,
