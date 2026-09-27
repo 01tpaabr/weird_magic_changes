@@ -3271,6 +3271,7 @@ impl<'a> Gen<'a> {
         self.locals.clear();
         self.next_local = 0;
         for (name, ty) in &s.params {
+            self.hides(name, &format!("parameter `{name}` of `{}`", s.name), &s.at)?;
             let slot = self.alloc_local(&s.at, ty.width().into())?;
             self.locals.push(Local {
                 name: name.clone(),
@@ -3765,6 +3766,21 @@ impl<'a> Gen<'a> {
             .map(|i| i as u8)
     }
 
+    /// A local, binding or parameter (`what`) named `n` would hide a need
+    /// or mem slot this code sees: refused, as for a trait parameter.
+    fn hides(&self, n: &str, what: &str, at: &Pos) -> Result<()> {
+        match self.owner {
+            Some(o) if self.need_slot(n).is_some() || self.mem_slot(n).is_some() => Err(self.err(
+                at,
+                format!(
+                    "{what} has the name of a need or mem slot of `{}`",
+                    self.inst_name(o)
+                ),
+            )),
+            _ => Ok(()),
+        }
+    }
+
     /// A trait parameter in scope.
     fn param(&self, n: &str) -> Option<i32> {
         self.params.iter().find(|(p, _)| p == n).map(|&(_, v)| v)
@@ -3816,6 +3832,7 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
                 self.pred(pred)?;
                 self.expr(r)?;
@@ -3836,6 +3853,7 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
                 let c = self.scent(ch, at)?;
                 self.push_int(i32::from(c))?;
@@ -4273,6 +4291,7 @@ impl<'a> Gen<'a> {
                 if self.local(name).is_some() {
                     return Err(self.err(at, format!("`{name}` is already bound")));
                 }
+                self.hides(name, &format!("local `{name}`"), at)?;
                 self.expr(value)?;
                 let slot = self.alloc_local(at, 1)?;
                 self.asm.store(slot);
@@ -4474,6 +4493,7 @@ impl<'a> Gen<'a> {
                 if self.local(bind).is_some() {
                     return Err(self.err(at, format!("`{bind}` is already bound")));
                 }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
                 self.scoped(|g| {
                     let base = g.alloc_local(at, FOR_EACH_LOCALS.into())?;
                     g.pred(pred)?;
@@ -6143,6 +6163,56 @@ mod tests {
         // Nothing hides it: still folded.
         let e = compile_err("const W = 1 kind a { when 1 => { choose { W: idle }  move north } }");
         assert!(e.contains("a second action"), "{e}");
+    }
+
+    #[test]
+    fn a_local_that_hides_a_need_or_mem_is_an_error() {
+        for (text, want) in [
+            (
+                "kind a { need food max 1d\n when true => { let food = 5  food += 1h } }",
+                "t.rules:2:21: local `food` has the name of a need or mem slot of `a`",
+            ),
+            (
+                "kind a { mem m\n when nearest a within 3 as m => idle }",
+                "t.rules:2:7: binding `m` has the name of a need or mem slot of `a`",
+            ),
+            (
+                "kind a { mem m\n when sniff s within 3 as m => idle }",
+                "binding `m` has the name of a need or mem slot of `a`",
+            ),
+            (
+                "kind a { mem m\n when true => for each a within 2 as m { look = 1 } }",
+                "binding `m` has the name of a need or mem slot of `a`",
+            ),
+            (
+                "kind a { mem m\n sub f(m) { idle }\n when true => f(1) }",
+                "t.rules:2:6: parameter `m` of `f` has the name of a need or mem slot of `a`",
+            ),
+            // A trait's member sub, and a trait's own rule.
+            (
+                "trait t { need food max 1d  sub f(food: target) { move food } }\n\
+                 kind a extends t { when true => f(here) }",
+                "parameter `food` of `f` has the name of a need or mem slot of `t`",
+            ),
+            (
+                "trait t { mem m  when true => { let m = 1  idle } }\nkind a extends t { }",
+                "local `m` has the name of a need or mem slot of `t`",
+            ),
+        ] {
+            let e = compile_err(text);
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        // A name the code can't see is not hidden: a file sub sees no need,
+        // a trait sees only its own; and a const may still be shadowed.
+        compile_ok(
+            "sub f(food) { if food > 1 { idle } }\n\
+             kind a { need food max 1d  when true => f(food) }",
+        );
+        compile_ok(
+            "trait t { when true => { let m = 1  idle } }\n\
+             kind a extends t { mem m }",
+        );
+        compile_ok("const m = 1 kind a { when true => { let m = 2  idle } }");
     }
 
     #[test]

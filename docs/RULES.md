@@ -227,6 +227,11 @@ the trait a tag (`tags drinker`) and match the tag.
 | `sub_name(args)` | call a sub (§12) |
 | `return expr` | inside a sub |
 
+A name reads a local first (a `let`, an `as` binding, a sub's parameter), then a need or mem
+slot, then a trait parameter, then a constant. A local may hide a trait parameter or a
+constant, but not a need or mem slot the code can name: `let food = 5` in a kind with `need
+food` is an error, as is a binding or a member sub's parameter of that name.
+
 ## 8. Actions
 
 Each action is one intent, settled after every actor has thought. The outcome is readable at
