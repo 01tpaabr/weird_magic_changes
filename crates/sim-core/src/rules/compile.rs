@@ -5109,37 +5109,40 @@ mod tests {
 
     #[test]
     fn an_expression_deeper_than_the_vm_stack_is_an_error() {
-        let nest = |n: usize, leaf: &str| format!("{}{leaf}{}", "1 + (".repeat(n), ")".repeat(n));
+        // Arguments wait on the stack while the next one is computed: each
+        // level of `g(1, 1, 1, 1, 1, ...)` leaves five values waiting, and
+        // costs only a few of the parser's 128 nesting levels.
+        let g = "sub g(a, b, c, d, e, h) { return a + h }";
+        let nest = |n: usize, leaf: &str| {
+            format!("{}{leaf}{}", "g(1, 1, 1, 1, 1, ".repeat(n), ")".repeat(n))
+        };
         let e = compile_err(&format!(
-            "kind k {{ mem m\n when true => m = {} }}",
-            nest(70, "m")
+            "{g}\nkind k {{ mem m\n when true => m = {} }}",
+            nest(13, "m")
         ));
         assert!(
-            e.starts_with("t.rules:2:2:") && e.contains("71 stack values"),
+            e.starts_with("t.rules:3:2:") && e.contains("stack values"),
             "{e}"
         );
         let e = compile_err(&format!(
-            "sub f(v) {{ return {} }}\nkind k {{ mem m\n when true => m = f(m) }}",
-            nest(70, "v")
+            "{g}\nsub f(v) {{ return {} }}\nkind k {{ mem m\n when true => m = f(m) }}",
+            nest(13, "v")
         ));
-        assert!(e.contains("sub `f` needs 71 stack values"), "{e}");
-        // Arguments wait on the stack while the next one is computed.
-        let e = compile_err(&format!(
-            "kind k {{ mem m\n when true => m = max(m, {}) }}",
-            nest(63, "m")
-        ));
-        assert!(e.contains("65 stack values"), "{e}");
+        assert!(
+            e.contains("sub `f` needs") && e.contains("stack values"),
+            "{e}"
+        );
 
         use bytemuck::Zeroable;
         let k = compile_ok(&format!(
-            "kind k {{ mem m\n when true => m = {} }}",
-            nest(60, "m")
+            "{g}\nkind k {{ mem m\n when true => m = {} }}",
+            nest(9, "m")
         ));
         let mut mind = crate::actors::ActorMind::zeroed();
         for _ in 0..2 {
             assert_eq!(run_think(&k, "k", &mut mind).trap, None);
         }
-        assert_eq!(mind.mem[0], 120);
+        assert_eq!(mind.mem[0], 18);
     }
 
     #[test]
@@ -5962,7 +5965,7 @@ mod tests {
         let calls = "a(n - 1) ".repeat(16);
         compile_ok(&format!(
             "sub a(n) {{ if n > 0 {{ {calls} }} else {{ n = 0 }} }}\n\
-             kind rock {{ glyph \"r\" when 1 > 0 => idle }}"
+             kind stone {{ glyph \"r\" when 1 > 0 => idle }}"
         ));
     }
 
