@@ -27,6 +27,11 @@
 //! never saves: run it twice, or with `WMC_THREADS=1` and again without,
 //! and the checksums must match. `show` and `run` are headless: a bare
 //! `bevy_ecs` world, no `App`.
+
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 use std::io::Write;
 use std::time::Instant;
 
@@ -440,7 +445,7 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
         "kind", "alive", "born", "became", "eaten", "died", "thinks", "ops/think", "traps"
     )?;
     for (i, name) in kinds.names().enumerate() {
-        let k = i as u16;
+        let k = u16::try_from(i).expect("kind ids are u16");
         let thinks = tally.get(k, life::THINKS);
         writeln!(
             out,

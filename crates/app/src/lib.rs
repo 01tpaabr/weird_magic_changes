@@ -9,6 +9,11 @@
 //! - [`packs`], [`compile`], [`rules_for`]: which rules the app runs (packs
 //!   from `--rules` or `WMC_RULES`, a save's own packs, or the built-in ones).
 //! - [`why`]: `wmc why`, one actor's think explained.
+
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 pub mod camera;
 pub mod clock;
 pub mod play;
