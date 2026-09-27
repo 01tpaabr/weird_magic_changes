@@ -66,7 +66,7 @@ make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: i
 make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
-make fuzz       the never-panic properties (scenarios, saves, CLI), FUZZ_CASES each, new seed (printed)
+make fuzz       the fuzzers (rules, scenarios, saves, CLI, simulation), FUZZ_CASES each, new seed (printed)
 make ci         check + test  == "done"
 make bench      criterion, results in target/criterion
 make release    LTO, static Bevy
@@ -88,7 +88,8 @@ make fmt
   The skill's `references/` hold verified cheatsheets.
 - New sim system: a plain fn in `sim-core`, added to `SimTick` inside a `Phase` set, with a
   checksum test. New actor kind: a `.rules` file (`docs/RULES.md`), `wmc lint` it, a test in `scenarios/tests/`, `wmc why` to debug it. New
-  sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test. New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
+  sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test, and
+  `docs/GRAMMAR.md` + `rules/gen_rules.rs` taught it (any syntax change: the same two). New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).
 - Remote: `origin` = github.com/01tpaabr/weird_magic_changes. Commit on `main` in small steps
