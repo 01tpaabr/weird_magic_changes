@@ -128,6 +128,13 @@ impl Store {
         Ok(Self { dir })
     }
 
+    /// A save directory as it stands, creating nothing: for readers that
+    /// never save (`wmc run`, `wmc why`). A directory that is not there
+    /// reads as no world ([`read_meta`](Self::read_meta) is `Ok(None)`).
+    pub fn at(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -633,6 +640,18 @@ mod tests {
             std::env::temp_dir().join(format!("wmc-store-test-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         Store::open(dir).unwrap()
+    }
+
+    /// `Store::at` reads a directory that is not there as no world, and
+    /// leaves it not there.
+    #[test]
+    fn a_store_at_a_missing_dir_is_no_world_and_creates_nothing() {
+        let dir = std::env::temp_dir().join(format!("wmc-store-at-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let s = Store::at(&dir);
+        assert_eq!(s.read_meta().unwrap(), None);
+        assert_eq!(s.read_chunk(ChunkCoord::new(0, 0)).unwrap(), None);
+        assert!(!dir.exists());
     }
 
     #[test]

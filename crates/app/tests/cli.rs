@@ -84,6 +84,66 @@ fn why_waits_out_a_cadence_longer_than_a_day() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Every file under `dir` with its bytes, in path order.
+fn files_under(dir: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let p = e.unwrap().path();
+        if p.is_dir() {
+            out.extend(files_under(&p));
+        } else {
+            out.push((p.clone(), std::fs::read(&p).unwrap()));
+        }
+    }
+    out.sort();
+    out
+}
+
+/// `run` and `why` never save, so they leave the disk as they found it: no
+/// save directory where there was none, nothing in an empty one, a saved
+/// world byte for byte. An empty save directory is an error for every
+/// command that takes one (it was the working directory, where `run` made
+/// a `chunks`).
+#[test]
+fn run_and_why_create_nothing_on_disk() {
+    use sim_core::{Scenario, Store, sim};
+    let dir = scratch("nothing");
+    let tiny = "seed 1\nsize 1 1\nstart fox at (0, 0)\n";
+    std::fs::write(dir.join("tiny.scenario"), tiny).unwrap();
+    std::fs::create_dir(dir.join("empty")).unwrap();
+    let store = Store::open(dir.join("saved")).unwrap();
+    sim::save(
+        &mut sim::new_world(&Scenario::parse("t", tiny).unwrap()),
+        &store,
+    )
+    .unwrap();
+    let before = files_under(&dir);
+    for save in ["fresh", "empty", "saved"] {
+        let cases: [&[&str]; 2] = [
+            &["run", save, "3", "--scenario", "tiny.scenario"],
+            &["why", save, "0", "0", "0", "--scenario", "tiny.scenario"],
+        ];
+        for args in cases {
+            let (code, out, err) = wmc_in(&dir, &[], args);
+            assert_eq!(code, Some(0), "{args:?}\n{out}{err}");
+        }
+    }
+    for args in [
+        &["run", "", "1"][..],
+        &["why", "", "0", "0"],
+        &["why", "-v", "", "0", "0"],
+        &["play", ""],
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert_eq!(code, Some(1), "{args:?}\n{out}{err}");
+        assert!(err.contains("an empty path"), "{args:?}\n{err}");
+    }
+    assert!(!dir.join("fresh").exists());
+    assert_eq!(files_under(&dir), before);
+    assert_eq!(std::fs::read_dir(dir.join("empty")).unwrap().count(), 0);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
 /// `[w h]` on the command line get the checks a `size` line gets.
 #[test]
 fn a_size_from_the_command_line_is_checked() {

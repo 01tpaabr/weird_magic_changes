@@ -20,8 +20,9 @@
 //! where kinds start) instead of the built-in `scenarios/default.scenario`;
 //! `[width height seed]` override its size and seed. `lint` checks the
 //! scenario against the rules.
-//! `play` and `run` open the world in `save_dir` if one exists (scenario and
-//! size/seed args are then ignored), otherwise create it. A save opens
+//! `play`, `run` and `why` open the world in `save_dir` if one exists
+//! (scenario and size/seed args are then ignored), otherwise make it (`play`
+//! creates the directory; `run` and `why` create nothing on disk). A save opens
 //! under rules that number its kinds differently (matched by name). `run`
 //! never saves: run it twice, or with `WMC_THREADS=1` and again without,
 //! and the checksums must match. `show` and `run` are headless: a bare
@@ -51,6 +52,16 @@ struct Setup {
     scenario: Scenario,
     /// The scenario's file, for errors.
     name: String,
+}
+
+/// A command's save directory argument: there, and not an empty path (which
+/// would be the working directory).
+fn save_dir<'a>(arg: Option<&'a String>, command: &str) -> anyhow::Result<&'a str> {
+    let dir = arg.with_context(|| format!("{command} needs a save directory"))?;
+    if dir.is_empty() {
+        bail!("{command} needs a save directory, not an empty path");
+    }
+    Ok(dir)
 }
 
 /// Take `--flag` out of `args`: was it there?
@@ -109,12 +120,12 @@ fn main() -> anyhow::Result<()> {
     match args.first().map(String::as_str) {
         Some("show") => show(&setup(&args[1..])?),
         Some("play") => {
-            let dir = args.get(1).context("play needs a save directory")?;
+            let dir = save_dir(args.get(1), "play")?;
             let s = setup(&args[2..])?;
             play::run(dir, &s.scenario, &s.name, &s.packs)
         }
         Some("run") => {
-            let dir = args.get(1).context("run needs a save directory")?;
+            let dir = save_dir(args.get(1), "run")?;
             let ticks = args
                 .get(2)
                 .context("run needs a tick count")?
@@ -125,7 +136,7 @@ fn main() -> anyhow::Result<()> {
         Some("why") => {
             let verbose = args.get(1).is_some_and(|a| a == "-v");
             let a = &args[1 + usize::from(verbose)..];
-            let dir = a.first().context("why needs a save directory")?;
+            let dir = save_dir(a.first(), "why")?;
             let coord = |i: usize, what: &str| -> anyhow::Result<i32> {
                 a.get(i)
                     .with_context(|| format!("why needs {what}"))?
@@ -306,9 +317,10 @@ fn show(setup: &Setup) -> anyhow::Result<()> {
 }
 
 /// The world saved in `dir` with the chunks around its camera, else a new
-/// one of the setup (its initial region loaded). Never saved by the caller.
+/// one of the setup (its initial region loaded). Never saved by the caller,
+/// so it creates nothing on disk: no world there is a world in memory.
 fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
-    let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
+    let store = Store::at(dir);
     let kinds = app::rules_for(&store, &setup.packs, &setup.scenario.packs)?;
     Ok(
         match sim::open_world_with(&store, kinds.clone()).context("reading save")? {
