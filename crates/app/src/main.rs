@@ -75,7 +75,14 @@ fn take_flag(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Vec<String>> 
 }
 
 fn main() -> anyhow::Result<()> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    // `env::args` panics on one that is not UTF-8.
+    let mut args: Vec<String> = std::env::args_os()
+        .skip(1)
+        .map(|a| {
+            a.into_string()
+                .map_err(|a| anyhow::anyhow!("argument {a:?} is not UTF-8"))
+        })
+        .collect::<anyhow::Result<_>>()?;
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
     let strict = take_switch(&mut args, "--strict");
@@ -88,8 +95,7 @@ fn main() -> anyhow::Result<()> {
         par::init_task_pool_with(Some(n));
     } else {
         // Checked here: the pool reads it when a world is made, and panics.
-        par::parse_threads(std::env::var("WMC_THREADS").ok().as_deref())
-            .map_err(anyhow::Error::msg)?;
+        par::env_threads().map_err(anyhow::Error::msg)?;
     }
     // `-v` and negative coordinates start with one `-`, a flag with two.
     if let Some(f) = args.iter().find(|a| a.starts_with("--")) {

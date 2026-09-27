@@ -19,7 +19,18 @@ use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 /// value that is not one: a mistyped `WMC_THREADS=1` would otherwise run
 /// on all cores and the thread-count gate would compare a run with itself.
 pub fn threads_from_env() -> Option<usize> {
-    parse_threads(std::env::var("WMC_THREADS").ok().as_deref()).unwrap_or_else(|e| panic!("{e}"))
+    env_threads().unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// `WMC_THREADS` read with [`parse_threads`]; a value that is not UTF-8
+/// is no count. `wmc` checks it with this before it makes a world, so a
+/// bad one is an error there, not a panic.
+pub fn env_threads() -> Result<Option<usize>, String> {
+    match std::env::var("WMC_THREADS") {
+        Ok(v) => parse_threads(Some(&v)),
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(v)) => parse_threads(Some(&v.to_string_lossy())),
+    }
 }
 
 /// The most threads a pool may have. Far past any core count; the pool
@@ -28,9 +39,8 @@ pub fn threads_from_env() -> Option<usize> {
 pub const MAX_THREADS: usize = 1024;
 
 /// `WMC_THREADS`'s value: unset or empty is `None` (all cores), else a
-/// count of 1 to [`MAX_THREADS`]. `wmc` checks it with this before it makes
-/// a world, so a bad one is an error there, not a panic.
-pub fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
+/// count of 1 to [`MAX_THREADS`].
+fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
     match v {
         None | Some("") => Ok(None),
         Some(v) => match v.trim().parse() {

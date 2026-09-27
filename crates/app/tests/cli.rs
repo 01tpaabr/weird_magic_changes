@@ -513,3 +513,50 @@ fn a_thread_count_past_the_most_is_an_error() {
     }
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An argument that is not UTF-8 is an error that says which, not a panic
+/// where the arguments are read; a `WMC_THREADS` that is not is no count,
+/// not unset.
+#[test]
+fn arguments_that_are_not_utf8_are_errors() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = odd_fixtures("utf8");
+    let bad = OsStr::from_bytes(b"x\xff.scenario");
+    for args in [
+        vec![OsStr::new("show"), bad],
+        vec![OsStr::new("scenario"), bad],
+        vec![bad],
+        vec![OsStr::new("show"), OsStr::new("--rules"), bad],
+    ] {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env_remove("WMC_RULES")
+            .env_remove("WMC_THREADS")
+            .current_dir(&dir)
+            .args(&args)
+            .output()
+            .unwrap();
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.code() == Some(1)
+                && err.contains("Error: argument \"x\\xFF.scenario\" is not UTF-8"),
+            "{args:?}: {:?}\n{err}",
+            out.status
+        );
+    }
+    let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+        .env_remove("WMC_RULES")
+        .env("WMC_THREADS", OsStr::from_bytes(b"\xff"))
+        .current_dir(&dir)
+        .args(["scenario", "tiny.scenario"])
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.code() == Some(1)
+            && err.contains("Error: WMC_THREADS=`\u{FFFD}` is not a thread count"),
+        "{:?}\n{err}",
+        out.status
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
