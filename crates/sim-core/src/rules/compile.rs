@@ -17,8 +17,10 @@ use std::fmt;
 
 use super::asm::{Asm, Label};
 use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, Sense, pred, result};
-use super::{DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo};
-use crate::actors::{MEM_SLOTS, NEED_SLOTS};
+use super::{
+    DEFAULT_COLOR, DebugInfo, Diagnostic, GeneDef, KindDef, Kinds, Level, NeedDef, RuleInfo,
+};
+use crate::actors::{GENE_SLOTS, MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
 
@@ -343,6 +345,17 @@ struct Decls {
     tags: Vec<String>,
     needs: Vec<NeedAst>,
     mems: Vec<(String, Pos)>,
+    genes: Vec<GeneAst>,
+}
+
+/// `gene NAME = DEFAULT from LO to HI`.
+#[derive(Debug, Clone)]
+struct GeneAst {
+    name: String,
+    default: Expr,
+    lo: Expr,
+    hi: Expr,
+    at: Pos,
 }
 
 /// `need NAME max M [decay 0] [vital]`.
@@ -636,6 +649,7 @@ const KEYWORDS: &[&str] = &[
     "decay",
     "vital",
     "mem",
+    "gene",
     "when",
     "if",
     "else",
@@ -700,9 +714,9 @@ const KEYWORDS: &[&str] = &[
     "only",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 12] = [
+const DECL_WORDS: [&str; 13] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "color", "place", "need",
-    "mem",
+    "mem", "gene",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -1096,6 +1110,7 @@ impl Parser<'_> {
                     let (name, at) = self.ident("memory slot name")?;
                     if d.mems.iter().any(|(m, _)| *m == name)
                         || d.needs.iter().any(|n| n.name == name)
+                        || d.genes.iter().any(|g| g.name == name)
                     {
                         return Err(self.err_at(&at, format!("`{name}` declared twice")));
                     }
@@ -1104,6 +1119,29 @@ impl Parser<'_> {
                         break;
                     }
                 }
+            } else if self.eat_kw("gene") {
+                // `gene NAME = DEFAULT from LO to HI`: `from` and `to` are
+                // words only here, like `max` and `decay` in a need.
+                let (name, at) = self.ident("gene name")?;
+                if d.genes.iter().any(|g| g.name == name)
+                    || d.mems.iter().any(|(m, _)| *m == name)
+                    || d.needs.iter().any(|n| n.name == name)
+                {
+                    return Err(self.err_at(&at, format!("`{name}` declared twice")));
+                }
+                self.expect_sym("=")?;
+                let default = self.additive()?;
+                self.expect_kw("from")?;
+                let lo = self.additive()?;
+                self.expect_kw("to")?;
+                let hi = self.additive()?;
+                d.genes.push(GeneAst {
+                    name,
+                    default,
+                    lo,
+                    hi,
+                    at,
+                });
             } else {
                 return Ok(d);
             }
@@ -1805,6 +1843,7 @@ struct Inst<'a> {
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
+    genes: Vec<GeneDef>,
     states: Vec<String>,
     /// Member subs after overriding: name, the instance that defines it,
     /// the sub.
@@ -2572,12 +2611,16 @@ impl<'a> Gen<'a> {
                 mems.insert(i, m);
             }
         }
+        let genes = self.merge_genes(item, &parents, &needs, &mems)?;
         for (pn, pat) in &it.params {
-            if needs.iter().any(|n| n.name == *pn) || mems.contains(pn) {
+            if needs.iter().any(|n| n.name == *pn)
+                || mems.contains(pn)
+                || genes.iter().any(|g| g.name == *pn)
+            {
                 return Err(self.err(
                     pat,
                     format!(
-                        "parameter `{pn}` has the name of a need or mem slot of `{}`",
+                        "parameter `{pn}` has the name of a need, mem slot or gene of `{}`",
                         it.name
                     ),
                 ));
@@ -2665,11 +2708,135 @@ impl<'a> Gen<'a> {
             tags,
             needs,
             mems,
+            genes,
             states,
             members,
             reflex,
             state_lists,
         })
+    }
+
+    /// Genes by name, like needs: parents' slots first, a redeclaration
+    /// overrides in place, parents that disagree must be settled by the
+    /// item. A gene may not share its name with a need, mem slot,
+    /// constant, parameter in scope, kind or tag: `fold` and the bytecode
+    /// would read two different things.
+    fn merge_genes(
+        &self,
+        item: usize,
+        parents: &[usize],
+        needs: &[NeedDef],
+        mems: &[String],
+    ) -> Result<Vec<GeneDef>> {
+        let it = &self.items[item];
+        let mut genes: Vec<GeneDef> = Vec::new();
+        let mut from: Vec<usize> = Vec::new();
+        let mut clashes: Vec<(String, usize, usize)> = Vec::new();
+        for &p in parents {
+            for g in &self.insts[p].genes {
+                match genes.iter().position(|x| x.name == g.name) {
+                    None => {
+                        genes.push(g.clone());
+                        from.push(p);
+                    }
+                    Some(i) if genes[i] == *g => {}
+                    Some(i) => clashes.push((g.name.clone(), from[i], p)),
+                }
+            }
+        }
+        for ga in &it.decls.genes {
+            let n = &ga.name;
+            let taken = if needs.iter().any(|x| x.name == *n) {
+                Some("a need")
+            } else if mems.contains(n) {
+                Some("a mem slot")
+            } else if self.param(n).is_some() {
+                Some("a parameter")
+            } else if self.const_value(n).is_some() {
+                Some("a constant")
+            } else if self.items.iter().any(|i| i.name == *n) {
+                Some("a kind or trait")
+            } else if self.items.iter().any(|i| i.decls.tags.contains(n)) {
+                Some("a tag")
+            } else {
+                None
+            };
+            if let Some(what) = taken {
+                return Err(self.err(&ga.at, format!("gene `{n}` has the name of {what}")));
+            }
+            let (default, lo, hi) = (
+                self.fold(&ga.default)?,
+                self.fold(&ga.lo)?,
+                self.fold(&ga.hi)?,
+            );
+            // Lenient while checking traits (parameters bound to 1): a
+            // range or default that only holds for real arguments.
+            if !self.checking {
+                if lo > hi {
+                    return Err(self.err(
+                        &ga.at,
+                        format!("gene `{n}` runs from {lo} to {hi}: the low end comes first"),
+                    ));
+                }
+                if !(lo..=hi).contains(&default) {
+                    return Err(self.err(
+                        &ga.at,
+                        format!("gene `{n}` starts at {default}, outside {lo} to {hi}"),
+                    ));
+                }
+            }
+            let (lo, hi) = (lo.min(hi), lo.max(hi));
+            let def = GeneDef {
+                name: n.clone(),
+                default: default.clamp(lo, hi),
+                lo,
+                hi,
+            };
+            match genes.iter().position(|x| x.name == def.name) {
+                Some(i) => genes[i] = def,
+                None => genes.push(def),
+            }
+        }
+        if let Some((n, a, b)) = clashes
+            .iter()
+            .find(|(n, ..)| !it.decls.genes.iter().any(|x| x.name == *n))
+        {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits gene `{n}` from `{}` and `{}`, declared differently: redeclare it in `{}`",
+                    it.name,
+                    self.inst_name(*a),
+                    self.inst_name(*b),
+                    it.name
+                ),
+            ));
+        }
+        if let Some(g) = genes
+            .iter()
+            .find(|g| needs.iter().any(|n| n.name == g.name) || mems.contains(&g.name))
+        {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits `{}` both as a gene and as a need or mem slot",
+                    it.name, g.name
+                ),
+            ));
+        }
+        if genes.len() > GENE_SLOTS {
+            let names: Vec<&str> = genes.iter().map(|g| g.name.as_str()).collect();
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` has {} genes, at most {GENE_SLOTS}: {}",
+                    it.name,
+                    genes.len(),
+                    names.join(", ")
+                ),
+            ));
+        }
+        Ok(genes)
     }
 
     /// One rule list of the instance `me` (being resolved): its own rules
@@ -2853,6 +3020,7 @@ impl<'a> Gen<'a> {
             bite: inst.bite.unwrap_or(1),
             needs: inst.needs.clone(),
             mems: inst.mems.clone(),
+            genes: inst.genes.clone(),
             states: inst.states.len().max(1) as u8,
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
@@ -3296,6 +3464,18 @@ impl<'a> Gen<'a> {
             .map(|i| i as u8)
     }
 
+    fn gene_slot(&self, n: &str) -> Option<u8> {
+        let (cur, owner) = (self.cur?, self.owner?);
+        if !self.insts[owner].genes.iter().any(|g| g.name == n) {
+            return None;
+        }
+        self.insts[cur]
+            .genes
+            .iter()
+            .position(|g| g.name == n)
+            .map(|i| i as u8)
+    }
+
     /// A trait parameter in scope.
     fn param(&self, n: &str) -> Option<i32> {
         self.params.iter().find(|(p, _)| p == n).map(|&(_, v)| v)
@@ -3306,11 +3486,14 @@ impl<'a> Gen<'a> {
             && cur != owner
         {
             let c = &self.insts[cur];
-            if c.needs.iter().any(|d| d.name == n) || c.mems.iter().any(|m| m == n) {
+            if c.needs.iter().any(|d| d.name == n)
+                || c.mems.iter().any(|m| m == n)
+                || c.genes.iter().any(|g| g.name == n)
+            {
                 return self.err(
                     at,
                     format!(
-                        "`{}` uses `{n}`, which it does not declare (a trait or parent kind sees only its own needs and mems)",
+                        "`{}` uses `{n}`, which it does not declare (a trait or parent kind sees only its own needs, mems and genes)",
                         self.inst_name(owner)
                     ),
                 );
@@ -3324,7 +3507,7 @@ impl<'a> Gen<'a> {
         } else {
             self.err(
                 at,
-                format!("unknown name `{n}` (not a need, mem slot or binding of this kind)"),
+                format!("unknown name `{n}` (not a need, mem slot, gene or binding of this kind)"),
             )
         }
     }
@@ -3537,6 +3720,8 @@ impl<'a> Gen<'a> {
                     self.asm.need(i);
                 } else if let Some(i) = self.mem_slot(n) {
                     self.asm.mem(i);
+                } else if let Some(i) = self.gene_slot(n) {
+                    self.asm.gene(i);
                 } else if let Some(v) = self.param(n).or_else(|| self.const_value(n)) {
                     self.push_int(v);
                 } else {
@@ -3730,6 +3915,11 @@ impl<'a> Gen<'a> {
             self.asm.set_need(i);
         } else if let Some(i) = self.mem_slot(name) {
             self.asm.set_mem(i);
+        } else if self.gene_slot(name).is_some() {
+            return Err(self.err(
+                at,
+                format!("cannot assign to `{name}`: it is a gene (inherited, never written)"),
+            ));
         } else if self.param(name).is_some() || self.const_value(name).is_some() {
             return Err(self.err(at, format!("cannot assign to `{name}`: it is a constant")));
         } else {
@@ -4111,7 +4301,7 @@ mod tests {
     fn errors_carry_positions_and_name_the_problem() {
         assert_eq!(
             compile_err("kind a {\n  need water max 1h\n  when watter > 0 => idle\n}"),
-            "t.rules:3:8: unknown name `watter` (not a need, mem slot or binding of this kind)"
+            "t.rules:3:8: unknown name `watter` (not a need, mem slot, gene or binding of this kind)"
         );
         assert!(compile_err("kind a { cadence 3 }").contains("power of two"));
         assert!(compile_err("kind a { sight 40 }").contains("0 to 16"));
@@ -4777,6 +4967,103 @@ mod tests {
         assert!(
             compile_err("trait t(v) { when 1 => v = 2 } kind a extends t(1) { }")
                 .contains("cannot assign to `v`: it is a constant")
+        );
+    }
+
+    #[test]
+    fn genes_are_read_by_name_merge_like_needs_and_are_never_written() {
+        use crate::actors::ActorMind;
+        use bytemuck::Zeroable;
+        // The trait's default and range come from its parameters; checked
+        // alone with every parameter bound to 1, the default is outside
+        // the range, which must not refuse the trait.
+        let k = compile_ok(
+            "trait drinker(thirsty) {
+               need water max 4h vital
+               gene thirst = thirsty from 30min to 6h
+               when water < thirst => water = thirst
+             }
+             kind a extends drinker(2h) { gene fear = -1 from -5 to 12 }
+             kind b extends drinker(1h) { gene thirst = 3h from 1h to 4h }",
+        );
+        let a = k.by_name("a").unwrap();
+        let g = |name: &str, default, lo, hi| GeneDef {
+            name: name.into(),
+            default,
+            lo,
+            hi,
+        };
+        assert_eq!(
+            a.genes,
+            [g("thirst", 1800, 450, 5400), g("fear", -1, -5, 12)]
+        );
+        assert_eq!(
+            k.by_name("b").unwrap().genes,
+            [g("thirst", 2700, 900, 3600)],
+            "a redeclaration overrides in place"
+        );
+        assert!(k.code.iter().any(|o| o.code == OpCode::Gene));
+        // Each actor reads its own value, whatever the default says.
+        let mut m = ActorMind::zeroed();
+        m.needs[0] = 1; // a vital need at 0 dies before any rule runs
+        m.genes[0] = 700;
+        assert_eq!(run_think(&k, "a", &mut m).trap, None);
+        assert_eq!(m.needs[0], 700);
+
+        let err = |t: &str| compile_err(t);
+        assert!(
+            err("kind a { gene g = 5 from 1 to 9  when 1 => g = 2 }")
+                .contains("cannot assign to `g`: it is a gene (inherited, never written)")
+        );
+        assert!(err("kind a { gene g = 5 from 9 to 1 }").contains("the low end comes first"));
+        assert!(err("kind a { gene g = 10 from 1 to 9 }").contains("starts at 10, outside 1 to 9"));
+        assert!(
+            err("kind a { gene g = 1 from 1 to 9  gene g = 2 from 1 to 9 }")
+                .contains("declared twice")
+        );
+        assert!(err("kind a { mem g  gene g = 1 from 1 to 9 }").contains("declared twice"));
+        assert!(err("kind a { gene g = 1 from 1 9 }").contains("expected `to`"));
+        assert!(
+            err("const G = 3 kind a { gene G = 1 from 1 to 9 }")
+                .contains("gene `G` has the name of a constant")
+        );
+        assert!(
+            err("trait t(v) { gene v = 1 from 1 to 9 } kind a extends t(1) { }")
+                .contains("gene `v` has the name of a parameter")
+        );
+        assert!(
+            err("kind a { gene b = 1 from 1 to 9 } kind b { }")
+                .contains("gene `b` has the name of a kind or trait")
+        );
+        assert!(
+            err("kind a { tags meat  gene meat = 1 from 1 to 9 }")
+                .contains("gene `meat` has the name of a tag")
+        );
+        assert!(
+            err("trait t { need g max 1h } kind a extends t { gene g = 1 from 1 to 9 }")
+                .contains("gene `g` has the name of a need")
+        );
+        assert!(
+            err(
+                "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
+                     kind a extends t, u { }"
+            )
+            .contains("inherits gene `g` from `t` and `u`, declared differently")
+        );
+        compile_ok(
+            "trait t { gene g = 1 from 1 to 9 } trait u { gene g = 2 from 1 to 9 }
+             kind a extends t, u { gene g = 3 from 1 to 9 }",
+        );
+        let many: String = (0..9)
+            .map(|i| format!("gene g{i} = 0 from 0 to 1 "))
+            .collect();
+        assert!(err(&format!("kind a {{ {many} }}")).contains("has 9 genes, at most 8"));
+        // A trait reads only the genes it or its ancestors declare.
+        let e =
+            err("trait t { when fear > 1 => idle } kind a extends t { gene fear = 1 from 0 to 9 }");
+        assert!(
+            e.contains("unknown name `fear`") || e.contains("which it does not declare"),
+            "{e}"
         );
     }
 

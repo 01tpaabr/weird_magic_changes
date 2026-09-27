@@ -147,7 +147,7 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 
 | group | senses | source |
 |---|---|---|
-| self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
+| self | each need, mem and gene by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
 | here / at | `ground`, `feature`, `scent(ch)`; `ground_at(t)`, `feature_at(t)`, `free(t)`, `is(t, pred)`, `look_of(t)`, `signal_of(t)` | cells and public rows in the halo; unloaded = rock, no actor |
 | search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, row-major in a ring, ring start rotated by one RNG draw |
@@ -188,6 +188,7 @@ decl     := "glyph" STRING | "color" STRING | "cover" | "tags" NAME+   # glyph, 
           | "cadence" num | "sight" num | "fuel" num | "bite" num | "food" num
           | "need" NAME "max" num [ "decay" INT ] [ "vital" ]
           | "mem" NAME ("," NAME)*
+          | "gene" NAME "=" num "from" num "to" num          # step 9: read, never written
 num      := expr                                             # constant: numbers, consts, trait parameters
 state    := "state" NAME "{" rule* "}"
 rule     := "when" cond "=>" body | "inherit" [ NAME ]

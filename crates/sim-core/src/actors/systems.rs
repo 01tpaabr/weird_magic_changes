@@ -1148,12 +1148,17 @@ fn local_target(cell: usize, dx: i8, dy: i8) -> Option<usize> {
     ((ox, oy) == (0, 0)).then_some(local)
 }
 
-/// A fresh mind of `kind`: every need at its max, memory clear, born now.
+/// A fresh mind of `kind`: every need at its max, memory clear, every gene
+/// at its default, born now.
 pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
     let def = kinds.def(kind);
     let mut needs = [0i32; NEED_SLOTS];
     for (n, d) in needs.iter_mut().zip(&def.needs) {
         *n = d.max;
+    }
+    let mut genes = [0i32; GENE_SLOTS];
+    for (g, d) in genes.iter_mut().zip(&def.genes) {
+        *g = d.default;
     }
     ActorMind {
         uid,
@@ -1166,7 +1171,7 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
         hurt: 0,
         hurt_dir: 0,
         _pad: 0,
-        genes: [0; GENE_SLOTS],
+        genes,
     }
 }
 

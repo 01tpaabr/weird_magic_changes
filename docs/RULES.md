@@ -84,6 +84,7 @@ Declarations come first in a kind, then the reflex rules, then any `state` block
 | `bite N` | 1 | health taken per `eat`/`hit`/`graze`, 0 to 255 |
 | `need NAME max M [decay 0] [vital]` | | a counter, at most 4 per kind |
 | `mem a, b, ...` | | memory slots, at most 12 per kind, all 0 at birth |
+| `gene NAME = D from LO to HI` | | a number of each individual's own, at most 8 per kind; read, never written |
 
 **Needs.** A need is an integer from 0 to its max. By default it is *ticks until empty*: it
 loses one per tick, and a value like `water < 30min` reads naturally. With `decay 0` it is
@@ -91,6 +92,26 @@ points that only rules and actions change, like `health`. A `vital` need at 0 ki
 read a need by its name and can assign to it, clamped to `0..max`
 (`water = min(water + 6h, 1d)`). Some needs have fixed meanings for actions: `water` for
 `drink`, `health` for bites, and `food` for what eating gives.
+
+**Genes.** A gene is a number the rules read by name, like a mem slot, but each actor has
+its own value and no rule can change it. A newborn starts at the default `D`. All three
+numbers are constant expressions, so a trait can take them from its parameters:
+
+```
+trait drinker(thirsty) {
+  need water max 4h vital
+  gene thirst = thirsty from 30min to 6h
+  when water < thirst and nearest water within 1 as w => drink w
+}
+kind sheep extends drinker(2h) {
+  gene fear = 6 from 1 to 12
+  when nearest fox within fear as f => flee(f)
+}
+```
+
+Genes merge through `extends` like needs: by name, a kind's own declaration overrides its
+parents', and two parents that declare one differently must be settled by the kind. A gene
+can't share its name with a need, mem slot, constant, trait parameter, kind or tag.
 
 **Time literals** are ticks: `30min`, `4h`, `2d`.
 
@@ -575,7 +596,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 
 | | |
 |---|---|
-| needs, mem slots per kind | 4, 12 |
+| needs, mem slots, genes per kind | 4, 12, 8 |
 | tags, scent channels per rule set | 64, 4 |
 | states per kind | 64 |
 | sight | 16 |
@@ -583,7 +604,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | sub call depth | 8 |
 | parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5) |
 
-Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
+Reserved words can't name a need, mem, gene, local, kind, sub or constant. They are every keyword
 in this document plus the sense names (`x`, `y`, `age`, `light`, `hour`, `day`, `kind`,
 `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`, `ground`, `feature`, `taken`,
 `trapped`). `wmc lint` says so when you hit one.

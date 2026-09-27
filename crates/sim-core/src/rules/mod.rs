@@ -14,7 +14,7 @@ pub mod vm;
 
 use bevy_ecs::prelude::*;
 
-use crate::actors::{MEM_SLOTS, NEED_SLOTS};
+use crate::actors::{GENE_SLOTS, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
 use vm::Op;
 
@@ -30,6 +30,17 @@ pub struct NeedDef {
     pub decays: bool,
     /// Zero means death.
     pub vital: bool,
+}
+
+/// One gene of a kind: `gene NAME = DEFAULT from LO to HI`. A newborn
+/// starts at `default` unless a parent passes its own value on (clamped to
+/// `lo..=hi`, then maybe mutated inside it).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneDef {
+    pub name: String,
+    pub default: i32,
+    pub lo: i32,
+    pub hi: i32,
 }
 
 /// One kind's properties and where its program starts.
@@ -55,6 +66,8 @@ pub struct KindDef {
     pub needs: Vec<NeedDef>,
     /// Memory slot names, at most [`MEM_SLOTS`].
     pub mems: Vec<String>,
+    /// At most [`GENE_SLOTS`].
+    pub genes: Vec<GeneDef>,
     /// Number of `state` blocks (state 0 = none / the first).
     pub states: u8,
     /// Program counter of the think.
@@ -170,6 +183,11 @@ impl KindDef {
     fn mem_index(&self, name: &str) -> Option<usize> {
         self.mems.iter().position(|m| m == name)
     }
+
+    /// Slot of the gene called `name`, if this kind has one.
+    pub fn gene_named(&self, name: &str) -> Option<usize> {
+        self.genes.iter().position(|g| g.name == name)
+    }
 }
 
 /// How a row's slots carry over `become` from one kind to another: for each
@@ -243,6 +261,15 @@ impl Kinds {
             d.id = i as u16;
             assert!(d.needs.len() <= NEED_SLOTS, "{}: too many needs", d.name);
             assert!(d.mems.len() <= MEM_SLOTS, "{}: too many mem slots", d.name);
+            assert!(d.genes.len() <= GENE_SLOTS, "{}: too many genes", d.name);
+            for g in &d.genes {
+                assert!(
+                    g.lo <= g.default && g.default <= g.hi,
+                    "{}: gene `{}` outside its range",
+                    d.name,
+                    g.name
+                );
+            }
             assert!(d.sight <= 16, "{}: sight beyond the halo", d.name);
             assert!(d.cadence_shift < 32, "{}: cadence", d.name);
         }
@@ -365,6 +392,14 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
                 mix(u64::from(b));
             }
             mix(0xFF);
+        }
+        // Nothing mixed for a kind without genes: its hash stays put.
+        for g in &d.genes {
+            for b in g.name.bytes() {
+                mix(u64::from(b));
+            }
+            mix(u64::from(g.default as u32) | 1 << 46);
+            mix(u64::from(g.lo as u32) | u64::from(g.hi as u32) << 32);
         }
     }
     for op in code {

@@ -88,6 +88,10 @@ impl Asm {
         self.emit(OpCode::SetMem, i, 0)
     }
 
+    pub fn gene(&mut self, i: u8) -> &mut Self {
+        self.emit(OpCode::Gene, i, 0)
+    }
+
     pub fn sense(&mut self, s: Sense) -> &mut Self {
         self.emit(OpCode::Sense, s as u8, 0)
     }
