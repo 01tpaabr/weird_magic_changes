@@ -35,8 +35,10 @@ struct Knobs {
     terrain: (u32, u32, u32, u32),
     /// A kind and the `d` of its `start K 1 / d`.
     shares: Vec<(Index, u32)>,
-    /// A kind and a cell; one on water, rock or a taken cell is left out.
-    ats: Vec<(Index, i32, i32)>,
+    /// A kind and a cell, and maybe a need or mem it starts with (which,
+    /// an edge or any value, the value); one on water, rock or a taken cell
+    /// is left out.
+    ats: Vec<(Index, i32, i32, Option<(Index, u8, i32)>)>,
     ticks: u64,
 }
 
@@ -47,7 +49,15 @@ fn knobs() -> impl Strategy<Value = Knobs> {
         (1u32..=2, 1u32..=2, 0u32..32, 0u32..32),
         (1u32..=40, 0u32..=60, 0u32..=20, 0u32..=20),
         prop::collection::vec((any::<Index>(), 8u32..=64), 1..=3),
-        prop::collection::vec((any::<Index>(), 0i32..128, 0i32..128), 0..=4),
+        prop::collection::vec(
+            (
+                any::<Index>(),
+                0i32..128,
+                0i32..128,
+                prop::option::of((any::<Index>(), 0u8..3, any::<i32>())),
+            ),
+            0..=4,
+        ),
         200u64..=400,
     )
         .prop_map(
@@ -100,16 +110,40 @@ fn case(p: &Program, k: &Knobs) -> Case {
     }
     // Only walkable cells, one start each: the terrain is the seed's.
     let s = Scenario::parse("fuzz.scenario", &text).expect("a generated scenario parses");
+    let kinds = crate::rules::compile("fuzz.rules", &p.text).expect("a valid program compiles");
     let mut cells: Vec<(i32, i32)> = Vec::new();
-    for (i, x, y) in &k.ats {
+    for (i, x, y, with) in &k.ats {
         if p.kinds.is_empty() || cells.contains(&(*x, *y)) {
             continue;
         }
         let (g, f) = s.terrain().cell(*x, *y);
-        if g.walkable() && !f.blocks() {
-            cells.push((*x, *y));
-            text += &format!("start {} at ({x}, {y})\n", i.get(&p.kinds));
+        if !g.walkable() || f.blocks() {
+            continue;
         }
+        cells.push((*x, *y));
+        let def = kinds.by_name(i.get(&p.kinds)).expect("a kind it declares");
+        text += &format!("start {} at ({x}, {y})", def.name);
+        // A need at 0, full, or anywhere between; a mem at either end of
+        // what a scenario can write, or anything.
+        let names: Vec<(&str, Option<i32>)> = def
+            .needs
+            .iter()
+            .map(|n| (n.name.as_str(), Some(n.max)))
+            .chain(def.mems.iter().map(|m| (m.as_str(), None)))
+            .collect();
+        if let (Some((slot, edge, v)), false) = (with, names.is_empty()) {
+            let (name, max) = *slot.get(&names);
+            let v = match (max, edge) {
+                (Some(_), 0) => 0,
+                (Some(max), 1) => max,
+                (Some(max), _) => v.rem_euclid(max.saturating_add(1).max(1)),
+                (None, 0) => -i32::MAX,
+                (None, 1) => i32::MAX,
+                (None, _) => (*v).max(-i32::MAX),
+            };
+            text += &format!(" with ({name} = {v})");
+        }
+        text += "\n";
     }
     text += &format!("run {}\n", k.ticks);
     Case {
