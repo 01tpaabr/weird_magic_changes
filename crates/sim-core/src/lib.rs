@@ -25,6 +25,11 @@
 //!   phases, world creation, streaming, save/load, checksum.
 //! - [`par`]: deterministic parallel helpers over the compute task pool.
 
+// A narrowing `as` either is a checked conversion or says why the value
+// fits (or that the truncation is the point). Tests may narrow freely.
+#![warn(clippy::cast_possible_truncation)]
+#![cfg_attr(test, allow(clippy::cast_possible_truncation))]
+
 pub mod actors;
 pub mod par;
 pub mod reload;
