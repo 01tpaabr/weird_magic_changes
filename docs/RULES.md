@@ -215,7 +215,7 @@ the trait a tag (`tags drinker`) and match the tag.
 | statement | |
 |---|---|
 | `name = expr`, `name += expr`, `name -= expr` | a need, a mem slot or a local |
-| `let name = expr` | a local; lives until the end of the rule body |
+| `let name = expr` | a local; lives until the end of its block: the rule or sub body, an `if` or `else` branch, a `while`, `repeat` or `for each` body, or a `choose` arm |
 | `if cond { } else if cond { } else { }` | |
 | `while cond { }`, `repeat n { }` | bounded by fuel |
 | `for each pred within r as v { }` | once per matching cell in rings 1..r, in a fixed order (each ring clockwise from its top-left). The search's fuel is paid once. There is no `break`, so collect into locals and act after the loop |
@@ -597,7 +597,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | fuel per think | 4096 |
 | sub call depth | 8 |
 | value stack per think | 64 (shared by a rule and the subs it calls; a rule or sub that needs more by itself is an error: nest less deeply or split with `let`) |
-| parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5, a `choose` 1 per arm plus 1) |
+| parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5, a `choose` 1 per arm plus 1, a `repeat` 1, and `toward`, `away` and `random free` 2 while evaluated) |
 | nesting in one rule or sub | 128 levels: each nested statement, parenthesis, call argument, operand, `-`, `not`, `toward` and `away` is one, and so is each operator in a chain (`(m) > 0` is three: the parenthesis, `m` and `>`) |
 | compiled size of one rule, one state's rules, one sub | 32767 ops (jumps are 16 bits; split what is longer) |
 | distinct constants outside -32768..32767 per rule set | 65536 |

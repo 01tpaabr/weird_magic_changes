@@ -5256,6 +5256,29 @@ mod tests {
         }
     }
 
+    /// RULES §7: a `let` lives until the end of its block.
+    #[test]
+    fn a_let_ends_with_its_block() {
+        compile_ok("kind a { mem m\n when 1 => { let a = 3  if m == 0 { m = a } } }");
+        let e = compile_err("kind a { mem m\n when 1 => { if m == 0 { let a = 3 }  m = a } }");
+        assert!(e.contains("unknown name `a`"), "{e}");
+    }
+
+    /// RULES §18: `toward`, `away` and `random free` take 2 slots while
+    /// evaluated, on top of the rule's bindings.
+    #[test]
+    fn toward_takes_two_slots() {
+        let binds = (0..8)
+            .map(|i| format!("nearest free within 1 as t{i}"))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        compile_ok(&format!("kind a {{ when {binds} => move t0 }}"));
+        for t in ["toward t0", "away t0", "random free"] {
+            let e = compile_err(&format!("kind a {{ when {binds} => move {t} }}"));
+            assert!(e.contains("too many bindings"), "{t}: {e}");
+        }
+    }
+
     #[test]
     fn choose_draws_once_and_large_constants_use_the_pool() {
         let k = compile_ok(
