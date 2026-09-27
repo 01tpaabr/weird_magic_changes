@@ -635,7 +635,7 @@ pub struct Ctx<'a> {
 /// calls (RULES.md §18).
 pub const STACK: usize = 64;
 /// Sub frames on top of the rule's own: calls nest this deep (RULES.md §12).
-const FRAMES: usize = 8;
+pub const FRAMES: usize = 8;
 
 /// Locals per call frame (a sub's arguments and `let`s).
 pub const FRAME_LOCALS: usize = 16;

@@ -24,7 +24,9 @@ use std::collections::HashMap;
 use std::fmt;
 
 use super::asm::{Asm, Label};
-use super::vm::{Action, FOR_EACH_LOCALS, FRAME_LOCALS, OpCode, STACK, Sense, pred, result};
+use super::vm::{
+    Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
+};
 use super::{DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
@@ -1939,7 +1941,24 @@ fn returns_value(body: &[Stmt]) -> bool {
             returns_value(body)
         }
         Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
-        _ => false,
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::Call { .. }
+        | Stmt::Idle(_)
+        | Stmt::Die(_)
+        | Stmt::Become { .. }
+        | Stmt::Spawn { .. }
+        | Stmt::Transfer { .. }
+        | Stmt::Move(..)
+        | Stmt::Drink(..)
+        | Stmt::Eat(..)
+        | Stmt::Hit(..)
+        | Stmt::Graze(..)
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..) => false,
     })
 }
 
@@ -1956,7 +1975,25 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
                 spawn_withs(body, out)
             }
             Stmt::Choose(arms) => arms.iter().for_each(|(_, b)| spawn_withs(b, out)),
-            _ => {}
+            Stmt::Spawn { .. }
+            | Stmt::Set { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Let { .. }
+            | Stmt::Call { .. }
+            | Stmt::Return { .. }
+            | Stmt::Idle(_)
+            | Stmt::Die(_)
+            | Stmt::Become { .. }
+            | Stmt::Transfer { .. }
+            | Stmt::Move(..)
+            | Stmt::Drink(..)
+            | Stmt::Eat(..)
+            | Stmt::Hit(..)
+            | Stmt::Graze(..)
+            | Stmt::Look(_)
+            | Stmt::Signal(_)
+            | Stmt::Mark(..)
+            | Stmt::Next(..) => {}
         }
     }
 }
@@ -2095,7 +2132,20 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Eat(_, at)
         | Stmt::Hit(_, at)
         | Stmt::Graze(_, at) => Some(at),
-        _ => None,
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::If { .. }
+        | Stmt::While { .. }
+        | Stmt::Repeat { .. }
+        | Stmt::Choose(_)
+        | Stmt::Call { .. }
+        | Stmt::Return { .. }
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..)
+        | Stmt::ForEach { .. } => None,
     }
 }
 
@@ -2109,7 +2159,24 @@ fn may_return(s: &Stmt) -> bool {
         Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
             body.iter().any(may_return)
         }
-        _ => false,
+        Stmt::Set { .. }
+        | Stmt::Assign { .. }
+        | Stmt::Let { .. }
+        | Stmt::Call { .. }
+        | Stmt::Idle(_)
+        | Stmt::Die(_)
+        | Stmt::Become { .. }
+        | Stmt::Spawn { .. }
+        | Stmt::Transfer { .. }
+        | Stmt::Move(..)
+        | Stmt::Drink(..)
+        | Stmt::Eat(..)
+        | Stmt::Hit(..)
+        | Stmt::Graze(..)
+        | Stmt::Look(_)
+        | Stmt::Signal(_)
+        | Stmt::Mark(..)
+        | Stmt::Next(..) => false,
     }
 }
 
@@ -3389,7 +3456,7 @@ impl<'a> Gen<'a> {
             Stmt::Call { name, .. } => {
                 // A callee's answer depends only on it, the tables and the
                 // depth (inside it every name is unknown): remembered.
-                depth < 8
+                depth < FRAMES as u32
                     && self.callee(name).is_some_and(|sub| {
                         let key = (std::ptr::from_ref(sub) as usize, self.cur, depth, acts_only);
                         if let Some(&v) = self.ends_memo.borrow().get(&key) {

@@ -936,7 +936,7 @@ impl<'a> Gen<'a> {
         at: &Pos,
         out: &mut Out,
     ) {
-        if w.depth >= 8 {
+        if w.depth >= FRAMES as u32 {
             return;
         }
         if w.walks >= WALKS {
