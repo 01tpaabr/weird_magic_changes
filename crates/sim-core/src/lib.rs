@@ -46,3 +46,23 @@ pub use stage::{
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};
+
+/// Proptest settings for the never-panic properties (scenario text, save
+/// files): `cases` for `make test`, `WMC_FUZZ_CASES` for `make fuzz`. The
+/// seed is fixed, so `make test` checks the same cases every run;
+/// `WMC_FUZZ_SEED` picks others (`make fuzz` prints the one it used).
+/// Nothing is persisted: a failure prints its shrunk input, which goes in a
+/// regression test.
+#[cfg(test)]
+pub(crate) fn fuzz_config(cases: u32) -> proptest::test_runner::Config {
+    let var = |name: &str| std::env::var(name).ok();
+    let seed = var("WMC_FUZZ_SEED").and_then(|v| v.parse().ok());
+    proptest::test_runner::Config {
+        cases: var("WMC_FUZZ_CASES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cases),
+        failure_persistence: None,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(seed.unwrap_or(0x5EED)),
+        ..proptest::test_runner::Config::default()
+    }
+}

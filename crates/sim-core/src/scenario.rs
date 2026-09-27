@@ -41,6 +41,8 @@ use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos};
 
 mod expect;
 pub use expect::{check_expect, expect, expect_family};
+#[cfg(test)]
+mod fuzz;
 
 /// A cell's placement draw is out of this: the top 24 bits of a cell hash,
 /// exact in integers. A share `n / d` is `n * PLACE_ONE / d` of it.
