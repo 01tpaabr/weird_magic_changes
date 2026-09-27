@@ -115,6 +115,10 @@ A binding is only visible in the body if its search is a top-level conjunct: all
 searches, so `when chance(10) and nearest chicken within 6 as m ...` only searches one time
 in ten.
 
+A condition only tests: a sub it calls must not act or `next`, through the subs that one
+calls too (§12). That is a compile error, since the action would stand even when the
+condition turns out false. In a body, `v = step()` and `if step() > 0 { }` are fine.
+
 ## 5. States
 
 ```
@@ -332,7 +336,8 @@ sub turn(h) {                       # returns a value: usable in expressions
 
 A sub sees only its parameters, its locals and constants, never a kind's needs or memory,
 so every kind can call it. It may act (`flee` moves); the think then ends when the calling
-rule's body finishes. Calls nest up to 8 deep. `take`, `give` and `next` belong to kinds, not
+rule's body finishes. A sub that may act or `next` (itself, or through any sub it calls)
+can't be called from a `when` condition (§4). Calls nest up to 8 deep. `take`, `give` and `next` belong to kinds, not
 subs.
 
 ## 13. Cost

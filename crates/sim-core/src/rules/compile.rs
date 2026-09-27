@@ -2123,6 +2123,10 @@ struct Gen<'a> {
     /// [`Gen::ends`] of a call, by (sub address, tables, depth, acts_only):
     /// only looked up, never iterated.
     ends_memo: RefCell<HashMap<(usize, Option<usize>, u32, bool), bool>>,
+    /// [`Gen::call_acts`] of a call, by (sub address, tables, depth).
+    acts_memo: RefCell<HashMap<(usize, Option<usize>, u32), bool>>,
+    /// Compiling a `when` condition: a sub called here must not act.
+    in_when: bool,
 }
 
 /// Does this statement emit an action? Its position, if so.
@@ -2215,6 +2219,8 @@ impl<'a> Gen<'a> {
             },
             state: None,
             ends_memo: RefCell::default(),
+            acts_memo: RefCell::default(),
+            in_when: false,
             items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
@@ -3424,6 +3430,96 @@ impl<'a> Gen<'a> {
         subs.iter().find(|s| s.name == name)
     }
 
+    /// May a call of `name` here act or `next`, on any path? Follows every
+    /// call in its body, in statements and in expressions, eight deep.
+    fn call_acts(&self, name: &str, depth: u32) -> bool {
+        depth < FRAMES as u32
+            && self.callee(name).is_some_and(|sub| {
+                let key = (std::ptr::from_ref(sub) as usize, self.cur, depth);
+                if let Some(&v) = self.acts_memo.borrow().get(&key) {
+                    return v;
+                }
+                let v = sub.body.iter().any(|s| self.stmt_acts(s, depth + 1));
+                self.acts_memo.borrow_mut().insert(key, v);
+                v
+            })
+    }
+
+    fn stmt_acts(&self, s: &Stmt, depth: u32) -> bool {
+        let body = |b: &[Stmt]| b.iter().any(|s| self.stmt_acts(s, depth));
+        match s {
+            Stmt::Next(..) => true,
+            _ if action_at(s).is_some() => true,
+            Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
+                self.expr_acts(value, depth)
+            }
+            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Mark(_, e, _) => self.expr_acts(e, depth),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
+            Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
+            Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
+            Stmt::Repeat { count, body: b } => self.expr_acts(count, depth) || body(b),
+            Stmt::ForEach { r, body: b, .. } => self.expr_acts(r, depth) || body(b),
+            Stmt::Choose(arms) => arms
+                .iter()
+                .any(|(w, b)| self.expr_acts(w, depth) || body(b)),
+            Stmt::Call { name, args, .. } => {
+                self.args_act(args, depth) || self.call_acts(name, depth)
+            }
+            _ => false,
+        }
+    }
+
+    fn cond_acts(&self, c: &Cond, depth: u32) -> bool {
+        match c {
+            Cond::Expr(e) | Cond::Nearest { r: e, .. } | Cond::Sniff { r: e, .. } => {
+                self.expr_acts(e, depth)
+            }
+            Cond::And(a, b) | Cond::Or(a, b) => {
+                self.cond_acts(a, depth) || self.cond_acts(b, depth)
+            }
+            Cond::Not(a) => self.cond_acts(a, depth),
+        }
+    }
+
+    fn expr_acts(&self, e: &Expr, depth: u32) -> bool {
+        match e {
+            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Count(_, a) => {
+                self.expr_acts(a, depth)
+            }
+            Expr::Bin(_, a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
+            Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
+            Expr::Dist(t)
+            | Expr::FreeAt(t)
+            | Expr::IsAt(t, _)
+            | Expr::LookOf(t)
+            | Expr::SignalOf(t, _)
+            | Expr::Scent(_, Some(t), _) => self.target_acts(t, depth),
+            Expr::Call { name, args, .. } => {
+                self.args_act(args, depth) || self.call_acts(name, depth)
+            }
+            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Scent(..) => {
+                false
+            }
+        }
+    }
+
+    fn target_acts(&self, t: &Target, depth: u32) -> bool {
+        match t {
+            Target::Heading(e) => self.expr_acts(e, depth),
+            Target::At(a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
+            Target::Toward(t) | Target::Away(t) => self.target_acts(t, depth),
+            _ => false,
+        }
+    }
+
+    fn args_act(&self, args: &[Arg], depth: u32) -> bool {
+        args.iter().any(|a| match a {
+            Arg::Expr(e) => self.expr_acts(e, depth),
+            Arg::Target(t) => self.target_acts(t, depth),
+            Arg::Pred(_) | Arg::Name(..) => false,
+        })
+    }
+
     fn rule_list(&mut self, list: &RList<'a>) -> Result<()> {
         for rr in &list.rules {
             self.owner = Some(rr.owner);
@@ -3440,7 +3536,9 @@ impl<'a> Gen<'a> {
         self.next_local = 0;
         let next = self.asm.label();
         let cond_pc = self.asm.here();
+        self.in_when = true;
         self.cond(&rule.cond, next, true)?;
+        self.in_when = false;
         let body_pc = self.asm.here();
         self.stmts(&rule.body)?;
         self.asm.end_rule().bind(next);
@@ -4031,6 +4129,13 @@ impl<'a> Gen<'a> {
                 .ok_or_else(|| self.err(at, format!("unknown sub `{name}`")))?;
             (u16::try_from(i).expect("checked in generate"), &subs[i])
         };
+        // The action would survive a false condition (docs/RULES.md §4).
+        if self.in_when && self.call_acts(name, 0) {
+            return Err(self.err(
+                at,
+                format!("`{name}` may act or `next`: a sub called in a `when` condition must not"),
+            ));
+        }
         if args.len() != sub.params.len() {
             return Err(self.err(
                 at,
@@ -5894,6 +5999,55 @@ mod tests {
              kind k { when true => { f()  move north } }",
         );
         assert!(e.contains("a second action"), "{e}");
+    }
+
+    #[test]
+    fn a_sub_called_in_a_when_condition_must_not_act() {
+        let step = "sub step() { move north  return 1 }\n";
+        for (text, sub) in [
+            ("kind a { when step() > 0 => idle }", "step"),
+            ("kind a { when true and not (step() == 1) => idle }", "step"),
+            (
+                "kind a { when nearest a within step() as f => idle }",
+                "step",
+            ),
+            ("kind a { when is(dir(step()), free) => idle }", "step"),
+            // Through calls, in statements and expressions, and inside
+            // if, choose and loops.
+            (
+                "sub p() { let v = step()  return v }\nkind a { when p() => idle }",
+                "p",
+            ),
+            (
+                "sub h() { choose { 1: idle  1: look = 1 } }\n\
+                 sub p() { repeat 2 { if hour > 1 { h() } }  return 1 }\n\
+                 kind a { when 1 + p() > 0 => idle }",
+                "p",
+            ),
+            (
+                "kind a { sub g() { if hour > 1 { next S }  return 1 }\n\
+                 when g() => idle  state S { } }",
+                "g",
+            ),
+        ] {
+            let e = compile_err(&format!("{step}{text}"));
+            assert!(
+                e.contains(&format!(
+                    "`{sub}` may act or `next`: a sub called in a `when` condition must not"
+                )),
+                "{text}: {e}"
+            );
+        }
+        let e = compile_err(&format!("{step}kind a {{\n when hour > step() => idle }}"));
+        assert!(e.starts_with("t.rules:3:14:"), "{e}");
+        // A pure sub is fine, and an acting sub still works in a body.
+        compile_ok("sub pure() { return hour + 1 }\nkind a { when pure() > 0 => idle }");
+        compile_ok(&format!(
+            "{step}kind a {{ mem v  when true => {{ v = step() }} }}"
+        ));
+        compile_ok(&format!(
+            "{step}kind a {{ when true => {{ if step() > 0 {{ look = 1 }} }} }}"
+        ));
     }
 
     #[test]
