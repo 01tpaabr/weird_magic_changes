@@ -88,7 +88,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `glyph "c"` | `?` | one printable ASCII character |
 | `color "#rrggbb"` | pale yellow | the glyph's colour |
 | `cover` | no | ground cover (grass): lies under whoever stands on the cell, never blocks, never moves; eaten with `graze` |
-| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set; the list ends at the next declaration, `sub`, `when` or `state`, so no tag is named `food` |
+| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
 | `cadence N` | 8 | thinks every N ticks; a power of two |
 | `sight N` | 4 | the largest radius any search reaches, 0 to 16 |
 | `fuel N` | 512 | ops per think, 1 to 4096 |
