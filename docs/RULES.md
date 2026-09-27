@@ -381,7 +381,7 @@ start hive at (77, 103)                        # exactly there
 | `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
 | `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
-| `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with` |
+| `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
 
 `seed`, `size`, `map`, `legend` and `outside` come once, and each terrain field once (several

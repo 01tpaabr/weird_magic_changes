@@ -543,8 +543,8 @@ impl Scenario {
     /// second `seed`, `size`, `outside` or terrain field, shares that are
     /// not `0 < n / d <= 1` or place nobody (below `1 / PLACE_ONE`), two
     /// shares for one kind,
-    /// shares summing above one, and a map that does not fit its legend or
-    /// its size are errors. Kind, need and memory names are checked later,
+    /// shares summing above one, a map that does not fit its legend or
+    /// its size, and a legend entry the map never uses are errors. Kind, need and memory names are checked later,
     /// against the rules ([`Placement::resolve`]).
     pub fn parse(file: &str, text: &str) -> Result<Scenario, ScenarioError> {
         let mut s = Scenario::default();
@@ -960,8 +960,10 @@ impl Scenario {
             ));
         }
         let mut cells = Vec::with_capacity(width * height);
+        let mut used = [false; 256];
         for (y, (at, row)) in drawn.iter().enumerate() {
             for (x, b) in row.bytes().enumerate() {
+                used[usize::from(b)] = true;
                 let Some((_, what, _)) = entries.iter().find(|e| e.0 == b) else {
                     return Err(err(
                         *at,
@@ -984,6 +986,12 @@ impl Scenario {
                     }
                 }
             }
+        }
+        if let Some((key, _, at)) = entries.iter().find(|e| !used[usize::from(e.0)]) {
+            return Err(err(
+                *at,
+                format!("`{}` is in the legend but not on the map", char::from(*key)),
+            ));
         }
         if size_line.is_none() {
             (s.width, s.height) = (w, h);
@@ -1654,6 +1662,16 @@ legend {
             (
                 format!("map {{\n{}\n}}\n{legend}", ".".repeat(64 * 4096 + 1)),
                 "t:1: a map covers at most 4096 chunks",
+            ),
+            // A legend entry the map never draws: a typo'd kind or `with`
+            // would never be checked, or a drawing was forgotten.
+            (
+                format!("map {{\n..\n}}\n{legend}"),
+                "t:6: `C` is in the legend but not on the map",
+            ),
+            (
+                "map {\n..\n}\nlegend {\n  . soil\n  # rock   # unused\n}".to_string(),
+                "t:6: `#` is in the legend but not on the map",
             ),
         ] {
             let e = Scenario::parse("t", &text).unwrap_err().to_string();
