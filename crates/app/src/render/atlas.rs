@@ -17,7 +17,7 @@ pub const FIRST_GLYPH: u8 = b' ';
 pub const LAST_GLYPH: u8 = b'~';
 pub const GLYPH_COUNT: usize = (LAST_GLYPH - FIRST_GLYPH + 1) as usize;
 /// Tileset layer of the fully covered box (cell backgrounds).
-pub const SOLID: u16 = GLYPH_COUNT as u16;
+pub const SOLID: u16 = (LAST_GLYPH - FIRST_GLYPH) as u16 + 1;
 /// Layers in the tileset: the glyphs and the solid box.
 pub const LAYERS: usize = GLYPH_COUNT + 1;
 
@@ -46,27 +46,30 @@ impl GlyphAtlas {
         let advance = font.metrics('M', px).advance_width;
         // Centre the font's line box vertically and its advance box horizontally.
         let baseline = ((cell as f32 - (line.ascent - line.descent)) / 2.0 + line.ascent).round();
-        let baseline = baseline as i32;
-        let x_pad = ((cell as f32 - advance) / 2.0).round() as i32;
         let cell_i = i32::try_from(cell).expect("cell fits i32");
+        // Offsets within a cell or two of 0, and the cell fits i32.
+        #[allow(clippy::cast_possible_truncation)]
+        let (baseline, x_pad) = (
+            baseline as i32,
+            ((cell as f32 - advance) / 2.0).round() as i32,
+        );
 
         let mut coverage = vec![0u8; GLYPH_COUNT * cell * cell];
-        for (i, boxed) in coverage.chunks_exact_mut(cell * cell).enumerate() {
-            let ch = char::from(FIRST_GLYPH + i as u8);
+        for (ch, boxed) in (FIRST_GLYPH..=LAST_GLYPH).zip(coverage.chunks_exact_mut(cell * cell)) {
+            let ch = char::from(ch);
             let (m, bitmap) = font.rasterize(ch, px);
             if m.width == 0 || m.height == 0 {
                 continue;
             }
             let x0 = x_pad + m.xmin;
             // fontdue: `ymin` is the bitmap's bottom edge above the baseline; rows top-down.
-            let y0 = baseline - (m.ymin + m.height as i32);
-            for (r, line) in bitmap.chunks_exact(m.width).enumerate() {
-                let y = y0 + r as i32;
+            let height = i32::try_from(m.height).expect("a glyph is a few cells tall");
+            let y0 = baseline - (m.ymin + height);
+            for (y, line) in (y0..).zip(bitmap.chunks_exact(m.width)) {
                 if y < 0 || y >= cell_i {
                     continue;
                 }
-                for (c, &v) in line.iter().enumerate() {
-                    let x = x0 + c as i32;
+                for (x, &v) in (x0..).zip(line) {
                     if x < 0 || x >= cell_i {
                         continue;
                     }
@@ -87,12 +90,18 @@ impl GlyphAtlas {
     }
 
     pub fn index(byte: u8) -> usize {
+        usize::from(Self::offset(byte))
+    }
+
+    /// `byte`'s box, counted from [`FIRST_GLYPH`] (unknown bytes: `?`'s).
+    #[inline]
+    fn offset(byte: u8) -> u8 {
         let b = if (FIRST_GLYPH..=LAST_GLYPH).contains(&byte) {
             byte
         } else {
             b'?'
         };
-        usize::from(b - FIRST_GLYPH)
+        b - FIRST_GLYPH
     }
 
     /// The `cell*cell` coverage box for `byte`.
@@ -104,7 +113,7 @@ impl GlyphAtlas {
     /// Tileset layer for `byte` (unknown bytes draw as `?`).
     #[inline]
     pub fn layer(byte: u8) -> u16 {
-        Self::index(byte) as u16
+        u16::from(Self::offset(byte))
     }
 
     /// The atlas as a GPU array texture: [`LAYERS`] layers of `cell x cell`
@@ -123,7 +132,7 @@ impl GlyphAtlas {
             Extent3d {
                 width: cell,
                 height: cell,
-                depth_or_array_layers: LAYERS as u32,
+                depth_or_array_layers: u32::try_from(LAYERS).expect("96 layers"),
             },
             TextureDimension::D2,
             data,

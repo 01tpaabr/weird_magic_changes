@@ -68,10 +68,14 @@ fn linear(c: u8) -> f32 {
     }
 }
 
+// A weighted mean of two bytes (weights summing to 255, over 255): a byte.
+#[allow(clippy::cast_possible_truncation)]
 const fn lerp(a: u8, b: u8, t: u8) -> u8 {
     ((a as u32 * (255 - t as u32) + b as u32 * t as u32 + 127) / 255) as u8
 }
 
+// A byte times a byte over 255: a byte.
+#[allow(clippy::cast_possible_truncation)]
 const fn scale(c: u8, light: u8) -> u8 {
     ((c as u32 * light as u32 + 127) / 255) as u8
 }
@@ -81,6 +85,8 @@ pub const NIGHT_FLOOR: u8 = 0x66;
 
 /// Map brightness for a sim daylight level (`sim_core::time::daylight`):
 /// full sun draws the palette as is, night draws it at [`NIGHT_FLOOR`].
+// `span * daylight / 255` is at most `span`, and `NIGHT_FLOOR + span` is 255.
+#[allow(clippy::cast_possible_truncation)]
 pub const fn brightness(daylight: u8) -> u8 {
     let span = (255 - NIGHT_FLOOR) as u32;
     NIGHT_FLOOR + ((span * daylight as u32 + 127) / 255) as u8
@@ -110,6 +116,8 @@ pub const SCENT_TINT: u8 = 0x68;
 
 /// `bg` tinted toward each channel's colour by that channel's scent: a
 /// trail shows as a faint wash that fades with it.
+// `s * SCENT_TINT / 255` is at most `SCENT_TINT`, a byte.
+#[allow(clippy::cast_possible_truncation)]
 pub fn scented(bg: Color, scent: [u8; SCENT_CHANNELS]) -> Color {
     scent.iter().zip(SCENT).fold(bg, |c, (&s, col)| {
         if s == 0 {
