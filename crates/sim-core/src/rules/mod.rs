@@ -437,29 +437,6 @@ mod tests {
         );
     }
 
-    /// The trait example in docs/RULES.md §6 compiles as a pack on top of
-    /// the built-in rules, so the reference cannot drift from the language.
-    #[test]
-    fn the_rules_md_trait_example_compiles_on_the_builtin_rules() {
-        let doc = include_str!("../../../../docs/RULES.md");
-        let section = &doc[doc.find("## 6. Traits").unwrap()..];
-        let start = section.find("```\n").unwrap() + 4;
-        let end = start + section[start..].find("```").unwrap();
-        let mut files = builtin::FILES.to_vec();
-        files.push(("example.rules", &section[start..end]));
-        let k = compile::compile_files(&files).unwrap_or_else(|e| panic!("{e}"));
-        let lamb = k.by_name("lamb").unwrap();
-        assert_eq!(k.def(lamb.parent.unwrap()).name, "sheep");
-        assert!(
-            k.debug
-                .diagnostics
-                .iter()
-                .all(|d| d.level != Level::Warning),
-            "{:?}",
-            k.debug.diagnostics
-        );
-    }
-
     #[test]
     fn remap_matches_slots_by_name() {
         let k = Kinds::builtin();

@@ -2020,21 +2020,6 @@ legend {
         assert_eq!(present(&starts, &k), want);
     }
 
-    /// The scenarios in docs/RULES.md §14 parse and fit the built-in rules.
-    #[test]
-    fn the_rules_md_scenarios_parse_and_resolve() {
-        let doc = include_str!("../../../docs/RULES.md");
-        let from = doc.find("## 14. Scenarios").unwrap();
-        let to = doc.find("## 15. Packs").unwrap();
-        let blocks: Vec<&str> = doc[from..to].split("```").skip(1).step_by(2).collect();
-        assert_eq!(blocks.len(), 3);
-        for text in blocks {
-            let s = Scenario::parse("RULES.md", text).unwrap_or_else(|e| panic!("{e}"));
-            Placement::resolve(&s.starts, &Kinds::builtin(), &s.terrain())
-                .unwrap_or_else(|e| panic!("{e}"));
-        }
-    }
-
     /// Every built-in kind appears in the default world; the fox pen starts
     /// hens and foxes, which lay eggs that hatch into chicks, and nothing
     /// else.

@@ -5,7 +5,7 @@ The files are compiled into bytecode when a world opens, and every actor of a ki
 that program against its own needs and memory. This is the author's reference; the design
 and the reasons behind it are in `ACTORS.md`.
 
-```
+```sh
 make run ARGS="lint rules/"                 # compile, print the kind table
 make run ARGS="why saves/dev 77 103"        # what the actor at (77, 103) is thinking
 make run ARGS="play saves/try --rules rules --rules my_pack --scenario my.scenario"
@@ -15,9 +15,18 @@ In `wmc play`, `r` recompiles the world's packs (§15; with the built-in rules, 
 swaps them into the running world. Live actors keep their kind, needs, memory and state by
 name.
 
+Every example here runs in `make test` (`crates/sim-core/tests/docs.rs`), so each fence says
+what it holds. ` ```rules ` compiles with the built-in rules, without a warning: a kind,
+trait, sub or const it declares replaces the built-in one of that name, and bare rules are
+the rules of a kind that extends `drinker(6, 2h, 3)` with `sight 8`. ` ```scenario ` fits
+the rules it names, else the built-in ones, and passes its `expect` lines; one headed with a
+file's path is that file, abridged. A block that shows a mistake adds `error` to the fence
+(` ```rules error `) and ends the line that fails with `# error: ` and part of the message.
+` ```sh ` and ` ```text ` are not run.
+
 ## 1. A first kind
 
-```
+```rules
 kind seed {
   glyph ","
   color "#7a3b12"
@@ -54,7 +63,7 @@ day is 21 600 ticks: 900 an hour, 15 a minute.
 4. **First match.** A rule whose condition holds runs its whole body. If the body did an
    action or a `next`, the think ends there. If it did neither, scanning goes on to the
    next rule. So a body that only writes memory "falls through":
-   ```
+   ```rules
    when nearest water within 6 as w => { knows_water = 1  water_x = x + w.dx }   # falls through
    when blocked => { heading = rand(8) + 1 }                                     # falls through
    when detour > 0 => { detour -= 1  move dir(heading) }                         # acts: the think ends
@@ -98,14 +107,14 @@ read a need by its name and can assign to it, clamped to `0..max`
 
 ## 4. Rules, conditions and bindings
 
-```
+```text
 when <condition> => <statement or { block }>
 ```
 
 A condition is an expression (nonzero is true), combined with `and`, `or` and `not`, which
 short-circuit. Two conditions also bind a name to a cell:
 
-```
+```rules
 when nearest fox within 5 as f => flee(f)       # f is the nearest cell holding a fox
 when sniff trail within 4 as v => move toward v # v is the cell with the most `trail` scent
 ```
@@ -121,7 +130,7 @@ condition turns out false. In a body, `v = step()` and `if step() > 0 { }` are f
 
 ## 5. States
 
-```
+```rules
 kind bee {
   glyph "b"
   need food   max 4h vital
@@ -153,7 +162,7 @@ glyph, no colour, and no actors of its own. A kind **extends** traits to include
 may extend one other kind. The built-in kinds are written this way, on the traits of
 `rules/lib.rules` (§16); any pack can use them.
 
-```
+```rules
 trait grazer(hungry) {                    # a parameter: a constant inside the trait
   need food max 1d vital
   mem meals
@@ -237,6 +246,13 @@ A name reads a local first (a `let`, an `as` binding, a sub's parameter), then a
 slot, then a trait parameter, then a constant. A local may hide a trait parameter or a
 constant, but not a need or mem slot the code can name: `let food = 5` in a kind with `need
 food` is an error, as is a binding or a member sub's parameter of that name.
+
+```rules error
+kind hen {
+  need food max 1d vital
+  when true => { let food = 5  idle }   # error: has the name of a need or mem slot
+}
+```
 
 ## 8. Actions
 
@@ -338,7 +354,7 @@ Every value is a 32-bit integer; there are no floats. Arithmetic wraps, `x / 0` 
 (p percent), `pack(a, b)` / `hi(v)` / `lo(v)` (two signed bytes in one value, for signals).
 Randomness is drawn per actor per tick from the world seed, so a replay draws the same.
 
-```
+```rules
 const LOAD = 30min                  # folded at compile time; visible everywhere
 
 sub flee(t: target) {               # parameters are ints unless typed `target` or `pred`
@@ -383,7 +399,7 @@ Rules say what kinds are and how they behave. Where they start is the world's bu
 new world is made from a **scenario**, a small text file in `scenarios/`. A save keeps its
 scenario, so every part of the map generates the same way whenever it is first visited.
 
-```
+```scenario
 # scenarios/meadow.scenario
 seed 12
 size 256 256                                   # the region generated at creation, in cells
@@ -422,7 +438,7 @@ one is an error), shares still apply to its walkable cells, and every kind chara
 a `start K at (x, y)`. This is the fox and the
 cornered hen of `scenarios/tests/fox_pen.scenario`, with the pen drawn:
 
-```
+```scenario
 seed 3
 outside soil
 map {
@@ -451,7 +467,7 @@ checksum at both; one without `run` lines only makes its world. A test sees only
 initial region (`size`, in whole 64-cell chunks): nothing streams in, so a `start K at`
 outside it is never placed.
 
-```
+```scenario
 # scenarios/tests/eggs_hatch.scenario
 seed 4
 terrain water_level 0 rock_on_soil 0 rock_on_water 0   # flat soil
@@ -503,7 +519,7 @@ trait is that item's own: two items may each have a `wander`, but it can't share
 a file sub, a kind or a trait. A pack given twice loads once. With several packs an error
 names a file `pack/file.rules`, with more parent directories where two packs share a name.
 
-```
+```sh
 wmc play saves/zoo --rules rules --rules mods/wolves     # the built-in kinds, then a mod's
 WMC_RULES=rules:mods/wolves wmc run saves/zoo 1000       # the same, for any command
 wmc lint rules mods/wolves                               # check them together
@@ -512,7 +528,7 @@ wmc lint rules mods/wolves                               # check them together
 A scenario can name its world's packs, relative to the scenario file, so it runs like any
 other with nothing but `--scenario`:
 
-```
+```scenario
 rules ../packs/life                 # in scenarios/life.scenario
 ```
 

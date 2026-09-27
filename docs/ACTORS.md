@@ -21,7 +21,7 @@ state is exactly needs + memory + a state byte: no saved program counter, so a t
 pure function of (own row, the world after this tick's Simulate phase (scent faded), tick,
 seed).
 
-```
+```text
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
  Simulate  seq   scent_decay (cadence 16)     W ChunkCells.scent of due chunks (one thread: too little work to split)
  Think     par   actors::think                R Tick SimConfig Programs Stage, ANY ChunkCells + ChunkActors
@@ -327,7 +327,7 @@ TIME     := INT ("min" | "h" | "d")
 
 **Example** (abridged; `rules/lib.rules` and `rules/animals.rules` have the full ones).
 
-```
+```rules
 sub turn(h) {                              # mostly straight on
   if h == 0 { return rand(8) + 1 }
   choose { 80: return h   8: return h % 8 + 1   8: return (h + 6) % 8 + 1   4: return rand(8) + 1 }
