@@ -147,6 +147,11 @@ impl Asm {
         self.emit(OpCode::Nearest, slot, 0)
     }
 
+    /// `-> found`, binding a free neighbour into `slot`, `slot + 1`.
+    pub fn random_free(&mut self, slot: u8) -> &mut Self {
+        self.emit(OpCode::RandomFree, slot, 0)
+    }
+
     /// `ch r -> found`, binding the strongest scent cell into `slot`, `slot + 1`.
     pub fn sniff(&mut self, slot: u8) -> &mut Self {
         self.emit(OpCode::Sniff, slot, 0)

@@ -158,6 +158,10 @@ pub enum OpCode {
     /// is bound into `dx, dy` and the cursor moves past it. The first step
     /// (cursor 0) pays the search's fuel.
     ForEach,
+    /// `-> found`; on success `locals[a], locals[a+1] = dx, dy` of a free
+    /// neighbour (`random free`): ring 1 as `Nearest` scans it, start
+    /// rotated by one draw, whatever the kind's `sight`
+    RandomFree,
 }
 
 impl OpCode {
@@ -168,6 +172,7 @@ impl OpCode {
         use OpCode as O;
         match self {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
+            O::RandomFree => (0, 1),
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
             O::SetLook | O::SetSignal | O::Mark => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
@@ -779,6 +784,22 @@ impl Machine<'_> {
         Ok(None)
     }
 
+    /// A free neighbour (`random free`): ring 1 as [`Machine::nearest`]
+    /// scans it, with its draw and fuel, but not capped by `sight`: a
+    /// neighbour is not a search (`free(east)` is not capped either).
+    fn random_free(&mut self) -> Result<Option<(i32, i32)>, Trap> {
+        self.spend(9 / SEARCH_DIV)?;
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let start = (self.draw() % 8) as i32;
+        for k in 0..8 {
+            let (dx, dy) = ring_cell(1, (start + k) % 8);
+            if self.ctx.halo.free(lx, ly, dx, dy) {
+                return Ok(Some((dx, dy)));
+            }
+        }
+        Ok(None)
+    }
+
     /// The cell with the most scent `ch` in rings `1..=r`: the first such
     /// in scan order, each ring's start rotated by one draw (as `nearest`).
     fn sniff(&mut self, ch: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
@@ -1102,6 +1123,20 @@ impl Machine<'_> {
                             self.sniff(what, r)?
                         };
                         match found {
+                            Some((dx, dy)) => {
+                                self.locals[i] = dx;
+                                self.locals[i + 1] = dy;
+                                self.push(1)?;
+                            }
+                            None => self.push(0)?,
+                        }
+                    }
+                    O::RandomFree => {
+                        let i = self.local(op.a)?;
+                        if usize::from(op.a) + 1 >= FRAME_LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        match self.random_free()? {
                             Some((dx, dy)) => {
                                 self.locals[i] = dx;
                                 self.locals[i + 1] = dy;

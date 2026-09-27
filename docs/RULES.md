@@ -308,7 +308,7 @@ A **target** is a cell relative to the actor:
 | `toward t`, `away t` | one step toward or away from t |
 | `at(x, y)` | a world position |
 | `attacker` | where the lowest-key biter came from |
-| `random free` | a free neighbour, if any |
+| `random free` | a free neighbour, if any: one of the 8, whatever the kind's `sight` (not a search) |
 
 A **predicate** says what a cell must hold:
 

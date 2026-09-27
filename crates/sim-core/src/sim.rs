@@ -2410,6 +2410,48 @@ mod tests {
         assert!(d.3.needs[0] < 100, "no refill from afar: {}", d.3.needs[0]);
     }
 
+    /// `random free` is one of the 8 neighbours whatever the kind's
+    /// `sight`: a sight-0 kind moves to one and spawns on one.
+    #[test]
+    fn random_free_is_a_neighbour_even_at_sight_0() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::rules::vm::result;
+        let kinds = compile(
+            "t.rules",
+            "kind walker { cadence 1  sight 0  mem r
+               when true => { r = result  move random free } }
+             kind pod { cadence 1  sight 0  mem n
+               when n == 0 => { n = 1  spawn pod at random free }
+               when true => idle }",
+        )
+        .unwrap();
+        let (walker, pod) = (0, 1);
+        let mut w = new_world_with(&cfg(1), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(10, 10),
+            walker,
+            newborn(&kinds, walker, 0xE1, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(30, 30),
+            pod,
+            newborn(&kinds, pod, 0xE2, now)
+        ));
+        step(&mut w);
+        step(&mut w);
+        let all = rows(&mut w);
+        let wk = all.iter().find(|r| r.0 == 0xE1).unwrap();
+        assert_ne!(wk.2, Pos::new(10, 10), "the walker left its cell");
+        assert_eq!(wk.3.mem[0], i32::from(result::OK), "its move was OK");
+        let pods = all.iter().filter(|r| r.1 == pod).count();
+        assert!(pods >= 2, "the pod spawned a neighbour: {pods}");
+    }
+
     /// A kind built from traits with `inherit` and a member sub behaves
     /// exactly like the same kind written flat: same rows, tick for tick
     /// (only the rules hash differs).

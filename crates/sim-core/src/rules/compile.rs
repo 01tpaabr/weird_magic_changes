@@ -3988,13 +3988,12 @@ impl<'a> Gen<'a> {
                 self.asm.sense(Sense::Y).op(OpCode::Sub);
             }
             Target::RandomFree => {
-                // A free neighbour chosen by the ring's rotated start; (0, 0)
-                // when there is none (the move is then BLOCKED).
+                // A free neighbour chosen by the ring's rotated start, whatever
+                // the sight; (0, 0) when there is none (the move is then BLOCKED).
                 let here = self.here.clone();
                 let tmp = self.alloc_local(&here, 2)?;
                 self.asm.push(0).store(tmp).push(0).store(tmp + 1);
-                self.push_int(pred::FREE)?;
-                self.asm.push(1).nearest(tmp).op(OpCode::Pop);
+                self.asm.random_free(tmp).op(OpCode::Pop);
                 self.asm.load(tmp).load(tmp + 1);
                 self.next_local = tmp;
             }
