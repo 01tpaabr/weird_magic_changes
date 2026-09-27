@@ -1361,7 +1361,8 @@ impl Parser<'_> {
             return Ok(Stmt::Let { name, at, value });
         }
         if self.eat_kw("return") {
-            let value = if self.is_sym("}") || self.is_sym(";") {
+            // The value starts on the `return` line, or there is none.
+            let value = if self.is_sym("}") || self.is_sym(";") || self.pos().line != at.line {
                 None
             } else {
                 Some(self.expr()?)
@@ -5237,6 +5238,24 @@ mod tests {
             let e = compile_err(text);
             assert!(e.contains(want), "{text}: {e}");
         }
+    }
+
+    #[test]
+    fn a_return_takes_a_value_only_on_its_own_line() {
+        // A bare `return` ends an arm; the next arm's weight is not its value.
+        compile_ok(
+            "sub f() { choose {\n 20: return\n 80: move north } }\n\
+             kind a { when true => f() }",
+        );
+        // The next line's call is a statement: `g` stays a procedure.
+        let e = compile_err(
+            "sub h() { return 1 }\nsub g() { return\n h() }\n\
+             kind a { mem m  when true => m = g() }",
+        );
+        assert!(e.contains("sub `g` returns nothing"), "{e}");
+        compile_ok(
+            "sub g(v) { return v +\n 1 }\nkind a { mem m  when true => { m = g(2)  idle } }",
+        );
     }
 
     /// Only a file sub is refused `next`: a member sub is its kind's own.

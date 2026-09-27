@@ -225,7 +225,7 @@ the trait a tag (`tags drinker`) and match the tag.
 | `for each pred within r as v { }` | once per matching cell in rings 1..r, in a fixed order (each ring clockwise from its top-left). The search's fuel is paid once. There is no `break`, so collect into locals and act after the loop |
 | `choose { 3: stmt  2: { ... } }` | one weighted draw, runs that arm. A negative weight counts as 0, and each weight is capped at 2^31 / (number of arms) |
 | `sub_name(args)` | call a sub (§12) |
-| `return expr` | inside a sub |
+| `return expr`, `return` | inside a sub: leave it with a value, or with none. The value must start on the `return` line: a `return` with nothing after it on its line returns nothing, and the next line is the next statement or `choose` arm |
 
 A name reads a local first (a `let`, an `as` binding, a sub's parameter), then a need or mem
 slot, then a trait parameter, then a constant. A local may hide a trait parameter or a

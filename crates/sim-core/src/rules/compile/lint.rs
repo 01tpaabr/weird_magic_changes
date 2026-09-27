@@ -1230,7 +1230,7 @@ mod tests {
     fn a_read_in_a_file_sub_points_at_the_read() {
         let got = lint(
             "sub helper(t: target) {
-               return
+               return 1 +
                  signal_of(t)
              }
              kind p { sight 4 mem n  when nearest p within 3 as t => { n = helper(t) } }",
