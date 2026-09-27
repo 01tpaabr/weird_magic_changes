@@ -1948,6 +1948,18 @@ legend {
         );
     }
 
+    /// A `water_scale` below 1 is legal (lakes finer than a cell: terrain
+    /// like noise); 0 is not.
+    #[test]
+    fn a_water_scale_below_one_parses() {
+        let s = Scenario::parse("t", "terrain water_scale 0.25\n").unwrap();
+        assert_eq!(s.params.water_scale, 0.25);
+        let e = Scenario::parse("t", "terrain water_scale 0\n")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("above 0"), "{e}");
+    }
+
     /// A saved start of a kind the rules lack is kept, and skipped: a share
     /// keeps its interval, so the shares after it keep their cells, and an
     /// explicit start places nobody. A new world refuses both.

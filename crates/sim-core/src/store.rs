@@ -643,7 +643,7 @@ mod tests {
             initial_width: 300,
             initial_height: 200,
             params: GenParams {
-                water_scale: 9.5,
+                water_scale: 0.25,
                 ..GenParams::default()
             },
             starts: vec![

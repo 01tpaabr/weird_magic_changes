@@ -34,7 +34,8 @@ pub const STREAM_UID_COVER: u64 = 0x0007;
 /// Stored in the save file: changing them changes every unsaved chunk.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GenParams {
-    /// Noise feature size in cells. Larger = bigger, smoother lakes.
+    /// Noise feature size in cells, above 0. Larger = bigger, smoother
+    /// lakes; below about 1, finer than a cell: terrain like noise.
     pub water_scale: f32,
     /// Fraction of cells that end up water, roughly (noise is in `[0, 1]`).
     pub water_level: f32,

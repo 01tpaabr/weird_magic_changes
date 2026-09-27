@@ -395,7 +395,7 @@ start hive at (77, 103)                        # exactly there
 | `rules PATH ...` | the built-in rules | the packs the world runs (§15), relative to the scenario file |
 | `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks, at most 4096 of them (4096 x 4096 cells); the rest generates as the camera reaches it |
-| `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
+| `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
 | `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
