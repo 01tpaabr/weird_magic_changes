@@ -507,7 +507,7 @@ fn load_chunks(
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
             }
             for e in c.placement.explicit_in(coord) {
-                if e.needs.is_empty() && e.mems.is_empty() {
+                if e.needs.is_empty() && e.mems.is_empty() && e.genes.is_empty() {
                     continue;
                 }
                 let layer = if e.placed.cover {
@@ -524,6 +524,9 @@ fn load_chunks(
                 }
                 for &(i, v) in &e.mems {
                     m.mem[usize::from(i)] = v;
+                }
+                for &(i, v) in &e.genes {
+                    m.genes[usize::from(i)] = v;
                 }
             }
         }
@@ -670,23 +673,31 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
         } => {
             let ids = family(who)?;
             // Per kind (a family's kinds may lay slots out differently): a
-            // need slot of that name, else a mem slot.
-            let slot = |k: u16| -> Option<(bool, usize)> {
+            // need slot of that name, else a mem slot, else a gene.
+            let slot = |k: u16| -> Option<(u8, usize)> {
                 let d = kinds.def(k);
                 d.need_named(name)
-                    .map(|i| (true, i))
-                    .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
+                    .map(|i| (0, i))
+                    .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (1, i)))
+                    .or_else(|| d.gene_named(name).map(|i| (2, i)))
             };
             if !ids.clone().any(|k| slot(k).is_some()) {
-                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
+                return Err(format!(
+                    "`{}` has no need, memory or gene `{name}`",
+                    who.kind
+                ));
             }
             let mut vals = Vec::new();
             for (a, m) in world.query::<(&ChunkActors, &ChunkMinds)>().iter(world) {
                 for (r, mind) in a.rows.iter().zip(&m.rows) {
                     if ids.contains(&r.kind)
-                        && let Some((need, i)) = slot(r.kind)
+                        && let Some((layer, i)) = slot(r.kind)
                     {
-                        vals.push(i64::from(if need { mind.needs[i] } else { mind.mem[i] }));
+                        vals.push(i64::from(match layer {
+                            0 => mind.needs[i],
+                            1 => mind.mem[i],
+                            _ => mind.genes[i],
+                        }));
                     }
                 }
             }
@@ -694,6 +705,8 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
                 Agg::Min => vals.iter().min().copied(),
                 Agg::Max => vals.iter().max().copied(),
                 Agg::Sum => Some(vals.iter().sum()),
+                Agg::Mean => (!vals.is_empty())
+                    .then(|| vals.iter().sum::<i64>().div_euclid(vals.len() as i64)),
             };
             match got {
                 Some(g) => (op.holds(g, *v), g.to_string()),
@@ -1309,6 +1322,80 @@ mod tests {
             assert!(*g == 6 || *g == 8, "one step off 7: {g}");
         }
         assert_eq!(children(Some((1, 1))), moved, "and the same every run");
+    }
+
+    /// A scenario's `with` sets a gene by name (inside its range only), and
+    /// `expect` reads genes; a reload carries them by name, clamped to the
+    /// new range, and a gene the new rules add starts at its default.
+    #[test]
+    fn genes_start_by_name_and_reload_by_name() {
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let old = compile(
+            "a.rules",
+            "kind a { glyph \"a\"  gene g = 3 from 0 to 9  gene h = 1 from 0 to 9 }",
+        )
+        .unwrap();
+        let start = |v: i32| Scenario {
+            starts: vec![
+                Start::At {
+                    kind: "a".into(),
+                    x: 5,
+                    y: 5,
+                    with: vec![("h".into(), v)],
+                },
+                Start::at("a", 6, 5),
+            ],
+            params: crate::stage::worldgen::GenParams {
+                water_level: 0.0,
+                rock_on_soil: 0.0,
+                rock_on_water: 0.0,
+                ..Default::default()
+            },
+            ..cfg(3)
+        };
+        let e = new_world_with(&start(10), old.clone()).unwrap_err();
+        assert!(e.contains("gene `h` runs from 0 to 9"), "{e}");
+        let mut w = new_world_with(&start(8), old).unwrap();
+        let genes = |w: &mut World| -> Vec<[i32; 3]> {
+            rows(w)
+                .into_iter()
+                .map(|r| [r.3.genes[0], r.3.genes[1], r.3.genes[2]])
+                .collect()
+        };
+        let mut g = genes(&mut w);
+        g.sort();
+        assert_eq!(g, [[3, 1, 0], [3, 8, 0]]);
+        let who = Who {
+            kind: "a".into(),
+            only: false,
+        };
+        let value = |agg, name: &str| Expect::Value {
+            agg,
+            name: name.into(),
+            who: who.clone(),
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        assert_eq!(expect(&mut w, &value(Agg::Mean, "h")).unwrap().1, "4");
+        assert_eq!(expect(&mut w, &value(Agg::Max, "h")).unwrap().1, "8");
+        assert!(
+            expect(&mut w, &value(Agg::Min, "nope"))
+                .unwrap_err()
+                .contains("no need, memory or gene `nope`")
+        );
+
+        // `h` narrows to 2..=8 and moves to slot 0 (a reload re-checks the
+        // starts: `with (h = 8)` must still fit); `k` is new.
+        let new = compile(
+            "b.rules",
+            "kind a { glyph \"a\"  gene h = 4 from 2 to 8  gene k = 7 from 0 to 9  gene g = 3 from 0 to 9 }",
+        )
+        .unwrap();
+        reload_rules(&mut w, None, new).unwrap();
+        let mut g = genes(&mut w);
+        g.sort();
+        assert_eq!(g, [[2, 7, 3], [8, 7, 3]], "1 clamped up to 2");
     }
 
     /// Every cell of the loaded chunks becomes plain soil: scenarios place
@@ -2439,7 +2526,7 @@ mod tests {
                 ok(false, "egg"),
                 ok(true, "nobody"),
                 Err("the rules have no kind `wolf`".into()),
-                Err("`chicken` has no need or memory `sleep`".into()),
+                Err("`chicken` has no need, memory or gene `sleep`".into()),
                 ok(false, "no `hive` alive"),
             ]
         );

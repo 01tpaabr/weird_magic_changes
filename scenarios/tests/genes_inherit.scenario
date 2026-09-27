@@ -1,0 +1,15 @@
+# Without a `mutation` line a child's genes are its parent's. Every budder
+# descends from one whose `reach` is 9; budders die of age after a day, so by
+# day 3 the founder and its first children are gone, and every budder alive,
+# on either side of the chunk borders at x = 64 and y = 64, still has 9.
+rules ../../packs/genes
+seed 3
+size 128 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0   # flat soil everywhere
+start budder at (62, 62) with (reach = 9)
+
+run 3d
+expect born budder > 20
+expect died budder > 10
+expect min reach of budder == 9
+expect max reach of budder == 9

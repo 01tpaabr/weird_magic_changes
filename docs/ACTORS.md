@@ -73,7 +73,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   Run-time spawns fold in the tick. Which kind starts where is the **scenario's**, not the
   rules' (step 8b, `sim_core::scenario`): `start K n / d` shares cut each walkable cell's
   placement draw (`0..2^24`) into intervals in the order written, `start K at (x, y)` takes
-  one cell (`with (food = 2h)` sets its needs or memory by name). A scenario may also draw
+  one cell (`with (food = 2h)` sets its needs, memory or genes by name). A scenario may also draw
   its ground (`map`, `legend`, `outside`, step 8e): drawn cells replace the noise, kind
   characters become explicit starts. Resolved against the loaded kind table into a
   `Placement` at create and at every open; a start naming a kind the rules lack, a trait,
@@ -138,8 +138,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 - **Hot reload** (`r` in `wmc play`, `sim_core::reload`): the rules directory (`WMC_RULES`,
   else `./rules`) is recompiled and swapped in between two ticks. Rows are remapped by
   name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
-  the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
-  channel by its name. Saved chunks that are not loaded are rewritten the same way and
+  the new max; new needs start full), mem (new ones 0) and gene (clamped to the new range;
+  new ones at their default), the state by its name, each scent channel by its name. Saved chunks that are not loaded are rewritten the same way and
   `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
   with the old). Moving a kind between standing and ground cover is refused. A compile error
   changes nothing and shows on the status bar. A reload is not a recorded input: a reloaded
@@ -560,3 +560,19 @@ where it touches the tick.
    to text; the Rust tests left are engine mechanics.
    What a new author needs is in `docs/RULES.md`: the language, traits, scenarios and their
    tests, packs, the vocabulary, the lint.
+9. **Genes: numbers that are inherited and mutate** (decision 38). The first way behaviour
+   changes across generations without a new rules file; rules that are themselves switched
+   on and off per actor come after.
+   9a: `ActorMind.genes` (8 `i32`, 88 -> 120 B), store v10.
+   9b: `gene NAME = D from LO to HI` (constant expressions, trait parameters allowed; lenient
+   while a trait is checked alone), merged by name like needs; `OpCode::Gene` appended;
+   `KindDef.genes` in the rules hash only when present; lint: genes never read, `within
+   GENE` against the gene's high end.
+   9c: `offspring` at Apply's and Migrate's spawns (by name, clamped, then mutated with the
+   scenario's `mutation N / D`, drawn from both uids), `become` by name, store v11 (the rate
+   and gene names in the header).
+   9d: genes by name through reload and reopening, scenario `with (gene = v)`, `expect mean`,
+   `wmc why` prints them. `packs/genes` (a `budder` that only buds) and two scenario tests:
+   without `mutation` every descendant keeps the founder's `reach`; with `mutation 1 / 1`
+   selection pulls it down (a budder that looks less far counts fewer neighbours and keeps
+   budding) and the world fills with short-sighted budders.

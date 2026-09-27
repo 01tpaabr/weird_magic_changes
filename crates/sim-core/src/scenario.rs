@@ -152,12 +152,14 @@ pub struct Who {
     pub only: bool,
 }
 
-/// How `min|max|sum` folds a need or memory over a kind's actors.
+/// How `min|max|sum|mean` folds a need, memory or gene over a kind's
+/// actors. `mean` rounds down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agg {
     Min,
     Max,
     Sum,
+    Mean,
 }
 
 /// What an `expect` checks.
@@ -177,8 +179,8 @@ pub enum Expect {
         op: Op,
         n: i64,
     },
-    /// `min|max|sum NAME of [only] K OP V`: a need or memory over every
-    /// actor of the kind.
+    /// `min|max|sum|mean NAME of [only] K OP V`: a need, memory or gene
+    /// over every actor of the kind.
     Value {
         agg: Agg,
         name: String,
@@ -229,7 +231,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
 
 /// The words after `expect`.
 fn expectation(rest: &str) -> Result<Expect, String> {
-    const FORMS: &str = "expected `expect count|born|became|eaten|died [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
+    const FORMS: &str = "expected `expect count|born|became|eaten|died [only] KIND OP N`, `expect min|max|sum|mean NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
     let words: Vec<&str> = rest.split_whitespace().collect();
     // `OP V` ending the line at `words[i..]`.
     let op_value = |i: usize| -> Result<(Op, i64), String> {
@@ -254,6 +256,7 @@ fn expectation(rest: &str) -> Result<Expect, String> {
         "min" => Some(Agg::Min),
         "max" => Some(Agg::Max),
         "sum" => Some(Agg::Sum),
+        "mean" => Some(Agg::Mean),
         _ => None,
     };
     let first = *words.first().ok_or(FORMS)?;
@@ -1021,9 +1024,11 @@ pub struct Explicit {
     /// Its local cell.
     pub cell: u16,
     pub placed: Placed,
-    /// What `with` sets, by slot: `(need, value)` and `(mem, value)`.
+    /// What `with` sets, by slot: `(need, value)`, `(mem, value)` and
+    /// `(gene, value)`.
     pub needs: Vec<(u8, i32)>,
     pub mems: Vec<(u8, i32)>,
+    pub genes: Vec<(u8, i32)>,
 }
 
 /// A scenario's starts resolved against a kind table: what worldgen places.
@@ -1075,7 +1080,7 @@ impl Placement {
                     if !g.walkable() {
                         return Err(format!("`{s}` is on water"));
                     }
-                    let (mut needs, mut mems) = (Vec::new(), Vec::new());
+                    let (mut needs, mut mems, mut genes) = (Vec::new(), Vec::new(), Vec::new());
                     for (name, v) in with {
                         if let Some(i) = def.need_named(name) {
                             let max = def.needs[i].max;
@@ -1085,9 +1090,18 @@ impl Placement {
                             needs.push((i as u8, *v));
                         } else if let Some(i) = def.mems.iter().position(|m| m == name) {
                             mems.push((i as u8, *v));
+                        } else if let Some(i) = def.gene_named(name) {
+                            let g = &def.genes[i];
+                            if !(g.lo..=g.hi).contains(v) {
+                                return Err(format!(
+                                    "`{s}`: gene `{name}` runs from {} to {}",
+                                    g.lo, g.hi
+                                ));
+                            }
+                            genes.push((i as u8, *v));
                         } else {
                             return Err(format!(
-                                "`{s}`: `{}` has no need or memory `{name}`",
+                                "`{s}`: `{}` has no need, memory or gene `{name}`",
                                 def.name
                             ));
                         }
@@ -1099,6 +1113,7 @@ impl Placement {
                         placed,
                         needs,
                         mems,
+                        genes,
                     });
                 }
             }
@@ -1537,6 +1552,7 @@ legend {
             placed: b,
             needs: vec![],
             mems: vec![],
+            genes: vec![],
         };
         assert_eq!(pl.explicit_in(here), [only(here, local(dry))]);
         assert_eq!(pl.explicit_in(there), [only(there, local(far))]);
@@ -1581,7 +1597,7 @@ legend {
             ),
             (
                 "start fox at (5, 1) with (sleep = 1)",
-                "`fox` has no need or memory `sleep`",
+                "`fox` has no need, memory or gene `sleep`",
             ),
             ("start chicken at (2, 2)", "two starts at (2, 2)"),
         ] {

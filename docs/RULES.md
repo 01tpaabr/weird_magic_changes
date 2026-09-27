@@ -395,7 +395,7 @@ start hive at (77, 103)                        # exactly there
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks; the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the unbounded world, starts as kind K |
-| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable; `with` sets its needs, memory or genes by name (`food = 2h`, `heading = 3`, `fear = 9`; a gene inside its range) |
 | `map { ... }` | | cells drawn from (0, 0), one character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with` |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
@@ -463,7 +463,7 @@ expect became chick == 1
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
 | `expect count K OP N` | actors of K alive now |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
-| `expect min\|max\|sum NAME of K OP V` | a need or memory over every actor of K (no actor: the check fails) |
+| `expect min\|max\|sum\|mean NAME of K OP V` | a need, memory or gene over every actor of K; `mean` rounds down (no actor: the check fails) |
 | `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
@@ -510,8 +510,9 @@ live count against a plain Life's up to generation 100, and `life_patterns.scena
 a blinker, a block and a glider.
 
 A save also opens under packs that number things differently, which is what adding a pack
-does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
-keeps its kind, cell, needs and memory. The first time the world writes to the save, the
+does. Kinds, needs, memory, genes, states and scent channels are matched **by name**, so
+every actor keeps its kind, cell, needs, memory and genes (clamped to a gene's new range; a
+gene the new rules add starts at its default). The first time the world writes to the save, the
 whole directory moves over to the new numbering, and from then on it belongs to the new set
 of packs. Rules that lack one of the save's kinds are refused with the list, and so is a kind
 that turned from standing into ground cover, or back.
@@ -564,7 +565,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 
 ## 17. Debugging
 
-- **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, entry
+- **`wmc lint rules/`** compiles and prints the kind table: numbering, needs, memory, genes, entry
   points, each kind's parents and family. Errors come as `file:line:col: message`, and
   stop the compile. Warnings and notes come as `file:line:col: warning: message` and don't.
   `wmc lint --strict` fails on any warning, for CI. A world prints its rules' warnings once
@@ -588,14 +589,14 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **Two actions in a row** are a compile error when the compiler can see both: a statement
   that acts on every path, then another action in the same block.
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at
-  (x, y) to think, and prints that think. It shows the actor's needs and memory, and every
+  (x, y) to think, and prints that think. It shows the actor's needs, memory and genes, and every
   rule it checked: `FIRED`, `no` (condition false) or blank (not reached). Then the decision
   with its effects, what it wrote, the fuel spent, and after the real step where it went and
   its result. `-v` adds every op.
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and
-  changes nothing. Actors keep kind, needs, memory, state and scent by name. Rows of a kind
+  changes nothing. Actors keep kind, needs, memory, genes, state and scent by name. Rows of a kind
   you removed are dropped: the one way to take a kind out of a save. Saved chunks are
   rewritten to match.
 

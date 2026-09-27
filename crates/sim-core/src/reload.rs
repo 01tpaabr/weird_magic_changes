@@ -7,7 +7,8 @@
 //! everything by name: a row keeps its kind if a kind of that name still
 //! exists (rows of a kind that is gone are dropped), each need and mem
 //! carries over by name (clamped to the new max; new needs start full, new
-//! mems at 0), the state by its name (else the first), each scent channel
+//! mems at 0), each gene by name (clamped to the new range; new ones at
+//! their default), the state by its name (else the first), each scent channel
 //! by its name (else empty). A kind cannot move between standing and ground
 //! cover (refused: restart).
 //!
@@ -22,7 +23,8 @@
 use bevy_ecs::prelude::*;
 
 use crate::actors::{
-    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
+    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, GENE_SLOTS, MEM_SLOTS, NEED_SLOTS,
+    Tally, flags,
 };
 use crate::rules::Kinds;
 use crate::scenario::{Placement, present};
@@ -51,6 +53,10 @@ struct Target {
     maxes: [i32; NEED_SLOTS],
     need_count: usize,
     mems: [Option<usize>; MEM_SLOTS],
+    /// For each new gene slot: the old slot of that name, and the new
+    /// `(default, lo, hi)`.
+    genes: [Option<usize>; GENE_SLOTS],
+    gene_defs: Vec<(i32, i32, i32)>,
     /// Old state index -> new.
     states: Vec<u8>,
 }
@@ -93,6 +99,8 @@ impl Plan {
                 maxes: [0; NEED_SLOTS],
                 need_count: nd.needs.len(),
                 mems: [None; MEM_SLOTS],
+                genes: [None; GENE_SLOTS],
+                gene_defs: nd.genes.iter().map(|g| (g.default, g.lo, g.hi)).collect(),
                 states: Vec::new(),
             };
             for (i, n) in nd.needs.iter().enumerate() {
@@ -101,6 +109,9 @@ impl Plan {
             }
             for (i, m) in nd.mems.iter().enumerate() {
                 t.mems[i] = od.mems.iter().position(|o| o == m);
+            }
+            for (i, g) in nd.genes.iter().enumerate() {
+                t.genes[i] = od.genes.iter().position(|o| *o == g.name);
             }
             let ns = new
                 .debug
@@ -169,6 +180,13 @@ impl Plan {
                     }
                     for i in 0..MEM_SLOTS {
                         m.mem[i] = t.mems[i].map_or(0, |src| old.mem[src]);
+                    }
+                    for i in 0..GENE_SLOTS {
+                        m.genes[i] = match (t.gene_defs.get(i), t.genes[i]) {
+                            (None, _) => 0,
+                            (Some(&(d, ..)), None) => d,
+                            (Some(&(_, lo, hi)), Some(src)) => old.genes[src].clamp(lo, hi),
+                        };
                     }
                     m.state = t.states.get(usize::from(old.state)).copied().unwrap_or(0);
                 }

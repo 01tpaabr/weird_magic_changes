@@ -1,0 +1,16 @@
+# Budders: a kind that only buds, for watching genes pass from parent to child
+# (scenarios/tests/genes_inherit and genes_drift). A budder buds into a free
+# neighbouring cell while fewer than twelve budders stand within its `reach`, and
+# dies of age after a day, so a world of them turns over a generation about
+# every day. `reach` is a gene: each budder has its own, a child starts with
+# its parent's, and a scenario's `mutation` line makes it drift.
+
+kind budder {
+  glyph "b"
+  color "#9fd36b"
+  cadence 256
+  sight 10
+  gene reach = 5 from 1 to 10     # how far it looks for crowding
+  when age > 1d => die
+  when count budder within reach < 12 and nearest free within 1 as c => spawn budder at c
+}

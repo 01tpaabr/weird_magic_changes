@@ -20,7 +20,9 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   parallel across chunks and give **bit-identical results on 1 thread or 64**. The test
   suite checks this on every run.
 - **The rules language.** Kinds with needs, memory and states, `when condition => action`
-  rules, subs, and traits with inheritance, compiled to a fuel-bounded bytecode VM.
+  rules, subs, and traits with inheritance, compiled to a fuel-bounded bytecode VM. A kind's
+  genes are numbers each individual inherits from its parent, drifting by mutation when a
+  scenario asks for it.
 - **A built-in ecosystem.** Hens graze, drink, lay eggs and flee foxes. Chicks follow the
   hens and grow up. Foxes hunt, sleep and raise kits. Flowers make nectar, hives raise
   bees, and bees find flowers, dance the way home and lay scent trails. Grass spreads and
