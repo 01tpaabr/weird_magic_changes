@@ -793,6 +793,9 @@ pub(crate) fn unique_uids(world: &mut World) -> Result<(), String> {
 }
 
 #[cfg(test)]
+mod fuzz;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::scenario::{Agg, Expect, Who};
