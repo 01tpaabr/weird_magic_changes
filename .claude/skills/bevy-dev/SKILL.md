@@ -174,6 +174,28 @@ so Bevy repacks our tiles in the same frame. Patterns used, copy them:
   the panic; keep it when you touch `install`.
 - Nothing in `sim-core` tests needs an `App`; nothing in `app` tests opens a window.
 
+### The fuzzers and what each one guards
+
+All are proptest with a fixed seed and few cases in `make test`, and many cases from a new
+seed in `make fuzz` (it prints `WMC_FUZZ_SEED=… WMC_FUZZ_CASES=…`; rerun with the same
+seed to replay; `sim_core::fuzz_config` reads both). A failure is shrunk, then kept as a
+plain regression test (a unit test, or a file in `scenarios/tests/`) next to its fix.
+
+| Guard | Where | Extend it when you add |
+|---|---|---|
+| Grammar | `docs/GRAMMAR.md` (EBNF + static rules) | any syntax |
+| Program generator | `rules/gen_rules.rs`: `Mode::Syntax` (parses), `Valid` (compiles), `Lively` (compiles and acts) | a keyword, sense, action, declaration: teach all three modes |
+| Compiler properties | `rules/compile/props.rs`: derived programs parse, valid ones compile and lint, same hash twice or split per file, mutated and pathological texts never panic, overflow the stack or take 2 s | a new limit (add a pathological case) |
+| Simulation fuzzer | `sim/fuzz.rs`: a `Lively` program in a 1–4 chunk world, 200–400 ticks; `sim::invariants` + `unique_uids` every tick; checksum per tick vs another thread count (the test binary re-run as a child), vs save + reopen, vs reload of the same rules | actor state (a check in `invariants`), a phase or effect (make `Lively` produce it) |
+| Scenario fuzzer | `scenario/fuzz.rs`: generated scenarios parse to what they say; mutated ones parse or are refused, resolve and build a small world, never panic | scenario syntax, a start or expect form |
+| Save fuzzer | `store/fuzz.rs`: a valid save cut, flipped, or given extreme headers opens or is refused, never panics; round trips, also through a remap | a stored field or header value (and bump `FORMAT_VERSION`) |
+| CLI | `crates/app/tests/cli.rs`: odd command lines exit 0 or 1, never a panic | a command or flag |
+| Executable docs | `crates/sim-core/tests/docs.rs`: every fenced block in `RULES.md`/`ACTORS.md` runs (fence labels at the top of `RULES.md`; ` ```rules error ` blocks must fail where they say); the §18 limits, the prose numbers, reserved words and vocabulary equal the code's constants | a doc example (label its fence), a limit (a named constant + its §18 row) |
+| Narrowing casts | `clippy::cast_possible_truncation`, on for both crates' non-test code | a cast: `try_from` off hot paths; in a hot loop `as` with `#[allow(..)] // why it fits`, or a shared helper that states the invariant (`stage::cell_u16`, `actors::slot_u16`, `time::stamp`) |
+
+Not fuzzed yet: streaming chunks out and back mid-run, reload with *different* rules
+(remapping), and the renderer.
+
 ## Build & run
 
 - `make` / `make run` / `make test` pass `--features app/dev` = `bevy/dynamic_linking`. The
@@ -199,6 +221,7 @@ lookup-only maps); `Parallel<T>` is in `bevy::utils`; `Entity::PLACEHOLDER` exis
 ## Definition of done
 
 `make ci` green (fmt, clippy -D warnings, all tests including the cross-process
-determinism gate). For anything touching a hot path: a criterion before/after number in
+determinism gate and the fast tier of every fuzzer). The fuzzers that cover the change
+extended (table above); `make fuzz` clean at the end of a design step. For anything touching a hot path: a criterion before/after number in
 the commit message and `docs/PERF.md` updated. For any new system: its own unit test and an
 unchanged-or-explained `wmc run` checksum story.

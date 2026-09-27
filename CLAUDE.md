@@ -91,6 +91,13 @@ make fmt
   sense or action: an opcode in `rules/vm.rs` + a keyword in `rules/compile.rs` + a test, and
   `docs/GRAMMAR.md` + `rules/gen_rules.rs` taught it (any syntax change: the same two). New per-cell layer: a field in `ChunkCells`, folded into `hash`, encoded
   in `store` (bump `FORMAT_VERSION`), rendered in `app/render/palette.rs`. Same commit.
+- Tests guard the whole surface, not just the new case. A change also extends what fuzzes it:
+  new syntax or sense/action -> `GRAMMAR.md` + `rules/gen_rules.rs` (its `Lively` mode, so
+  `sim/fuzz.rs` runs it); new actor state -> `sim::invariants`; new saved field -> the store
+  round trip and `store/fuzz.rs`; new scenario syntax -> `scenario/fuzz.rs`; new doc example
+  -> a fence label (`tests/docs.rs` runs it). A fuzz failure becomes a fixed regression test.
+  Run `make fuzz` before closing a design step. A narrowing `as` needs a checked conversion
+  or `#[allow(clippy::cast_possible_truncation)] // why it fits`. How-to: `/bevy-dev`, Testing.
 - Rust edition is 2024 (`gen` is reserved, `unsafe` ops inside `unsafe fn` must be wrapped).
 - Remote: `origin` = github.com/01tpaabr/weird_magic_changes. Commit on `main` in small steps
   and push; no PRs yet.

@@ -66,7 +66,7 @@ fuzz:
 	@seed=$${WMC_FUZZ_SEED:-$$(date +%s)}; \
 	echo "WMC_FUZZ_SEED=$$seed WMC_FUZZ_CASES=$(FUZZ_CASES)"; \
 	WMC_FUZZ_SEED=$$seed WMC_FUZZ_CASES=$(FUZZ_CASES) \
-		cargo test --workspace $(DEV) -- fuzz:: generated_command_lines_never_panic
+		cargo test --workspace $(DEV) -- fuzz:: compile::props:: generated_command_lines_never_panic
 
 ci: check test
 
