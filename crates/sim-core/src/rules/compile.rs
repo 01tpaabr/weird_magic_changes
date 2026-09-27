@@ -4529,6 +4529,51 @@ mod tests {
             .expect("should not compile")
     }
 
+    /// One think of `kind` in a halo over one chunk (the world's first),
+    /// standing at local `(x, y)`.
+    fn run_think_in(
+        k: &Kinds,
+        kind: &str,
+        mind: &mut crate::actors::ActorMind,
+        cells: &crate::stage::ChunkCells,
+        actors: &crate::actors::ChunkActors,
+        (x, y): (usize, usize),
+        tick: u64,
+        rng: u64,
+    ) -> crate::rules::vm::Outcome {
+        use crate::rules::vm::{self, Ctx, Halo};
+        let mut chunks = [None; 9];
+        chunks[4] = Some((cells, actors));
+        let halo = Halo {
+            chunks,
+            tags: &k.tag_bits,
+            family_end: &k.family_end,
+        };
+        let ctx = Ctx {
+            halo: &halo,
+            kind: k.by_name(kind).unwrap(),
+            cell: y * 64 + x,
+            pos: crate::stage::Pos::new(x as i32, y as i32),
+            tick,
+            rng,
+            look: 0,
+            signal: 0,
+        };
+        vm::think(k, ctx, mind)
+    }
+
+    /// [`run_think_in`] a bare chunk.
+    fn run_think(
+        k: &Kinds,
+        kind: &str,
+        mind: &mut crate::actors::ActorMind,
+    ) -> crate::rules::vm::Outcome {
+        let cells = crate::stage::ChunkCells::default();
+        let actors = crate::actors::ChunkActors::default();
+        let rng = crate::rules::vm::rng_base(1, 5, 9);
+        run_think_in(k, kind, mind, &cells, &actors, (36, 1), 5, rng)
+    }
+
     #[test]
     fn plants_file_compiles_to_the_hand_assembled_program() {
         let text = crate::rules::builtin::ORACLE_PLANTS;
@@ -4995,8 +5040,7 @@ mod tests {
     #[test]
     fn subs_targets_and_loops_compile_and_run() {
         use crate::actors::{ActorMind, ChunkActors};
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
+        use crate::stage::ChunkCells;
         use bytemuck::Zeroable;
         let k = compile_ok(
             "sub twice(n) { return n * 2 }
@@ -5012,34 +5056,10 @@ mod tests {
         let mut cells = ChunkCells::default();
         cells.ground[10 * 64 + 13] = Ground::Water; // 2 east of the actor at (11, 10)
         let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
         let mut mind = ActorMind::zeroed();
-        let ctx = Ctx {
-            halo: &halo,
-            kind: &k.defs[0],
-            cell: 10 * 64 + 11,
-            pos: WorldPos::new(11, 10),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
         // Rule 1 has no action: falls through; rule 2 neither; rule 3 moves.
-        let out = vm::think(&k, ctx, &mut mind);
+        let rng = crate::rules::vm::rng_base(1, 5, 9);
+        let out = run_think_in(&k, "a", &mut mind, &cells, &actors, (11, 10), 5, rng);
         assert_eq!(out.trap, None, "{out:?}");
         assert_eq!(out.action, Action::Move);
         assert_eq!((out.dx, out.dy), (0, -1));
@@ -5051,8 +5071,7 @@ mod tests {
     #[test]
     fn states_consts_looks_signals_and_for_each_compile_and_run() {
         use crate::actors::{ActorMind, ActorPub, ChunkActors};
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ActorId, ChunkCells, Pos as WorldPos};
+        use crate::stage::{ActorId, ChunkCells};
         use bytemuck::Zeroable;
         let k = compile_ok(
             "const LOAD = 30min
@@ -5091,34 +5110,11 @@ mod tests {
                 ..ActorPub::zeroed()
             });
         }
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let ctx = Ctx {
-            halo: &halo,
-            kind: &k.defs[0],
-            cell: 10 * 64 + 10,
-            pos: WorldPos::new(10, 10),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
+        let rng = crate::rules::vm::rng_base(1, 5, 9);
+        let think = |m: &mut ActorMind| run_think_in(&k, "a", m, &cells, &actors, (10, 10), 5, rng);
         // State A (the first): the loops, the bytes, the effects, `next`.
         let mut mind = ActorMind::zeroed();
-        let out = vm::think(&k, ctx, &mut mind);
+        let out = think(&mut mind);
         assert_eq!(out.trap, None, "{out:?}");
         assert_eq!(out.action, Action::Idle);
         assert_eq!(
@@ -5129,32 +5125,15 @@ mod tests {
         assert_eq!(&mind.mem[..6], &[901, 4, 5, -763, -3, 5]);
         // State B: reads the neighbour's signal through `a:3`.
         mind.state = 1;
-        let out = vm::think(&k, ctx, &mut mind);
+        let out = think(&mut mind);
         assert_eq!((out.trap, out.action, out.next), (None, Action::Idle, None));
         assert_eq!(mind.mem[0], 77);
         // The reflex runs first, in any state.
         mind.mem[0] = 1;
-        let out = vm::think(&k, ctx, &mut mind);
+        let out = think(&mut mind);
         assert_eq!((out.next, mind.mem[0]), (Some(1), 2));
         // Nothing to see: B falls to `die`.
-        let empty = ChunkActors::default();
-        let bare = ChunkCells::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&bare, &empty)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let out = vm::think(&k, Ctx { halo: &halo, ..ctx }, &mut mind);
+        let out = run_think(&k, "a", &mut mind);
         assert_eq!(out.action, Action::Die);
 
         let errs = [
@@ -5287,40 +5266,16 @@ mod tests {
         let rand = k.code.iter().filter(|o| o.code == OpCode::Rand).count();
         assert_eq!(rand, 1);
         use crate::actors::ChunkActors;
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
+        use crate::rules::vm;
+        use crate::stage::ChunkCells;
         use bytemuck::Zeroable;
         let cells = ChunkCells::default();
         let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
         let mut counts = [0; 3];
         for uid in 0..500u64 {
             let mut mind = crate::actors::ActorMind::zeroed();
-            let ctx = Ctx {
-                halo: &halo,
-                kind: &k.defs[0],
-                cell: 100,
-                pos: WorldPos::new(36, 1),
-                tick: 77,
-                rng: vm::rng_base(3, 77, uid),
-                look: 0,
-                signal: 0,
-            };
-            let out = vm::think(&k, ctx, &mut mind);
+            let rng = vm::rng_base(3, 77, uid);
+            let out = run_think_in(&k, "a", &mut mind, &cells, &actors, (36, 1), 77, rng);
             assert_eq!(out.trap, None);
             counts[mind.mem[0] as usize] += 1;
         }
@@ -5385,31 +5340,16 @@ mod tests {
             "kind a { mem p, q\n when true => { choose { 2000000000: p += 1  2000000000: q += 1 }  idle } }",
         );
         use crate::actors::ChunkActors;
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
+        use crate::rules::vm;
+        use crate::stage::ChunkCells;
         use bytemuck::Zeroable;
         let cells = ChunkCells::default();
         let actors = ChunkActors::default();
-        let mut chunks = [None; 9];
-        chunks[4] = Some((&cells, &actors));
-        let halo = Halo {
-            chunks,
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
         let mut mind = crate::actors::ActorMind::zeroed();
         for uid in 0..64u64 {
-            let ctx = Ctx {
-                halo: &halo,
-                kind: &k.defs[0],
-                cell: 100,
-                pos: WorldPos::new(36, 1),
-                tick: 5,
-                rng: vm::rng_base(3, 5, uid),
-                look: 0,
-                signal: 0,
-            };
-            assert_eq!(vm::think(&k, ctx, &mut mind).trap, None);
+            let rng = vm::rng_base(3, 5, uid);
+            let out = run_think_in(&k, "a", &mut mind, &cells, &actors, (36, 1), 5, rng);
+            assert_eq!(out.trap, None);
         }
         let (p, q) = (mind.mem[0], mind.mem[1]);
         assert!(p > 0 && q > 0, "p {p} q {q}");
@@ -5425,45 +5365,6 @@ mod tests {
             .filter(|r| r.kind == id)
             .map(|r| (r.state, r.line, r.via.clone()))
             .collect()
-    }
-
-    /// A halo over one bare chunk, for running a think in a test.
-    fn run_think(
-        k: &Kinds,
-        kind: &str,
-        mind: &mut crate::actors::ActorMind,
-    ) -> crate::rules::vm::Outcome {
-        use crate::actors::ChunkActors;
-        use crate::rules::vm::{self, Ctx, Halo};
-        use crate::stage::{ChunkCells, Pos as WorldPos};
-        let cells = ChunkCells::default();
-        let actors = ChunkActors::default();
-        let halo = Halo {
-            chunks: [
-                None,
-                None,
-                None,
-                None,
-                Some((&cells, &actors)),
-                None,
-                None,
-                None,
-                None,
-            ],
-            tags: &k.tag_bits,
-            family_end: &k.family_end,
-        };
-        let ctx = Ctx {
-            halo: &halo,
-            kind: k.by_name(kind).unwrap(),
-            cell: 100,
-            pos: WorldPos::new(36, 1),
-            tick: 5,
-            rng: vm::rng_base(1, 5, 9),
-            look: 0,
-            signal: 0,
-        };
-        vm::think(k, ctx, mind)
     }
 
     /// A constant folds to what the VM computes for the same expression
