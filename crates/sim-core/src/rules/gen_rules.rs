@@ -228,12 +228,14 @@ impl<'a> G<'a> {
 
     /// Between statements, declarations or rules.
     fn sep(&mut self) -> &'static str {
-        match self.n(6) {
+        match self.n(8) {
             0 => "\n",
             1 => " ",
             2 => "\n  ",
             3 => "\n\n",
             4 => "  # a comment\n",
+            5 => "\r\n",
+            6 => " # ünïcödé, \"#\" ✓\n",
             _ => "\t",
         }
     }
@@ -738,6 +740,7 @@ impl<'a> G<'a> {
             2 => self
                 .one(&[
                     "32767",
+                    "007",
                     "32768",
                     "65536",
                     "2147483647",
