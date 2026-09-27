@@ -623,7 +623,7 @@ fn render_frame(
 
 /// Two status rows: how many of each kind are loaded, and the life events
 /// since the world was opened, each kind by its glyph
-/// (`alive C97 o4 ...`, `born o12 | grew c4 | eaten C3 | died C5`), with
+/// (`alive C97 o4 ...`, `born o12 | became c4 | eaten C3 | died C5`), with
 /// `TRAPS b2` when a kind's program ran out of fuel or faulted (a rules
 /// bug: `wmc why` shows the think).
 fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (String, String) {
@@ -643,7 +643,7 @@ fn life_lines(kinds: &Kinds, tally: &Tally, rows: &Query<&ChunkActors>) -> (Stri
     let mut events = String::new();
     for (label, event) in [
         ("born", life::BORN),
-        ("grew", life::BECAME),
+        ("became", life::BECAME),
         ("eaten", life::EATEN),
         ("died", life::DIED),
         ("TRAPS", life::TRAPS),

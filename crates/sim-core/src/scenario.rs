@@ -171,8 +171,8 @@ pub enum Expect {
         op: Op,
         n: i64,
     },
-    /// `born|became|eaten|died [only] K OP N`: the life counters so far
-    /// (`counter` is an `actors::life` index).
+    /// `born|became|eaten|died|thinks|traps [only] K OP N`: the life
+    /// counters so far (`counter` is an `actors::life` index).
     Tally {
         counter: usize,
         who: Who,
@@ -231,7 +231,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
 
 /// The words after `expect`.
 fn expectation(rest: &str) -> Result<Expect, String> {
-    const FORMS: &str = "expected `expect count|born|became|eaten|died [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
+    const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
     let words: Vec<&str> = rest.split_whitespace().collect();
     // `OP V` ending the line at `words[i..]`.
     let op_value = |i: usize| -> Result<(Op, i64), String> {
@@ -250,6 +250,8 @@ fn expectation(rest: &str) -> Result<Expect, String> {
         "became" => Some(crate::actors::life::BECAME),
         "eaten" => Some(crate::actors::life::EATEN),
         "died" => Some(crate::actors::life::DIED),
+        "thinks" => Some(crate::actors::life::THINKS),
+        "traps" => Some(crate::actors::life::TRAPS),
         _ => None,
     };
     let agg = |w: &str| match w {
@@ -1304,7 +1306,9 @@ mod tests {
              expect at (77, -3) hive
              expect at (1, 2) nobody
              expect checksum 8e1fd4fd7f84a868
-             expect state 00ff",
+             expect state 00ff
+             expect traps hen == 0             # the counters `wmc run` prints too
+             expect thinks only fox > 3",
         )
         .unwrap();
         let who = |kind: &str, only| Who {
@@ -1354,6 +1358,18 @@ mod tests {
                 },
                 &Expect::Checksum(0x8e1f_d4fd_7f84_a868),
                 &Expect::State(0xff),
+                &Expect::Tally {
+                    counter: crate::actors::life::TRAPS,
+                    who: who("hen", false),
+                    op: Op::Eq,
+                    n: 0
+                },
+                &Expect::Tally {
+                    counter: crate::actors::life::THINKS,
+                    who: who("fox", true),
+                    op: Op::Gt,
+                    n: 3
+                },
             ]
         );
         match &s.checks[2] {

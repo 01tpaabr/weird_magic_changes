@@ -452,6 +452,7 @@ expect became chick == 1
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
 | `expect count K OP N` | actors of K alive now |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
+| `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K (no actor: the check fails) |
 | `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |

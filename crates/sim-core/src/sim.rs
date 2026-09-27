@@ -2176,6 +2176,22 @@ mod tests {
         );
         assert_eq!((t.get(1, life::THINKS), t.get(1, life::TRAPS)), (5, 0));
         assert_eq!(t.get(1, life::OPS), 5 * 4); // Push 1, Jz, Act, EndRule
+        // A scenario test reads the same counters.
+        let s = Scenario::parse(
+            "t",
+            "expect traps spin == 5\nexpect thinks calm == 5\nexpect traps calm == 0",
+        )
+        .unwrap();
+        let got: Vec<Result<(bool, String), String>> = s
+            .checks
+            .iter()
+            .map(|c| match c {
+                crate::scenario::Check::Expect { what, .. } => expect(&mut w, what),
+                crate::scenario::Check::Run(_) => unreachable!(),
+            })
+            .collect();
+        let ok = |v: &str| Ok((true, v.to_string()));
+        assert_eq!(got, [ok("5"), ok("5"), ok("0")]);
         let spin = rows(&mut w).into_iter().find(|r| r.0 == 0x51).unwrap();
         assert_eq!(spin.3.mem[0], 5);
     }
