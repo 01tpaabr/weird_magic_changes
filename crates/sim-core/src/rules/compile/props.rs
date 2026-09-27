@@ -1,7 +1,7 @@
 //! Properties of the compiler over programs made from the grammar
 //! (`rules/gen_rules.rs`, `docs/GRAMMAR.md`): whatever the grammar derives
-//! parses; well-scoped, well-typed programs compile, lint included; and
-//! nothing panics or takes long.
+//! parses; well-scoped, well-typed programs compile, lint included; and no
+//! text, mutated or pathological, panics, overflows the stack or takes long.
 //!
 //! The runs are deterministic (a fixed seed, no persistence file) and small
 //! enough for `make test`. `WMC_FUZZ_CASES=n` runs `n` cases per property and
@@ -14,6 +14,7 @@
 
 use std::time::{Duration, Instant};
 
+use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestCaseError, TestError, TestRng, TestRunner};
 
 use super::*;
@@ -102,4 +103,199 @@ fn valid_programs_compile_and_lint() {
         }
         Ok(())
     }));
+}
+
+/// A text as pieces: a run of name characters, a run of whitespace, or one
+/// other character.
+fn pieces(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let class = |c: char| {
+        if c.is_ascii_alphanumeric() || c == '_' {
+            0
+        } else if c.is_whitespace() {
+            1
+        } else {
+            2
+        }
+    };
+    for c in text.chars() {
+        match out.last_mut() {
+            Some(last) if class(c) != 2 && last.chars().next().map(class) == Some(class(c)) => {
+                last.push(c);
+            }
+            _ => out.push(c.to_string()),
+        }
+    }
+    out
+}
+
+const WORDS: [&str; 30] = [
+    "kind", "trait", "sub", "const", "when", "=>", "{", "}", "(", ")", "return", "\n", "#", "\"",
+    "inherit", "state", "not", "-", "toward", "extends", ";", ".", ":", ",", "and", "nearest",
+    "as", "within", "choose", "if",
+];
+const NUMBERS: [&str; 7] = [
+    "0",
+    "2147483647",
+    "2147483648",
+    "99999999999999999999",
+    "2147483647d",
+    "143165577min",
+    "-2147483647",
+];
+const NESTS: [(&str, &str); 9] = [
+    ("(", ")"),
+    ("{", "}"),
+    ("not ", ""),
+    ("- ", ""),
+    ("toward ", ""),
+    ("if a { ", "}"),
+    ("f(", ")"),
+    ("choose { 1: ", "}"),
+    ("a + ", ""),
+];
+
+/// Apply one mutation, chosen and placed by `(what, a, b)`.
+fn mutate(p: &mut Vec<String>, (what, a, b): (u8, u32, u32)) {
+    let len = p.len().max(1);
+    let (i, j) = (a as usize % len, b as usize % len);
+    match what % 8 {
+        0 if !p.is_empty() => {
+            p.remove(i);
+        }
+        1 if !p.is_empty() => {
+            let t = p[i].clone();
+            p.insert(i, t);
+        }
+        2 if !p.is_empty() => p.swap(i, j),
+        3 => p.truncate(i),
+        4 => {
+            // Any characters: controls, quotes, non-ASCII.
+            let s: String = [a, b, a ^ b]
+                .iter()
+                .filter_map(|&c| char::from_u32(c % 0x3000))
+                .collect();
+            p.insert(i.min(p.len()), s);
+        }
+        5 => p.insert(i.min(p.len()), WORDS[j % WORDS.len()].to_string()),
+        6 => {
+            let n = NUMBERS[j % NUMBERS.len()].to_string();
+            match p
+                .iter()
+                .position(|t| t.starts_with(|c: char| c.is_ascii_digit()))
+            {
+                Some(k) => p[k] = n,
+                None => p.insert(i.min(p.len()), n),
+            }
+        }
+        _ => {
+            let (open, close) = NESTS[j % NESTS.len()];
+            let n = 1 + (b as usize >> 8) % 3000;
+            p.insert(i.min(p.len()), open.repeat(n) + "a " + &close.repeat(n));
+        }
+    }
+}
+
+#[test]
+fn mutated_programs_never_panic_and_stay_fast() {
+    let strategy = (
+        prop_oneof![
+            gen_rules::program(Mode::Syntax),
+            gen_rules::program(Mode::Valid)
+        ],
+        prop::collection::vec((any::<u8>(), any::<u32>(), any::<u32>()), 1..6),
+    )
+        .prop_map(|(p, ms)| {
+            let mut pieces = pieces(&p.text);
+            for m in ms {
+                mutate(&mut pieces, m);
+            }
+            pieces.concat()
+        });
+    check(runner(CASES).run(&strategy, |text| compile_quickly(&text).map(|_| ())));
+}
+
+/// Texts no generator makes: nesting far past the limit, chains of
+/// `extends` and calls, thousands of items. Each is refused or compiled,
+/// quickly and on a test thread's stack.
+#[test]
+fn pathological_texts_are_refused_quickly() {
+    let n = |k: usize, s: &str| s.repeat(k);
+    let chain = |k: usize, word: &str| {
+        let mut t = format!("{word} x0 {{ }}\n");
+        for i in 1..k {
+            t += &format!("{word} x{i} extends x{} {{ }}\n", i - 1);
+        }
+        t
+    };
+    // Nine subs, each nesting 60 deep around a call of the next: the
+    // analyses follow calls 8 deep, through every level.
+    let calls = |func: bool| {
+        let mut t = String::new();
+        for i in 0..9 {
+            let call = match (func, i == 8) {
+                (true, true) => "return 1".to_string(),
+                (true, false) => format!("return s{}()", i + 1),
+                (false, true) => "idle".to_string(),
+                (false, false) => format!("s{}()", i + 1),
+            };
+            let tail = if func { " return 0" } else { "" };
+            let (open, close) = (n(60, "if true { "), n(60, "}"));
+            t += &format!("sub s{i}() {{ {open}{call} {close}{tail} }}\n");
+        }
+        t + if func {
+            "kind k { mem m\n when s0() > 0 => { m = s0() } }"
+        } else {
+            "kind k { when true => { s0()  idle } }"
+        }
+    };
+    let traits = (0..500).map(|i| format!("t{i}")).collect::<Vec<_>>();
+    let wide = traits
+        .iter()
+        .map(|t| format!("trait {t} {{ when true => idle }}\n"))
+        .collect::<String>()
+        + &format!("kind k extends {} {{ }}", traits.join(", "));
+    let rule = |body: &str| format!("kind k {{ mem m\n when true => {{ {body} }} }}");
+    let cases = [
+        format!(
+            "kind k {{ when {}1{} => idle }}",
+            n(100_000, "("),
+            n(100_000, ")")
+        ),
+        rule(&(n(10_000, "if true { ") + &n(10_000, "}"))),
+        format!("kind k {{ when 1{} > 0 => idle }}", n(100_000, " + 1")),
+        format!("kind k {{ when {}true => idle }}", n(100_000, "not ")),
+        format!("kind k {{ when {}1 > 0 => idle }}", n(100_000, "- ")),
+        format!(
+            "kind k {{ when true => move {}here }}",
+            n(100_000, "toward ")
+        ),
+        rule(&format!(
+            "if m == 0 {{ }} {}",
+            n(10_000, "else if m == 1 { } ")
+        )),
+        rule(&n(50_000, "m = m + 1 ")),
+        rule(
+            &(0..20_000)
+                .map(|i| format!("m = {} ", 100_000 + i))
+                .collect::<String>(),
+        ),
+        chain(3000, "kind"),
+        chain(3000, "trait") + "kind k extends x2999 { }",
+        calls(true),
+        calls(false),
+        wide,
+        (0..2000).map(|i| format!("kind k{i} {{ }}\n")).collect(),
+        (0..2000)
+            .map(|i| format!("sub s{i}() {{ s{}() }}\n", (i + 1) % 2000))
+            .collect::<String>()
+            + "kind k { when true => s0() }",
+    ];
+    for text in &cases {
+        let t = Instant::now();
+        let _ = compile("p.rules", text);
+        let took = t.elapsed();
+        let head: String = text.chars().take(80).collect();
+        assert!(took < SLOW, "{took:?} compiling {head}...");
+    }
 }
