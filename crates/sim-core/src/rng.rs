@@ -1,18 +1,16 @@
-//! Derived randomness. There is no global RNG anywhere in the sim.
+//! Derived randomness. There is no global RNG anywhere in the sim, and no
+//! stream with state: every draw is a pure function of what names it, so
+//! it does not depend on chunking, thread count, or evaluation order.
 //!
-//! Two flavours:
-//! - [`hash_cell`]: a pure hash of `(seed, stream, x, y)`. Use it when every
-//!   cell/entity needs an independent value: the result does not depend on
-//!   chunking, thread count, or evaluation order at all.
-//! - [`rng_for`]: a full `Xoshiro256PlusPlus` stream seeded from
-//!   `(seed, tick, id)`. Use it when one unit of work needs many random draws.
+//! - [`hash_cell`]: a pure hash of `(seed, stream, x, y)`, for a value per
+//!   cell (worldgen, placement).
+//! - Counter-based draws: a base hashed from what the unit of work is (the
+//!   actor `uid` and the tick: `rules::vm::rng_base`), and draw `n` is
+//!   `splitmix64(base + n)` (the VM's `rand` and `chance`).
 //!
 //! `stream` constants let different uses of the same `(seed, x, y)` stay
 //! uncorrelated. Add new ones as `pub const STREAM_*: u64` next to the system
 //! that uses them; never reuse a number.
-
-use rand::SeedableRng;
-use rand_xoshiro::Xoshiro256PlusPlus;
 
 /// splitmix64 finaliser: cheap, good avalanche, the standard way to turn a
 /// counter into a seed.
@@ -36,12 +34,6 @@ pub fn hash_cell(seed: u64, stream: u64, x: i32, y: i32) -> u64 {
 #[inline]
 pub fn unit_f32(h: u64) -> f32 {
     (h >> 40) as f32 / (1u64 << 24) as f32
-}
-
-/// RNG stream for one unit of work (a chunk or an entity) on one tick.
-#[inline]
-pub fn rng_for(seed: u64, tick: u64, id: u32) -> Xoshiro256PlusPlus {
-    Xoshiro256PlusPlus::seed_from_u64(splitmix64(seed ^ splitmix64(tick) ^ (u64::from(id) << 32)))
 }
 
 #[cfg(test)]

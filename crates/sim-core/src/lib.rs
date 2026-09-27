@@ -16,7 +16,7 @@
 //!   Resolve, Exchange, Apply, Migrate, Compact).
 //! - [`rules`]: the kind table, the rules VM and the built-in programs (`docs/ACTORS.md`).
 //! - [`reload`]: rule swaps and save remapping ([`reload::Plan`]).
-//! - [`rng`]: derived, shared-nothing randomness (`hash_cell`, `rng_for`).
+//! - [`rng`]: derived, counter-based randomness (`hash_cell`, `splitmix64`).
 //! - [`scenario`]: the world a save is made from (seed, size, terrain,
 //!   where kinds start), and its resolution against the rules.
 //! - [`store`]: save directory format (meta + per-chunk files).

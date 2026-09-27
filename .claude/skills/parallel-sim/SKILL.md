@@ -49,9 +49,10 @@ data refuse to build until you order them or split the data.
 4. **Chunks are fixed and coordinate-based, not thread-based.** A chunk is a `ChunkCoord`;
    results depend on chunk boundaries, never on which thread ran them, how `par_iter_mut`
    batched them, or the entity id. This is what makes 1-thread == 64-thread bit-identical.
-5. **Seeds are derived, never shared.** `rng_for(seed, tick, chunk_or_actor_id)` via a
-   hash (splitmix64) -> `Xoshiro256PlusPlus::seed_from_u64`. Global RNG is banned; so is
-   seeding from an `Entity`.
+5. **Randomness is counter-based, never shared.** A draw is a pure hash of what names it:
+   `hash_cell(seed, stream, x, y)` for a cell, `splitmix64(vm::rng_base(seed, tick, uid) + n)`
+   for an actor's `n`-th draw. No stream state, so no order to get wrong. Global RNG is
+   banned; so is keying on an `Entity` or a slot.
 6. **No allocation inside a tick.** Scratch buffers live in components/resources and are
    `clear()`ed, not dropped. Per-chunk event lists are a `Vec` component on the chunk. No
    `Commands` spawn/despawn in a phase: chunk entities change only in streaming.
@@ -70,7 +71,7 @@ data refuse to build until you order them or split the data.
 | Need                                    | Use                                              |
 |-----------------------------------------|--------------------------------------------------|
 | same op over every chunk                | one system, `Query<..>::par_iter_mut().for_each` |
-| same op over an arbitrary slice         | `par::par_map` / `par::par_for` (task-pool scope, results in input order) |
+| same op over an arbitrary slice         | `par::par_map` / `par::par_zip_mut` (task-pool scope, results in input order) |
 | two/three independent heavy systems     | put them in the same phase with disjoint access; Bevy runs them concurrently |
 | pipeline across frames (sim -> render)  | Bevy's pipelined rendering already does it; sim state is read in `Update` |
 | long-lived background work (IO, saves)  | `IoTaskPool::get().spawn(..)` + a `Task<T>` polled in a system |

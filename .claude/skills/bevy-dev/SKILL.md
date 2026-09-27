@@ -25,7 +25,7 @@ write a Bevy call from memory if you can check it in ten seconds.
 |------------------------------------------------------|------------------------------------------------------|
 | `stage`: chunk entities (`ChunkCoord`, `ChunkCells`, `ChunkMeta`), `Stage` directory resource, `StageCells` read param, insert/remove/checksum | `play`: `PlayPlugin`, `run()`, resources (`Layout`, `Zoom`, `Frames`, `Grids`), the `Update` chain |
 | `sim`: `SimConfig`, `Tick`, `SimTick` schedule + `Phase` sets, `install/create/open/save/ensure_loaded/step/checksum` | `render::cells` phase 1 (chunks -> `CellFrame`), `render::grid` phase 2 (`CellFrame` -> tile data), `render::atlas` tileset, `render::palette` |
-| `par`: `init_task_pool` (honours `WMC_THREADS`), `par_map`, `par_for` | `camera` (`ViewCamera`), `clock` (`SimClock`): wall-clock lives here only |
+| `par`: `init_task_pool` (honours `WMC_THREADS`), `par_map`, `par_zip_mut` | `camera` (`ViewCamera`), `clock` (`SimClock`): wall-clock lives here only |
 | `store`, `rng`, `time`: unchanged plain Rust          | `main.rs`: `show`/`run` are headless (bare `World`), `play` is the `App` |
 
 No `App`, `Time`, asset or window type may appear in `sim-core`. No `unsafe` anywhere.
@@ -59,8 +59,12 @@ fn grow_moss(tick: Res<Tick>, cfg: Res<SimConfig>,
              mut chunks: Query<(&ChunkCoord, &mut ChunkCells, &mut ChunkMeta)>) {
     chunks.par_iter_mut().for_each(|(coord, mut cells, mut meta)| {
         if !cadence::due(tick.0, 4, *coord) { return; }      // every 4 ticks, staggered by coord
-        let mut rng = rng_for(cfg.seed, tick.0, coord_id(*coord));
-        for i in 0..CHUNK_CELLS { /* read+write this chunk only */ }
+        let t = splitmix64(tick.0);
+        for i in 0..CHUNK_CELLS {
+            let p = coord.cell(i);
+            let r = splitmix64(hash_cell(cfg.seed, STREAM_MOSS, p.x, p.y) ^ t); // this cell's draw this tick
+            /* read+write this chunk only */
+        }
         meta.dirty = true;
     });
 }
@@ -77,8 +81,9 @@ Rules that keep it deterministic and fast:
    the chunk (a component field or a `Vec` per chunk); a sequential system in the next
    phase merges by walking `stage.active()`. `bevy::utils::Parallel<T>` drains in thread
    order: acceptable only if you `sort_unstable_by_key` on a stable key before merging.
-3. **RNG is `rng_for(seed, tick, id)` / `hash_cell`.** `id` is a hash of the chunk coord or
-   the actor id, never an `Entity`, never a slot.
+3. **RNG is counter-based, with no stream state.** `hash_cell(seed, STREAM_*, x, y)` for a
+   cell; an actor's draw `n` is `splitmix64(vm::rng_base(seed, tick, uid) + n)`. Keyed by a
+   cell coord or the actor `uid`, never an `Entity`, never a slot.
 4. **Batching:** `par_iter_mut()` batches by entity count / thread count; results never
    depend on the batch size because of rule 1. Tune `.batching_strategy(BatchingStrategy::fixed(n))`
    only with a `make bench` number.
@@ -99,7 +104,7 @@ From `&mut World` (streaming, saves, tests): `stage::chunk`, `stage::chunk_mut` 
 
 `ComputeTaskPool::get().scope(|s| { for x in items { s.spawn(async move { f(x) }) } })`
 returns `Vec<T>` **in spawn order** (verified: FIFO queue) when spawned from the scope
-closure. `par::par_zip_mut(items, out, batch, f)`, `par::par_map` and `par::par_for` wrap
+closure. `par::par_zip_mut(items, out, batch, f)` and `par::par_map` wrap
 it. `par_iter` and `scope` panic if the pool was never initialised: call
 `sim_core::par::init_task_pool()` (tests, headless) or let `TaskPoolPlugin` do it (App).
 `WMC_THREADS=n` sizes both paths.

@@ -111,31 +111,6 @@ where
     });
 }
 
-/// Run `f` on `n` disjoint work indices `0..n` in parallel, `batch` indices
-/// per task. For phases that write through disjoint `&mut` slices the caller
-/// split beforehand (a frame's rows, a buffer's bands): `f(i)` must touch only
-/// what index `i` owns.
-pub fn par_for(n: usize, batch: usize, f: impl Fn(usize) + Sync) {
-    let batch = batch.max(1);
-    if n <= batch {
-        (0..n).for_each(f);
-        return;
-    }
-    let f = &f;
-    ComputeTaskPool::get().scope(|s| {
-        let mut start = 0;
-        while start < n {
-            let end = (start + batch).min(n);
-            s.spawn(async move {
-                for i in start..end {
-                    f(i);
-                }
-            });
-            start = end;
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -175,25 +150,5 @@ mod tests {
             );
         }
         par_zip_mut(&[] as &[u32], &mut [] as &mut [u64], 1, |_, _| {});
-    }
-
-    #[test]
-    fn par_for_touches_every_index_once() {
-        init_task_pool();
-        let n = 777;
-        let mut hits = vec![0u8; n];
-        // Hand each index its own cell through a raw split: the pattern a
-        // caller uses is disjoint slices, here simulated with atomics-free
-        // per-index ownership via `chunks_mut(1)` collected up front.
-        let cells: Vec<std::sync::atomic::AtomicU8> = (0..n)
-            .map(|_| std::sync::atomic::AtomicU8::new(0))
-            .collect();
-        par_for(n, 10, |i| {
-            cells[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        });
-        for (h, c) in hits.iter_mut().zip(&cells) {
-            *h = c.load(std::sync::atomic::Ordering::Relaxed);
-        }
-        assert!(hits.iter().all(|&h| h == 1));
     }
 }

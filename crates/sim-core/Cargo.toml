@@ -10,8 +10,6 @@ license.workspace = true
 bevy_ecs.workspace = true
 bevy_tasks.workspace = true
 bytemuck.workspace = true
-rand.workspace = true
-rand_xoshiro.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
