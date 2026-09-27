@@ -44,7 +44,8 @@ pub struct KindDef {
     pub tags: u64,
     /// Thinks every `1 << cadence_shift` ticks.
     pub cadence_shift: u8,
-    /// Search radius cap, in cells (`<= 16`: inside the 3x3 halo).
+    /// Search radius cap, in cells (at most [`compile::MAX_SIGHT`]: inside
+    /// the 3x3 halo).
     pub sight: u8,
     /// Ops per think.
     pub fuel: u32,
@@ -248,7 +249,11 @@ impl Kinds {
             d.id = i as u16;
             assert!(d.needs.len() <= NEED_SLOTS, "{}: too many needs", d.name);
             assert!(d.mems.len() <= MEM_SLOTS, "{}: too many mem slots", d.name);
-            assert!(d.sight <= 16, "{}: sight beyond the halo", d.name);
+            assert!(
+                d.sight <= compile::MAX_SIGHT,
+                "{}: sight beyond the halo",
+                d.name
+            );
             assert!(d.cadence_shift < 32, "{}: cadence", d.name);
         }
         let glyphs = defs.iter().map(|d| d.glyph).collect();

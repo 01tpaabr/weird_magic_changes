@@ -678,7 +678,28 @@ struct Parser<'a> {
 /// How deep one tree may be: a nesting and an operator in a chain are one
 /// level each (RULES §18). The parser, the code generator, lint and drop
 /// all recurse on the tree, so this is what keeps them on the stack.
-const MAX_DEPTH: u32 = 128;
+pub const MAX_DEPTH: u32 = 128;
+
+// The other limits of a rule set (RULES §18; `tests/docs.rs` holds the doc
+// to these).
+/// The widest `sight`: a search stays inside the 3x3 chunk halo.
+pub const MAX_SIGHT: u8 = 16;
+/// The most `fuel` a kind may declare, in ops per think.
+pub const MAX_FUEL: u32 = 4096;
+/// `state` blocks per kind.
+pub const MAX_STATES: usize = 64;
+/// Tags per rule set: a kind's tags are one `u64` bitset.
+pub const MAX_TAGS: usize = u64::BITS as usize;
+/// Kinds per rule set: ids are `u16`, and `Kinds` keeps `u16::MAX` free.
+pub const MAX_KINDS: usize = 65_534;
+/// Subs per rule set, a member sub once per kind that has it: `Call` takes
+/// a `u16`.
+pub const MAX_SUBS: usize = 65_536;
+/// Distinct constants outside the 16-bit immediates: the pool index is a
+/// `u16`.
+pub const MAX_POOL: usize = 65_536;
+const _: () = assert!(MAX_SUBS == 1 << u16::BITS && MAX_POOL == 1 << u16::BITS);
+const _: () = assert!(MAX_KINDS == u16::MAX as usize - 1);
 
 fn sense_named(name: &str) -> Option<Sense> {
     Some(match name {
@@ -706,7 +727,7 @@ fn sense_named(name: &str) -> Option<Sense> {
 // declare `need water`). `food` likewise: a declaration where a declaration
 // starts, a need name everywhere else (`need food`, `food < 12h`). The
 // built-in functions, `free` among them, are reserved.
-const KEYWORDS: &[&str] = &[
+pub const KEYWORDS: &[&str] = &[
     "kind",
     "sub",
     "glyph",
@@ -1098,8 +1119,8 @@ impl Parser<'_> {
             if states.iter().any(|s| s.name == sname) {
                 return Err(self.err_at(&sat, format!("state `{sname}` declared twice")));
             }
-            if states.len() == 64 {
-                return Err(self.err_at(&sat, "at most 64 states per kind"));
+            if states.len() == MAX_STATES {
+                return Err(self.err_at(&sat, format!("at most {MAX_STATES} states per kind")));
             }
             self.expect_sym("{")?;
             let srules = self.rule_items()?;
@@ -2304,11 +2325,11 @@ impl<'a> Gen<'a> {
         let items = self.items;
         // Kind ids and sub indices are u16 (`Kinds` keeps u16::MAX free);
         // checked first, before the passes below that grow with the square.
-        if let Some(it) = items.iter().filter(|it| !it.is_trait).nth(65_534) {
-            return Err(self.err(&it.at, "at most 65534 kinds in a rule set"));
+        if let Some(it) = items.iter().filter(|it| !it.is_trait).nth(MAX_KINDS) {
+            return Err(self.err(&it.at, format!("at most {MAX_KINDS} kinds in a rule set")));
         }
-        if let Some(s) = self.subs.get(65_536) {
-            return Err(self.err(&s.at, "at most 65536 subs in a rule set"));
+        if let Some(s) = self.subs.get(MAX_SUBS) {
+            return Err(self.err(&s.at, format!("at most {MAX_SUBS} subs in a rule set")));
         }
         // Names: kinds and traits share one namespace; subs and consts
         // are global too (one namespace across every loaded file).
@@ -2439,8 +2460,10 @@ impl<'a> Gen<'a> {
                     ));
                 }
                 if !self.tags.contains(t) {
-                    if self.tags.len() == 64 {
-                        return Err(self.err(&it.at, "at most 64 tags in a rule set"));
+                    if self.tags.len() == MAX_TAGS {
+                        return Err(
+                            self.err(&it.at, format!("at most {MAX_TAGS} tags in a rule set"))
+                        );
                     }
                     self.tags.push(t.clone());
                 }
@@ -2503,7 +2526,7 @@ impl<'a> Gen<'a> {
                 let idx = u16::try_from(next_sub).map_err(|_| {
                     self.err(
                         &items[self.insts[ki].item].at,
-                        "at most 65536 subs in a rule set, member subs included",
+                        format!("at most {MAX_SUBS} subs in a rule set, member subs included"),
                     )
                 })?;
                 here.push((name.clone(), idx));
@@ -2794,15 +2817,15 @@ impl<'a> Gen<'a> {
         let sight = self
             .decl_num(
                 &d.sight,
-                |s| (0..=16).contains(&s),
-                "sight is 0 to 16 cells",
+                |s| (0..=i32::from(MAX_SIGHT)).contains(&s),
+                &format!("sight is 0 to {MAX_SIGHT} cells"),
             )?
             .map(|s| s as u8);
         let fuel = self
             .decl_num(
                 &d.fuel,
-                |f| (1..=4096).contains(&f),
-                "fuel is 1 to 4096 ops per think",
+                |f| (1..=MAX_FUEL as i32).contains(&f),
+                &format!("fuel is 1 to {MAX_FUEL} ops per think"),
             )?
             .map(|f| f as u32);
         let food = self.decl_num(&d.food, |f| f >= 0, "food is 0 or more ticks")?;
@@ -2964,8 +2987,11 @@ impl<'a> Gen<'a> {
                 states.push(s.clone());
             }
         }
-        if states.len() > 64 {
-            return Err(self.err(&it.at, format!("`{}` has more than 64 states", it.name)));
+        if states.len() > MAX_STATES {
+            return Err(self.err(
+                &it.at,
+                format!("`{}` has more than {MAX_STATES} states", it.name),
+            ));
         }
 
         // Member subs by name; the item's own override its parents'.
@@ -3715,7 +3741,7 @@ impl<'a> Gen<'a> {
             let Ok(idx) = u16::try_from(idx) else {
                 return Err(self.err(
                     &self.here,
-                    "too many distinct constants outside -32768..32767 (max 65536)",
+                    format!("too many distinct constants outside -32768..32767 (max {MAX_POOL})"),
                 ));
             };
             self.asm.push_k(idx);

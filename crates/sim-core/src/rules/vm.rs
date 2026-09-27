@@ -658,7 +658,7 @@ pub const FRAME_LOCALS: usize = 16;
 const LOCALS: usize = (FRAMES + 1) * FRAME_LOCALS;
 
 /// Per-op fuel; a search costs `cells / SEARCH_DIV` extra.
-const SEARCH_DIV: u32 = 8;
+pub const SEARCH_DIV: u32 = 8;
 
 struct Machine<'m> {
     stack: [i32; STACK],
