@@ -35,7 +35,9 @@ use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, Sta
 pub use crate::scenario::{check_expect, expect};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
-use crate::stage::{self, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage};
+use crate::stage::{
+    self, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage,
+};
 use crate::store::{SavedKind, Store, WorldMeta};
 use crate::time::{START_TICK, stamp};
 
@@ -416,7 +418,9 @@ pub fn save(world: &mut World, store: &Store) -> io::Result<usize> {
 
 /// Bring the chunks around `focus` into memory and drop far ones.
 /// Load order is coordinate order; unload order likewise; both are
-/// independent of thread count. Without a store, dirty chunks are never
+/// independent of thread count. Nothing past the world's extent loads: a
+/// focus outside it streams as the nearest cell inside
+/// ([`Pos::clamp_to_world`]), and the load square stops at the edge. Without a store, dirty chunks are never
 /// unloaded (nothing could bring them back). A saved chunk that fails to
 /// read or check is left unloaded ([`Unreadable`]) while the rest load and
 /// unload: then the error lists the files.
@@ -430,16 +434,18 @@ pub fn ensure_loaded(
         policy.unload >= policy.load,
         "unload radius must be >= load radius"
     );
-    let (fc, _) = focus.split();
+    let (fc, _) = focus.clamp_to_world().split();
     let mut stats = StreamStats::default();
 
-    // Load.
+    // Load: the square around the focus, cut at the edge of the world.
+    let lo = |v: i32| v.saturating_sub(policy.load).max(-CHUNK_EXTENT);
+    let hi = |v: i32| v.saturating_add(policy.load).min(CHUNK_EXTENT - 1);
     let mut wanted = Vec::new();
     {
         let stage = world.resource::<Stage>();
         let bad = &world.resource::<Unreadable>().0;
-        for y in fc.y - policy.load..=fc.y + policy.load {
-            for x in fc.x - policy.load..=fc.x + policy.load {
+        for y in lo(fc.y)..=hi(fc.y) {
+            for x in lo(fc.x)..=hi(fc.x) {
                 let c = ChunkCoord::new(x, y);
                 if !stage.is_loaded(c) && !bad.contains(&c) {
                     wanted.push(c);
@@ -505,6 +511,10 @@ fn load_chunks(
     coords: &[ChunkCoord],
     store: Option<&Store>,
 ) -> (usize, usize, Vec<String>) {
+    debug_assert!(
+        coords.iter().all(|c| c.in_world()),
+        "only chunks inside the world load"
+    );
     let now = tick(world);
     // A save opened under other rules: its rows are checked against the
     // kind table they were written with, then remapped.
@@ -597,8 +607,11 @@ fn load_chunks(
 /// Re-run the think of whoever is at `p` (standing, else ground cover)
 /// against the world as it is, with a trace: what the next step would have
 /// it decide (`wmc why`). Changes nothing. `None` if nobody is there or the
-/// chunk is not loaded.
+/// chunk is not loaded (never, outside the world).
 pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
+    if !p.in_world() {
+        return None;
+    }
     let (cc, i) = p.split();
     let e = world.resource::<Stage>().entity(cc)?;
     let cells = world.get::<ChunkCells>(e)?;
@@ -659,10 +672,13 @@ pub fn find_uid(world: &mut World, uid: u64) -> Option<(Pos, ChunkCoord, u16)> {
 
 /// Put an actor of `kind` with `mind` on the cell at `p` (in the cover
 /// layer for a `cover` kind), for tests and tools (worldgen and `spawn` are
-/// the in-game ways). `false` if the chunk is not loaded or the cell is not
-/// walkable or its layer is taken. Marks the chunk dirty. Not for use
-/// inside a tick.
+/// the in-game ways). `false` if the cell is outside the world, the chunk
+/// is not loaded, or the cell is not walkable or its layer is taken. Marks
+/// the chunk dirty. Not for use inside a tick.
 pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> bool {
+    if !p.in_world() {
+        return false;
+    }
     let (cc, i) = p.split();
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
@@ -960,6 +976,75 @@ mod tests {
         // Entities come and go: the ECS holds exactly the loaded set.
         let n = w.query::<&ChunkCells>().iter(&w).count();
         assert_eq!(n, w.resource::<Stage>().loaded_count());
+    }
+
+    /// Streaming stops at the edge of the world: at the edge only the
+    /// chunks inside load, and a focus past it (to the ends of `i32`)
+    /// streams as the nearest cell inside, loading and unloading exactly
+    /// as there.
+    #[test]
+    fn streaming_stops_at_the_edge_of_the_world() {
+        use crate::stage::WORLD_EXTENT;
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        let empty = Scenario {
+            width: 0,
+            height: 0,
+            ..cfg(3)
+        };
+        let policy = LoadPolicy { load: 2, unload: 3 };
+        let loaded = |w: &World| w.resource::<Stage>().loaded_coords().collect::<Vec<_>>();
+        let square = |xs: std::ops::RangeInclusive<i32>, ys: std::ops::RangeInclusive<i32>| {
+            ys.flat_map(|y| xs.clone().map(move |x| ChunkCoord::new(x, y)))
+                .collect::<Vec<_>>()
+        };
+        let mut w = new_world(&empty);
+        let s = ensure_loaded(&mut w, Pos::new(hi, 0), policy, None).unwrap();
+        assert_eq!((s.generated, s.unloaded), (3 * 5, 0));
+        assert_eq!(
+            loaded(&w),
+            square(CHUNK_EXTENT - 3..=CHUNK_EXTENT - 1, -2..=2)
+        );
+        for (focus, xs, ys) in [
+            (
+                Pos::new(i32::MAX, i32::MIN),
+                CHUNK_EXTENT - 3..=CHUNK_EXTENT - 1,
+                -CHUNK_EXTENT..=-CHUNK_EXTENT + 2,
+            ),
+            (
+                Pos::new(lo - 1, WORLD_EXTENT),
+                -CHUNK_EXTENT..=-CHUNK_EXTENT + 2,
+                CHUNK_EXTENT - 3..=CHUNK_EXTENT - 1,
+            ),
+        ] {
+            let mut past = new_world(&empty);
+            let s = ensure_loaded(&mut past, focus, policy, None).unwrap();
+            assert_eq!(s.generated, 3 * 3, "{focus:?}");
+            assert_eq!(loaded(&past), square(xs, ys), "{focus:?}");
+            let mut at = new_world(&empty);
+            ensure_loaded(&mut at, focus.clamp_to_world(), policy, None).unwrap();
+            assert_eq!(stage::checksum(&mut past), stage::checksum(&mut at));
+            // Back from past the edge: the far side unloads as from the edge.
+            let s = ensure_loaded(&mut past, Pos::new(0, 0), policy, None).unwrap();
+            assert_eq!((s.generated, s.unloaded), (25, 9), "{focus:?}");
+        }
+        // A radius past the whole world stops at its edge too.
+        let huge = LoadPolicy {
+            load: i32::MAX,
+            unload: i32::MAX,
+        };
+        let s = ensure_loaded(
+            &mut w,
+            Pos::new(i32::MAX, i32::MAX),
+            LoadPolicy { load: 0, ..huge },
+            None,
+        );
+        assert_eq!(s.unwrap().generated, 1);
+        assert!(loaded(&w).iter().all(|c| c.in_world()));
+        // Nobody is at a cell outside, and nobody is put there.
+        assert!(explain(&w, Pos::new(WORLD_EXTENT, 0)).is_none());
+        let kinds = Kinds::builtin();
+        let mind = crate::actors::systems::newborn(&kinds, 0, 1, tick(&w));
+        assert!(!place_actor(&mut w, Pos::new(WORLD_EXTENT, hi), 0, mind));
     }
 
     #[test]
@@ -2638,6 +2723,84 @@ mod tests {
         }
         let eggs: Vec<Pos> = all.iter().filter(|r| r.1 == egg).map(|r| r.2).collect();
         assert_eq!(eggs, vec![Pos::new(70, 40)]);
+    }
+
+    /// At the edge of the world the cells beyond read as an unloaded chunk:
+    /// rock, nobody, not free. A move out of the world, or a spawn past it,
+    /// is BLOCKED, at every edge, and nothing loads past it; a move along
+    /// the edge is OK.
+    #[test]
+    fn nobody_moves_or_spawns_past_the_edge_of_the_world() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        use crate::rules::vm::result;
+        use crate::stage::WORLD_EXTENT;
+        let kinds = compile(
+            "t.rules",
+            "kind egg { cadence 1024 }
+             kind hen { cadence 1  mem dx, dy, r, f, k
+               when r == 0 => { r = 9  f = free(at(x + dx, y + dy))  k = is(at(x + dx, y + dy), rock)
+                                move at(x + dx, y + dy) }
+               when r == 9 => { r = result  idle }
+               when true => idle }
+             kind layer { cadence 1  mem dx, dy, r, f, k
+               when r == 0 => { r = 9  f = free(at(x + dx, y + dy))  k = is(at(x + dx, y + dy), rock)
+                                spawn egg at at(x + dx, y + dy) }
+               when r == 9 => { r = result  idle }
+               when true => idle }",
+        )
+        .unwrap();
+        let (egg, hen, layer) = (0, 1, 2);
+        let empty = Scenario {
+            width: 0,
+            height: 0,
+            ..cfg(1)
+        };
+        let mut w = new_world_with(&empty, kinds.clone()).unwrap();
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        let (blocked, ok) = (i32::from(result::BLOCKED), i32::from(result::OK));
+        // (kind, at, (dx, dy), what its first think finds: free, rock, result)
+        let actors = [
+            (hen, Pos::new(hi, lo + 10), (1, 0), (0, 1, blocked)),
+            (hen, Pos::new(hi - 10, lo), (0, -1), (0, 1, blocked)),
+            (hen, Pos::new(hi, lo), (1, -1), (0, 1, blocked)),
+            (hen, Pos::new(hi, lo + 20), (0, 1), (1, 0, ok)),
+            (layer, Pos::new(hi, lo + 30), (1, 0), (0, 1, blocked)),
+            (layer, Pos::new(hi - 20, lo), (0, -1), (0, 1, blocked)),
+            (hen, Pos::new(lo, hi - 10), (-1, 0), (0, 1, blocked)),
+            (hen, Pos::new(lo + 10, hi), (0, 1), (0, 1, blocked)),
+            (layer, Pos::new(lo, hi - 20), (-1, 0), (0, 1, blocked)),
+            (layer, Pos::new(lo + 20, hi), (1, 0), (1, 0, ok)),
+        ];
+        let policy = LoadPolicy { load: 1, unload: 1 };
+        for corner in [Pos::new(hi, lo), Pos::new(lo, hi)] {
+            ensure_loaded(&mut w, corner, policy, None).unwrap();
+            flatten(&mut w);
+        }
+        let now = tick(&w);
+        for (i, &(kind, p, (dx, dy), _)) in actors.iter().enumerate() {
+            let mut m = newborn(&kinds, kind, 0xA0 + i as u64, now);
+            (m.mem[0], m.mem[1]) = (dx, dy);
+            assert!(place_actor(&mut w, p, kind, m), "{p:?}");
+        }
+        let before: Vec<ChunkCoord> = w.resource::<Stage>().loaded_coords().collect();
+        assert_eq!(before.len(), 2 * 4);
+        for _ in 0..3 {
+            step(&mut w);
+        }
+        let after: Vec<ChunkCoord> = w.resource::<Stage>().loaded_coords().collect();
+        assert_eq!(after, before, "nothing loads past the edge");
+        let all = rows(&mut w);
+        for (i, &(kind, p, (dx, dy), (free, rock, res))) in actors.iter().enumerate() {
+            let r = all.iter().find(|r| r.0 == 0xA0 + i as u64).unwrap();
+            assert_eq!(&r.3.mem[..5], &[dx, dy, res, free, rock], "{p:?} {dx},{dy}");
+            let moved = kind == hen && res == ok;
+            let want = if moved { p.offset(dx, dy).unwrap() } else { p };
+            assert_eq!(r.2, want, "{p:?} {dx},{dy}");
+            assert!(r.2.in_world());
+        }
+        let eggs: Vec<Pos> = all.iter().filter(|r| r.1 == egg).map(|r| r.2).collect();
+        assert_eq!(eggs, [Pos::new(lo + 21, hi)]);
     }
 
     /// A kind built from traits with `inherit` and a member sub behaves

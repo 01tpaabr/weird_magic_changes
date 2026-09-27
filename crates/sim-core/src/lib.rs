@@ -11,7 +11,7 @@
 //! `app`.
 //!
 //! Modules:
-//! - [`stage`]: the chunked, unbounded 2D grid every actor stands on.
+//! - [`stage`]: the chunked 2D grid every actor stands on, [`WORLD_EXTENT`] each way.
 //! - [`actors`]: actor rows inside chunks and the actor phases (Think,
 //!   Resolve, Exchange, Apply, Migrate, Compact).
 //! - [`rules`]: the kind table, the rules VM and the built-in programs (`docs/ACTORS.md`).
@@ -46,8 +46,8 @@ pub use rules::{KindDef, Kinds};
 pub use scenario::Scenario;
 pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick};
 pub use stage::{
-    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta,
-    Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells,
+    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData,
+    ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells, WORLD_EXTENT,
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};

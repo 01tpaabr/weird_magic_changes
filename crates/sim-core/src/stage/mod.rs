@@ -1,5 +1,6 @@
-//! The Stage: an unbounded 2D grid of cells that actors stand on, stored as
-//! fixed-size **chunks**, one entity per loaded chunk.
+//! The Stage: a 2D grid of cells that actors stand on, a billion cells each
+//! way from the origin ([`WORLD_EXTENT`]), stored as fixed-size **chunks**,
+//! one entity per loaded chunk.
 //!
 //! ```text
 //! world cell (x, y): i32          chunk coord = (x >> CHUNK_BITS, y >> CHUNK_BITS)
@@ -72,6 +73,20 @@ pub fn cell_u16(cell: usize) -> u16 {
     cell as u16
 }
 const MASK: i32 = CHUNK_SIZE - 1;
+
+/// The world's extent: a cell's `x` and `y` each lie in
+/// `[-WORLD_EXTENT, WORLD_EXTENT)`, whole chunks either way. Nothing past it
+/// ever loads: streaming clamps its focus to it, and scenarios and saves
+/// refuse positions past it. So to an actor at the edge the cells beyond
+/// read as an unloaded chunk (rock, nobody) and a move or spawn there is
+/// BLOCKED. Every chunk inside, and every neighbour of one, has
+/// representable cells, and the difference of two positions inside fits an
+/// `i32`. It is also where the app's camera stops.
+pub const WORLD_EXTENT: i32 = 1_000_000_000;
+/// [`WORLD_EXTENT`] in chunks: a chunk coordinate inside lies in
+/// `[-CHUNK_EXTENT, CHUNK_EXTENT)`.
+pub const CHUNK_EXTENT: i32 = WORLD_EXTENT / CHUNK_SIZE;
+const _: () = assert!(WORLD_EXTENT % CHUNK_SIZE == 0 && WORLD_EXTENT <= 1 << 30);
 
 /// What a cell fundamentally is. Exactly one per cell.
 #[repr(u8)]
@@ -150,8 +165,9 @@ impl Default for ActorId {
     }
 }
 
-/// World cell coordinate. Unbounded; `y` grows downward. The initial map
-/// occupies `[0, w) x [0, h)`, everything else is generated on demand.
+/// World cell coordinate; `y` grows downward. The initial map occupies
+/// `[0, w) x [0, h)`, everything else is generated on demand, up to
+/// [`WORLD_EXTENT`] each way. A `Pos` may lie outside it: nothing is there.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
 pub struct Pos {
@@ -165,7 +181,23 @@ impl Pos {
         Self { x, y }
     }
 
-    /// `self + (dx, dy)`, `None` only on i32 overflow (the edge of the world).
+    /// Inside the world's extent ([`WORLD_EXTENT`])?
+    #[inline]
+    pub const fn in_world(self) -> bool {
+        -WORLD_EXTENT <= self.x
+            && self.x < WORLD_EXTENT
+            && -WORLD_EXTENT <= self.y
+            && self.y < WORLD_EXTENT
+    }
+
+    /// The nearest position inside the world's extent.
+    #[inline]
+    pub fn clamp_to_world(self) -> Pos {
+        let c = |v: i32| v.clamp(-WORLD_EXTENT, WORLD_EXTENT - 1);
+        Pos::new(c(self.x), c(self.y))
+    }
+
+    /// `self + (dx, dy)`, `None` only on i32 overflow.
     #[inline]
     pub fn offset(self, dx: i32, dy: i32) -> Option<Pos> {
         Some(Pos::new(self.x.checked_add(dx)?, self.y.checked_add(dy)?))
@@ -204,7 +236,17 @@ impl ChunkCoord {
         Self { x, y }
     }
 
-    /// World position of this chunk's top-left cell.
+    /// Inside the world's extent ([`CHUNK_EXTENT`])?
+    #[inline]
+    pub const fn in_world(self) -> bool {
+        -CHUNK_EXTENT <= self.x
+            && self.x < CHUNK_EXTENT
+            && -CHUNK_EXTENT <= self.y
+            && self.y < CHUNK_EXTENT
+    }
+
+    /// World position of this chunk's top-left cell (for a chunk inside the
+    /// world or next to it: further out, the shift wraps).
     #[inline]
     pub const fn origin(self) -> Pos {
         Pos::new(self.x << CHUNK_BITS, self.y << CHUNK_BITS)
@@ -525,6 +567,44 @@ mod tests {
         assert_eq!(Pos::new(-1, -1).split().0, ChunkCoord::new(-1, -1));
         assert_eq!(Pos::new(-1, -1).split().1, CHUNK_CELLS - 1);
         assert_eq!(ChunkCoord::new(-1, 2).origin(), Pos::new(-64, 128));
+    }
+
+    /// The extent is whole chunks: a cell is inside iff its chunk is, and
+    /// the chunks just past the edge still have representable cells.
+    #[test]
+    fn the_world_extent_is_whole_chunks() {
+        let (lo, hi) = (-WORLD_EXTENT, WORLD_EXTENT - 1);
+        for (p, inside) in [
+            (Pos::new(0, 0), true),
+            (Pos::new(lo, lo), true),
+            (Pos::new(hi, hi), true),
+            (Pos::new(hi + 1, 0), false),
+            (Pos::new(0, lo - 1), false),
+            (Pos::new(i32::MAX, i32::MIN), false),
+        ] {
+            assert_eq!(p.in_world(), inside, "{p:?}");
+            let (cc, i) = p.split();
+            assert_eq!(cc.in_world(), inside, "{p:?}");
+            assert_eq!(cc.cell(i), p, "{p:?}");
+        }
+        assert_eq!(
+            Pos::new(hi, 0).split().0,
+            ChunkCoord::new(CHUNK_EXTENT - 1, 0)
+        );
+        assert_eq!(
+            ChunkCoord::new(CHUNK_EXTENT, 0).origin(),
+            Pos::new(WORLD_EXTENT, 0)
+        );
+        let past = ChunkCoord::new(-CHUNK_EXTENT - 1, CHUNK_EXTENT);
+        assert_eq!(
+            past.cell(CHUNK_CELLS - 1),
+            Pos::new(lo - 1, WORLD_EXTENT + 63)
+        );
+        assert_eq!(
+            Pos::new(i32::MAX, i32::MIN).clamp_to_world(),
+            Pos::new(hi, lo)
+        );
+        assert_eq!(Pos::new(-5, 7).clamp_to_world(), Pos::new(-5, 7));
     }
 
     #[test]
