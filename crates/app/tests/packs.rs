@@ -96,11 +96,15 @@ fn a_save_remembers_its_packs_and_opens_by_name() {
         "{err}"
     );
 
-    // Its packs gone: the built-in rules, said so.
+    // Its packs gone: the built-in rules, said so, and that a save keeps them.
     std::fs::remove_dir_all(&base).unwrap();
     let (ok, builtin, err) = wmc(&["run", dir, "400"]);
     assert!(ok, "{err}");
     assert!(err.contains("the save's packs are missing"), "{err}");
+    assert!(
+        err.contains("using the built-in rules (saving will keep them)"),
+        "{err}"
+    );
     assert_eq!(line(&builtin, "state:"), line(&plain, "state:"));
 
     // None of that wrote anything.

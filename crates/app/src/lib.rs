@@ -78,7 +78,8 @@ pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::
             packs = saved;
         } else {
             eprintln!(
-                "rules: the save's packs are missing ({}); using the built-in rules",
+                "rules: the save's packs are missing ({}); using the built-in rules \
+                 (saving will keep them)",
                 gone.iter()
                     .map(|p| p.display().to_string())
                     .collect::<Vec<_>>()

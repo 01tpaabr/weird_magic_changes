@@ -516,7 +516,9 @@ rules ../packs/life                 # in scenarios/life.scenario
 A save remembers its packs, by absolute path. So a new world runs `--rules`, else
 `WMC_RULES`, else its scenario's `rules`, else the built-in kinds; a saved one runs
 `--rules`, else `WMC_RULES`, else the packs it was saved with. If one of those is gone it
-says so and uses the built-in rules. `wmc lint --scenario <file>`, with no packs (no
+says so and uses the built-in rules, and the next save (`p` or quitting `wmc play`) records
+the built-in rules in place of the missing packs: from then on the save opens with them,
+even once the packs are back (pass `--rules` to return to them). `wmc lint --scenario <file>`, with no packs (no
 `--rules`, positional pack or `WMC_RULES`), lints the ones the scenario names, the same order
 as for a new world.
 
