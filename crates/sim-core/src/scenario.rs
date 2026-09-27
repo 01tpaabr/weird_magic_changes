@@ -37,7 +37,7 @@ use std::fmt;
 
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
-use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, cell_u16};
+use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16};
 
 mod expect;
 pub use expect::{check_expect, expect, expect_family};
@@ -54,6 +54,11 @@ const MAP_CELLS: usize = 1 << 24;
 /// The most chunks `size` may generate at creation (4096 x 4096 cells,
 /// about 600 MB); the rest generates as the camera reaches it.
 pub const MAX_SIZE_CHUNKS: u64 = 4096;
+
+// A `size` or a drawn map is at most this many chunks, or cells, in a
+// line: inside the world's extent without a check of its own.
+const _: () = assert!(MAX_SIZE_CHUNKS * CHUNK_SIZE as u64 <= WORLD_EXTENT as u64);
+const _: () = assert!(MAP_CELLS <= WORLD_EXTENT as usize);
 
 /// Where a kind starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +305,7 @@ fn expectation(rest: &str) -> Result<Expect, String> {
     if first == "at" || first.starts_with("at(") {
         let tail = rest.trim_start().strip_prefix("at").unwrap_or("");
         let (x, y, after) = xy(tail).ok_or(FORMS)?;
+        in_world(x, y)?;
         let after: Vec<&str> = after.split_whitespace().collect();
         let who = match after[..] {
             ["nobody"] => None,
@@ -473,6 +479,19 @@ fn xy(text: &str) -> Option<(i32, i32, &str)> {
         x.trim().parse().ok()?,
         y.trim().parse().ok()?,
         &inner[close + 1..],
+    ))
+}
+
+/// `(x, y)` is inside the world's extent ([`WORLD_EXTENT`]), else why not.
+/// Shared by `start ... at`, `expect at` and the starts of a save.
+pub fn in_world(x: i32, y: i32) -> Result<(), String> {
+    if Pos::new(x, y).in_world() {
+        return Ok(());
+    }
+    Err(format!(
+        "({x}, {y}) is outside the world: x and y run from {} to {}",
+        -WORLD_EXTENT,
+        WORLD_EXTENT - 1
     ))
 }
 
@@ -737,6 +756,7 @@ impl Scenario {
                         let (x, y, after) = xy(at).ok_or_else(|| {
                             err(line_no, "expected `start KIND at (X, Y)`".into())
                         })?;
+                        in_world(x, y).map_err(|m| err(line_no, format!("`{kind}` at {m}")))?;
                         let with = match after.trim() {
                             "" => Vec::new(),
                             after => with_list(after).map_err(|m| err(line_no, m))?,
@@ -1098,8 +1118,14 @@ impl DrawnMap {
         Some((g, f))
     }
 
-    /// Every byte a cell, and one per cell.
+    /// Every byte a cell, one per cell, and every cell inside the world.
     pub fn validate(&self) -> Result<(), String> {
+        if self.width > WORLD_EXTENT.unsigned_abs() || self.height > WORLD_EXTENT.unsigned_abs() {
+            return Err(format!(
+                "a {} x {} map reaches outside the world ({WORLD_EXTENT} cells each way)",
+                self.width, self.height
+            ));
+        }
         if self.cells.len() != self.width as usize * self.height as usize {
             return Err(format!(
                 "a {} x {} map with {} cells",
@@ -1264,6 +1290,7 @@ impl Placement {
             match s {
                 Start::Share { .. } => shares.push((Some(placed), s.share())),
                 Start::At { kind, x, y, with } => {
+                    in_world(*x, *y).map_err(|m| err(format!("`{kind}` at {m}")))?;
                     // Not quoted as a `start` line: a map may have drawn it.
                     let (g, f) = terrain.cell(*x, *y);
                     if f.blocks() {
@@ -1558,6 +1585,23 @@ mod tests {
             ("start hive at ((3, 4", "expected `start KIND at (X, Y)`"),
             ("start hive at 3, 4)", "expected `start KIND at (X, Y)`"),
             ("start hive at (3, 4, 5)", "expected `start KIND at (X, Y)`"),
+            (
+                "start hive at (1000000000, 0)",
+                "t:1: `hive` at (1000000000, 0) is outside the world: x and y run from -1000000000 to 999999999",
+            ),
+            (
+                "seed 1\nstart hive at (0, -1000000001) with (food = 1)",
+                "t:2: `hive` at (0, -1000000001) is outside the world",
+            ),
+            (
+                "start hive at (-2147483648, 2147483647)",
+                "is outside the world",
+            ),
+            (
+                "run 1\nexpect at (999999999, 1000000000) nobody",
+                "t:2: (999999999, 1000000000) is outside the world",
+            ),
+            ("expect at (-1000000001, 0) hive", "is outside the world"),
             ("spawn fox", "unknown statement `spawn`"),
             ("terrain water_level nan", "`nan` is not a number"),
             ("terrain water_scale 0", "above 0"),
@@ -1620,6 +1664,14 @@ mod tests {
                 ..
             }]
         ));
+        // The last cells inside the world are fine.
+        let edge =
+            "start hive at (999999999, -1000000000)\nexpect at (-1000000000, 999999999) nobody";
+        let edge = Scenario::parse("t", edge).unwrap();
+        assert_eq!(
+            edge.starts,
+            [Start::at("hive", 999_999_999, -1_000_000_000)]
+        );
         // Exactly one is fine.
         Scenario::parse("t", "start a 1 / 2\nstart b 1 / 2").unwrap();
         Scenario::parse("t", "size 4096 4096").unwrap();
