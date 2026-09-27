@@ -173,3 +173,275 @@ fn a_start_that_does_not_fit_names_its_line() {
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+// ---- odd command lines -------------------------------------------------------------------
+
+/// `wmc args` run in `dir` with `env` set (and no other `WMC_RULES` or
+/// `WMC_THREADS`): exit code (`None`: killed by a signal), stdout, stderr.
+fn wmc_in(dir: &Path, env: &[(&str, &str)], args: &[&str]) -> (Option<i32>, String, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+        .env_remove("WMC_RULES")
+        .env_remove("WMC_THREADS")
+        .envs(env.iter().copied())
+        .current_dir(dir)
+        .args(args)
+        .output()
+        .expect("wmc runs");
+    let text = |b: &[u8]| String::from_utf8_lossy(b).into_owned();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+/// `wmc args` exits 0, or 1 with an `Error:`; never a panic or a signal.
+fn no_panic(dir: &Path, env: &[(&str, &str)], args: &[&str]) {
+    let (code, out, err) = wmc_in(dir, env, args);
+    let said = format!("{env:?} {args:?}: exit {code:?}\n{out}{err}");
+    assert!(!err.contains("panicked at"), "{said}");
+    match code {
+        Some(0) => {}
+        Some(1) => assert!(err.contains("Error: "), "{said}"),
+        _ => panic!("{said}"),
+    }
+}
+
+/// A scratch directory holding what odd command lines name: a tiny
+/// scenario and a broken one, a rules file that does not compile, a file
+/// where a save should be, a save with a world file of garbage, a real save
+/// whose camera is past the end of the world, and one whose chunk file is
+/// cut short.
+fn odd_fixtures(name: &str) -> PathBuf {
+    use sim_core::{Scenario, Store, sim};
+    let dir = scratch(name);
+    let tiny = "seed 1\nsize 1 1\nstart fox at (0, 0)\nrun 3\nexpect count fox == 1\n";
+    std::fs::write(dir.join("tiny.scenario"), tiny).unwrap();
+    std::fs::write(dir.join("bad.scenario"), "seed x\n").unwrap();
+    std::fs::write(dir.join("bad.rules"), "kind {\n").unwrap();
+    std::fs::write(dir.join("afile"), "not a save").unwrap();
+    std::fs::create_dir_all(dir.join("garbage/chunks")).unwrap();
+    std::fs::write(dir.join("garbage/world.wmc"), "WMCW and then nothing").unwrap();
+    for save in ["far", "broken"] {
+        let store = Store::open(dir.join(save)).unwrap();
+        let mut w = sim::new_world(&Scenario::parse("t", tiny).unwrap());
+        sim::save(&mut w, &store).unwrap();
+    }
+    std::fs::write(dir.join("far/camera.txt"), "1e300 -1e300\n").unwrap();
+    let chunk = dir.join("broken/chunks/0_0.wmcc");
+    let bytes = std::fs::read(&chunk).unwrap();
+    std::fs::write(&chunk, &bytes[..bytes.len() / 2]).unwrap();
+    dir
+}
+
+/// Missing and extra arguments, unknown flags, numbers out of every range,
+/// empty strings, paths that are not there or not what they should be: an
+/// error that says so, or a run, never a panic. (`play` only where it
+/// fails before it opens a window.)
+#[test]
+fn odd_command_lines_never_panic() {
+    let dir = odd_fixtures("odd");
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let rules = rules.to_str().unwrap();
+    let cases: &[&[&str]] = &[
+        &[],
+        &[""],
+        &["nope"],
+        &["SHOW"],
+        &["-v"],
+        &["--", "show"],
+        &["--strict"],
+        &["show", ""],
+        &["show", "-1", "5"],
+        &["show", "5", "5", "-1"],
+        &["show", "0", "5"],
+        &["show", "5", "0"],
+        &["show", "4097", "4097"],
+        &["show", "65", "1", "18446744073709551615"],
+        &["show", "5", "5", "18446744073709551616"],
+        &["show", "99999999999", "1"],
+        &["show", "1", "2", "3", "4"],
+        &["show", " 1"],
+        &["show", "1e3"],
+        &["show", "--threads"],
+        &["show", "--threads", "0"],
+        &["show", "--threads", "-1"],
+        &["show", "--threads", "x"],
+        &["show", "--threads", ""],
+        &["show", "--threads", "99999999999999999999"],
+        &["show", "3", "3", "--threads", "1", "--threads", "2"],
+        &["show", "--rules"],
+        &["show", "--rules", ""],
+        &["show", "--rules", "/nonexistent"],
+        &["show", "--rules", "bad.rules"],
+        &["show", "--rules", "afile"],
+        &["show", "--rules", "."],
+        &["show", "--scenario"],
+        &["show", "--scenario", ""],
+        &["show", "--scenario", "."],
+        &["show", "--scenario", "/nonexistent"],
+        &["show", "--scenario", "bad.scenario"],
+        &["show", "--scenario", "tiny.scenario"],
+        &["show", "2", "2", "--scenario", "tiny.scenario"],
+        &[
+            "show",
+            "--scenario",
+            "tiny.scenario",
+            "--scenario",
+            "bad.scenario",
+        ],
+        &["show", "--strict"],
+        &["show", "--seed", "1"],
+        &["show", "-v"],
+        &["run"],
+        &["run", "s1"],
+        &["run", "s1", "-1"],
+        &["run", "s1", "x"],
+        &["run", "s1", "0"],
+        &["run", "s1", "18446744073709551616"],
+        &["run", "s1", "3", "0", "0"],
+        &["run", "s1", "1", "1", "1", "1", "extra"],
+        &["run", "", "1"],
+        &["run", "afile", "1"],
+        &["run", "garbage", "1"],
+        &["run", "far", "3"],
+        &["run", "broken", "1"],
+        &["run", "far", "1", "--rules", "bad.rules"],
+        &["why"],
+        &["why", "-v"],
+        &["why", "-v", "s2"],
+        &["why", "-v", "-v", "s2", "0", "0"],
+        &["why", "s2", "1"],
+        &["why", "s2", "1", "x"],
+        &["why", "s2", "99999999999", "1"],
+        &["why", "s2", "-2147483648", "2147483647"],
+        &["why", "s2", "1", "1", "-5"],
+        &["why", "far", "0", "0"],
+        &["why", "garbage", "0", "0"],
+        &["why", "broken", "0", "0"],
+        &["why", "s3", "0", "0", "0", "--scenario", "tiny.scenario"],
+        &[
+            "why",
+            "-v",
+            "s4",
+            "0",
+            "0",
+            "2",
+            "1",
+            "1",
+            "--scenario",
+            "tiny.scenario",
+        ],
+        &["why", "s5", "0", "0", "0", "1", "1", "1", "1"],
+        &["play"],
+        &["play", "s6", "x"],
+        &["play", "s6", "0", "0"],
+        &["play", "s6", "1", "1", "1", "1"],
+        &["lint"],
+        &["lint", ""],
+        &["lint", "/nonexistent"],
+        &["lint", "bad.rules"],
+        &["lint", "afile"],
+        &["lint", rules],
+        &["lint", rules, rules],
+        &["lint", "--strict", rules, "--scenario", "tiny.scenario"],
+        &["lint", "--scenario", "tiny.scenario"],
+        &["lint", rules, "--scenario", "bad.scenario"],
+        &["lint", rules, "--scenario", "/nonexistent"],
+        &["scenario"],
+        &["scenario", ""],
+        &["scenario", "."],
+        &["scenario", "/nonexistent"],
+        &["scenario", "bad.scenario"],
+        &["scenario", "afile"],
+        &["scenario", "tiny.scenario"],
+        &["scenario", "tiny.scenario", "--threads", "1"],
+        &["scenario", "tiny.scenario", "--rules", "bad.rules"],
+        &["scenario", "tiny.scenario", "tiny.scenario"],
+    ];
+    for args in cases {
+        no_panic(&dir, &[], args);
+    }
+    for rules in ["", ":", "/nonexistent", "bad.rules", "afile"] {
+        no_panic(&dir, &[("WMC_RULES", rules)], &["show", "3", "3"]);
+        no_panic(&dir, &[("WMC_RULES", rules)], &["run", "far", "1"]);
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Cases for `generated_command_lines_never_panic`: a few by default,
+/// `WMC_FUZZ_CASES` for `make fuzz`, `WMC_FUZZ_SEED` for others.
+fn fuzz_config(cases: u32) -> proptest::test_runner::Config {
+    let var = |name: &str| std::env::var(name).ok();
+    let seed = var("WMC_FUZZ_SEED").and_then(|v| v.parse().ok());
+    proptest::test_runner::Config {
+        cases: var("WMC_FUZZ_CASES")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(cases),
+        failure_persistence: None,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(seed.unwrap_or(0x5EED)),
+        ..proptest::test_runner::Config::default()
+    }
+}
+
+/// What a generated command line is made of: no `play` (a window), and no
+/// number a tick count reads as long.
+const WORDS: &[&str] = &[
+    "show",
+    "run",
+    "why",
+    "lint",
+    "scenario",
+    "--threads",
+    "--rules",
+    "--scenario",
+    "--strict",
+    "-v",
+    "--seed",
+    "--",
+    "",
+    ".",
+    "s7",
+    "garbage",
+    "far",
+    "broken",
+    "afile",
+    "tiny.scenario",
+    "bad.scenario",
+    "bad.rules",
+    "/nonexistent",
+    "RULES",
+    "0",
+    "1",
+    "2",
+    "3",
+    "64",
+    "65",
+    "-1",
+    "-0",
+    "x",
+    "1e3",
+    " 1",
+    "4097",
+    "-2147483649",
+    "18446744073709551616",
+    "99999999999999999999",
+    "é",
+    "\u{feff}1",
+];
+
+/// Any list of these words is an error that says so, or a run.
+#[test]
+fn generated_command_lines_never_panic() {
+    let dir = odd_fixtures("generated");
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let rules = rules.to_str().unwrap();
+    let words = proptest::collection::vec(proptest::sample::select(WORDS), 0..8);
+    let mut runner = proptest::test_runner::TestRunner::new(fuzz_config(24));
+    let result = runner.run(&words, |words| {
+        let args: Vec<&str> = words
+            .iter()
+            .map(|w| if *w == "RULES" { rules } else { w })
+            .collect();
+        no_panic(&dir, &[], &args);
+        Ok(())
+    });
+    std::fs::remove_dir_all(&dir).unwrap();
+    result.unwrap();
+}
