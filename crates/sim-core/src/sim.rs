@@ -1378,7 +1378,7 @@ mod tests {
             signal: None,
             amount: 0,
             with: [0; 2],
-            mark: None,
+            mark: [0; crate::stage::SCENT_CHANNELS],
             used: 0,
             trapped: false,
         };
@@ -1900,6 +1900,37 @@ mod tests {
         )
         .unwrap_err();
         assert!(e.to_string().contains("at most 4 scents"), "{e}");
+    }
+
+    /// Several `mark`s in one think add up, per channel and saturating,
+    /// also when they come from rules that fall through to one another.
+    #[test]
+    fn marks_in_one_think_add_up_per_channel() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind ant { glyph \"a\"  cadence 1
+               mem n, t, h, f
+               when n == 1 => { n = 2  t = scent(trail)  h = scent(home)  f = scent(food) }
+               when n == 0 => { mark trail 50  mark home 50 }
+               when n == 0 => { n = 1  mark trail 20  mark food 200  mark food 100  idle } }",
+        )
+        .unwrap();
+        let mut w = new_world_with(&cfg(12), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(20, 30),
+            0,
+            newborn(&kinds, 0, 0xA1, now)
+        ));
+        for _ in 0..3 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        assert_eq!(&all[0].3.mem[..4], &[2, 70, 50, 255], "{:?}", all[0].3.mem);
     }
 
     /// The acceptance test of the social primitives (docs/ACTORS.md §11

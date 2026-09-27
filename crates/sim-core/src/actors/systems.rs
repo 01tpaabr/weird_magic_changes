@@ -38,7 +38,9 @@ use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
 use crate::rules::{Kinds, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, Stage};
+use crate::stage::{
+    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, SCENT_CHANNELS, Stage,
+};
 
 /// One actor's decision this tick, waiting for the resolve phases.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,8 +63,9 @@ pub struct Intent {
     pub amount: i32,
     /// A `Spawn`'s child's first two `mem` values.
     pub with: [i32; 2],
-    /// `mark ch v` effect: added to the actor's (tick-start) cell in Apply.
-    pub mark: Option<(u8, u8)>,
+    /// `mark ch v` effects, per channel: added to the actor's (tick-start)
+    /// cell in Apply.
+    pub mark: [u8; SCENT_CHANNELS],
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
     /// Ops the think executed (saturating), for the per-kind counters.
@@ -417,7 +420,7 @@ fn think_one<const TRACE: bool>(
         signal: None,
         amount: 0,
         with: [0; 2],
-        mark: None,
+        mark: [0; SCENT_CHANNELS],
         trapped: false,
         used: 0,
     };
@@ -1093,9 +1096,11 @@ pub fn apply(
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
                 }
-                if let Some((ch, v)) = it.mark {
-                    let s = &mut cells.scent[usize::from(ch)][from];
-                    *s = s.saturating_add(v);
+                for (ch, &v) in it.mark.iter().enumerate() {
+                    if v > 0 {
+                        let s = &mut cells.scent[ch][from];
+                        *s = s.saturating_add(v);
+                    }
                 }
             }
         },

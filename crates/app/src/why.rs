@@ -336,12 +336,11 @@ fn decision(kinds: &Kinds, e: &Explained) -> String {
     if let Some(v) = it.signal {
         let _ = write!(d, "; signal = {v}");
     }
-    if let Some((ch, v)) = it.mark {
-        let name = kinds
-            .scents
-            .get(usize::from(ch))
-            .map_or("?", String::as_str);
-        let _ = write!(d, "; mark {name} {v}");
+    for (ch, &v) in it.mark.iter().enumerate() {
+        if v > 0 {
+            let name = kinds.scents.get(ch).map_or("?", String::as_str);
+            let _ = write!(d, "; mark {name} {v}");
+        }
     }
     if let Some(n) = out.next {
         let _ = write!(d, "; next {}", state_name(kinds, e.row.kind, n));

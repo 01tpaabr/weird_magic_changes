@@ -354,8 +354,9 @@ pub struct Outcome {
     pub amount: i32,
     /// First two `mem` values of a `Spawn`'s child (`with (a, b)`).
     pub with: [i32; 2],
-    /// `mark ch v` effect: channel and amount.
-    pub mark: Option<(u8, u8)>,
+    /// `mark ch v` effects: what to add to each scent channel (several
+    /// marks add up, saturating).
+    pub mark: [u8; SCENT_CHANNELS],
     pub next: Option<u8>,
     /// `look = v` effect, if the think set one.
     pub look: Option<u8>,
@@ -1196,7 +1197,8 @@ impl Machine<'_> {
                         if usize::from(op.a) >= SCENT_CHANNELS {
                             return Err(Trap::BadSense);
                         }
-                        self.out.mark = Some((op.a, v.clamp(0, 255) as u8));
+                        let m = &mut self.out.mark[usize::from(op.a)];
+                        *m = m.saturating_add(v.clamp(0, 255) as u8);
                     }
                     O::ScentAt => {
                         let dy = self.pop()?;
@@ -1343,7 +1345,7 @@ fn think_with<const TRACE: bool>(
         m.out.next = None;
         m.out.look = None;
         m.out.signal = None;
-        m.out.mark = None;
+        m.out.mark = [0; SCENT_CHANNELS];
     }
     m.out
 }

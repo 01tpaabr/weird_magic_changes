@@ -98,7 +98,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
   else the cover's glyph.
 - **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (4) `u8` layers. `mark ch v` adds
-  `v` (saturating) to the actor's tick-start cell in Apply; `scent_decay` (Simulate phase)
+  `v` (saturating) to the actor's tick-start cell in Apply (the marks of one think add up,
+  per channel: `Intent.mark` is one byte per channel); `scent_decay` (Simulate phase)
   takes `ceil(s / 32)` from every cell of a chunk's scented channels every 16 ticks,
   staggered by a hash of the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
