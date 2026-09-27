@@ -9,8 +9,9 @@
 //!
 //! The pool is a process-wide singleton. [`init_task_pool`] sizes it from
 //! `WMC_THREADS` (default: all cores; anything but a count of 1 or more
-//! panics); the first initialiser in a process wins, so `WMC_THREADS=1 wmc
-//! run ...` vs the default is the thread-count gate for the whole binary.
+//! panics, and `wmc` refuses it before that); the first initialiser in a
+//! process wins (`wmc --threads N` over `WMC_THREADS`), so `WMC_THREADS=1
+//! wmc run ...` vs the default is the thread-count gate for the whole binary.
 
 use bevy_tasks::{ComputeTaskPool, TaskPoolBuilder};
 
@@ -22,8 +23,9 @@ pub fn threads_from_env() -> Option<usize> {
 }
 
 /// `WMC_THREADS`'s value: unset or empty is `None` (all cores), else a
-/// count of 1 or more.
-fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
+/// count of 1 or more. `wmc` checks it with this before it makes a world,
+/// so a bad one is an error there, not a panic.
+pub fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
     match v {
         None | Some("") => Ok(None),
         Some(v) => match v.trim().parse() {
@@ -38,9 +40,13 @@ fn parse_threads(v: Option<&str>) -> Result<Option<usize>, String> {
 /// Make sure the compute pool exists, sized from `WMC_THREADS` when set.
 /// Idempotent; returns the pool's thread count. Every `par_iter` and
 /// [`par_map`] needs this to have run once (an `App` with `TaskPoolPlugin`
-/// does it for you).
+/// does it for you). A pool that exists already (`wmc --threads N`) is
+/// kept, and `WMC_THREADS` not read.
 pub fn init_task_pool() -> usize {
-    init_task_pool_with(threads_from_env())
+    match ComputeTaskPool::try_get() {
+        Some(pool) => pool.thread_num(),
+        None => init_task_pool_with(threads_from_env()),
+    }
 }
 
 /// [`init_task_pool`] with this many threads (`None`: all cores); the

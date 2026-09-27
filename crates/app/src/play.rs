@@ -68,8 +68,14 @@ const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] spe
 pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
     let mut app = App::new();
-    let task_pool_options = par::threads_from_env()
-        .map_or_else(TaskPoolOptions::default, TaskPoolOptions::with_num_threads);
+    // `WMC_THREADS`, which `main` checked, unless `--threads` made the
+    // compute pool already (it wins, and the variable is not read).
+    let threads = match par::thread_count() {
+        0 => par::threads_from_env(),
+        _ => None,
+    };
+    let task_pool_options =
+        threads.map_or_else(TaskPoolOptions::default, TaskPoolOptions::with_num_threads);
     app.add_plugins(
         DefaultPlugins
             .set(TaskPoolPlugin { task_pool_options })

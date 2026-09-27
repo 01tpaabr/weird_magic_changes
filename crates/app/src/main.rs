@@ -86,6 +86,10 @@ fn main() -> anyhow::Result<()> {
             .filter(|&n| n >= 1)
             .context("--threads needs a count")?;
         par::init_task_pool_with(Some(n));
+    } else {
+        // Checked here: the pool reads it when a world is made, and panics.
+        par::parse_threads(std::env::var("WMC_THREADS").ok().as_deref())
+            .map_err(anyhow::Error::msg)?;
     }
     // `-v` and negative coordinates start with one `-`, a flag with two.
     if let Some(f) = args.iter().find(|a| a.starts_with("--")) {

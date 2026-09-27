@@ -445,3 +445,33 @@ fn generated_command_lines_never_panic() {
     std::fs::remove_dir_all(&dir).unwrap();
     result.unwrap();
 }
+
+/// A `WMC_THREADS` that is no thread count is an error that names it,
+/// before any world is made; `--threads` overrides it.
+#[test]
+fn a_bad_wmc_threads_is_an_error_and_threads_overrides_it() {
+    let dir = odd_fixtures("threads-env");
+    for v in ["0", "-1", "abc", "1.5"] {
+        for args in [
+            &["show", "3", "3"][..],
+            &["run", "far", "1"],
+            &["why", "far", "0", "0"],
+            &["scenario", "tiny.scenario"],
+        ] {
+            let (code, out, err) = wmc_in(&dir, &[("WMC_THREADS", v)], args);
+            let want = format!("Error: WMC_THREADS=`{v}` is not a thread count");
+            assert!(
+                code == Some(1) && err.contains(&want),
+                "{v} {args:?}: {code:?}\n{out}{err}"
+            );
+        }
+        let (code, out, err) = wmc_in(
+            &dir,
+            &[("WMC_THREADS", v)],
+            &["scenario", "tiny.scenario", "--threads", "2"],
+        );
+        assert_eq!(code, Some(0), "{v}: {out}{err}");
+        assert!(out.contains("(2 threads)"), "{out}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
