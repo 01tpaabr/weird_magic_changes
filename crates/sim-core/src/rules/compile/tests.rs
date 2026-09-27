@@ -349,6 +349,19 @@ fn food_is_zero_or_more() {
     );
 }
 
+/// `decay` is a switch, not a rate (RULES §3): `1` is the default, one
+/// per tick; `0` is points; nothing else.
+#[test]
+fn decay_is_0_or_1() {
+    let decays =
+        |d: &str| compile_ok(&format!("kind a {{ need n max 9{d} }}")).defs[0].needs[0].decays;
+    assert!(decays("") && decays(" decay 1") && !decays(" decay 0"));
+    for d in ["2", "1h", "-1"] {
+        let e = compile_err(&format!("kind a {{ need n max 9 decay {d} }}"));
+        assert!(e.contains("0 (points) or 1 (per tick)"), "decay {d}: {e}");
+    }
+}
+
 #[test]
 fn a_tags_list_ends_at_the_next_declaration() {
     // `food` is not a keyword, but it starts a declaration: not a tag.

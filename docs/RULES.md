@@ -94,12 +94,14 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `fuel N` | 512 | ops per think, 1 to 4096 |
 | `food T` | 0 | what eating a whole one gives an eater (see `eat`), 0 or more |
 | `bite N` | 1 | health taken per `eat`/`hit`/`graze`, 0 to 255 |
-| `need NAME max M [decay 0] [vital]` | | a counter, at most 4 per kind |
+| `need NAME max M [decay 0\|1] [vital]` | `decay 1` | a counter, at most 4 per kind; `decay 1` loses one per tick (ticks until empty), `decay 0` never decays (points). `decay` is a switch, not a rate: any other number is an error |
 | `mem a, b, ...` | | memory slots, at most 12 per kind, all 0 at birth |
 
 **Needs.** A need is an integer from 0 to its max. By default it is *ticks until empty*: it
-loses one per tick, and a value like `water < 30min` reads naturally. With `decay 0` it is
-points that only rules and actions change, like `health`. A `vital` need at 0 kills. Rules
+loses one per tick, and a value like `water < 30min` reads naturally; `decay 1` says so
+explicitly. With `decay 0` it is points that only rules and actions change, like `health`.
+There is no faster decay: `decay 2` is an error; a need that should run out sooner takes a
+smaller max, or a rule that subtracts from it. A `vital` need at 0 kills. Rules
 read a need by its name and can assign to it, clamped to `0..max`
 (`water = min(water + 6h, 1d)`). Some needs have fixed meanings for actions: `water` for
 `drink`, `health` for bites, and `food` for what eating gives.

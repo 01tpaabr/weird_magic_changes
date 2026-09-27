@@ -23,7 +23,7 @@ use vm::Op;
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
 pub use compile::{CompileError, compile, compile_files, compile_packs};
 
-/// One need of a kind: `need NAME max M [decay 0] [vital]`.
+/// One need of a kind: `need NAME max M [decay 0|1] [vital]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NeedDef {
     pub name: String,
