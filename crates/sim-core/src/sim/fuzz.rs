@@ -33,7 +33,8 @@ struct Knobs {
     height: u32,
     /// `water_scale`, and the rest in hundredths.
     terrain: (u32, u32, u32, u32),
-    /// A kind and the `d` of its `start K 1 / d`.
+    /// A kind and the `d` of its `start K 1 / d`; one past a whole is
+    /// left out.
     shares: Vec<(Index, u32)>,
     /// A kind and a cell, and maybe a need or mem it starts with (which,
     /// an edge or any value, the value); one on water, rock or a taken cell
@@ -48,7 +49,11 @@ fn knobs() -> impl Strategy<Value = Knobs> {
         // 1 x 1 to 2 x 2 chunks, the last row and column mostly whole.
         (1u32..=2, 1u32..=2, 0u32..32, 0u32..32),
         (1u32..=40, 0u32..=60, 0u32..=20, 0u32..=20),
-        prop::collection::vec((any::<Index>(), 8u32..=64), 1..=3),
+        // Now and then a crowd: every other cell, or every one.
+        prop::collection::vec(
+            (any::<Index>(), prop_oneof![9 => 8u32..=64, 1 => 1u32..=2]),
+            1..=3,
+        ),
         prop::collection::vec(
             (
                 any::<Index>(),
@@ -98,13 +103,16 @@ fn case(p: &Program, k: &Knobs) -> Case {
         k.seed, k.width, k.height
     );
     let mut used: Vec<&str> = Vec::new();
+    let mut whole = 0;
     for (i, d) in &k.shares {
         if p.kinds.is_empty() {
             break;
         }
         let kind = i.get(&p.kinds).as_str();
-        if !used.contains(&kind) {
+        let share = crate::scenario::PLACE_ONE / d;
+        if !used.contains(&kind) && whole + share <= crate::scenario::PLACE_ONE {
             used.push(kind);
+            whole += share;
             text += &format!("start {kind} 1 / {d}\n");
         }
     }
