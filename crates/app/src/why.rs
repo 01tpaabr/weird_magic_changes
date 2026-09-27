@@ -101,7 +101,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     let _ = writeln!(
         s,
         "  age {} | state {} | look {} | signal {} | last result {} | hurt {}{}",
-        duration(i64::from((tick as u32).wrapping_sub(b.born))),
+        duration(i64::from(sim_core::time::stamp(tick).wrapping_sub(b.born))),
         state_name(kinds, e.row.kind, b.state),
         e.row.look,
         e.row.signal,
