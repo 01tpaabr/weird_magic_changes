@@ -27,7 +27,9 @@ use super::asm::{Asm, Label};
 use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
-use super::{DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo};
+use super::{
+    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo, RuleShape,
+};
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
@@ -2153,6 +2155,37 @@ impl<'a> Inst<'a> {
     }
 }
 
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// The first statement of `body` that ends the think, as `wmc rates` names
+/// it (`RuleShape::acts`); `None` when none does.
+fn acts(body: &[Stmt]) -> Option<String> {
+    body.iter().find_map(|s| {
+        Some(match s {
+            Stmt::Die(_) => "die".into(),
+            Stmt::Become { kind, .. } => format!("become {kind}"),
+            Stmt::Spawn { kind, .. } => format!("spawn {kind}"),
+            Stmt::Move(..) => "move".into(),
+            Stmt::Drink(..) => "drink".into(),
+            Stmt::Eat(..) => "eat".into(),
+            Stmt::Hit(..) => "hit".into(),
+            Stmt::Graze(..) => "graze".into(),
+            Stmt::Transfer { give: true, .. } => "give".into(),
+            Stmt::Transfer { give: false, .. } => "take".into(),
+            Stmt::Idle(_) => "idle".into(),
+            Stmt::Next(state, _) => format!("next {state}"),
+            Stmt::Call { name, .. } => format!("{name}()"),
+            Stmt::If { then, els, .. } if acts(then).is_some() || acts(els).is_some() => {
+                "if".into()
+            }
+            Stmt::Choose(arms) if arms.iter().any(|(_, b)| acts(b).is_some()) => "choose".into(),
+            _ => return None,
+        })
+    })
+}
+
 struct Gen<'a> {
     items: &'a [ItemAst],
     subs: &'a [SubAst],
@@ -3729,6 +3762,7 @@ impl<'a> Gen<'a> {
             (Some(o), Some(c)) if o != c => Some(self.inst_name(o).to_string()),
             _ => None,
         };
+        let shape = self.shape(rule);
         self.debug.rules.push(RuleInfo {
             kind: self.kind.unwrap_or(0),
             state: self.state,
@@ -3738,8 +3772,69 @@ impl<'a> Gen<'a> {
             cond_pc,
             body_pc,
             via,
+            shape,
         });
         Ok(())
+    }
+
+    /// What `rule` does and how often (`RuleShape`), with this instance's
+    /// parameters and the constants folded in.
+    fn shape(&self, rule: &Rule) -> RuleShape {
+        let mut shape = RuleShape::default();
+        let mut terms = Vec::new();
+        let mut stack = vec![&rule.cond];
+        while let Some(c) = stack.pop() {
+            match c {
+                Cond::And(a, b) => {
+                    stack.push(b);
+                    stack.push(a);
+                }
+                c => terms.push(c),
+            }
+        }
+        let folded = |e: &Expr| self.fold(e, &rule.at).ok().map(i64::from);
+        let mut times = |n: i64, d: i64| {
+            let (n, d) = (n.clamp(0, d) as u64, d as u64);
+            let (num, den) = (
+                shape.dice.0.saturating_mul(n),
+                shape.dice.1.saturating_mul(d),
+            );
+            let g = gcd(num, den).max(1);
+            shape.dice = (num / g, den / g);
+        };
+        for t in terms {
+            let Cond::Expr(e) = t else {
+                shape.gates = shape.gates.saturating_add(1);
+                continue;
+            };
+            match e {
+                Expr::Chance(p) if let Some(p) = folded(p) => times(p, 100),
+                Expr::Bin(op @ (OpCode::Lt | OpCode::Le), r, k)
+                    if let Expr::Rand(n) = r.as_ref()
+                        && let (Some(n), Some(k)) = (folded(n), folded(k))
+                        && n > 0 =>
+                {
+                    times(
+                        if *op == OpCode::Le {
+                            k.saturating_add(1)
+                        } else {
+                            k
+                        },
+                        n,
+                    );
+                }
+                Expr::Bin(OpCode::Gt | OpCode::Ge, a, v)
+                    if matches!(a.as_ref(), Expr::Sense(Sense::Age))
+                        && let Some(v) = self.fold(v, &rule.at).ok() =>
+                {
+                    shape.after_age = Some(v);
+                }
+                e if folded(e).is_some_and(|v| v != 0) => {} // always true
+                _ => shape.gates = shape.gates.saturating_add(1),
+            }
+        }
+        shape.acts = acts(&rule.body);
+        shape
     }
 
     /// The channel of scent `name`, numbered on first use.

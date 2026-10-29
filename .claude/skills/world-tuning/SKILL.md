@@ -29,6 +29,7 @@ References, read when the step needs them:
 
 | zoom | tool | answers |
 |---|---|---|
+| the rules, in day units | `wmc rates [packs] [--kind K]` | thinks a day, how long needs last, each rule's odds a think and times a day, lifespans |
 | one actor, one think | `wmc why <dir> <x> <y> [ticks [w h seed]]`; the inspector in `wmc play` (click an actor) | which rules it checks, which fires, what it decides |
 | one mechanism | a probe: a tiny drawn-map scenario with `run`/`expect` lines | one rate in isolation (a fox in a pen with N hens: kills a day) |
 | the world over time | `wmc observe <time> --scenario f [--kind K] [--csv f]` | alive over time; births and deaths a day by cause; needs; states; what thinks decide; which rules fire |
@@ -62,8 +63,9 @@ every step below writes in it. `tuning/<goal>/runs/` holds CSVs and is not commi
    `wmc observe <T> --scenario goal.scenario --csv runs/baseline.csv`: why. Write the
    dynamics story: per kind, births and deaths a day by cause, what its thinks mostly
    decide and which rules fire, and what limits it (food, water, predation, age, room,
-   a gate in a rule). Turn the rule numbers into rates with `references/arithmetic.md` and
-   check them against what observe measured: where they disagree, you misread a rule.
+   a gate in a rule). Turn the rule numbers into rates (`wmc rates` does the arithmetic of
+   `references/arithmetic.md` for every rule) and check them against what observe measured:
+   where they disagree, you misread a rule, or its gates hold less often than you think.
 3. **Check in with the user, once:** the goal file (are these the numbers they meant?), the
    baseline story, and the mechanism you mean to try first. After their go-ahead, work on
    your own within the budget (below).

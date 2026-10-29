@@ -15,6 +15,10 @@
 //!                                              of `--set NAME=a,b,c` values, on each of its seeds,
 //!                                              many runs at once (`app::lab`); --seeds N, --pass M,
 //!                                              --jobs N, --full (no early stop), --csv <file>
+//! wmc rates [pack...]                         each kind's numbers in day units: thinks a day,
+//!                                              how long its needs last, per rule its dice a
+//!                                              think and a day, lifespans (`app::rates`);
+//!                                              --kind K (repeatable)
 //! wmc observe <time> [w h seed]                make the scenario's world, step it for <time>
 //!                                              (ticks, or 90min, 2h, 4d) and report how its
 //!                                              kinds live and die (`app::observe`); takes
@@ -170,8 +174,11 @@ fn main() -> anyhow::Result<()> {
         bail!("--strict is only for lint");
     }
     let command = args.first().map(String::as_str);
-    if command != Some("observe") && (every.is_some() || sample.is_some() || !only.is_empty()) {
-        bail!("--every, --sample and --kind are only for observe");
+    if command != Some("observe") && (every.is_some() || sample.is_some()) {
+        bail!("--every and --sample are only for observe");
+    }
+    if !matches!(command, Some("observe" | "rates")) && !only.is_empty() {
+        bail!("--kind is only for observe and rates");
     }
     if !matches!(command, Some("observe" | "lab")) && csv.is_some() {
         bail!("--csv is only for observe and lab");
@@ -256,6 +263,21 @@ fn main() -> anyhow::Result<()> {
             }
             observe(ticks, &setup(&args[2..])?, opts, csv.as_deref(), &only)
         }
+        Some("rates") => {
+            // The packs as lint finds them: these, else `WMC_RULES`, else the
+            // scenario's; none is the built-in rules.
+            let cli: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
+            let from_scenario = match file {
+                Some(f) => scenario(Some(f))?.packs,
+                None => Vec::new(),
+            };
+            let kinds = app::compile(&app::packs_or(&cli, &from_scenario))?;
+            if let Some(k) = only.iter().find(|k| kinds.by_name(k).is_none()) {
+                bail!("--kind {k}: the rules have no such kind");
+            }
+            print!("{}", app::rates::report(&kinds, &only));
+            Ok(())
+        }
         Some("lab") => {
             let f = args.get(1).context("lab needs a scenario file")?;
             if let Some(a) = args.get(2) {
@@ -293,11 +315,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             bail!(
-                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab` or `lint`"
+                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab`, `rates` or `lint`"
             )
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
 }

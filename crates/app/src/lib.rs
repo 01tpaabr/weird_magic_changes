@@ -13,6 +13,7 @@
 //! - [`inspect`]: the inspector panel of `wmc play`.
 //! - [`observe`]: `wmc observe`, how each kind lives and dies over a run.
 //! - [`lab`]: `wmc lab`, a scenario's goals across const values and seeds.
+//! - [`rates`]: `wmc rates`, each kind's numbers in day units.
 
 // A narrowing `as` either is a checked conversion or says why the value
 // fits (or that the truncation is the point). Tests may narrow freely.
@@ -25,6 +26,7 @@ pub mod inspect;
 pub mod lab;
 pub mod observe;
 pub mod play;
+pub mod rates;
 pub mod render;
 pub mod why;
 

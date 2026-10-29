@@ -2051,3 +2051,46 @@ fn a_const_set_from_outside_replaces_the_declared_one() {
         .unwrap_err();
     assert!(e.to_string().ends_with("(they declare: none)"), "{e}");
 }
+
+/// What `wmc rates` reads off each rule: its dice multiplied (constants
+/// and trait parameters folded), its other gates, the age it waits for,
+/// and the first thing its body does that ends the think.
+#[test]
+fn a_rule_s_shape_is_read_off_its_source() {
+    let kinds = compile(
+        "t.rules",
+        "const ODDS = 3
+         trait aging(after, odds) { when age > after and rand(100000) < odds => die }
+         sub stroll() { move random free }
+         kind k extends aging(5d, ODDS) {
+           glyph \"k\"
+           mem m
+           inherit aging
+           when chance(2) and rand(10) <= 4 and m > 0 and nearest free within 1 as c => { m = 0  spawn k at c }
+           when true => m += 1
+           when age >= 2h => become k
+           when m > 3 => { if m > 5 { idle } }
+           when rand(0) < 1 => stroll()
+         }",
+    )
+    .unwrap();
+    let shapes: Vec<&RuleShape> = kinds.debug.rules.iter().map(|r| &r.shape).collect();
+    let shape = |dice, gates, after_age, acts: Option<&str>| RuleShape {
+        dice,
+        gates,
+        after_age,
+        acts: acts.map(String::from),
+    };
+    assert_eq!(
+        shapes,
+        [
+            &shape((3, 100000), 0, Some(5 * 21600), Some("die")),
+            &shape((1, 100), 2, None, Some("spawn k")), // 2/100 x 5/10
+            &shape((1, 1), 0, None, None),
+            &shape((1, 1), 0, Some(1800), Some("become k")),
+            &shape((1, 1), 1, None, Some("if")),
+            &shape((1, 1), 1, None, Some("stroll()")), // rand(0): no dice, a gate
+        ]
+    );
+    assert!((shapes[1].dice_odds() - 0.01).abs() < 1e-12);
+}

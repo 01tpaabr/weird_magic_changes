@@ -727,6 +727,12 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   cell again shows the ground cover under the actor. `f` follows the actor (the camera
   glides after it; moving the camera yourself lets go), and `Esc` closes the panel.
   When the actor dies, the panel keeps its last state, faded.
+- **`wmc rates [pack...] [--kind K]`** turns each kind's numbers into day units: thinks a
+  day, how long each need lasts, what eating one gives; per rule, its dice as odds a think
+  and times a day (if reached and its other gates hold; `gates` counts them), the age it
+  waits for, and what it does (`goes on` when it only writes memory). A `die` past an age
+  reads as days left on average. It says what a rule does when reached: `wmc observe`
+  measures how often it is.
 - **`wmc lab <file> --set NAME=a,b,c`** runs the scenario test in `<file>` (a goal: its
   `expect` lines, §14) once for every combination of the `--set` values (the first name
   varies slowest), on each of its seeds, many runs at once: a world each, on one thread,

@@ -71,6 +71,8 @@ make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind tab
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
 make run ARGS="observe 4d --scenario f"     # how each kind lives and dies over time: alive, deaths by cause,
                                    # what thinks decide, which rules fire (--every 1h --kind K --csv out.csv)
+make run ARGS="rates rules/ --kind fox"     # each kind's numbers in day units: thinks a day, needs, per rule
+                                   # its dice a think and a day, lifespans past an age
 make run ARGS="lab f --set K=1,2,3"         # a scenario's goals for each value of a const, on its seeds, in
                                    # parallel (--seeds N --pass M --jobs N --full --csv out.csv);
                                    # any command takes --set NAME=V for a session's const

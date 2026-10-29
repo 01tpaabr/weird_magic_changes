@@ -95,6 +95,48 @@ pub struct RuleInfo {
     /// The trait or ancestor kind the rule was inherited from; `None` for
     /// the kind's own rules.
     pub via: Option<String>,
+    /// What it does and how often, read off its source (`wmc rates`).
+    pub shape: RuleShape,
+}
+
+/// What a rule does and how often, read off its source without running it
+/// (`wmc rates`): its dice, its other gates, the age it waits for, and the
+/// action its body takes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuleShape {
+    /// The odds a think passes its dice, as a fraction: the terms of its
+    /// condition's top-level `and` that are `chance(p)` or `rand(n) < k`
+    /// (or `<=`) with constant arguments, multiplied. `(1, 1)` without dice.
+    pub dice: (u64, u64),
+    /// The condition's other top-level terms: gates whose odds depend on
+    /// the world (a search, a need, the hour).
+    pub gates: u16,
+    /// An `age > A` (or `>=`) term: the age it waits for, in ticks.
+    pub after_age: Option<i32>,
+    /// What its body does at the top level, in order, the first that ends
+    /// the think: `die`, `become chick`, `spawn fox`, `eat`, `move`,
+    /// `idle`, `next HOME`, `wander()` (a sub, which may act), `if` (an
+    /// action in a branch); `None` when it only writes memory or sets
+    /// effects, and the think goes on.
+    pub acts: Option<String>,
+}
+
+impl Default for RuleShape {
+    fn default() -> Self {
+        Self {
+            dice: (1, 1),
+            gates: 0,
+            after_age: None,
+            acts: None,
+        }
+    }
+}
+
+impl RuleShape {
+    /// The chance a think passes the dice.
+    pub fn dice_odds(&self) -> f64 {
+        self.dice.0 as f64 / self.dice.1.max(1) as f64
+    }
 }
 
 /// How serious a [`Diagnostic`] is. Errors stop the compile and are

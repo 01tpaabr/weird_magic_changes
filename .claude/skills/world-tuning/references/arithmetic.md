@@ -1,7 +1,10 @@
 # The arithmetic of a world
 
 Rules are written per think; goals are about days. Convert before you predict. The numbers
-below are the engine's (`sim_core::time`, `docs/RULES.md` §2, §3, §8, §13).
+below are the engine's (`sim_core::time`, `docs/RULES.md` §2, §3, §8, §13). `wmc rates
+[packs] --kind K` does this for every rule of a kind (thinks a day, how long needs last,
+odds a think and times a day, days left past an age); the reasoning below is how to read
+it and what it cannot know (how often a rule is reached, how often its gates hold).
 
 ## Time
 

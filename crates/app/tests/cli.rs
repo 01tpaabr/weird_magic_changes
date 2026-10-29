@@ -307,6 +307,39 @@ fn lab_sweeps_a_const_across_seeds() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `wmc rates`: the rules in day units, every kind or those `--kind`
+/// names; a pack's const set with `--set` shows in the numbers.
+#[test]
+fn rates_turn_rules_into_day_units() {
+    let (ok, out, err) = wmc(&["rates", "--kind", "chicken"]);
+    assert!(ok, "{err}");
+    assert!(out.starts_with("chicken (extends "), "{out}");
+    assert!(out.contains(": 5400 thinks a day (every 4 ticks)"), "{out}");
+    let egg = out.lines().find(|l| l.contains("spawn egg at c")).unwrap();
+    assert!(
+        egg.contains("spawn egg") && egg.contains("0.2%") && egg.contains("10.8"),
+        "{egg}"
+    );
+    let (ok, _, err) = wmc(&["rates", "--kind", "wolf"]);
+    assert!(
+        !ok && err.contains("--kind wolf: the rules have no such kind"),
+        "{err}"
+    );
+    let dir = scratch("rates");
+    let pack = dir.join("blob.rules");
+    std::fs::write(
+        &pack,
+        "const BUD = 50\nkind blob { glyph \"b\"  cadence 16\n  when chance(BUD) and nearest free within 1 as c => spawn blob at c }\n",
+    )
+    .unwrap();
+    let pack = pack.to_str().unwrap();
+    let (ok, out, _) = wmc(&["rates", pack]);
+    assert!(ok && out.contains("50%") && out.contains("675"), "{out}");
+    let (ok, out, _) = wmc(&["rates", pack, "--set", "BUD=10"]);
+    assert!(ok && out.contains("10%") && out.contains("135"), "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A start that does not fit the rules is refused at its line, by `lint
 /// --scenario`, `scenario` and a new world alike: the `start` line, or the
 /// map row that draws it (not quoted as a `start` line the file lacks),
@@ -588,6 +621,16 @@ fn odd_command_lines_never_panic() {
         &["show", "--set", "X=1", "--set", "X=2"],
         &["show", "--set", "X=99999999999"],
         &["run", "s1", "1", "--full"],
+        &["rates"],
+        &["rates", ""],
+        &["rates", "/nonexistent"],
+        &["rates", "bad.rules"],
+        &["rates", "afile"],
+        &["rates", rules],
+        &["rates", "--kind"],
+        &["rates", "--kind", "nobody"],
+        &["rates", "--scenario", "tiny.scenario"],
+        &["run", "s1", "1", "--kind", "fox"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);
