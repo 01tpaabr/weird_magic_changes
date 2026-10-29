@@ -54,8 +54,9 @@ crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors 
 rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
 packs/              packs that stand alone (life/: Conway's Life), named by a scenario's `rules` line
 scenarios/          *.scenario files: rules, seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
+tuning/             one folder per goal a world was tuned for (/world-tuning): goal.scenario, notes.md; runs/ is not committed
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
-.claude/skills/     bevy-dev (auto-loaded each session), parallel-sim (on demand)
+.claude/skills/     bevy-dev (auto-loaded each session), parallel-sim, world-tuning (on demand)
 ```
 
 ## Commands
@@ -124,3 +125,8 @@ make fmt
   session start via hook; invoke again after context compaction.
 - `/parallel-sim` — patterns for parallel systems: phases, chunking, double buffers,
   deterministic reductions, false sharing, job graphs, how to test and profile them.
+- `/world-tuning` — make a world behave a certain way by measuring: the goal as scenario
+  expectations, the baseline from `wmc observe`, a prediction before each change, sweeps
+  with `wmc lab`, the margin, the goal kept as a test. With the arithmetic of ticks and
+  chances, a cookbook of mechanisms, and the lessons so far. For any request about how a
+  world behaves over time.

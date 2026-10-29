@@ -34,13 +34,12 @@ the agent is its heaviest user.
    `--full`; per variant its verdict, per expectation its seeds and the spread of its key
    number; `--csv`. `--set NAME=V` sets a const for any command. No pruning of hopeless
    variants yet (it would make the set of runs depend on timing).
-4. **The skill** (`.claude/skills/world-tuning/`): the protocol (goal as properties ->
-   baseline story from `observe` -> prediction -> sweep -> explain misses -> confirm on a
-   bigger world and more seeds, +-20% on each knob -> lock in as a test in
-   `scenarios/tests/` -> notebook in `tuning/<goal>.md`); a cookbook mapping properties to
-   mechanisms and rules idioms (satiation, prey switching, territory, refuges,
-   density-dependent births, delays and oscillation); the unit arithmetic (thinks per day,
-   per-think chance to per-day odds, `mortal` lifespans); lessons learned in this project.
+4. **The skill** (done, decision 43): `.claude/skills/world-tuning/`: `SKILL.md` (the tools
+   by zoom level and the protocol: goal as properties, baseline story, one check-in,
+   predict, sweep, explain every miss, confirm with a margin, lock in as a test, report and
+   keep the lesson; a budget), `references/arithmetic.md`, `references/cookbook.md`
+   (snippets compile), `references/lessons.md`, `references/notebook.md`; `tuning/` holds
+   the goals and notebooks.
 5. **`wmc rates`.** Each kind's numbers in day units, from the compiled rules.
 
 Probes (tiny drawn-map scenarios that measure one mechanism, like one fox in a pen with N

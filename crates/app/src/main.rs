@@ -738,7 +738,7 @@ fn lab(
     if cfg!(debug_assertions) {
         writeln!(
             out,
-            "          a dev build: `cargo build --profile fast` and target/fast/wmc run labs several times faster"
+            "          a dev build: `cargo build --profile fast`, then target/fast/wmc, runs labs about twice as fast"
         )?;
     }
     let started = Instant::now();

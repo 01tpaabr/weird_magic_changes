@@ -19,3 +19,5 @@ zig-cache/
 
 # local save games
 saves/
+# tuning runs: CSVs from observe and lab (the notebooks and goals are kept)
+tuning/*/runs/

@@ -737,7 +737,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   `never` true), and its later lines read `not reached`, so a hopeless variant costs little;
   `--full` runs every seed to its end. `--seeds` and `--pass` override the scenario's,
   `--csv <file>` writes every verdict as a row. The report is the same whatever `--jobs`
-  says. An optimized build (`cargo build --profile fast`) runs it several times faster.
+  says. An optimized build (`cargo build --profile fast`, then `target/fast/wmc`) runs it
+  about twice as fast as a dev build.
   ```sh
   wmc lab goals/fox_pressure.scenario --set HUNT=6,8,10 --set FULL=16h,20h --seeds 8 --pass 7
   ```
