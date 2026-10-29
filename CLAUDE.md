@@ -1,8 +1,14 @@
 # weird_magic_changes — agent instructions
 
-Massively parallel game/simulation in Rust on **Bevy** (0.19). Bevy's ECS is the world
-state, its schedule is the tick, its task pool is the parallelism. Design details are TBD
-and will be added to `docs/`; the rules below apply regardless of the design.
+An engine and a rules language for massively parallel, deterministic world simulations,
+in Rust on **Bevy** (0.19). Bevy's ECS is the world state, its schedule is the tick, its
+task pool is the parallelism. Design lives in `docs/`; the rules below apply regardless.
+
+**The product is the engine, the language and the author features**, so that other
+people can define their own worlds and use cases (README "Purpose", ARCHITECTURE
+decision 39). The built-in kinds (chickens, foxes, bees) and `packs/life` are example and
+test content, not the goal. A new capability is general (a sense, action, layer or tool
+any pack can use), never a special case for one kind.
 
 ## Priorities, in order
 

@@ -6,6 +6,20 @@ creatures are written in a small rules language, worlds in scenario files, and b
 loaded as input. The aim is a base on which other people write their own kinds, and on
 which quite different simulations can run on the same engine.
 
+## Purpose
+
+This project is an engine and a language, not one particular game. What we build is the
+engine, the rules language and the features that let other people define their own
+worlds and their own use cases: what lives in a world (kinds, in rule packs), what the
+world is made of and who starts where (scenarios), and how to check that it behaves
+(scenario tests, the lint, `wmc why`).
+
+The chickens, foxes and bees in `rules/`, and Conway's Life in `packs/life`, are example
+content. They exercise and test the engine, show authors what the language can do, and
+find where it falls short. They are not the product. When a piece of content needs
+something the engine lacks, the answer is a general capability any pack can use (a
+sense, an action, a layer, a tool), not a special case for that one kind.
+
 ## Status
 
 The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works today:
@@ -21,7 +35,7 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   suite checks this on every run.
 - **The rules language.** Kinds with needs, memory and states, `when condition => action`
   rules, subs, and traits with inheritance, compiled to a fuel-bounded bytecode VM.
-- **A built-in ecosystem.** Hens graze, drink, lay eggs and flee foxes. Chicks follow the
+- **An example ecosystem** (the built-in pack, content rather than the product). Hens graze, drink, lay eggs and flee foxes. Chicks follow the
   hens and grow up. Foxes hunt, sleep and raise kits. Flowers make nectar, hives raise
   bees, and bees find flowers, dance the way home and lay scent trails. Grass spreads and
   regrows, seeds grow into trees, and trees drop seeds.
