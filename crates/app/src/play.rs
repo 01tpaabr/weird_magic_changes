@@ -28,6 +28,7 @@
 //! cell: the ground cover under it), `f` follows it, `Esc` closes it;
 //! `q` / `Esc` / close saves and quits.
 
+use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, bail};
@@ -48,7 +49,7 @@ use sim_core::{Scenario, par, sim, time};
 
 use crate::camera::{Input, ViewCamera};
 use crate::clock::SimClock;
-use crate::inspect::{self, ALERT, DIM, FAINT, Inspector, KEYS, Selection};
+use crate::inspect::{self, ALERT, DIM, FAINT, Inspector, KEYS, Line, Selection};
 use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
@@ -75,13 +76,15 @@ const PANEL_MAX: u32 = 120;
 /// The panel's text height in logical pixels, whatever the map's zoom; a
 /// text cell is [`crate::render::atlas::TEXT_ASPECT`] of that wide.
 const PANEL_TEXT_LOGICAL: u32 = 13;
-/// Rows or columns one notch of a mouse wheel scrolls the panel.
+/// Rows one notch of a mouse wheel scrolls the panel.
 const WHEEL_STEP: f32 = 3.0;
 /// Opacity of the panel's background: the map shows through it.
 const PANEL_ALPHA: f32 = 0.78;
 /// The selected actor's cell on the map.
 const SELECTED_BG: Color = Color::rgb(0xf0, 0xc6, 0x74);
 const SELECTED_FG: Color = Color::rgb(0x10, 0x10, 0x12);
+/// The panel line under the pointer.
+const HOVER_BG: Color = Color::rgb(0x3a, 0x3a, 0x4c);
 
 /// Open the world in `dir`, else create it from `scenario` (read from
 /// `name`, for errors), under the rules of `packs` (`--rules` paths; see
@@ -171,7 +174,7 @@ impl Plugin for PlayPlugin {
             .init_resource::<Click>()
             .init_resource::<Selection>()
             .init_resource::<Inspector>()
-            .init_resource::<PanelScroll>()
+            .init_resource::<PanelView>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
@@ -272,37 +275,38 @@ struct Glyphs {
     text: Handle<Image>,
 }
 
-/// How far the inspector's text is scrolled, in rows down and columns
-/// right, plus what a trackpad's pixel deltas have moved short of a whole
-/// row or column. Reset when another actor is selected; held to the text
-/// when drawn.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
-struct PanelScroll {
+/// How the inspector is viewed: scrolled `row` rows down (plus what a
+/// trackpad's pixel deltas moved short of a row), the rules a click opened
+/// (by `cond_pc`), the body row under the pointer, and the line and rule
+/// each body row on screen shows, for the next frame's click and hover.
+/// The scroll resets when another actor is selected; open rules stay open.
+#[derive(Resource, Debug, Default, Clone, PartialEq)]
+struct PanelView {
     row: usize,
-    col: usize,
-    rest_row: f32,
-    rest_col: f32,
+    rest: f32,
+    open: BTreeSet<u32>,
+    hover: Option<usize>,
+    shown: Vec<(usize, Option<u32>)>,
 }
 
-impl PanelScroll {
-    /// Move by `rows` and `cols` (fractions kept), never before the start.
-    fn by(&mut self, rows: f32, cols: f32) {
-        fn step(at: &mut usize, rest: &mut f32, d: f32) {
-            *rest += d;
-            let whole = rest.trunc();
-            *rest -= whole;
-            // A wheel moves a few rows a frame: far inside i64.
-            #[allow(clippy::cast_possible_truncation)]
-            let whole = whole as i64;
-            *at = usize::try_from(
-                (i64::try_from(*at).unwrap_or(i64::MAX))
-                    .saturating_add(whole)
-                    .max(0),
-            )
-            .unwrap_or(0);
+impl PanelView {
+    /// Scroll by `rows` (fractions kept), never before the first row.
+    fn scroll(&mut self, rows: f32) {
+        self.rest += rows;
+        let whole = self.rest.trunc();
+        self.rest -= whole;
+        // A wheel moves a few rows a frame: far inside i64.
+        #[allow(clippy::cast_possible_truncation)]
+        let whole = whole as i64;
+        let at = i64::try_from(self.row).unwrap_or(i64::MAX);
+        self.row = usize::try_from(at.saturating_add(whole).max(0)).unwrap_or(0);
+    }
+
+    /// Open a closed rule, close an open one.
+    fn toggle(&mut self, rule: u32) {
+        if !self.open.remove(&rule) {
+            self.open.insert(rule);
         }
-        step(&mut self.row, &mut self.rest_row, rows);
-        step(&mut self.col, &mut self.rest_col, cols);
     }
 }
 
@@ -436,7 +440,7 @@ fn handle_input(
     wheel: Res<AccumulatedMouseScroll>,
     mut click: ResMut<Click>,
     mut selection: ResMut<Selection>,
-    mut scroll: ResMut<PanelScroll>,
+    mut view: ResMut<PanelView>,
 ) {
     let held = |a, b| keys.pressed(a) || keys.pressed(b);
     let up = held(KeyCode::KeyW, KeyCode::ArrowUp);
@@ -469,21 +473,25 @@ fn handle_input(
         // The map; the status rows and the panel take no clicks.
         click.0 = Some(cell_at(&layout.map, layout.cell, at.x, at.y));
     }
-    if over_panel && wheel.delta != Vec2::ZERO {
+    view.hover = None;
+    if over_panel && let Some(at) = cursor {
+        let ch = layout.panel_cell.1.max(1) as f32;
+        // A pixel inside the window over a row a dozen pixels tall.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let row = (at.y / ch) as usize;
+        view.hover = Some(row);
+        if mouse.just_pressed(MouseButton::Left)
+            && let Some(&(_, Some(rule))) = view.shown.get(row)
+        {
+            view.toggle(rule);
+        }
         // Content follows the fingers (or the wheel): a positive delta
-        // scrolls back. Shift turns a plain wheel sideways.
-        let (cw, ch) = layout.panel_cell;
-        let (rows, cols) = match wheel.unit {
-            MouseScrollUnit::Line => (-wheel.delta.y * WHEEL_STEP, -wheel.delta.x * WHEEL_STEP),
-            MouseScrollUnit::Pixel => (
-                -wheel.delta.y * layout.scale / ch.max(1) as f32,
-                -wheel.delta.x * layout.scale / cw.max(1) as f32,
-            ),
-        };
-        if input.0.fast && cols == 0.0 {
-            scroll.by(0.0, rows);
-        } else {
-            scroll.by(rows, cols);
+        // scrolls back.
+        if wheel.delta.y != 0.0 {
+            view.scroll(match wheel.unit {
+                MouseScrollUnit::Line => -wheel.delta.y * WHEEL_STEP,
+                MouseScrollUnit::Pixel => -wheel.delta.y * layout.scale / ch,
+            });
         }
     }
     if keys.just_pressed(KeyCode::KeyF) && selection.uid.is_some() && selection.gone_at.is_none() {
@@ -600,7 +608,8 @@ fn layout(
             (width * 2 / 5 / text_w)
                 .clamp(PANEL_MIN, PANEL_MAX)
                 .min(width / text_w),
-            (map_h / text_h).max(1),
+            // Down to the status rows: the last row may go under them.
+            map_h.div_ceil(text_h).max(1),
         )
     } else {
         (0, 0)
@@ -731,7 +740,9 @@ fn inspect(world: &mut World) {
         }
     }
     if sel.uid != world.resource::<Selection>().uid {
-        *world.resource_mut::<PanelScroll>() = PanelScroll::default();
+        let mut view = world.resource_mut::<PanelView>();
+        view.row = 0;
+        view.rest = 0.0;
     }
     let tick = sim::tick(world);
     match (sel.uid, sel.near) {
@@ -755,12 +766,12 @@ fn inspect(world: &mut World) {
                     sel.follow = false;
                     let mut ins = world.resource_mut::<Inspector>();
                     ins.at = None;
-                    for l in &mut ins.lines {
-                        l.1 = FAINT;
+                    for span in ins.lines.iter_mut().flat_map(|l| &mut l.spans) {
+                        span.1 = FAINT;
                     }
                     ins.lines.insert(
                         0,
-                        (
+                        Line::plain(
                             format!("GONE at tick {tick}: died, eaten or unloaded"),
                             ALERT,
                         ),
@@ -871,7 +882,7 @@ fn render_frame(
     info: Res<StreamInfo>,
     notice: Res<Notice>,
     inspector: Res<Inspector>,
-    mut scroll: ResMut<PanelScroll>,
+    mut pview: ResMut<PanelView>,
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -909,29 +920,42 @@ fn render_frame(
     let (pc, pr) = (layout.panel_cols as usize, layout.panel_rows as usize);
     frames.panel.resize(pc, pr);
     if pc > 0 && pr > 0 {
-        let body = pr - 1;
-        let lines = &inspector.lines;
-        // A column of margin, then the text; scrolled no further than its end.
-        let widest = lines
-            .iter()
-            .map(|(t, _)| t.chars().count())
-            .max()
-            .unwrap_or(0)
-            + 1;
-        scroll.row = scroll.row.min(lines.len().saturating_sub(body));
-        scroll.col = scroll.col.min(widest.saturating_sub(pc));
-        for row in 0..body {
-            let (text, colour) = lines
-                .get(scroll.row + row)
-                .map_or(("", TEXT_FG), |(t, c)| (t.as_str(), *c));
-            let shown: String = std::iter::once(' ')
-                .chain(text.chars())
-                .skip(scroll.col)
-                .collect();
-            frames.panel.put_text(row, &shown, colour, TEXT_BG);
+        // The rows that fit above the status bar: the text, then the keys;
+        // a row past them lies under the status rows, blank.
+        let ch = layout.panel_cell.1.max(1);
+        let fit = usize::try_from(layout.map_h / ch).map_or(1, |f| f.clamp(1, pr));
+        let body = fit - 1;
+        let rows = inspect::rows(&inspector.lines, pc - 1, |r| pview.open.contains(&r));
+        pview.row = pview.row.min(rows.len().saturating_sub(body));
+        let first = pview.row;
+        let hovered = pview
+            .hover
+            .filter(|&h| h < body)
+            .and_then(|h| rows.get(first + h))
+            .filter(|r| !r.cells.is_empty())
+            .map(|r| r.line);
+        pview.shown.clear();
+        for i in 0..pr {
+            match rows.get(first + i).filter(|_| i < body) {
+                Some(r) => {
+                    let bg = if Some(r.line) == hovered {
+                        HOVER_BG
+                    } else {
+                        TEXT_BG
+                    };
+                    // A column of margin, then the text.
+                    let mut cells = vec![(b' ', TEXT_FG)];
+                    cells.extend_from_slice(&r.cells);
+                    frames.panel.put_cells(i, &cells, bg);
+                    pview.shown.push((r.line, r.rule));
+                }
+                None if i == body => {
+                    let footer = panel_footer(rows.len(), body, first);
+                    frames.panel.put_text(i, &footer, DIM, TEXT_BG);
+                }
+                None => frames.panel.put_text(i, "", TEXT_FG, TEXT_BG),
+            }
         }
-        let footer = panel_footer(lines.len(), widest, body, pc, &scroll);
-        frames.panel.put_text(body, &footer, DIM, TEXT_BG);
     }
 
     let focus_chunk = camera.cell().split().0;
@@ -968,20 +992,16 @@ fn render_frame(
         .put_text(3, notice.current().unwrap_or(HELP), TEXT_FG, TEXT_BG);
 }
 
-/// The panel's last row: the keys, and where the view is when the text
-/// is longer or wider than the panel (`rows 12-40 of 75 | col 9`).
-fn panel_footer(lines: usize, widest: usize, body: usize, cols: usize, at: &PanelScroll) -> String {
+/// The panel's last row: the keys, and which rows are in view when there
+/// are more than `body` (`rows 12-40 of 75`), from row `first`.
+fn panel_footer(rows: usize, body: usize, first: usize) -> String {
     let mut footer = format!(" {KEYS}");
-    if lines > body || widest > cols {
-        footer.push_str(" | scroll: rows ");
+    if rows > body {
         footer.push_str(&format!(
-            "{}-{} of {lines}",
-            (at.row + 1).min(lines),
-            (at.row + body).min(lines)
+            " | scroll: rows {}-{} of {rows}",
+            (first + 1).min(rows),
+            (first + body).min(rows)
         ));
-        if at.col > 0 {
-            footer.push_str(&format!(" | col {}", at.col + 1));
-        }
     }
     footer
 }
@@ -1148,34 +1168,31 @@ mod tests {
     }
 
     #[test]
-    fn panel_scroll_keeps_fractions_and_stops_at_the_start() {
-        let mut s = PanelScroll::default();
-        s.by(3.0, 0.0);
-        assert_eq!((s.row, s.col), (3, 0));
+    fn panel_view_scrolls_in_fractions_and_toggles_rules() {
+        let mut v = PanelView::default();
+        v.scroll(3.0);
+        assert_eq!(v.row, 3);
         // A trackpad: a third of a row at a time adds up.
         for _ in 0..3 {
-            s.by(1.0 / 3.0 + 1e-4, 0.0);
+            v.scroll(1.0 / 3.0 + 1e-4);
         }
-        assert_eq!(s.row, 4);
-        s.by(-100.0, 2.5);
-        assert_eq!((s.row, s.col), (0, 2), "never before the first row");
-        s.by(0.0, 0.5);
-        assert_eq!(s.col, 3);
+        assert_eq!(v.row, 4);
+        v.scroll(-100.0);
+        assert_eq!(v.row, 0, "never before the first row");
+        v.toggle(9);
+        v.toggle(4);
+        assert!(v.open.contains(&9) && v.open.contains(&4));
+        v.toggle(9);
+        assert_eq!(v.open.iter().copied().collect::<Vec<_>>(), [4]);
     }
 
     #[test]
     fn the_footer_says_where_the_view_is_only_when_it_scrolls() {
-        let at = PanelScroll::default();
-        assert_eq!(panel_footer(10, 30, 20, 40, &at), format!(" {KEYS}"));
-        let f = panel_footer(75, 30, 20, 40, &at);
+        assert_eq!(panel_footer(10, 20, 0), format!(" {KEYS}"));
+        let f = panel_footer(75, 20, 0);
         assert!(f.ends_with("scroll: rows 1-20 of 75"), "{f}");
-        let at = PanelScroll {
-            row: 60,
-            col: 8,
-            ..default()
-        };
-        let f = panel_footer(75, 90, 20, 40, &at);
-        assert!(f.ends_with("rows 61-75 of 75 | col 9"), "{f}");
+        let f = panel_footer(75, 20, 60);
+        assert!(f.ends_with("rows 61-75 of 75"), "{f}");
     }
 
     #[test]

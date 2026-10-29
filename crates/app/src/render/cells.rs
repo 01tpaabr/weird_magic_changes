@@ -97,6 +97,29 @@ impl CellFrame {
         self.fg[range.clone()].fill(fg.0);
         self.bg[range].fill(bg.0);
     }
+
+    /// [`Self::put_text`] with a colour per cell: `cells` from column 0,
+    /// the rest of the row blank on `bg`.
+    pub fn put_cells(&mut self, row: usize, cells: &[(u8, Color)], bg: Color) {
+        if row >= self.rows {
+            return;
+        }
+        let range = row * self.cols..(row + 1) * self.cols;
+        let mut src = cells.iter();
+        for (g, f) in self.glyph[range.clone()]
+            .iter_mut()
+            .zip(&mut self.fg[range.clone()])
+        {
+            let (b, c) = src.next().copied().unwrap_or((b' ', Color(bg.0)));
+            *g = if b.is_ascii_graphic() || b == b' ' {
+                b
+            } else {
+                b'?'
+            };
+            *f = c.0;
+        }
+        self.bg[range].fill(bg.0);
+    }
 }
 
 /// Fill the first `view.height` rows of `frame` from the chunks `chunk`

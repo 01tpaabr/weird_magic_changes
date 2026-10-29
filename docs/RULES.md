@@ -654,17 +654,20 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   with its effects, what it wrote, the fuel spent, and after the real step where it went and
   its result. `-v` adds every op, up to the one that trapped.
 - **Click an actor in `wmc play`** to open the inspector, a see-through panel over the
-  right of the map, in a smaller font than the map. At the top: kind and parents, age,
-  state, look, signal and last result. Then **next think**: the rules that fire, copied
-  out with where they are written (a rule that only writes memory falls through, so
-  there can be several), and the decision, its writes and its cost. Then needs (with a
-  bar), memory, and **rules**: every rule of its reflexes and current state, in the
-  order the think tries them. It is `wmc why` without the ops, refreshed every frame,
-  and changes nothing. The mouse wheel or the trackpad scrolls the panel up and down and
-  sideways (Shift with a plain wheel scrolls sideways); the last row says where you are.
-  Clicking the same cell again shows the ground cover under the actor. `f` follows the
-  actor (the camera glides after it; moving the camera yourself lets go), and `Esc`
-  closes the panel. When the actor dies, the panel keeps its last state, faded.
+  right of the map, in a smaller font than the map. At the top: kind, uid and parents,
+  age, state, look, signal and last result. Then **next think**: the rules that fire,
+  copied out (a rule that only writes memory falls through, so there can be several),
+  and the decision, its writes and its cost. Then needs (with a bar), memory, and
+  **rules**: every rule of its reflexes and current state, in the order the think tries
+  them. Rule text is coloured as an editor colours code: keywords, actions, senses and
+  targets, numbers, kind names, the kind's own needs and memory, sub calls. A line too
+  long for the panel ends in `...`; click a rule to open it onto as many rows as it
+  needs, and again to close it. The line under the pointer is lit. It is `wmc why`
+  without the ops, refreshed every frame, and changes nothing. The mouse wheel or the
+  trackpad scrolls the panel; the last row says where you are. Clicking the same map
+  cell again shows the ground cover under the actor. `f` follows the actor (the camera
+  glides after it; moving the camera yourself lets go), and `Esc` closes the panel.
+  When the actor dies, the panel keeps its last state, faded.
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and

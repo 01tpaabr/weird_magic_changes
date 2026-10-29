@@ -11,25 +11,29 @@
 
 use bevy::prelude::{Resource, World};
 use sim_core::actors::systems::Explained;
+use sim_core::rules::RuleInfo;
 use sim_core::rules::vm::{event, need_now};
 use sim_core::time::stamp;
-use sim_core::{ChunkActors, ChunkCells, ChunkCoord, ChunkMinds, Kinds, Pos, Stage, sim};
+use sim_core::{ChunkActors, ChunkCells, ChunkCoord, ChunkMinds, KindDef, Kinds, Pos, Stage, sim};
 
+use crate::highlight;
 use crate::render::palette::{Color, TEXT_FG};
-use crate::why::{Checked, checked_rules, decision, duration, result_name, state_name, writes};
+use crate::why::{checked_rules, decision, duration, result_name, state_name, writes};
 
 /// Section titles.
 pub const TITLE: Color = Color::rgb(0xf0, 0xc6, 0x74);
-/// The rules that fire, in the next-think section.
-pub const FIRED: Color = Color::rgb(0x9b, 0xe3, 0x8a);
 /// A rule whose condition trapped, or an actor that is gone.
 pub const ALERT: Color = Color::rgb(0xff, 0x7b, 0x72);
 /// Secondary text: where a rule is written, the cost.
 pub const DIM: Color = Color::rgb(0xa0, 0xa0, 0xa8);
 /// The last state of an actor that is gone.
 pub const FAINT: Color = Color::rgb(0x6a, 0x6a, 0x72);
+/// Who it is: the uid and the parents.
+pub const PINK: Color = Color::rgb(0xf5, 0xa3, 0xd0);
 /// The panel's last row.
-pub const KEYS: &str = "click select | f follow | esc close";
+pub const KEYS: &str = "click: select, or open a rule | f follow | esc close";
+/// The rows an opened rule continues on start this far in.
+const WRAP_INDENT: usize = 6;
 
 /// Who is selected, if anyone.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -63,8 +67,101 @@ impl Selection {
 pub struct Inspector {
     /// Where the selected actor stands (`None`: nobody selected, or gone).
     pub at: Option<Pos>,
-    /// Text rows, top to bottom, each in one colour.
-    pub lines: Vec<(String, Color)>,
+    /// Its lines, top to bottom.
+    pub lines: Vec<Line>,
+}
+
+/// One line of the panel: runs of one colour each, and the rule it shows,
+/// if it is one (its `cond_pc`, unique in a rule set): a click opens it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Line {
+    pub spans: Vec<(String, Color)>,
+    pub rule: Option<u32>,
+}
+
+impl Line {
+    pub fn plain(text: String, colour: Color) -> Self {
+        Self {
+            spans: vec![(text, colour)],
+            rule: None,
+        }
+    }
+
+    /// `prefix` in `colour`, then the rule's text in syntax colours.
+    fn rule(kinds: &Kinds, def: &KindDef, prefix: &str, colour: Color, r: &RuleInfo) -> Self {
+        let mut spans = vec![(prefix.to_string(), colour)];
+        spans.extend(highlight::spans(kinds, def, &r.text));
+        Self {
+            spans,
+            rule: Some(r.cond_pc),
+        }
+    }
+
+    pub fn text(&self) -> String {
+        self.spans.iter().map(|(t, _)| t.as_str()).collect()
+    }
+}
+
+/// One row of the panel as drawn: a glyph and colour per cell, and the
+/// line it belongs to (an opened rule takes several rows).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Row {
+    pub cells: Vec<(u8, Color)>,
+    pub line: usize,
+    pub rule: Option<u32>,
+}
+
+/// `lines` as rows `width` cells wide. A line that does not fit ends in
+/// `...`, unless it is a rule `open` says is open: that one wraps, at a
+/// space where it can, onto rows indented by [`WRAP_INDENT`].
+pub fn rows(lines: &[Line], width: usize, open: impl Fn(u32) -> bool) -> Vec<Row> {
+    let mut out = Vec::new();
+    for (i, l) in lines.iter().enumerate() {
+        let cells: Vec<(u8, Color)> = l
+            .spans
+            .iter()
+            .flat_map(|(t, c)| {
+                t.chars()
+                    .map(move |ch| (u8::try_from(ch).unwrap_or(b'?'), *c))
+            })
+            .collect();
+        let row = |cells: Vec<(u8, Color)>| Row {
+            cells,
+            line: i,
+            rule: l.rule,
+        };
+        if cells.len() <= width {
+            out.push(row(cells));
+        } else if l.rule.is_some_and(&open) && width > WRAP_INDENT + 8 {
+            let mut rest = &cells[..];
+            let mut first = true;
+            while !rest.is_empty() {
+                let room = if first { width } else { width - WRAP_INDENT };
+                let mut take = rest.len().min(room);
+                if take < rest.len()
+                    && let Some(sp) = rest[..take].iter().rposition(|(b, _)| *b == b' ')
+                    && sp > room / 2
+                {
+                    take = sp + 1;
+                }
+                let mut cells = if first {
+                    Vec::new()
+                } else {
+                    vec![(b' ', TEXT_FG); WRAP_INDENT]
+                };
+                cells.extend_from_slice(&rest[..take]);
+                out.push(row(cells));
+                rest = &rest[take..];
+                first = false;
+            }
+        } else {
+            let keep = width.saturating_sub(3);
+            let mut cut = cells[..keep].to_vec();
+            cut.extend(std::iter::repeat_n((b'.', DIM), width - keep));
+            out.push(row(cut));
+        }
+    }
+    out
 }
 
 /// The actor to select on the cell at `p`: the standing one, else the
@@ -115,7 +212,7 @@ pub fn locate(world: &mut World, uid: u64, near: ChunkCoord) -> Option<(Pos, Chu
 }
 
 /// The panel for the actor at `p` whose next think is `e`, `width` columns
-/// wide (longer lines are cut by the frame).
+/// wide (memory and writes wrap to it; [`rows`] cuts or wraps the rest).
 pub fn panel(
     kinds: &Kinds,
     tick: u64,
@@ -123,13 +220,14 @@ pub fn panel(
     e: &Explained,
     follow: bool,
     width: usize,
-) -> Vec<(String, Color)> {
+) -> Vec<Line> {
     let def = kinds.def(e.row.kind);
     let b = &e.before;
-    let mut out: Vec<(String, Color)> = Vec::new();
-    let mut line = |s: String, c: Color| out.push((s, c));
+    let mut out: Vec<Line> = Vec::new();
+    let line = |out: &mut Vec<Line>, s: String, c: Color| out.push(Line::plain(s, c));
 
     line(
+        &mut out,
         format!(
             "{} '{}' at ({}, {}){}",
             def.name,
@@ -140,13 +238,14 @@ pub fn panel(
         ),
         TITLE,
     );
-    line(format!("uid {:016x}", b.uid), DIM);
+    line(&mut out, format!("uid {:016x}", b.uid), PINK);
     if let Some(parents) = kinds.debug.parents.get(usize::from(e.row.kind))
         && !parents.is_empty()
     {
-        line(format!("extends {}", parents.join(", ")), DIM);
+        line(&mut out, format!("extends {}", parents.join(", ")), PINK);
     }
     line(
+        &mut out,
         format!(
             "age {} | state {}",
             duration(i64::from(stamp(tick).wrapping_sub(b.born))),
@@ -155,6 +254,7 @@ pub fn panel(
         TEXT_FG,
     );
     line(
+        &mut out,
         format!(
             "look {} | signal {} | last {} | hurt {}{}",
             e.row.look,
@@ -170,6 +270,7 @@ pub fn panel(
         TEXT_FG,
     );
     line(
+        &mut out,
         format!(
             "thinks every {} ticks{}",
             def.cadence(),
@@ -181,41 +282,40 @@ pub fn panel(
     // What it does next and why, first: the rules that fired, copied out
     // of the list below, then the decision.
     let rules = checked_rules(kinds, e);
-    line(String::new(), TEXT_FG);
-    line("next think".into(), TITLE);
-    let at = |c: &Checked<'_>| {
-        let via = c
-            .rule
-            .via
-            .as_ref()
-            .map_or(String::new(), |v| format!(", via {v}"));
-        format!("    {}:{}{via}", c.file, c.rule.line)
-    };
+    line(&mut out, String::new(), TEXT_FG);
+    line(&mut out, "next think".into(), TITLE);
     if e.starved {
-        line("  none: a vital need is empty, it dies".into(), ALERT);
+        line(
+            &mut out,
+            "  none: a vital need is empty, it dies".into(),
+            ALERT,
+        );
     }
     for c in rules.iter().filter(|c| c.verdict == "FIRED") {
-        line(format!("  {}", c.rule.text), FIRED);
-        line(at(c), DIM);
+        out.push(Line::rule(kinds, def, "  ", TEXT_FG, c.rule));
     }
     for c in rules.iter().filter(|c| c.verdict == "TRAPPED") {
-        line(format!("  trapped in: {}", c.rule.text), ALERT);
-        line(at(c), DIM);
+        out.push(Line::rule(kinds, def, "  trapped in: ", ALERT, c.rule));
     }
     if !e.starved
         && rules
             .iter()
             .all(|c| c.verdict != "FIRED" && c.verdict != "TRAPPED")
     {
-        line("  no rule fired".into(), DIM);
+        line(&mut out, "  no rule fired".into(), DIM);
     }
-    line(format!("  decides {}", decision(kinds, e)), TEXT_FG);
+    line(
+        &mut out,
+        format!("  decides {}", decision(kinds, e)),
+        TEXT_FG,
+    );
     let writes = writes(kinds, tick, e);
     for row in wrap(&writes, width.saturating_sub(9)) {
-        line(format!("  writes {row}"), TEXT_FG);
+        line(&mut out, format!("  writes {row}"), TEXT_FG);
     }
     let left = e.trace.last().map_or(def.fuel, |st| st.fuel);
     line(
+        &mut out,
         format!(
             "  cost {} ops, {} of {} fuel",
             e.outcome.used,
@@ -225,12 +325,16 @@ pub fn panel(
         DIM,
     );
     if let Some(t) = e.outcome.trap {
-        line(format!("  TRAPPED: {t:?} (the think becomes idle)"), ALERT);
+        line(
+            &mut out,
+            format!("  TRAPPED: {t:?} (the think becomes idle)"),
+            ALERT,
+        );
     }
 
     if !def.needs.is_empty() {
-        line(String::new(), TEXT_FG);
-        line("needs".into(), TITLE);
+        line(&mut out, String::new(), TEXT_FG);
+        line(&mut out, "needs".into(), TITLE);
         let names = def.needs.iter().map(|n| n.name.len()).max().unwrap_or(0);
         for (i, n) in def.needs.iter().enumerate() {
             // As the think sees it: decayed since the last one.
@@ -250,6 +354,7 @@ pub fn panel(
                 TEXT_FG
             };
             line(
+                &mut out,
                 format!(
                     "  {:<names$} {} {value}{}",
                     n.name,
@@ -261,8 +366,8 @@ pub fn panel(
         }
     }
     if !def.mems.is_empty() {
-        line(String::new(), TEXT_FG);
-        line("memory".into(), TITLE);
+        line(&mut out, String::new(), TEXT_FG);
+        line(&mut out, "memory".into(), TITLE);
         let words: Vec<String> = def
             .mems
             .iter()
@@ -270,15 +375,15 @@ pub fn panel(
             .map(|(i, m)| format!("{m} {}", b.mem[i]))
             .collect();
         for row in wrap(&words, width.saturating_sub(2)) {
-            line(format!("  {row}"), TEXT_FG);
+            line(&mut out, format!("  {row}"), TEXT_FG);
         }
     }
 
     // Every rule the think could reach, in the order it tries them.
-    line(String::new(), TEXT_FG);
-    line("rules".into(), TITLE);
+    line(&mut out, String::new(), TEXT_FG);
+    line(&mut out, "rules".into(), TITLE);
     if rules.is_empty() {
-        line("  (a hand-assembled kind: no source)".into(), DIM);
+        line(&mut out, "  (a hand-assembled kind: no source)".into(), DIM);
     }
     let mut shown_state = None;
     for c in &rules {
@@ -286,11 +391,12 @@ pub fn panel(
         if r.state.is_some() && shown_state != r.state {
             shown_state = r.state;
             line(
+                &mut out,
                 format!(" state {}", state_name(kinds, e.row.kind, b.state)),
                 TITLE,
             );
         }
-        line(format!("  {}", r.text), TEXT_FG);
+        out.push(Line::rule(kinds, def, "  ", TEXT_FG, r));
     }
     out
 }
@@ -416,49 +522,102 @@ mod tests {
         let (_, cc, slot) = locate(&mut w, 0xAB, p.split().0).unwrap();
         let e = sim::explain_slot(&w, cc, slot).unwrap();
         let lines = panel(&kinds, sim::tick(&w), p, &e, true, 48);
-        let text: Vec<&str> = lines.iter().map(|(s, _)| s.as_str()).collect();
+        let text: Vec<String> = lines.iter().map(Line::text).collect();
         assert!(
             text[0].starts_with("chicken 'C' at") && text[0].ends_with("FOLLOWING"),
             "{text:?}"
         );
-        assert!(text.iter().any(|l| l.starts_with("extends ")), "{text:?}");
+        let pink = |prefix: &str| {
+            lines
+                .iter()
+                .find(|l| l.text().starts_with(prefix))
+                .unwrap()
+                .spans[0]
+                .1
+        };
+        assert_eq!(pink("uid "), PINK);
+        assert_eq!(pink("extends "), PINK);
         assert!(
             text.iter()
                 .any(|l| l.trim_start().starts_with("food ") && l.contains("[##########]")),
             "{text:?}"
         );
-        assert!(text.contains(&"memory"), "{text:?}");
-        // The rule that fires is copied into the next-think section, and
-        // listed again, plainly, under the rules.
-        let next = text
-            .iter()
-            .position(|l| *l == "next think")
-            .expect("a next-think section");
-        let rules = text
-            .iter()
-            .position(|l| *l == "rules")
-            .expect("a rules section");
+        assert!(text.iter().any(|l| l == "memory"), "{text:?}");
+        // The rules that fire are copied into the next-think section, with
+        // no location, and listed again under the rules: the same rule, so
+        // opening one opens both.
+        let next = text.iter().position(|l| l == "next think").unwrap();
+        let rules = text.iter().position(|l| l == "rules").unwrap();
         assert!(next < rules);
         let fired = &lines[next + 1];
-        assert_eq!(fired.1, FIRED, "{text:?}");
-        assert!(fired.0.starts_with("  when "), "{text:?}");
-        assert!(text[next + 2].contains(".rules:"), "{text:?}");
-        assert!(text[rules + 1..].contains(&fired.0.as_str()), "{text:?}");
+        assert!(fired.text().starts_with("  when "), "{text:?}");
+        assert!(fired.rule.is_some());
         assert!(
-            lines[rules + 1..]
-                .iter()
-                .all(|(l, c)| *c != FIRED && !l.contains("FIRED"))
+            !text[next..rules].iter().any(|l| l.contains(".rules:")),
+            "{text:?}"
         );
-        assert!(
-            text.iter()
-                .all(|l| !l.starts_with("FIRED") && !l.starts_with("no "))
-        );
+        assert!(lines[rules + 1..].iter().any(|l| l == fired), "{text:?}");
         assert!(
             text[next..rules]
                 .iter()
                 .any(|l| l.starts_with("  decides ")),
             "{text:?}"
         );
+        // Rule text is in syntax colours: `when` is a keyword.
+        assert!(
+            fired
+                .spans
+                .iter()
+                .any(|(t, c)| t == "when" && *c == highlight::KEYWORD)
+        );
+        // Every rule of the list is a rule line.
+        assert!(
+            lines[rules + 1..]
+                .iter()
+                .all(|l| l.rule.is_some() || l.text().starts_with(" state "))
+        );
+    }
+
+    #[test]
+    fn long_lines_end_in_dots_and_an_open_rule_wraps() {
+        let rule = Line {
+            spans: vec![(
+                "  when aaaa bbbb cccc dddd eeee ffff gggg => idle".into(),
+                TEXT_FG,
+            )],
+            rule: Some(7),
+        };
+        let lines = vec![Line::plain("short".into(), TEXT_FG), rule.clone()];
+        let shown = |rows: &[Row]| -> Vec<String> {
+            rows.iter()
+                .map(|r| r.cells.iter().map(|(b, _)| char::from(*b)).collect())
+                .collect()
+        };
+        let closed = rows(&lines, 24, |_| false);
+        assert_eq!(shown(&closed), ["short", "  when aaaa bbbb cccc..."]);
+        assert_eq!(closed[1].cells[23].1, DIM);
+        let open = rows(&lines, 24, |r| r == 7);
+        assert_eq!(
+            shown(&open),
+            [
+                "short",
+                "  when aaaa bbbb cccc ",
+                "      dddd eeee ffff ",
+                "      gggg => idle"
+            ]
+        );
+        assert!(open[1..].iter().all(|r| r.line == 1 && r.rule == Some(7)));
+        // Every character of the rule is on some row, in order.
+        let back: String = shown(&open[1..])
+            .iter()
+            .map(|r| r.trim_start())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(back.replace(' ', ""), rule.text().replace(' ', ""));
+        // A plain line never wraps; a fitting one is whole.
+        let wide = vec![Line::plain("x".repeat(30), TEXT_FG)];
+        assert_eq!(rows(&wide, 24, |_| true).len(), 1);
+        assert_eq!(shown(&rows(&wide, 40, |_| true)), ["x".repeat(30)]);
     }
 
     #[test]

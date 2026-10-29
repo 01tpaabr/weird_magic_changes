@@ -16,6 +16,7 @@
 #![cfg_attr(test, allow(clippy::cast_possible_truncation))]
 pub mod camera;
 pub mod clock;
+pub mod highlight;
 pub mod inspect;
 pub mod play;
 pub mod render;
