@@ -64,7 +64,7 @@ fn bench_upload(c: &mut Criterion) {
     let mut g = c.benchmark_group("grid_upload");
     g.throughput(Throughput::Elements(u64::from(COLS * ROWS)));
     g.bench_function("160x90", |b| {
-        b.iter(|| grid::upload(&frame, &mut bg, &mut fg))
+        b.iter(|| grid::upload(&frame, &mut bg, &mut fg, 1.0))
     });
     g.finish();
 }

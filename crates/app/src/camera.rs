@@ -17,6 +17,8 @@ const FAST_SPEED: f64 = 56.0;
 /// Time constant of the velocity easing, seconds: ~63% of the way to the
 /// target speed after this long, ~95% after three times it.
 const SMOOTHING: f64 = 0.07;
+/// Time constant of [`ViewCamera::glide_to`], seconds.
+const FOLLOW: f64 = 0.15;
 /// Below this speed with no input the camera snaps to rest.
 const REST: f64 = 0.02;
 /// The edge of the world (`sim_core::WORLD_EXTENT`): keeps `cell()` inside
@@ -76,6 +78,17 @@ impl ViewCamera {
         }
         self.x = (self.x + self.vx * dt).clamp(-LIMIT, LIMIT);
         self.y = (self.y + self.vy * dt).clamp(-LIMIT, LIMIT);
+    }
+
+    /// Ease the view toward `(x, y)` (cells) over [`FOLLOW`], dropping any
+    /// glide of its own: following an actor that steps a cell at a time,
+    /// the view slides after it instead of jumping.
+    pub fn glide_to(&mut self, x: f64, y: f64, dt: f64) {
+        let k = 1.0 - (-dt / FOLLOW).exp();
+        self.vx = 0.0;
+        self.vy = 0.0;
+        self.x = (self.x + (x - self.x) * k).clamp(-LIMIT, LIMIT);
+        self.y = (self.y + (y - self.y) * k).clamp(-LIMIT, LIMIT);
     }
 
     /// The camera is app state, not sim state, so it gets its own tiny file
@@ -211,6 +224,30 @@ mod tests {
         fs::write(dir.join("camera.txt"), "10 -4\n").unwrap();
         assert_eq!(ViewCamera::load(&dir).unwrap().cell(), Pos::new(10, -4));
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn glide_to_closes_in_without_overshooting() {
+        let mut c = ViewCamera::new(Pos::new(0, 0));
+        c.update(
+            0.1,
+            Input {
+                dx: 1,
+                dy: 0,
+                fast: false,
+            },
+        );
+        c.glide_to(10.5, -4.5, 1.0 / 60.0);
+        assert_eq!((c.vx, c.vy), (0.0, 0.0), "its own glide stops");
+        let mut last = (10.5 - c.x).hypot(-4.5 - c.y);
+        for _ in 0..120 {
+            c.glide_to(10.5, -4.5, 1.0 / 60.0);
+            let d = (10.5 - c.x).hypot(-4.5 - c.y);
+            assert!(d < last && c.x <= 10.5 && c.y >= -4.5);
+            last = d;
+        }
+        assert!(last < 0.01, "two seconds is many time constants: {last}");
+        assert_eq!(c.cell(), Pos::new(10, -5));
     }
 
     #[test]

@@ -45,7 +45,8 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
 - **A second world.** `packs/life` is Conway's Game of Life as a pack: two kinds, none of
   the built-in ones, on the same engine, tested against a plain Life.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
-  think, explained rule by rule), hot reload (`r` in the game), and scenario tests
+  think, explained rule by rule), the inspector (click an actor in the game: the same,
+  live, with `f` to follow it), hot reload (`r` in the game), and scenario tests
   (`wmc scenario`).
 
 **Performance.** A 1024 x 1024-cell world (256 chunks) holding about 333,000 actors, most of
@@ -83,7 +84,8 @@ must print the same checksum.
 
 In the window: `w a s d` or the arrows move (Shift for 4x), `space` pauses, `.` steps one
 tick, `[` and `]` change the speed, `+` and `-` zoom, `p` saves, `r` reloads the rules,
-and `q` saves and quits.
+and `q` saves and quits. Click an actor to open the inspector: its needs, memory and state,
+and its rules as its next think runs them. `f` follows it, and `Esc` closes the inspector.
 
 ## Writing your own kinds
 

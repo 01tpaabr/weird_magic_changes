@@ -653,6 +653,14 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   `TRAPPED` (the think trapped in its condition) or blank (not reached). Then the decision
   with its effects, what it wrote, the fuel spent, and after the real step where it went and
   its result. `-v` adds every op, up to the one that trapped.
+- **Click an actor in `wmc play`** to open the inspector, a see-through panel over the
+  right of the map: kind and parents, age, state, look, signal, last result, needs (with
+  a bar), memory, and the rules of its reflexes and current state as its next think runs
+  them (`FIRED`, `no`, `TRAPPED`, or faint: not reached), then the decision, its writes
+  and its cost. It is `wmc why` without the ops, refreshed every frame, and changes nothing.
+  Clicking the same cell again shows the ground cover under the actor. `f` follows the
+  actor (the camera glides after it; moving the camera yourself lets go), and `Esc` closes
+  the panel. When the actor dies, the panel keeps its last state, faded.
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and

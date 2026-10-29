@@ -9,6 +9,7 @@ use std::fmt::Write;
 
 use bevy::prelude::World;
 use sim_core::actors::systems::Explained;
+use sim_core::rules::RuleInfo;
 use sim_core::rules::vm::{Action, OpCode, need_now, result};
 use sim_core::time::{Clock, TICKS_PER_DAY};
 use sim_core::{Kinds, Pos, sim};
@@ -45,7 +46,7 @@ pub fn duration(ticks: i64) -> String {
     if neg { format!("-{s}") } else { s }
 }
 
-fn result_name(code: u8) -> &'static str {
+pub fn result_name(code: u8) -> &'static str {
     match code & result::MASK {
         result::OK => "OK",
         result::BLOCKED => "BLOCKED",
@@ -55,7 +56,7 @@ fn result_name(code: u8) -> &'static str {
     }
 }
 
-fn state_name(kinds: &Kinds, kind: u16, state: u8) -> String {
+pub fn state_name(kinds: &Kinds, kind: u16, state: u8) -> String {
     kinds
         .debug
         .states
@@ -71,7 +72,7 @@ fn state_name(kinds: &Kinds, kind: u16, state: u8) -> String {
         })
 }
 
-fn kind_name(kinds: &Kinds, kind: u16) -> String {
+pub fn kind_name(kinds: &Kinds, kind: u16) -> String {
     kinds
         .defs
         .get(usize::from(kind))
@@ -80,7 +81,7 @@ fn kind_name(kinds: &Kinds, kind: u16) -> String {
 
 fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String {
     let def = kinds.def(e.row.kind);
-    let (b, a) = (&e.before, &e.after);
+    let b = &e.before;
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -145,13 +146,7 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
         let _ = writeln!(s, "  mem    {}", mems.join(" | "));
     }
 
-    let visited = |pc: u32| e.trace.iter().any(|st| st.pc == pc);
-    let rules: Vec<_> = kinds
-        .debug
-        .rules
-        .iter()
-        .filter(|r| r.kind == e.row.kind)
-        .collect();
+    let rules = checked_rules(kinds, e);
     if e.starved {
         let _ = writeln!(
             s,
@@ -165,70 +160,29 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
             "rules  (FIRED: its body ran; no: its condition was false; TRAPPED: the think \
              trapped in its condition; blank: not reached)"
         );
-        // A trap outside a body is in the condition of the last rule entered.
-        let trapped = e.outcome.trap.and_then(|_| {
-            e.trace
-                .iter()
-                .rev()
-                .find_map(|st| rules.iter().position(|r| r.cond_pc == st.pc))
-        });
         let mut shown_state = None;
-        for (i, r) in rules.iter().enumerate() {
-            if r.state.is_some_and(|st| st != b.state) {
-                continue;
-            }
+        for c in &rules {
+            let r = c.rule;
             if r.state.is_some() && shown_state != r.state {
                 shown_state = r.state;
                 let _ = writeln!(s, "  state {}", state_name(kinds, e.row.kind, b.state));
             }
-            let verdict = if visited(r.body_pc) {
-                "FIRED"
-            } else if trapped == Some(i) {
-                "TRAPPED"
-            } else if visited(r.cond_pc) {
-                "no"
-            } else {
-                ""
-            };
-            let file = kinds
-                .debug
-                .files
-                .get(usize::from(r.file))
-                .map_or("?", String::as_str);
             let via = r
                 .via
                 .as_ref()
                 .map_or(String::new(), |v| format!("   [via {v}]"));
             let _ = writeln!(
                 s,
-                "  {:<20} {verdict:<6} {}{via}",
-                format!("{file}:{}", r.line),
+                "  {:<20} {:<6} {}{via}",
+                format!("{}:{}", c.file, r.line),
+                c.verdict,
                 r.text
             );
         }
     }
 
     let _ = writeln!(s, "decides {}", decision(kinds, e));
-    let mut writes = Vec::new();
-    for (i, n) in def.needs.iter().enumerate() {
-        // Decay is not a write: compare with the decayed value the rules saw.
-        let seen = need_now(b.needs[i], n.decays, tick, b.last_think);
-        if a.needs[i] != seen {
-            writes.push(format!("{} {} -> {}", n.name, seen, a.needs[i]));
-        }
-    }
-    for (i, m) in def.mems.iter().enumerate() {
-        if a.mem[i] != b.mem[i] {
-            writes.push(format!("{m} {} -> {}", b.mem[i], a.mem[i]));
-        }
-    }
-    if a.state != b.state {
-        writes.push(format!(
-            "state {} -> {}",
-            state_name(kinds, e.row.kind, b.state),
-            state_name(kinds, e.row.kind, a.state)
-        ));
-    }
+    let writes = writes(kinds, tick, e);
     if !writes.is_empty() {
         let _ = writeln!(s, "writes  {}", writes.join(" | "));
     }
@@ -248,7 +202,12 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     if ops {
         let _ = writeln!(s, "ops");
         for st in &e.trace {
-            if let Some(r) = rules.iter().find(|r| r.cond_pc == st.pc) {
+            if let Some(r) = kinds
+                .debug
+                .rules
+                .iter()
+                .find(|r| r.kind == e.row.kind && r.cond_pc == st.pc)
+            {
                 let _ = writeln!(s, "  -- line {}: {}", r.line, r.text);
             }
             let sub = kinds
@@ -277,7 +236,90 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     s
 }
 
-fn decision(kinds: &Kinds, e: &Explained) -> String {
+/// One rule of the actor's reflexes or current state, and what the think
+/// did with it.
+#[derive(Debug, Clone, Copy)]
+pub struct Checked<'k> {
+    pub rule: &'k RuleInfo,
+    /// The rules file it was written in.
+    pub file: &'k str,
+    /// `FIRED` (its body ran), `no` (its condition was false), `TRAPPED`
+    /// (the think trapped in its condition), or blank (not reached).
+    pub verdict: &'static str,
+}
+
+/// The rules the think in `e` could reach (the reflexes, then the current
+/// state's), in order, each with its verdict. Empty for a hand-assembled
+/// kind (no source positions).
+pub fn checked_rules<'k>(kinds: &'k Kinds, e: &Explained) -> Vec<Checked<'k>> {
+    let visited = |pc: u32| e.trace.iter().any(|st| st.pc == pc);
+    let rules: Vec<&RuleInfo> = kinds
+        .debug
+        .rules
+        .iter()
+        .filter(|r| r.kind == e.row.kind)
+        .collect();
+    // A trap outside a body is in the condition of the last rule entered.
+    let trapped = e.outcome.trap.and_then(|_| {
+        e.trace
+            .iter()
+            .rev()
+            .find_map(|st| rules.iter().position(|r| r.cond_pc == st.pc))
+    });
+    rules
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.state.is_none_or(|st| st == e.before.state))
+        .map(|(i, &r)| Checked {
+            rule: r,
+            file: kinds
+                .debug
+                .files
+                .get(usize::from(r.file))
+                .map_or("?", String::as_str),
+            verdict: if visited(r.body_pc) {
+                "FIRED"
+            } else if trapped == Some(i) {
+                "TRAPPED"
+            } else if visited(r.cond_pc) {
+                "no"
+            } else {
+                ""
+            },
+        })
+        .collect()
+}
+
+/// What the think in `e` wrote: needs, memory and state, `name old -> new`.
+pub fn writes(kinds: &Kinds, tick: u64, e: &Explained) -> Vec<String> {
+    let def = kinds.def(e.row.kind);
+    let (b, a) = (&e.before, &e.after);
+    let mut writes = Vec::new();
+    for (i, n) in def.needs.iter().enumerate() {
+        // Decay is not a write: compare with the decayed value the rules saw.
+        let seen = need_now(b.needs[i], n.decays, tick, b.last_think);
+        if a.needs[i] != seen {
+            writes.push(format!("{} {} -> {}", n.name, seen, a.needs[i]));
+        }
+    }
+    for (i, m) in def.mems.iter().enumerate() {
+        if a.mem[i] != b.mem[i] {
+            writes.push(format!("{m} {} -> {}", b.mem[i], a.mem[i]));
+        }
+    }
+    if a.state != b.state {
+        writes.push(format!(
+            "state {} -> {}",
+            state_name(kinds, e.row.kind, b.state),
+            state_name(kinds, e.row.kind, a.state)
+        ));
+    }
+    writes
+}
+
+/// The intent of the think in `e`, with its effects: `move (1, 0) -> step
+/// (1, 0); look = 1`.
+pub fn decision(kinds: &Kinds, e: &Explained) -> String {
     let (it, out) = (&e.intent, &e.outcome);
     let at = |dx: i8, dy: i8| format!("({dx}, {dy})");
     let need = |i: u16| {

@@ -7,8 +7,11 @@
 //!    glyph tileset and the tile layers when their shape changes.
 //! 4. `stream_and_tick` (exclusive): load/unload chunks around the camera, run
 //!    the ticks the [`SimClock`] owes (bounded by [`TICK_BUDGET`]), save/quit.
-//! 5. `render_frame`: phase 1, chunks -> `CellFrame`, dimmed by the sim's daylight.
-//! 6. `upload_tiles`: phase 2, `CellFrame` -> tilemap tile data + layer transforms.
+//! 5. `inspect` (exclusive): a click selects an actor; the selected one is
+//!    found again by uid and its next think explained for the side panel.
+//! 6. `render_frame`: phase 1, chunks -> `CellFrame`, dimmed by the sim's
+//!    daylight, plus the status rows and the inspector panel.
+//! 7. `upload_tiles`: phase 2, `CellFrame` -> tilemap tile data + layer transforms.
 //!
 //! Then Bevy draws: two tilemap chunks per layer, one draw call each.
 //!
@@ -21,7 +24,9 @@
 //! x4 speed; `space` pauses/resumes the sim; `.` runs one tick and pauses;
 //! `[` / `]` slow down / speed up (1x .. 16x, max); `p` saves; `r` reloads the
 //! rules (the world's packs, else `./rules`), the status bar says what changed;
-//! `+`/`-` zoom; `q` / `Esc` / close saves and quits.
+//! `+`/`-` zoom; a click on an actor opens the inspector (again on the same
+//! cell: the ground cover under it), `f` follows it, `Esc` closes it;
+//! `q` / `Esc` / close saves and quits.
 
 use std::time::{Duration, Instant};
 
@@ -42,10 +47,11 @@ use sim_core::{Scenario, par, sim, time};
 
 use crate::camera::{Input, ViewCamera};
 use crate::clock::SimClock;
+use crate::inspect::{self, ALERT, DIM, FAINT, Inspector, KEYS, Selection};
 use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
-use crate::render::palette::{Looks, TEXT_BG, TEXT_FG, VOID_BG, brightness};
+use crate::render::palette::{Color, Looks, TEXT_BG, TEXT_FG, VOID_BG, brightness};
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the tileset is built for.
@@ -60,7 +66,15 @@ const MAX_DT: f64 = 0.1;
 /// Sim time per frame. The rest of a 60 Hz frame is for streaming and drawing;
 /// at max speed this is how long each frame ticks for.
 pub const TICK_BUDGET: Duration = Duration::from_millis(10);
-const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | p save | r reload rules | +/- zoom | q quit";
+const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | click inspect | f follow | p save | r reload rules | +/- zoom | q quit";
+/// The inspector panel: two fifths of the window, held to this many columns.
+const PANEL_MIN: u32 = 36;
+const PANEL_MAX: u32 = 64;
+/// Opacity of the panel's background: the map shows through it.
+const PANEL_ALPHA: f32 = 0.78;
+/// The selected actor's cell on the map.
+const SELECTED_BG: Color = Color::rgb(0xf0, 0xc6, 0x74);
+const SELECTED_FG: Color = Color::rgb(0x10, 0x10, 0x12);
 
 /// Open the world in `dir`, else create it from `scenario` (read from
 /// `name`, for errors), under the rules of `packs` (`--rules` paths; see
@@ -147,6 +161,9 @@ impl Plugin for PlayPlugin {
             .init_resource::<Frames>()
             .init_resource::<StreamInfo>()
             .init_resource::<Glyphs>()
+            .init_resource::<Click>()
+            .init_resource::<Selection>()
+            .init_resource::<Inspector>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
@@ -155,6 +172,7 @@ impl Plugin for PlayPlugin {
                     advance_camera,
                     layout,
                     stream_and_tick,
+                    inspect,
                     render_frame,
                     upload_tiles,
                 )
@@ -204,6 +222,10 @@ struct Pending {
     quit: bool,
 }
 
+/// The map cell the player clicked this frame, for `inspect`.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct Click(Option<Pos>);
+
 /// A message for the help row, shown until `until` (wall clock: the app's,
 /// never the sim's).
 #[derive(Resource, Debug, Default, Clone)]
@@ -239,11 +261,12 @@ struct Glyphs {
     tileset: Handle<Image>,
 }
 
-/// The two cell frames of a frame: the map and the status rows.
+/// The cell frames of a frame: the map, the status rows, the inspector.
 #[derive(Resource, Debug, Default)]
 struct Frames {
     map: CellFrame,
     status: CellFrame,
+    panel: CellFrame,
 }
 
 /// The tile layers on screen.
@@ -251,6 +274,9 @@ struct Frames {
 struct Grids {
     map: Layer,
     status: Layer,
+    /// Over the map's right side while an actor is selected.
+    panel: Layer,
+    panel_shown: bool,
 }
 
 /// Where the map grid sits so that a fractional camera centre lands on the
@@ -263,6 +289,18 @@ pub struct MapLayout {
     pub shift_y: usize,
     pub cols: usize,
     pub rows: usize,
+}
+
+/// The map cell under window pixel `(px, py)` (physical, from the top-left).
+pub fn cell_at(map: &MapLayout, cell: u32, px: f32, py: f32) -> Pos {
+    let cell = f64::from(cell);
+    // A pixel inside the window, a cell of a few pixels: far inside i32.
+    #[allow(clippy::cast_possible_truncation)]
+    let at = |px: f32, shift: usize| ((f64::from(px) + shift as f64) / cell).floor() as i32;
+    Pos::new(
+        map.origin.x.saturating_add(at(px, map.shift_x)),
+        map.origin.y.saturating_add(at(py, map.shift_y)),
+    )
 }
 
 pub fn map_layout(camera: &ViewCamera, cell: usize, width: usize, height: usize) -> MapLayout {
@@ -313,6 +351,10 @@ pub struct Layout {
     pub map_h: u32,
     pub status_cols: u32,
     pub status_h: u32,
+    /// The inspector, over the map's right edge: `0 x 0` while nobody is
+    /// selected.
+    pub panel_cols: u32,
+    pub panel_rows: u32,
 }
 
 // ---- systems ---------------------------------------------------------------------------------
@@ -320,17 +362,31 @@ pub struct Layout {
 fn setup(mut commands: Commands) {
     commands.spawn((Camera2d, Msaa::Off));
     let map = Layer::spawn(&mut commands, 0.0);
+    let panel = Layer::spawn(&mut commands, 1.0);
     let status = Layer::spawn(&mut commands, 2.0);
-    commands.insert_resource(Grids { map, status });
+    for e in [panel.bg, panel.fg] {
+        commands.entity(e).insert(Visibility::Hidden);
+    }
+    commands.insert_resource(Grids {
+        map,
+        status,
+        panel,
+        panel_shown: false,
+    });
 }
 
 fn handle_input(
     keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    layout: Res<Layout>,
     mut close: MessageReader<WindowCloseRequested>,
     mut input: ResMut<MoveInput>,
     mut clock: ResMut<SimClock>,
     mut zoom: ResMut<Zoom>,
     mut pending: ResMut<Pending>,
+    mut click: ResMut<Click>,
+    mut selection: ResMut<Selection>,
 ) {
     let held = |a, b| keys.pressed(a) || keys.pressed(b);
     let up = held(KeyCode::KeyW, KeyCode::ArrowUp);
@@ -342,6 +398,26 @@ fn handle_input(
         dy: i8::from(down) - i8::from(up),
         fast: held(KeyCode::ShiftLeft, KeyCode::ShiftRight),
     };
+    // Moving the view yourself lets go of the actor.
+    if up || down || left || right {
+        selection.follow = false;
+    }
+    click.0 = None;
+    if mouse.just_pressed(MouseButton::Left)
+        && layout.visible
+        && let Ok(window) = window.single()
+        && let Some(at) = window.physical_cursor_position()
+    {
+        // The map, minus the panel over its right side; the status rows
+        // and the panel take no clicks.
+        let panel_x = layout.width - layout.panel_cols * layout.cell;
+        if at.y < layout.map_h as f32 && (layout.panel_cols == 0 || at.x < panel_x as f32) {
+            click.0 = Some(cell_at(&layout.map, layout.cell, at.x, at.y));
+        }
+    }
+    if keys.just_pressed(KeyCode::KeyF) && selection.uid.is_some() && selection.gone_at.is_none() {
+        selection.follow = !selection.follow;
+    }
     if keys.just_pressed(KeyCode::Space) {
         clock.toggle_pause();
     }
@@ -367,13 +443,34 @@ fn handle_input(
     if keys.any_just_pressed([KeyCode::Minus, KeyCode::NumpadSubtract]) {
         zoom.change(-ZOOM_STEP);
     }
-    if keys.any_just_pressed([KeyCode::KeyQ, KeyCode::Escape]) || close.read().next().is_some() {
+    // Esc closes the inspector first, then quits.
+    let esc = keys.just_pressed(KeyCode::Escape);
+    if esc && selection.uid.is_some() {
+        selection.clear();
+    } else if esc || keys.just_pressed(KeyCode::KeyQ) || close.read().next().is_some() {
         pending.quit = true;
     }
 }
 
-fn advance_camera(time: Res<Time>, input: Res<MoveInput>, mut camera: ResMut<ViewCamera>) {
-    camera.update(time.delta_secs_f64().min(MAX_DT), input.0);
+/// Glide by the keys, or after the followed actor: it stands in the middle
+/// of the map left of the panel.
+fn advance_camera(
+    time: Res<Time>,
+    input: Res<MoveInput>,
+    selection: Res<Selection>,
+    inspector: Res<Inspector>,
+    layout: Res<Layout>,
+    mut camera: ResMut<ViewCamera>,
+) {
+    let dt = time.delta_secs_f64().min(MAX_DT);
+    match inspector.at {
+        Some(p) if selection.follow => camera.glide_to(
+            f64::from(p.x) + 0.5 + f64::from(layout.panel_cols) / 2.0,
+            f64::from(p.y) + 0.5,
+            dt,
+        ),
+        _ => camera.update(dt, input.0),
+    }
 }
 
 fn layout(
@@ -381,6 +478,7 @@ fn layout(
     mut projection: Query<&mut Projection, With<Camera2d>>,
     zoom: Res<Zoom>,
     camera: Res<ViewCamera>,
+    selection: Res<Selection>,
     mut layout: ResMut<Layout>,
     mut glyphs: ResMut<Glyphs>,
     mut images: ResMut<Assets<Image>>,
@@ -416,6 +514,16 @@ fn layout(
     let map_h = height - status_h;
     let map = map_layout(&camera, cell as usize, width as usize, map_h as usize);
     let status_cols = width.div_ceil(cell);
+    let (panel_cols, panel_rows) = if selection.uid.is_some() {
+        (
+            (width / cell * 2 / 5)
+                .clamp(PANEL_MIN, PANEL_MAX)
+                .min(width / cell),
+            (map_h / cell).max(1),
+        )
+    } else {
+        (0, 0)
+    };
     *layout = Layout {
         visible: true,
         width,
@@ -426,12 +534,34 @@ fn layout(
         map_h,
         status_cols,
         status_h,
+        panel_cols,
+        panel_rows,
     };
     let (cols, rows) = (
         u32::try_from(map.cols).expect("the map is a window wide"),
         u32::try_from(map.rows).expect("the map is a window tall"),
     );
-    let Grids { map: m, status: s } = &mut *grids;
+    let shown = panel_cols > 0 && panel_rows > 0;
+    let Grids {
+        map: m,
+        status: s,
+        panel: p,
+        panel_shown,
+    } = &mut *grids;
+    if shown && (p.cols, p.rows, p.cell) != (panel_cols, panel_rows, cell) {
+        p.configure(&mut commands, panel_cols, panel_rows, cell, &glyphs.tileset);
+    }
+    if *panel_shown != shown {
+        *panel_shown = shown;
+        let v = if shown {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        for e in [p.bg, p.fg] {
+            commands.entity(e).insert(v);
+        }
+    }
     if (m.cols, m.rows, m.cell) != (cols, rows, cell) {
         m.configure(&mut commands, cols, rows, cell, &glyphs.tileset);
     }
@@ -495,6 +625,61 @@ fn stream_and_tick(world: &mut World) {
     if pending.quit {
         world.write_message(AppExit::Success);
     }
+}
+
+/// The inspector: a click selects whoever is on the cell (or clears the
+/// selection on an empty one); the selected actor is found again by uid
+/// and its next think explained, read-only, into [`Inspector`]. When it is
+/// gone the panel keeps its last state, faded, under a line saying so.
+fn inspect(world: &mut World) {
+    let click = world.resource::<Click>().0;
+    let width = world.resource::<Layout>().panel_cols as usize;
+    let mut sel = *world.resource::<Selection>();
+    if let Some(p) = click {
+        match inspect::pick(world, p, sel.uid) {
+            Some((uid, cc)) => sel.select(uid, cc),
+            None => sel.clear(),
+        }
+    }
+    let tick = sim::tick(world);
+    match (sel.uid, sel.near) {
+        (Some(uid), Some(near)) if sel.gone_at.is_none() => {
+            match inspect::locate(world, uid, near) {
+                Some((p, cc, slot)) => {
+                    sel.near = Some(cc);
+                    let e = sim::explain_slot(world, cc, slot).expect("a row it was found in");
+                    let lines = inspect::panel(
+                        world.resource::<Kinds>(),
+                        tick,
+                        p,
+                        &e,
+                        sel.follow,
+                        width.saturating_sub(2),
+                    );
+                    *world.resource_mut::<Inspector>() = Inspector { at: Some(p), lines };
+                }
+                None => {
+                    sel.gone_at = Some(tick);
+                    sel.follow = false;
+                    let mut ins = world.resource_mut::<Inspector>();
+                    ins.at = None;
+                    for l in &mut ins.lines {
+                        l.1 = FAINT;
+                    }
+                    ins.lines.insert(
+                        0,
+                        (
+                            format!("GONE at tick {tick}: died, eaten or unloaded"),
+                            ALERT,
+                        ),
+                    );
+                }
+            }
+        }
+        (Some(_), _) => {}
+        (None, _) => *world.resource_mut::<Inspector>() = Inspector::default(),
+    }
+    *world.resource_mut::<Selection>() = sel;
 }
 
 /// `r`: recompile the packs the world runs (the built-in rules: `./rules`,
@@ -593,6 +778,7 @@ fn render_frame(
     clock: Res<SimClock>,
     info: Res<StreamInfo>,
     notice: Res<Notice>,
+    inspector: Res<Inspector>,
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -613,6 +799,45 @@ fn render_frame(
         light,
         &mut frames.map,
     );
+    if let Some(p) = inspector.at {
+        let (dx, dy) = (
+            i64::from(p.x) - i64::from(map.origin.x),
+            i64::from(p.y) - i64::from(map.origin.y),
+        );
+        if let (Ok(c), Ok(r)) = (usize::try_from(dx), usize::try_from(dy))
+            && c < map.cols
+            && r < map.rows
+        {
+            let i = r * map.cols + c;
+            frames.map.bg[i] = SELECTED_BG.0;
+            frames.map.fg[i] = SELECTED_FG.0;
+        }
+    }
+    let (pc, pr) = (layout.panel_cols as usize, layout.panel_rows as usize);
+    frames.panel.resize(pc, pr);
+    if pc > 0 && pr > 0 {
+        let body = pr - 1;
+        let lines = &inspector.lines;
+        for row in 0..body {
+            let (text, colour) = match lines.get(row) {
+                Some(_) if lines.len() > body && row == body - 1 => (
+                    format!(
+                        "... {} more rows (a taller window shows them)",
+                        lines.len() - row
+                    ),
+                    DIM,
+                ),
+                Some((t, c)) => (t.clone(), *c),
+                None => (String::new(), TEXT_FG),
+            };
+            frames
+                .panel
+                .put_text(row, &format!(" {text}"), colour, TEXT_BG);
+        }
+        frames
+            .panel
+            .put_text(body, &format!(" {KEYS}"), DIM, TEXT_BG);
+    }
 
     let focus_chunk = camera.cell().split().0;
     let status = format!(
@@ -712,11 +937,18 @@ fn upload_tiles(
     let status_at = grids
         .status
         .place(0.0, (layout.height - layout.status_h) as f32, w, h);
-    for (layer, frame, (bg_at, fg_at)) in [
-        (&grids.map, &frames.map, map_at),
-        (&grids.status, &frames.status, status_at),
+    let panel_at = grids.panel.place(
+        (layout.width - layout.panel_cols * layout.cell) as f32,
+        0.0,
+        w,
+        h,
+    );
+    for (layer, frame, (bg_at, fg_at), alpha) in [
+        (&grids.map, &frames.map, map_at, 1.0),
+        (&grids.status, &frames.status, status_at, 1.0),
+        (&grids.panel, &frames.panel, panel_at, PANEL_ALPHA),
     ] {
-        if !layer.fits(frame) {
+        if frame.cols() == 0 || !layer.fits(frame) {
             continue;
         }
         let Ok([(mut bg, mut bg_tf), (mut fg, mut fg_tf)]) =
@@ -728,7 +960,7 @@ fn upload_tiles(
         if bg.len() != n || fg.len() != n {
             continue;
         }
-        grid::upload(frame, &mut bg, &mut fg);
+        grid::upload(frame, &mut bg, &mut fg, alpha);
         bg_tf.translation = bg_at;
         fg_tf.translation = fg_at;
     }
@@ -778,6 +1010,32 @@ mod tests {
                     "{x},{y} {w}x{h}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn a_click_lands_on_the_cell_drawn_under_it() {
+        // The camera's cell is under the window centre, and every pixel of
+        // a drawn cell maps back to it.
+        for (x, y) in [(10.5, 5.5), (-3.7, 2.2), (0.02, -0.97)] {
+            let mut cam = ViewCamera::new(Pos::new(0, 0));
+            cam.x = x;
+            cam.y = y;
+            let l = map_layout(&cam, 16, 320, 160);
+            let mid = cell_at(&l, 16, 160.0, 80.0);
+            assert!((mid.x - cam.cell().x).abs() <= 1 && (mid.y - cam.cell().y).abs() <= 1);
+            // Frame column c starts at window pixel c * 16 - shift.
+            for c in 0..l.cols {
+                let left = (c * 16) as f32 - l.shift_x as f32;
+                for px in [left, left + 15.9] {
+                    if (0.0..320.0).contains(&px) {
+                        let p = cell_at(&l, 16, px, 0.0);
+                        assert_eq!(p.x, l.origin.x + c as i32, "{x},{y} column {c} at {px}");
+                    }
+                }
+            }
+            let top = cell_at(&l, 16, 0.0, 0.0);
+            assert_eq!(top, l.origin, "the top-left pixel is in the first cell");
         }
     }
 

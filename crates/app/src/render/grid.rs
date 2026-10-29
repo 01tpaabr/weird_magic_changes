@@ -97,9 +97,16 @@ impl Layer {
 }
 
 /// Write `frame` into a layer's tile data. Backgrounds are the solid box
-/// tinted; glyphs are their box tinted, and blank cells are empty tiles
-/// (nothing to blend). Both vectors must be `cols x rows` long.
-pub fn upload(frame: &CellFrame, bg: &mut TilemapChunkTileData, fg: &mut TilemapChunkTileData) {
+/// tinted, at opacity `bg_alpha` (below 1 the layers under it show
+/// through: the inspector); glyphs are their box tinted, and blank cells
+/// are empty tiles (nothing to blend). Both vectors must be `cols x rows`
+/// long.
+pub fn upload(
+    frame: &CellFrame,
+    bg: &mut TilemapChunkTileData,
+    fg: &mut TilemapChunkTileData,
+    bg_alpha: f32,
+) {
     let (cols, rows) = (frame.cols(), frame.rows());
     let n = cols * rows;
     assert_eq!(bg.len(), n, "bg tile data length");
@@ -114,7 +121,7 @@ pub fn upload(frame: &CellFrame, bg: &mut TilemapChunkTileData, fg: &mut Tilemap
         for (i, ((&g, &f), &b)) in cells.enumerate() {
             bg[dst + i] = Some(TileData {
                 tileset_index: SOLID,
-                color: super::palette::Color(b).tint(),
+                color: super::palette::Color(b).tint().with_alpha(bg_alpha),
                 ..TileData::default()
             });
             fg[dst + i] = (g != b' ').then(|| TileData {
@@ -150,7 +157,7 @@ mod tests {
         f.put_text(1, "#", Color::rgb(0, 0, 0), Color::rgb(0, 0, 0));
         let mut bg = TilemapChunkTileData(vec![None; 6]);
         let mut fg = TilemapChunkTileData(vec![None; 6]);
-        upload(&f, &mut bg, &mut fg);
+        upload(&f, &mut bg, &mut fg, 1.0);
         // Frame row 1 ("#  ") is tile row 0 (bottom).
         assert_eq!(fg[0].unwrap().tileset_index, GlyphAtlas::layer(b'#'));
         assert!(fg[1].is_none() && fg[2].is_none());
@@ -161,6 +168,10 @@ mod tests {
         assert!(bg.iter().all(|t| t.unwrap().tileset_index == SOLID));
         assert_eq!(fg[3].unwrap().color, Color::rgb(1, 2, 3).tint());
         assert_eq!(bg[3].unwrap().color, Color::rgb(9, 9, 9).tint());
+        // A see-through layer: only the backgrounds fade.
+        upload(&f, &mut bg, &mut fg, 0.5);
+        assert_eq!(bg[3].unwrap().color.alpha(), 0.5);
+        assert_eq!(fg[3].unwrap().color.alpha(), 1.0);
     }
 
     #[test]
