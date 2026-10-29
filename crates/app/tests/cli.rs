@@ -182,6 +182,13 @@ fn unused_arguments_are_refused() {
     assert!(!ok && err.contains("scenario takes one file"), "{err}");
     let (ok, _, err) = wmc(&["run", dir, "1", "--strict"]);
     assert!(!ok && err.contains("--strict is only for lint"), "{err}");
+    let (ok, _, err) = wmc(&["run", dir, "1", "--every", "1h"]);
+    assert!(!ok && err.contains("only for observe"), "{err}");
+    let (ok, _, err) = wmc(&["observe", "2h", "10", "10", "1", "extra"]);
+    assert!(
+        !ok && err.contains("unexpected argument \"extra\""),
+        "{err}"
+    );
     // What they do use still works.
     let (ok, out, err) = wmc(&["scenario", fox_pen, "--threads", "1"]);
     assert!(ok, "{out}{err}");
@@ -189,6 +196,46 @@ fn unused_arguments_are_refused() {
     let (ok, out, err) = wmc(&["lint", rules.to_str().unwrap(), "--strict"]);
     assert!(ok, "{out}{err}");
     assert!(!Path::new(dir).exists(), "run never saves");
+}
+
+/// `observe` on a pen where a hungry fox eats a chicken: the chicken's
+/// death is counted as eaten by the fox, the CSV holds the same, and the
+/// rules that fire are named by file and line.
+#[test]
+fn observe_reports_who_died_of_what() {
+    let dir = scratch("observe");
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let fox_pen = repo.join("scenarios/tests/fox_pen.scenario");
+    let csv = dir.join("pen.csv");
+    let (ok, out, err) = wmc(&[
+        "observe",
+        "2h",
+        "--scenario",
+        fox_pen.to_str().unwrap(),
+        "--every",
+        "30min",
+        "--csv",
+        csv.to_str().unwrap(),
+        "--kind",
+        "fox",
+    ]);
+    assert!(ok, "{err}");
+    assert!(out.contains("eaten by fox 100%"), "{out}");
+    assert!(
+        out.contains("\nfox\n") && !out.contains("\nchicken\n"),
+        "{out}"
+    );
+    assert!(out.contains("animals.rules:"), "{out}");
+    let rows = std::fs::read_to_string(&csv).unwrap();
+    assert!(
+        rows.starts_with("tick,day,hour,kind,metric,value\n"),
+        "{rows}"
+    );
+    assert!(
+        rows.contains(",chicken,death.killed.fox,2\n"),
+        "two pens, two chickens: {rows}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// A start that does not fit the rules is refused at its line, by `lint
@@ -414,6 +461,42 @@ fn odd_command_lines_never_panic() {
         &["scenario", "tiny.scenario", "--threads", "1"],
         &["scenario", "tiny.scenario", "--rules", "bad.rules"],
         &["scenario", "tiny.scenario", "tiny.scenario"],
+        &["observe"],
+        &["observe", ""],
+        &["observe", "0"],
+        &["observe", "-1"],
+        &["observe", "1x"],
+        &["observe", "99999999999d"],
+        &["observe", "3", "--scenario", "tiny.scenario"],
+        &["observe", "3", "2", "2", "--scenario", "tiny.scenario"],
+        &["observe", "3", "1", "1", "1", "extra"],
+        &["observe", "3", "--every"],
+        &["observe", "3", "--every", "0"],
+        &[
+            "observe",
+            "3",
+            "--every",
+            "2h",
+            "--scenario",
+            "tiny.scenario",
+        ],
+        &["observe", "3", "--sample", "-1"],
+        &["observe", "3", "--sample", "100001"],
+        &[
+            "observe",
+            "3",
+            "--sample",
+            "0",
+            "--scenario",
+            "tiny.scenario",
+        ],
+        &["observe", "3", "--kind", "nobody"],
+        &["observe", "3", "--csv", ""],
+        &["observe", "3", "--csv", "."],
+        &["observe", "3", "--scenario", "bad.scenario"],
+        &["observe", "3", "--rules", "bad.rules"],
+        &["show", "--every", "1h"],
+        &["run", "s1", "1", "--csv", "x.csv"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);

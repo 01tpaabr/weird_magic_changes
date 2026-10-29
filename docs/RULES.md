@@ -668,6 +668,20 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   cell again shows the ground cover under the actor. `f` follows the actor (the camera
   glides after it; moving the camera yourself lets go), and `Esc` closes the panel.
   When the actor dies, the panel keeps its last state, faded.
+- **`wmc observe <time> [w h seed] --scenario <file>`** makes the scenario's world (on no
+  disk; its `run` and `expect` lines are not run), steps it for that time (ticks, or
+  `90min`, `2h`, `4d`) and reports how each kind lives and dies: how many are alive over
+  time and the lowest count; births and deaths per day, deaths by cause (`eaten by fox`,
+  `no water`, `own die`); and per kind, its typical needs, how many are in each state, what
+  its thinks decide, the rules that fire most (by `file:line`), and how its actions turn
+  out (`BLOCKED 14%`). Decisions and rules come from dry runs of up to `--sample N` (100)
+  thinks per kind at each sample, as the inspector runs them: nothing in the world changes.
+  `--every <time>` sets how often it samples (an hour), `--kind K` details only some kinds,
+  and `--csv <file>` writes every sample as `tick,day,hour,kind,metric,value` rows, for a
+  closer look. The report is the same on any thread count.
+  ```sh
+  wmc observe 4d 128 128 7 --kind fox --kind chicken --csv fox.csv
+  ```
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and

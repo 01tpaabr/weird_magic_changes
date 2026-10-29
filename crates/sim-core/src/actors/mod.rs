@@ -23,7 +23,9 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, cell_u16};
 
-pub use systems::{CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, Tally, life};
+pub use systems::{
+    Cause, CrossScratch, Effect, Hit, Intent, Intents, Outbox, Scratch, Tally, life,
+};
 
 /// Need counters per actor, named per kind by its rules file.
 pub const NEED_SLOTS: usize = 4;

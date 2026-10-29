@@ -1,0 +1,43 @@
+# Plan: tuning a world's dynamics
+
+Temporary: delete when step 5 ships; ARCHITECTURE.md decision 40 onward keep the record.
+
+**The goal (owner, 2026-10-29).** Ask an agent for a behaviour ("foxes hunt more chickens,
+but chickens don't all die") and have it get there by reasoning and measuring, not by hours
+of blind tweaking. Agents read the rules language well; what they lacked was the middle zoom
+level (rates, causes, trends), goals they can check, cheap experiments, and the arithmetic
+of ticks and chances. Everything here is an author feature first: any pack author uses it,
+the agent is its heaviest user.
+
+**Decisions taken (owner: "go with the recommended").**
+- Goals extend the scenario format (`expect` over time, several seeds), so a goal and a
+  regression test are the same file.
+- The agent may change consts and rule structure; a structural change needs a written
+  prediction first and is named in its report.
+- Autonomy: the agent checks in once, after the goal is written as properties and the
+  baseline is explained, then works alone within a budget (experiments or time) and
+  reports.
+- No automatic optimizer for now: blind search finds brittle, seed-fitted numbers with no
+  explanation. Sweeps plus reasoning instead.
+
+## Steps
+
+1. **`wmc observe`** (done, decision 40): alive over time, deaths by cause, needs, states,
+   last results, sampled decisions and rules that fire; summary + long CSV.
+2. **Goals over time.** `expect always ... from 2d`, `expect mean ... from 4d`, rates per
+   day (`expect rate eaten chicken per day >= 40`); `--seeds N --pass M` for "on 7 of 8
+   seeds". Scenario syntax, so `scenario/fuzz.rs` and RULES §14 grow with it.
+3. **`wmc lab`.** A scenario across seeds x knob values in parallel processes (an
+   optimized build), early stop when an `always` fails, one table row per variant (pass
+   rate, key numbers with their spread). Knobs are `const`s: `--set NAME=a,b,c`.
+4. **The skill** (`.claude/skills/world-tuning/`): the protocol (goal as properties ->
+   baseline story from `observe` -> prediction -> sweep -> explain misses -> confirm on a
+   bigger world and more seeds, +-20% on each knob -> lock in as a test in
+   `scenarios/tests/` -> notebook in `tuning/<goal>.md`); a cookbook mapping properties to
+   mechanisms and rules idioms (satiation, prey switching, territory, refuges,
+   density-dependent births, delays and oscillation); the unit arithmetic (thinks per day,
+   per-think chance to per-day odds, `mortal` lifespans); lessons learned in this project.
+5. **`wmc rates`.** Each kind's numbers in day units, from the compiled rules.
+
+Probes (tiny drawn-map scenarios that measure one mechanism, like one fox in a pen with N
+chickens) need no new tool: steps 1 and 2 make them measurable; the skill teaches them.

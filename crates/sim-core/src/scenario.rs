@@ -428,6 +428,15 @@ fn is_name(w: &str) -> bool {
         && !w.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// A time as a scenario's `run` line writes it (`64`, `90min`, `2h`,
+/// `1d`): its ticks, if it is one and above zero. For tools that take a
+/// time (`wmc observe 4d`).
+pub fn ticks_of(w: &str) -> Option<u64> {
+    value(w)
+        .filter(|&t| t > 0)
+        .and_then(|t| u64::try_from(t).ok())
+}
+
 /// `12`, `-3`, `90min`, `2h`, `1d`: an integer, or a time in ticks (the
 /// rules' units).
 fn value(w: &str) -> Option<i32> {

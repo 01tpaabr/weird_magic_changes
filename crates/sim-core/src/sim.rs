@@ -623,13 +623,24 @@ pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
 /// [`find_uid`]), so a tool can follow one actor whoever shares its cell.
 /// `None` if the chunk is not loaded or has no such row.
 pub fn explain_slot(world: &World, cc: ChunkCoord, slot: u16) -> Option<systems::Explained> {
+    explain_slots(world, cc, &[slot])?.pop()
+}
+
+/// [`explain_slot`] for several rows of one chunk, in the order given,
+/// sharing one view of the neighbourhood: how a tool samples a chunk's
+/// actors (`wmc observe`). `None` if the chunk is not loaded or a row is
+/// missing.
+pub fn explain_slots(
+    world: &World,
+    cc: ChunkCoord,
+    slots: &[u16],
+) -> Option<Vec<systems::Explained>> {
     let kinds = world.resource::<Kinds>();
     let stage = world.resource::<Stage>();
     let tick = world.resource::<Tick>().0;
     let seed = world.resource::<SimConfig>().seed;
     let e = stage.entity(cc)?;
-    let row = *world.get::<ChunkActors>(e)?.rows.get(usize::from(slot))?;
-    let mind = *world.get::<ChunkMinds>(e)?.rows.get(usize::from(slot))?;
+    let (pubs, minds) = (world.get::<ChunkActors>(e)?, world.get::<ChunkMinds>(e)?);
     // The think sees the world after the Simulate phase, so a chunk due to
     // fade its scent this tick is faded first, in a copy. Mirror every
     // Simulate system here.
@@ -651,9 +662,16 @@ pub fn explain_slot(world: &World, cc: ChunkCoord, slot: u16) -> Option<systems:
         };
         Some((cells, world.get::<ChunkActors>(e)?))
     });
-    Some(systems::explain(
-        kinds, tick, seed, &halo, cc, slot, &row, &mind,
-    ))
+    slots
+        .iter()
+        .map(|&slot| {
+            let row = pubs.rows.get(usize::from(slot))?;
+            let mind = minds.rows.get(usize::from(slot))?;
+            Some(systems::explain(
+                kinds, tick, seed, &halo, cc, slot, row, mind,
+            ))
+        })
+        .collect()
 }
 
 /// Where the actor with this `uid` is, if it is loaded: its cell, chunk
@@ -794,6 +812,47 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
     Ok(())
 }
 
+/// The deaths counted by cause agree with the life counters: per kind,
+/// the causes add up to `EATEN` + `DIED`, a killer is a kind of the rule
+/// set, and a starvation names one of the kind's vital needs. For the
+/// simulation fuzzer.
+#[cfg(test)]
+pub fn tally_agrees(world: &World) -> Result<(), String> {
+    use crate::actors::{Cause, Tally, life};
+    let kinds = world.resource::<Kinds>();
+    let tally = world.resource::<Tally>();
+    for (k, def) in kinds.defs.iter().enumerate() {
+        let kind = u16::try_from(k).expect("kind ids are u16");
+        let mut by_cause = 0;
+        for (cause, n) in tally.deaths_of(kind) {
+            by_cause += n;
+            match cause {
+                Cause::Killed(by) if usize::from(by) >= kinds.defs.len() => {
+                    return Err(format!(
+                        "{} killed by kind {by}, not in the rules",
+                        def.name
+                    ));
+                }
+                Cause::Starved(i) if !def.needs.get(usize::from(i)).is_some_and(|n| n.vital) => {
+                    return Err(format!(
+                        "{} starved of need slot {i}, not a vital need",
+                        def.name
+                    ));
+                }
+                _ => {}
+            }
+        }
+        let counted = tally.get(kind, life::EATEN) + tally.get(kind, life::DIED);
+        if by_cause != counted {
+            return Err(format!(
+                "{}: {by_cause} deaths by cause, {counted} eaten or died",
+                def.name
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// No two rows share a uid. Rows born in a world never do; a save from
 /// before cover births hashed apart (`STREAM_UID_COVER`) may hold twins,
 /// which the tick tolerates.
@@ -817,6 +876,7 @@ mod fuzz;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::actors::{Cause, Tally, life};
     use crate::scenario::{Agg, Expect, Who};
     use crate::stage::{Feature, Ground};
 
@@ -1706,6 +1766,8 @@ mod tests {
             all.iter().all(|r| r.1 != CHICKEN),
             "both chickens were eaten"
         );
+        let causes: Vec<_> = w.resource::<Tally>().deaths_of(CHICKEN).collect();
+        assert_eq!(causes, [(Cause::Killed(FOX), 2)], "both by a fox's bite");
         let foxes: Vec<_> = all.iter().filter(|r| r.1 == FOX).collect();
         assert_eq!(foxes.len(), 2);
         for f in foxes {
@@ -1716,6 +1778,56 @@ mod tests {
                 f.3.needs
             );
         }
+    }
+
+    /// Deaths are counted by cause: the vital need that ran out (by its
+    /// slot), or a rule's own `die`.
+    #[test]
+    fn deaths_are_counted_by_cause() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind dry { glyph \"d\"  cadence 1
+               need food max 1d vital
+               need water max 3 vital
+               when true => idle }
+             kind old { glyph \"o\"  cadence 1
+               when age > 2 => die
+               when true => idle }",
+        )
+        .unwrap();
+        let (dry, old) = (0, 1);
+        let mut w = new_world_with(&cfg(4), kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(5, 5),
+            dry,
+            newborn(&kinds, dry, 0xD1, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(9, 5),
+            old,
+            newborn(&kinds, old, 0xD2, now)
+        ));
+        for _ in 0..10 {
+            step(&mut w);
+        }
+        let t = w.resource::<Tally>();
+        assert_eq!(
+            t.deaths_of(dry).collect::<Vec<_>>(),
+            [(Cause::Starved(1), 1)],
+            "water, slot 1"
+        );
+        assert_eq!(t.deaths_of(old).collect::<Vec<_>>(), [(Cause::Died, 1)]);
+        assert_eq!(
+            t.get(dry, life::DIED) + t.get(old, life::DIED),
+            2,
+            "DIED is their sum"
+        );
     }
 
     /// `take` and `give` move a need between neighbours by name, in key

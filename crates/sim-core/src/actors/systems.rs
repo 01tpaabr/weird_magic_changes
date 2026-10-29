@@ -28,6 +28,8 @@
 //! changed this tick (vacated, died, claimed, filled) is not enterable
 //! until the next tick, so moves never chain.
 
+use std::collections::BTreeMap;
+
 use bevy_ecs::prelude::*;
 
 use crate::actors::{
@@ -110,12 +112,14 @@ pub enum EffectKind {
         give: bool,
     },
     /// `eat` (true) or `hit`, `bite` damage, `dir` from the victim toward
-    /// the biter (a `hurt_dir` value).
+    /// the biter (a `hurt_dir` value), and the biter's kind (whose bite
+    /// killed, for [`Tally::deaths`]).
     Bite {
         bite: u8,
         eat: bool,
         dir: u8,
         cover: bool,
+        kind: u16,
     },
 }
 
@@ -141,6 +145,8 @@ pub struct Hit {
     pub dir: u8,
     /// Bites the ground cover (`graze`) rather than who stands there.
     pub cover: bool,
+    /// The biter's kind.
+    pub kind: u16,
 }
 
 /// Working lists of the two sequential phases: every outbox of the tick,
@@ -163,6 +169,8 @@ pub struct Scratch {
     pub hits: Vec<Hit>,
     pub deaths: u32,
     events: Vec<[u32; LIFE_EVENTS]>,
+    /// This tick's deaths, by kind and cause: few, so a list.
+    causes: Vec<(u16, Cause)>,
 }
 
 /// Life events and work counted per kind: `Tally::counts[kind][event]`.
@@ -184,18 +192,38 @@ pub mod life {
 }
 const LIFE_EVENTS: usize = 7;
 
+/// Why a row died: [`life::EATEN`] and [`life::DIED`] split by cause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Cause {
+    /// A bite took its last health: the biter's kind.
+    Killed(u16),
+    /// The vital need in this slot of its kind was empty at its think.
+    Starved(u8),
+    /// One of its rules chose `die` (old age, say).
+    Died,
+}
+
 /// Life events and work per kind since the world was loaded: births,
-/// `become`s, deaths by bites and by needs; thinks, ops and traps. Sums, so
-/// the order they are added in does not matter; not saved, not in the
-/// checksum.
+/// `become`s, deaths by bites and by needs; thinks, ops and traps; and
+/// every death by kind and cause. Sums, so the order they are added in does
+/// not matter; not saved, not in the checksum.
 #[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 pub struct Tally {
     pub counts: Vec<[u64; LIFE_EVENTS]>,
+    /// Deaths per (kind, cause).
+    pub deaths: BTreeMap<(u16, Cause), u64>,
 }
 
 impl Tally {
     pub fn get(&self, kind: u16, event: usize) -> u64 {
         self.counts.get(usize::from(kind)).map_or(0, |c| c[event])
+    }
+
+    /// The deaths of `kind` so far, by cause.
+    pub fn deaths_of(&self, kind: u16) -> impl Iterator<Item = (Cause, u64)> + '_ {
+        self.deaths
+            .range((kind, Cause::Killed(0))..=(kind, Cause::Died))
+            .map(|(&(_, c), &n)| (c, n))
     }
 }
 
@@ -210,6 +238,7 @@ impl Default for Scratch {
             hits: Vec::new(),
             deaths: 0,
             events: Vec::new(),
+            causes: Vec::new(),
         }
     }
 }
@@ -609,6 +638,7 @@ pub fn resolve(
                                     eat,
                                     dir,
                                     cover,
+                                    kind: row.kind,
                                 });
                                 result::OK
                             }
@@ -622,6 +652,7 @@ pub fn resolve(
                                     eat,
                                     dir,
                                     cover,
+                                    kind: row.kind,
                                 },
                                 to,
                                 cell: cell_u16(cell),
@@ -690,6 +721,7 @@ pub fn exchange(
             eat,
             dir,
             cover,
+            kind,
         } = fx.what
         else {
             continue;
@@ -709,6 +741,7 @@ pub fn exchange(
                             eat,
                             dir,
                             cover,
+                            kind,
                         });
                         result::OK
                     }
@@ -761,9 +794,15 @@ pub fn exchange(
                 vm::decay(def, m, tick); // health as it stands now
             }
             let mut left = m.needs[h].max(0);
+            // Whose bite took the last of its health (the first biter's, if
+            // it had none left).
+            let mut killer = first.kind;
             for hit in &scratch.hits[group] {
                 let taken = i32::from(hit.bite).min(left);
                 left -= taken;
+                if taken > 0 && left <= 0 {
+                    killer = hit.kind;
+                }
                 if hit.eat && taken > 0 && def.food > 0 {
                     // Health is in 0..=max (every write clamps it), so
                     // taken <= max and food <= def.food, an i32.
@@ -790,6 +829,7 @@ pub fn exchange(
                     scratch.touch(cell); // a grazed-out tuft frees no standing room
                 }
                 scratch.count(vk, life::EATEN);
+                scratch.causes.push((vk, Cause::Killed(killer)));
             }
             meta.dirty = true;
         }
@@ -987,12 +1027,25 @@ pub fn apply(
                     Action::Eat | Action::Hit | Action::Graze | Action::Take | Action::Give => None,
                     Action::Die => {
                         let kind = actors.pubs[slot].kind;
+                        // Think stamped the needs to now: an empty vital
+                        // one made this `die`, else a rule chose it.
+                        let mind = &actors.minds[slot];
+                        let cause = kinds
+                            .def(kind)
+                            .needs
+                            .iter()
+                            .zip(mind.needs)
+                            .position(|(n, v)| n.vital && v <= 0)
+                            .map_or(Cause::Died, |i| {
+                                Cause::Starved(u8::try_from(i).expect("4 need slots"))
+                            });
                         actors.kill(slot);
                         scratch.deaths += 1;
                         if !cover {
                             scratch.touch(from);
                         }
                         scratch.count(kind, life::DIED);
+                        scratch.causes.push((kind, cause));
                         Some(result::OK)
                     }
                     Action::Become => {
@@ -1359,6 +1412,9 @@ fn set_result_in(minds: &mut ChunkMinds, slot: usize, res: u8) {
 /// so chunk order does not matter.
 pub fn tally(mut total: ResMut<Tally>, mut q: Query<&mut Scratch>) {
     for mut s in &mut q {
+        for (k, c) in s.causes.drain(..) {
+            *total.deaths.entry((k, c)).or_default() += 1;
+        }
         if s.events.iter().all(|e| e.iter().all(|&n| n == 0)) {
             continue;
         }
@@ -1479,6 +1535,7 @@ mod tests {
             eat: false,
             dir: 0,
             cover: false,
+            kind: 0,
         });
         s.reset();
         assert!(s.enterable(5) && s.enterable(6) && s.hits.is_empty());

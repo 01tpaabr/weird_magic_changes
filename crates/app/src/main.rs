@@ -10,6 +10,11 @@
 //! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
 //!                                              step `ticks`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
+//! wmc observe <time> [w h seed]                make the scenario's world, step it for <time>
+//!                                              (ticks, or 90min, 2h, 4d) and report how its
+//!                                              kinds live and die (`app::observe`); takes
+//!                                              --every <time>, --csv <file>, --sample N,
+//!                                              --kind K (repeatable)
 //! ```
 //! Any command takes `--rules <pack>` (repeatable), `--scenario <file>` and
 //! `--threads N`, anywhere after its name. A pack is a directory of `*.rules` files or one
@@ -102,6 +107,10 @@ fn main() -> anyhow::Result<()> {
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
     let strict = take_switch(&mut args, "--strict");
+    let every = take_flag(&mut args, "--every")?.pop();
+    let csv = take_flag(&mut args, "--csv")?.pop();
+    let sample = take_flag(&mut args, "--sample")?.pop();
+    let only = take_flag(&mut args, "--kind")?;
     if let Some(n) = take_flag(&mut args, "--threads")?.pop() {
         let n: usize = n
             .parse()
@@ -119,6 +128,11 @@ fn main() -> anyhow::Result<()> {
     }
     if strict && args.first().map(String::as_str) != Some("lint") {
         bail!("--strict is only for lint");
+    }
+    if args.first().map(String::as_str) != Some("observe")
+        && (every.is_some() || csv.is_some() || sample.is_some() || !only.is_empty())
+    {
+        bail!("--every, --csv, --sample and --kind are only for observe");
     }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
@@ -161,6 +175,28 @@ fn main() -> anyhow::Result<()> {
                 &setup(a.get(4..).unwrap_or(&[]))?,
             )
         }
+        Some("observe") => {
+            let time = |t: &str| {
+                sim_core::scenario::ticks_of(t)
+                    .with_context(|| format!("bad time {t:?}: ticks, or a time (90min, 2h, 4d)"))
+            };
+            let ticks = time(
+                args.get(1)
+                    .context("observe needs a time: ticks, or 90min, 2h, 4d")?,
+            )?;
+            let mut opts = app::observe::Options::default();
+            if let Some(e) = &every {
+                opts.every = time(e)?;
+            }
+            if let Some(n) = &sample {
+                opts.sample = n
+                    .parse()
+                    .ok()
+                    .filter(|n| *n <= 100_000)
+                    .context("--sample needs a count from 0 to 100000")?;
+            }
+            observe(ticks, &setup(&args[2..])?, opts, csv.as_deref(), &only)
+        }
         Some("scenario") => {
             let f = args.get(1).context("scenario needs a scenario file")?;
             if let Some(a) = args.get(2) {
@@ -185,11 +221,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             bail!(
-                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `scenario` or `lint`"
+                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario` or `lint`"
             )
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc lint [--strict] <pack>... | wmc scenario <file>; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file>; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
         ),
     }
 }
@@ -460,6 +496,63 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
             tally.get(k, life::TRAPS),
         )?;
     }
+    Ok(())
+}
+
+/// `wmc observe`: make the scenario's world (nowhere on disk; its `run` and
+/// `expect` lines are not run), step it for `ticks`, and print what
+/// [`app::observe`] measured; the samples go to `csv` too, if given.
+/// `only`: the kinds to detail (none: all).
+fn observe(
+    ticks: u64,
+    s: &Setup,
+    opts: app::observe::Options,
+    csv: Option<&str>,
+    only: &[String],
+) -> anyhow::Result<()> {
+    let kinds = app::compile(&app::packs_or(&s.packs, &s.scenario.packs))?;
+    app::warn(&kinds);
+    if let Some(k) = only
+        .iter()
+        .find(|k| !kinds.defs.iter().any(|d| d.name == **k))
+    {
+        bail!("--kind {k}: the rules have no such kind");
+    }
+    let mut world = sim::new_world_with(&s.scenario, kinds)
+        .map_err(|e| app::new_world_error(&s.name, s.scenario.line_of(&e), e))?;
+    let from = sim::tick(&world);
+    let started = Instant::now();
+    let report = app::observe::observe(&mut world, ticks, opts);
+    let wall = started.elapsed();
+    let kinds = world.resource::<Kinds>();
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "observe   {}, seed {}, {}x{}: {} to {}, a sample every {} ticks, up to {} thinks explained per kind",
+        s.name,
+        s.scenario.seed,
+        s.scenario.width,
+        s.scenario.height,
+        Clock::at(from),
+        Clock::at(sim::tick(&world)),
+        opts.every,
+        opts.sample
+    )?;
+    if let Some(path) = csv {
+        let file = std::fs::File::create(path).with_context(|| format!("writing {path}"))?;
+        let mut file = std::io::BufWriter::new(file);
+        app::observe::write_csv(&report, kinds, &mut file)
+            .and_then(|()| file.flush())
+            .with_context(|| format!("writing {path}"))?;
+        writeln!(out, "csv       {path} ({} samples)", report.samples.len())?;
+    }
+    writeln!(out)?;
+    write!(out, "{}", app::observe::summary(&report, kinds, only))?;
+    writeln!(
+        out,
+        "\nwall      {wall:.2?} ({} threads)",
+        par::thread_count()
+    )?;
     Ok(())
 }
 

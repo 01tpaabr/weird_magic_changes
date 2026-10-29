@@ -252,6 +252,7 @@ fn run(c: &Case, split: u64) -> Result<(), String> {
         let at = |e| format!("after tick {t}: {e}");
         invariants(&mut w).map_err(at)?;
         unique_uids(&mut w).map_err(at)?;
+        tally_agrees(&w).map_err(at)?;
         sums.push(checksum(&mut w));
         if t == split {
             save(&mut w, &store).map_err(|e| format!("saving at tick {t}: {e}"))?;

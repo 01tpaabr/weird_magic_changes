@@ -71,6 +71,42 @@ fn ecosystem_checksum_is_identical_across_thread_counts() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// `observe` reads the world in chunk order and picks the thinks it
+/// explains by uid: the same report and CSV on any thread count.
+#[test]
+fn observe_is_identical_across_thread_counts() {
+    let dir = tmp_dir("observe");
+    std::fs::create_dir_all(&dir).unwrap();
+    let report = |threads: &str| {
+        let csv = dir.join(format!("t{threads}.csv"));
+        let out = wmc(
+            threads,
+            &[
+                "observe",
+                "6h",
+                "192",
+                "128",
+                "12",
+                "--every",
+                "1h",
+                "--csv",
+                csv.to_str().unwrap(),
+            ],
+        );
+        let text: Vec<&str> = out
+            .lines()
+            .filter(|l| !l.starts_with("wall") && !l.starts_with("csv"))
+            .collect();
+        (text.join("\n"), std::fs::read_to_string(&csv).unwrap())
+    };
+    let (one, one_csv) = report("1");
+    let (eight, eight_csv) = report("8");
+    assert_eq!(one, eight);
+    assert_eq!(one_csv, eight_csv);
+    assert!(one.contains("decides"), "{one}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn show_is_identical_across_thread_counts() {
     let args = ["show", "200", "100", "5"];

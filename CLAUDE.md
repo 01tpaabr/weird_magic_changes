@@ -68,6 +68,8 @@ make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + ch
                                    # and --rules <pack> (repeatable; a dir of *.rules or a file; else WMC_RULES=a:b, else the save's packs)
 make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table and the author lint (--scenario f: check it fits; --strict: warnings fail)
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
+make run ARGS="observe 4d --scenario f"     # how each kind lives and dies over time: alive, deaths by cause,
+                                   # what thinks decide, which rules fire (--every 1h --kind K --csv out.csv)
 make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: its run/expect lines (--threads N)
 make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
