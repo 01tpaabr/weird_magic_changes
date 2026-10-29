@@ -1,8 +1,8 @@
 //! The inspector of `wmc play`: click an actor to see inside it, `f` to
-//! follow it. The panel shows its kind and parents, its needs, memory and
-//! state, and its rules as its next think would run them (FIRED, no, not
-//! reached), with the decision: [`crate::why`] in a side panel, refreshed
-//! every frame.
+//! follow it. The panel shows its kind and parents and its state, what its
+//! next think would do (the rules that fire, copied out, and the decision),
+//! its needs and memory, and every rule that think could reach:
+//! [`crate::why`] in a side panel, refreshed every frame.
 //!
 //! The selection is a `uid`, so it survives moving across chunks and
 //! `become`. Everything here reads the world and never writes it: the think
@@ -16,17 +16,17 @@ use sim_core::time::stamp;
 use sim_core::{ChunkActors, ChunkCells, ChunkCoord, ChunkMinds, Kinds, Pos, Stage, sim};
 
 use crate::render::palette::{Color, TEXT_FG};
-use crate::why::{checked_rules, decision, duration, result_name, state_name, writes};
+use crate::why::{Checked, checked_rules, decision, duration, result_name, state_name, writes};
 
 /// Section titles.
 pub const TITLE: Color = Color::rgb(0xf0, 0xc6, 0x74);
-/// A rule whose body ran.
+/// The rules that fire, in the next-think section.
 pub const FIRED: Color = Color::rgb(0x9b, 0xe3, 0x8a);
 /// A rule whose condition trapped, or an actor that is gone.
 pub const ALERT: Color = Color::rgb(0xff, 0x7b, 0x72);
-/// A rule whose condition was false.
+/// Secondary text: where a rule is written, the cost.
 pub const DIM: Color = Color::rgb(0xa0, 0xa0, 0xa8);
-/// A rule the think never reached.
+/// The last state of an actor that is gone.
 pub const FAINT: Color = Color::rgb(0x6a, 0x6a, 0x72);
 /// The panel's last row.
 pub const KEYS: &str = "click select | f follow | esc close";
@@ -178,6 +178,56 @@ pub fn panel(
         TEXT_FG,
     );
 
+    // What it does next and why, first: the rules that fired, copied out
+    // of the list below, then the decision.
+    let rules = checked_rules(kinds, e);
+    line(String::new(), TEXT_FG);
+    line("next think".into(), TITLE);
+    let at = |c: &Checked<'_>| {
+        let via = c
+            .rule
+            .via
+            .as_ref()
+            .map_or(String::new(), |v| format!(", via {v}"));
+        format!("    {}:{}{via}", c.file, c.rule.line)
+    };
+    if e.starved {
+        line("  none: a vital need is empty, it dies".into(), ALERT);
+    }
+    for c in rules.iter().filter(|c| c.verdict == "FIRED") {
+        line(format!("  {}", c.rule.text), FIRED);
+        line(at(c), DIM);
+    }
+    for c in rules.iter().filter(|c| c.verdict == "TRAPPED") {
+        line(format!("  trapped in: {}", c.rule.text), ALERT);
+        line(at(c), DIM);
+    }
+    if !e.starved
+        && rules
+            .iter()
+            .all(|c| c.verdict != "FIRED" && c.verdict != "TRAPPED")
+    {
+        line("  no rule fired".into(), DIM);
+    }
+    line(format!("  decides {}", decision(kinds, e)), TEXT_FG);
+    let writes = writes(kinds, tick, e);
+    for row in wrap(&writes, width.saturating_sub(9)) {
+        line(format!("  writes {row}"), TEXT_FG);
+    }
+    let left = e.trace.last().map_or(def.fuel, |st| st.fuel);
+    line(
+        format!(
+            "  cost {} ops, {} of {} fuel",
+            e.outcome.used,
+            def.fuel - left,
+            def.fuel
+        ),
+        DIM,
+    );
+    if let Some(t) = e.outcome.trap {
+        line(format!("  TRAPPED: {t:?} (the think becomes idle)"), ALERT);
+    }
+
     if !def.needs.is_empty() {
         line(String::new(), TEXT_FG);
         line("needs".into(), TITLE);
@@ -224,12 +274,10 @@ pub fn panel(
         }
     }
 
+    // Every rule the think could reach, in the order it tries them.
     line(String::new(), TEXT_FG);
-    line("rules, as its next think runs them".into(), TITLE);
-    let rules = checked_rules(kinds, e);
-    if e.starved {
-        line("  none: a vital need is empty, it dies".into(), ALERT);
-    } else if rules.is_empty() {
+    line("rules".into(), TITLE);
+    if rules.is_empty() {
         line("  (a hand-assembled kind: no source)".into(), DIM);
     }
     let mut shown_state = None;
@@ -242,45 +290,7 @@ pub fn panel(
                 TITLE,
             );
         }
-        let file = c.file.rsplit('/').next().unwrap_or(c.file);
-        let file = file.strip_suffix(".rules").unwrap_or(file);
-        let colour = match c.verdict {
-            "FIRED" => FIRED,
-            "TRAPPED" => ALERT,
-            "no" => DIM,
-            _ => FAINT,
-        };
-        line(
-            format!(
-                "{:<5} {:<12} {}",
-                c.verdict,
-                format!("{file}:{}", r.line),
-                r.text
-            ),
-            colour,
-        );
-    }
-
-    line(String::new(), TEXT_FG);
-    line(format!("decides {}", decision(kinds, e)), FIRED);
-    let writes = writes(kinds, tick, e);
-    if !writes.is_empty() {
-        for row in wrap(&writes, width.saturating_sub(7)) {
-            line(format!("writes {row}"), TEXT_FG);
-        }
-    }
-    let left = e.trace.last().map_or(def.fuel, |st| st.fuel);
-    line(
-        format!(
-            "cost {} ops, {} of {} fuel",
-            e.outcome.used,
-            def.fuel - left,
-            def.fuel
-        ),
-        DIM,
-    );
-    if let Some(t) = e.outcome.trap {
-        line(format!("TRAPPED: {t:?} (the think becomes idle)"), ALERT);
+        line(format!("  {}", r.text), TEXT_FG);
     }
     out
 }
@@ -418,13 +428,37 @@ mod tests {
             "{text:?}"
         );
         assert!(text.contains(&"memory"), "{text:?}");
-        let fired: Vec<_> = lines
+        // The rule that fires is copied into the next-think section, and
+        // listed again, plainly, under the rules.
+        let next = text
             .iter()
-            .filter(|(s, _)| s.starts_with("FIRED "))
-            .collect();
-        assert!(!fired.is_empty(), "{text:?}");
-        assert!(fired.iter().all(|(_, c)| *c == FIRED));
-        assert!(text.iter().any(|l| l.starts_with("decides ")), "{text:?}");
+            .position(|l| *l == "next think")
+            .expect("a next-think section");
+        let rules = text
+            .iter()
+            .position(|l| *l == "rules")
+            .expect("a rules section");
+        assert!(next < rules);
+        let fired = &lines[next + 1];
+        assert_eq!(fired.1, FIRED, "{text:?}");
+        assert!(fired.0.starts_with("  when "), "{text:?}");
+        assert!(text[next + 2].contains(".rules:"), "{text:?}");
+        assert!(text[rules + 1..].contains(&fired.0.as_str()), "{text:?}");
+        assert!(
+            lines[rules + 1..]
+                .iter()
+                .all(|(l, c)| *c != FIRED && !l.contains("FIRED"))
+        );
+        assert!(
+            text.iter()
+                .all(|l| !l.starts_with("FIRED") && !l.starts_with("no "))
+        );
+        assert!(
+            text[next..rules]
+                .iter()
+                .any(|l| l.starts_with("  decides ")),
+            "{text:?}"
+        );
     }
 
     #[test]

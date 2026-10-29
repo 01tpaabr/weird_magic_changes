@@ -84,8 +84,9 @@ must print the same checksum.
 
 In the window: `w a s d` or the arrows move (Shift for 4x), `space` pauses, `.` steps one
 tick, `[` and `]` change the speed, `+` and `-` zoom, `p` saves, `r` reloads the rules,
-and `q` saves and quits. Click an actor to open the inspector: its needs, memory and state,
-and its rules as its next think runs them. `f` follows it, and `Esc` closes the inspector.
+and `q` saves and quits. Click an actor to open the inspector: what its next think does and
+which rules fire, its needs, memory and state, and all its rules (the wheel or trackpad
+scrolls it). `f` follows it, and `Esc` closes the inspector.
 
 ## Writing your own kinds
 

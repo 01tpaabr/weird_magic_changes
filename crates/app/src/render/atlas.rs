@@ -1,6 +1,8 @@
 //! Glyph coverage atlas: every printable ASCII glyph rasterized once into a
-//! square `cell x cell` box, one coverage byte per pixel (0 = background,
-//! 255 = glyph), plus one solid box for cell backgrounds. Built when the
+//! `width x height` box, one coverage byte per pixel (0 = background,
+//! 255 = glyph), plus one solid box for cell backgrounds. The map's boxes are
+//! square ([`GlyphAtlas::build`]); text boxes are a glyph's advance wide
+//! ([`GlyphAtlas::text`], the inspector), so twice the columns fit. Built when the
 //! physical cell size changes (zoom, DPI), never per frame, then handed to
 //! the GPU as a 2D array texture ([`GlyphAtlas::tileset`]): one layer per
 //! box, white, coverage in alpha, so a per-tile tint gives the glyph colour.
@@ -28,34 +30,61 @@ static FONT: &[u8] = include_bytes!("../../assets/JetBrainsMonoNL-Regular.ttf");
 /// caps 0.66 cells tall; only the extremes of ascenders/descenders clip.
 const FONT_SCALE: f32 = 0.9;
 
+/// A text box's width over its height: the font's advance (0.6 em) at
+/// [`FONT_SCALE`] is 0.54 of the height, and the rest is spacing.
+pub const TEXT_ASPECT: f32 = 0.6;
+
 #[derive(Debug)]
 pub struct GlyphAtlas {
-    cell: usize,
-    /// `GLYPH_COUNT * cell * cell`, box `i` = glyph `FIRST_GLYPH + i`.
+    width: usize,
+    height: usize,
+    /// `GLYPH_COUNT * width * height`, box `i` = glyph `FIRST_GLYPH + i`.
     coverage: Vec<u8>,
 }
 
 impl GlyphAtlas {
+    /// Square `cell x cell` boxes: the map.
     pub fn build(cell_px: u32) -> Self {
-        let cell = cell_px.max(1) as usize;
+        Self::boxes(cell_px, cell_px)
+    }
+
+    /// Boxes `height` tall and [`TEXT_ASPECT`] of that wide: running text.
+    pub fn text(height_px: u32) -> Self {
+        Self::boxes(Self::text_width(height_px), height_px)
+    }
+
+    /// The width of a text box `height_px` tall, at least 1.
+    pub fn text_width(height_px: u32) -> u32 {
+        // A box of a few dozen pixels: far inside u32.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let w = (height_px as f32 * TEXT_ASPECT).round() as u32;
+        w.max(1)
+    }
+
+    fn boxes(width_px: u32, height_px: u32) -> Self {
+        let (width, height) = (width_px.max(1) as usize, height_px.max(1) as usize);
         let font = Font::from_bytes(FONT, FontSettings::default()).expect("bundled font parses");
-        let px = cell as f32 * FONT_SCALE;
+        let px = height as f32 * FONT_SCALE;
         let line = font
             .horizontal_line_metrics(px)
             .expect("bundled font has horizontal metrics");
         let advance = font.metrics('M', px).advance_width;
         // Centre the font's line box vertically and its advance box horizontally.
-        let baseline = ((cell as f32 - (line.ascent - line.descent)) / 2.0 + line.ascent).round();
-        let cell_i = i32::try_from(cell).expect("cell fits i32");
-        // Offsets within a cell or two of 0, and the cell fits i32.
+        let baseline = ((height as f32 - (line.ascent - line.descent)) / 2.0 + line.ascent).round();
+        let (w_i, h_i) = (
+            i32::try_from(width).expect("a box fits i32"),
+            i32::try_from(height).expect("a box fits i32"),
+        );
+        // Offsets within a box or two of 0, and the box fits i32.
         #[allow(clippy::cast_possible_truncation)]
         let (baseline, x_pad) = (
             baseline as i32,
-            ((cell as f32 - advance) / 2.0).round() as i32,
+            ((width as f32 - advance) / 2.0).round() as i32,
         );
 
-        let mut coverage = vec![0u8; GLYPH_COUNT * cell * cell];
-        for (ch, boxed) in (FIRST_GLYPH..=LAST_GLYPH).zip(coverage.chunks_exact_mut(cell * cell)) {
+        let n = width * height;
+        let mut coverage = vec![0u8; GLYPH_COUNT * n];
+        for (ch, boxed) in (FIRST_GLYPH..=LAST_GLYPH).zip(coverage.chunks_exact_mut(n)) {
             let ch = char::from(ch);
             let (m, bitmap) = font.rasterize(ch, px);
             if m.width == 0 || m.height == 0 {
@@ -66,23 +95,27 @@ impl GlyphAtlas {
             let height = i32::try_from(m.height).expect("a glyph is a few cells tall");
             let y0 = baseline - (m.ymin + height);
             for (y, line) in (y0..).zip(bitmap.chunks_exact(m.width)) {
-                if y < 0 || y >= cell_i {
+                if y < 0 || y >= h_i {
                     continue;
                 }
                 for (x, &v) in (x0..).zip(line) {
-                    if x < 0 || x >= cell_i {
+                    if x < 0 || x >= w_i {
                         continue;
                     }
-                    boxed[y as usize * cell + x as usize] = v;
+                    boxed[y as usize * width + x as usize] = v;
                 }
             }
         }
-        Self { cell, coverage }
+        Self {
+            width,
+            height,
+            coverage,
+        }
     }
 
-    /// Cell edge in pixels.
-    pub fn cell(&self) -> usize {
-        self.cell
+    /// A box's width and height in pixels.
+    pub fn size(&self) -> (usize, usize) {
+        (self.width, self.height)
     }
 
     pub fn coverage(&self) -> &[u8] {
@@ -104,9 +137,9 @@ impl GlyphAtlas {
         b - FIRST_GLYPH
     }
 
-    /// The `cell*cell` coverage box for `byte`.
+    /// The `width * height` coverage box for `byte`.
     pub fn glyph(&self, byte: u8) -> &[u8] {
-        let n = self.cell * self.cell;
+        let n = self.width * self.height;
         &self.coverage[Self::index(byte) * n..][..n]
     }
 
@@ -116,13 +149,17 @@ impl GlyphAtlas {
         u16::from(Self::offset(byte))
     }
 
-    /// The atlas as a GPU array texture: [`LAYERS`] layers of `cell x cell`
-    /// RGBA8 (sRGB), white with coverage in alpha; the last layer is solid.
+    /// The atlas as a GPU array texture: [`LAYERS`] layers of `width x
+    /// height` RGBA8 (sRGB), white with coverage in alpha; the last layer is
+    /// solid.
     /// Sampled linearly: displayed 1:1 with physical pixels it is exact, and
     /// off by a fraction of a pixel (odd scale factors) it stays smooth.
     pub fn tileset(&self) -> Image {
-        let cell = u32::try_from(self.cell).expect("cell fits u32");
-        let n = self.cell * self.cell;
+        let (width, height) = (
+            u32::try_from(self.width).expect("a box fits u32"),
+            u32::try_from(self.height).expect("a box fits u32"),
+        );
+        let n = self.width * self.height;
         let mut data = Vec::with_capacity(LAYERS * n * 4);
         for &cov in &self.coverage {
             data.extend_from_slice(&[255, 255, 255, cov]);
@@ -130,8 +167,8 @@ impl GlyphAtlas {
         data.extend(std::iter::repeat_n([255u8; 4], n).flatten());
         let mut image = Image::new(
             Extent3d {
-                width: cell,
-                height: cell,
+                width,
+                height,
                 depth_or_array_layers: u32::try_from(LAYERS).expect("96 layers"),
             },
             TextureDimension::D2,
@@ -151,7 +188,7 @@ mod tests {
     #[test]
     fn atlas_has_every_glyph_in_its_box() {
         let a = GlyphAtlas::build(16);
-        assert_eq!(a.cell(), 16);
+        assert_eq!(a.size(), (16, 16));
         assert_eq!(a.coverage().len(), GLYPH_COUNT * 256);
         assert!(a.glyph(b' ').iter().all(|&v| v == 0));
         for g in *b".~#@Mg" {
@@ -170,6 +207,22 @@ mod tests {
                 assert_eq!(b[y * 16 + 15], 0, "glyph {i} touches right edge");
             }
         }
+    }
+
+    #[test]
+    fn text_boxes_are_narrow_and_keep_every_glyph_inside() {
+        let a = GlyphAtlas::text(20);
+        assert_eq!(a.size(), (12, 20));
+        assert_eq!(GlyphAtlas::text_width(20), 12);
+        assert_eq!(GlyphAtlas::text_width(1), 1);
+        for g in *b"Mmw@#" {
+            let b = a.glyph(g);
+            assert!(b.iter().any(|&v| v > 128), "glyph {} empty", char::from(g));
+        }
+        // Box `i` is glyph `i`: an `l` and an `M` differ.
+        assert_ne!(a.glyph(b'l'), a.glyph(b'M'));
+        let img = a.tileset();
+        assert_eq!((img.width(), img.height()), (12, 20));
     }
 
     #[test]

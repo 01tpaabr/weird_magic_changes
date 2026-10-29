@@ -33,6 +33,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
 use bevy::camera::Projection;
+use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::log::{Level, LogPlugin};
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
@@ -67,9 +68,15 @@ const MAX_DT: f64 = 0.1;
 /// at max speed this is how long each frame ticks for.
 pub const TICK_BUDGET: Duration = Duration::from_millis(10);
 const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | click inspect | f follow | p save | r reload rules | +/- zoom | q quit";
-/// The inspector panel: two fifths of the window, held to this many columns.
-const PANEL_MIN: u32 = 36;
-const PANEL_MAX: u32 = 64;
+/// The inspector panel: two fifths of the window, held to this many columns
+/// of text cells.
+const PANEL_MIN: u32 = 40;
+const PANEL_MAX: u32 = 120;
+/// The panel's text height in logical pixels, whatever the map's zoom; a
+/// text cell is [`crate::render::atlas::TEXT_ASPECT`] of that wide.
+const PANEL_TEXT_LOGICAL: u32 = 13;
+/// Rows or columns one notch of a mouse wheel scrolls the panel.
+const WHEEL_STEP: f32 = 3.0;
 /// Opacity of the panel's background: the map shows through it.
 const PANEL_ALPHA: f32 = 0.78;
 /// The selected actor's cell on the map.
@@ -164,6 +171,7 @@ impl Plugin for PlayPlugin {
             .init_resource::<Click>()
             .init_resource::<Selection>()
             .init_resource::<Inspector>()
+            .init_resource::<PanelScroll>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
@@ -253,12 +261,49 @@ impl Notice {
 #[derive(Resource, Debug, Default, Clone, Copy)]
 struct StreamInfo(Option<StreamStats>);
 
-/// The glyph tileset on the GPU and the physical cell size it was built for
-/// (`0` = not built yet).
+/// The glyph tilesets on the GPU and the physical sizes they were built for
+/// (`0` = not built yet): square map cells, and the panel's text cells
+/// (`text_h` tall).
 #[derive(Resource, Debug, Default)]
 struct Glyphs {
     cell: u32,
     tileset: Handle<Image>,
+    text_h: u32,
+    text: Handle<Image>,
+}
+
+/// How far the inspector's text is scrolled, in rows down and columns
+/// right, plus what a trackpad's pixel deltas have moved short of a whole
+/// row or column. Reset when another actor is selected; held to the text
+/// when drawn.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq)]
+struct PanelScroll {
+    row: usize,
+    col: usize,
+    rest_row: f32,
+    rest_col: f32,
+}
+
+impl PanelScroll {
+    /// Move by `rows` and `cols` (fractions kept), never before the start.
+    fn by(&mut self, rows: f32, cols: f32) {
+        fn step(at: &mut usize, rest: &mut f32, d: f32) {
+            *rest += d;
+            let whole = rest.trunc();
+            *rest -= whole;
+            // A wheel moves a few rows a frame: far inside i64.
+            #[allow(clippy::cast_possible_truncation)]
+            let whole = whole as i64;
+            *at = usize::try_from(
+                (i64::try_from(*at).unwrap_or(i64::MAX))
+                    .saturating_add(whole)
+                    .max(0),
+            )
+            .unwrap_or(0);
+        }
+        step(&mut self.row, &mut self.rest_row, rows);
+        step(&mut self.col, &mut self.rest_col, cols);
+    }
 }
 
 /// The cell frames of a frame: the map, the status rows, the inspector.
@@ -351,10 +396,13 @@ pub struct Layout {
     pub map_h: u32,
     pub status_cols: u32,
     pub status_h: u32,
-    /// The inspector, over the map's right edge: `0 x 0` while nobody is
-    /// selected.
+    /// The inspector, over the map's right edge from pixel `panel_x`:
+    /// `panel_cols x panel_rows` text cells of `panel_cell` (width, height),
+    /// `0 x 0` while nobody is selected.
+    pub panel_x: u32,
     pub panel_cols: u32,
     pub panel_rows: u32,
+    pub panel_cell: (u32, u32),
 }
 
 // ---- systems ---------------------------------------------------------------------------------
@@ -385,8 +433,10 @@ fn handle_input(
     mut clock: ResMut<SimClock>,
     mut zoom: ResMut<Zoom>,
     mut pending: ResMut<Pending>,
+    wheel: Res<AccumulatedMouseScroll>,
     mut click: ResMut<Click>,
     mut selection: ResMut<Selection>,
+    mut scroll: ResMut<PanelScroll>,
 ) {
     let held = |a, b| keys.pressed(a) || keys.pressed(b);
     let up = held(KeyCode::KeyW, KeyCode::ArrowUp);
@@ -403,16 +453,37 @@ fn handle_input(
         selection.follow = false;
     }
     click.0 = None;
+    let cursor = window
+        .single()
+        .ok()
+        .and_then(Window::physical_cursor_position)
+        .filter(|_| layout.visible);
+    let over_panel = cursor.is_some_and(|at| {
+        layout.panel_cols > 0 && at.x >= layout.panel_x as f32 && at.y < layout.map_h as f32
+    });
     if mouse.just_pressed(MouseButton::Left)
-        && layout.visible
-        && let Ok(window) = window.single()
-        && let Some(at) = window.physical_cursor_position()
+        && let Some(at) = cursor
+        && at.y < layout.map_h as f32
+        && !over_panel
     {
-        // The map, minus the panel over its right side; the status rows
-        // and the panel take no clicks.
-        let panel_x = layout.width - layout.panel_cols * layout.cell;
-        if at.y < layout.map_h as f32 && (layout.panel_cols == 0 || at.x < panel_x as f32) {
-            click.0 = Some(cell_at(&layout.map, layout.cell, at.x, at.y));
+        // The map; the status rows and the panel take no clicks.
+        click.0 = Some(cell_at(&layout.map, layout.cell, at.x, at.y));
+    }
+    if over_panel && wheel.delta != Vec2::ZERO {
+        // Content follows the fingers (or the wheel): a positive delta
+        // scrolls back. Shift turns a plain wheel sideways.
+        let (cw, ch) = layout.panel_cell;
+        let (rows, cols) = match wheel.unit {
+            MouseScrollUnit::Line => (-wheel.delta.y * WHEEL_STEP, -wheel.delta.x * WHEEL_STEP),
+            MouseScrollUnit::Pixel => (
+                -wheel.delta.y * layout.scale / ch.max(1) as f32,
+                -wheel.delta.x * layout.scale / cw.max(1) as f32,
+            ),
+        };
+        if input.0.fast && cols == 0.0 {
+            scroll.by(0.0, rows);
+        } else {
+            scroll.by(rows, cols);
         }
     }
     if keys.just_pressed(KeyCode::KeyF) && selection.uid.is_some() && selection.gone_at.is_none() {
@@ -465,7 +536,9 @@ fn advance_camera(
     let dt = time.delta_secs_f64().min(MAX_DT);
     match inspector.at {
         Some(p) if selection.follow => camera.glide_to(
-            f64::from(p.x) + 0.5 + f64::from(layout.panel_cols) / 2.0,
+            f64::from(p.x)
+                + 0.5
+                + f64::from(layout.width - layout.panel_x) / 2.0 / f64::from(layout.cell),
             f64::from(p.y) + 0.5,
             dt,
         ),
@@ -510,16 +583,24 @@ fn layout(
         glyphs.tileset = images.add(GlyphAtlas::build(cell).tileset());
         glyphs.cell = cell;
     }
+    // A DPI factor times a dozen logical pixels: small, at least 1.
+    #[allow(clippy::cast_possible_truncation)]
+    let text_h = ((PANEL_TEXT_LOGICAL as f32) * scale).round().max(1.0) as u32;
+    let text_w = GlyphAtlas::text_width(text_h);
+    if glyphs.text_h != text_h {
+        glyphs.text = images.add(GlyphAtlas::text(text_h).tileset());
+        glyphs.text_h = text_h;
+    }
     let status_h = (STATUS_ROWS * cell).min(height);
     let map_h = height - status_h;
     let map = map_layout(&camera, cell as usize, width as usize, map_h as usize);
     let status_cols = width.div_ceil(cell);
     let (panel_cols, panel_rows) = if selection.uid.is_some() {
         (
-            (width / cell * 2 / 5)
+            (width * 2 / 5 / text_w)
                 .clamp(PANEL_MIN, PANEL_MAX)
-                .min(width / cell),
-            (map_h / cell).max(1),
+                .min(width / text_w),
+            (map_h / text_h).max(1),
         )
     } else {
         (0, 0)
@@ -534,8 +615,10 @@ fn layout(
         map_h,
         status_cols,
         status_h,
+        panel_x: width - panel_cols * text_w,
         panel_cols,
         panel_rows,
+        panel_cell: (text_w, text_h),
     };
     let (cols, rows) = (
         u32::try_from(map.cols).expect("the map is a window wide"),
@@ -548,8 +631,14 @@ fn layout(
         panel: p,
         panel_shown,
     } = &mut *grids;
-    if shown && (p.cols, p.rows, p.cell) != (panel_cols, panel_rows, cell) {
-        p.configure(&mut commands, panel_cols, panel_rows, cell, &glyphs.tileset);
+    if shown && (p.cols, p.rows, p.cell, p.cell_h) != (panel_cols, panel_rows, text_w, text_h) {
+        p.configure(
+            &mut commands,
+            panel_cols,
+            panel_rows,
+            (text_w, text_h),
+            &glyphs.text,
+        );
     }
     if *panel_shown != shown {
         *panel_shown = shown;
@@ -563,14 +652,14 @@ fn layout(
         }
     }
     if (m.cols, m.rows, m.cell) != (cols, rows, cell) {
-        m.configure(&mut commands, cols, rows, cell, &glyphs.tileset);
+        m.configure(&mut commands, cols, rows, (cell, cell), &glyphs.tileset);
     }
     if (s.cols, s.rows, s.cell) != (status_cols, STATUS_ROWS, cell) {
         s.configure(
             &mut commands,
             status_cols,
             STATUS_ROWS,
-            cell,
+            (cell, cell),
             &glyphs.tileset,
         );
     }
@@ -640,6 +729,9 @@ fn inspect(world: &mut World) {
             Some((uid, cc)) => sel.select(uid, cc),
             None => sel.clear(),
         }
+    }
+    if sel.uid != world.resource::<Selection>().uid {
+        *world.resource_mut::<PanelScroll>() = PanelScroll::default();
     }
     let tick = sim::tick(world);
     match (sel.uid, sel.near) {
@@ -779,6 +871,7 @@ fn render_frame(
     info: Res<StreamInfo>,
     notice: Res<Notice>,
     inspector: Res<Inspector>,
+    mut scroll: ResMut<PanelScroll>,
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -818,25 +911,27 @@ fn render_frame(
     if pc > 0 && pr > 0 {
         let body = pr - 1;
         let lines = &inspector.lines;
+        // A column of margin, then the text; scrolled no further than its end.
+        let widest = lines
+            .iter()
+            .map(|(t, _)| t.chars().count())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        scroll.row = scroll.row.min(lines.len().saturating_sub(body));
+        scroll.col = scroll.col.min(widest.saturating_sub(pc));
         for row in 0..body {
-            let (text, colour) = match lines.get(row) {
-                Some(_) if lines.len() > body && row == body - 1 => (
-                    format!(
-                        "... {} more rows (a taller window shows them)",
-                        lines.len() - row
-                    ),
-                    DIM,
-                ),
-                Some((t, c)) => (t.clone(), *c),
-                None => (String::new(), TEXT_FG),
-            };
-            frames
-                .panel
-                .put_text(row, &format!(" {text}"), colour, TEXT_BG);
+            let (text, colour) = lines
+                .get(scroll.row + row)
+                .map_or(("", TEXT_FG), |(t, c)| (t.as_str(), *c));
+            let shown: String = std::iter::once(' ')
+                .chain(text.chars())
+                .skip(scroll.col)
+                .collect();
+            frames.panel.put_text(row, &shown, colour, TEXT_BG);
         }
-        frames
-            .panel
-            .put_text(body, &format!(" {KEYS}"), DIM, TEXT_BG);
+        let footer = panel_footer(lines.len(), widest, body, pc, &scroll);
+        frames.panel.put_text(body, &footer, DIM, TEXT_BG);
     }
 
     let focus_chunk = camera.cell().split().0;
@@ -871,6 +966,24 @@ fn render_frame(
     frames
         .status
         .put_text(3, notice.current().unwrap_or(HELP), TEXT_FG, TEXT_BG);
+}
+
+/// The panel's last row: the keys, and where the view is when the text
+/// is longer or wider than the panel (`rows 12-40 of 75 | col 9`).
+fn panel_footer(lines: usize, widest: usize, body: usize, cols: usize, at: &PanelScroll) -> String {
+    let mut footer = format!(" {KEYS}");
+    if lines > body || widest > cols {
+        footer.push_str(" | scroll: rows ");
+        footer.push_str(&format!(
+            "{}-{} of {lines}",
+            (at.row + 1).min(lines),
+            (at.row + body).min(lines)
+        ));
+        if at.col > 0 {
+            footer.push_str(&format!(" | col {}", at.col + 1));
+        }
+    }
+    footer
 }
 
 /// Two status rows: how many of each kind are loaded, and the life events
@@ -937,12 +1050,7 @@ fn upload_tiles(
     let status_at = grids
         .status
         .place(0.0, (layout.height - layout.status_h) as f32, w, h);
-    let panel_at = grids.panel.place(
-        (layout.width - layout.panel_cols * layout.cell) as f32,
-        0.0,
-        w,
-        h,
-    );
+    let panel_at = grids.panel.place(layout.panel_x as f32, 0.0, w, h);
     for (layer, frame, (bg_at, fg_at), alpha) in [
         (&grids.map, &frames.map, map_at, 1.0),
         (&grids.status, &frames.status, status_at, 1.0),
@@ -1037,6 +1145,37 @@ mod tests {
             let top = cell_at(&l, 16, 0.0, 0.0);
             assert_eq!(top, l.origin, "the top-left pixel is in the first cell");
         }
+    }
+
+    #[test]
+    fn panel_scroll_keeps_fractions_and_stops_at_the_start() {
+        let mut s = PanelScroll::default();
+        s.by(3.0, 0.0);
+        assert_eq!((s.row, s.col), (3, 0));
+        // A trackpad: a third of a row at a time adds up.
+        for _ in 0..3 {
+            s.by(1.0 / 3.0 + 1e-4, 0.0);
+        }
+        assert_eq!(s.row, 4);
+        s.by(-100.0, 2.5);
+        assert_eq!((s.row, s.col), (0, 2), "never before the first row");
+        s.by(0.0, 0.5);
+        assert_eq!(s.col, 3);
+    }
+
+    #[test]
+    fn the_footer_says_where_the_view_is_only_when_it_scrolls() {
+        let at = PanelScroll::default();
+        assert_eq!(panel_footer(10, 30, 20, 40, &at), format!(" {KEYS}"));
+        let f = panel_footer(75, 30, 20, 40, &at);
+        assert!(f.ends_with("scroll: rows 1-20 of 75"), "{f}");
+        let at = PanelScroll {
+            row: 60,
+            col: 8,
+            ..default()
+        };
+        let f = panel_footer(75, 90, 20, 40, &at);
+        assert!(f.ends_with("rows 61-75 of 75 | col 9"), "{f}");
     }
 
     #[test]

@@ -26,8 +26,10 @@ pub struct Layer {
     /// Grid the chunks are currently built for; `0 x 0` until configured.
     pub cols: u32,
     pub rows: u32,
-    /// Tile edge in world units (physical pixels) the chunks are built for.
+    /// Tile width and height in world units (physical pixels) the chunks
+    /// are built for: square on the map, narrower for text.
     pub cell: u32,
+    pub cell_h: u32,
     /// Depth of the bg chunk; fg is `z + 0.5`.
     pub z: f32,
 }
@@ -44,12 +46,13 @@ impl Layer {
             cols: 0,
             rows: 0,
             cell: 0,
+            cell_h: 0,
             z,
         }
     }
 
-    /// (Re)build both chunks for a `cols x rows` grid of `cell`-sized tiles
-    /// drawn from `tileset`. `TilemapChunk` is immutable, so a new grid size,
+    /// (Re)build both chunks for a `cols x rows` grid of `cell x cell_h`
+    /// tiles drawn from `tileset` (built for that size). `TilemapChunk` is immutable, so a new grid size,
     /// cell size or tileset means inserting fresh components; the tile data
     /// is replaced with an empty grid of the right length in the same insert
     /// (the chunk's insert hook checks it). Cheap and rare: resize, zoom, DPI.
@@ -58,18 +61,19 @@ impl Layer {
         commands: &mut Commands,
         cols: u32,
         rows: u32,
-        cell: u32,
+        (cell, cell_h): (u32, u32),
         tileset: &Handle<Image>,
     ) {
         self.cols = cols;
         self.rows = rows;
         self.cell = cell;
+        self.cell_h = cell_h;
         let n = (cols * rows) as usize;
         for (entity, alpha) in [(self.bg, AlphaMode2d::Blend), (self.fg, AlphaMode2d::Blend)] {
             commands.entity(entity).insert((
                 TilemapChunk {
                     chunk_size: UVec2::new(cols, rows),
-                    tile_display_size: UVec2::splat(cell),
+                    tile_display_size: UVec2::new(cell, cell_h),
                     tileset: tileset.clone(),
                     alpha_mode: alpha,
                 },
@@ -89,7 +93,7 @@ impl Layer {
     /// camera is at the window centre, y up).
     pub fn place(&self, left: f32, top: f32, width: f32, height: f32) -> (Vec3, Vec3) {
         let w = (self.cols * self.cell) as f32;
-        let h = (self.rows * self.cell) as f32;
+        let h = (self.rows * self.cell_h) as f32;
         let cx = left + w / 2.0 - width / 2.0;
         let cy = height / 2.0 - (top + h / 2.0);
         (Vec3::new(cx, cy, self.z), Vec3::new(cx, cy, self.z + 0.5))
@@ -145,6 +149,7 @@ mod tests {
             cols,
             rows,
             cell,
+            cell_h: cell,
             z: 0.0,
         }
     }
