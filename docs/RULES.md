@@ -380,6 +380,12 @@ rule's body finishes. A sub that may act or `next` (itself, or through any sub i
 can't be called from a `when` condition (§4). Calls nest up to 8 deep. `take`, `give` and `next` belong to kinds, not
 subs.
 
+**Constants from outside.** Any `wmc` command takes `--set NAME=V` (repeatable): the
+constant `NAME` takes the value `V` (a number or a time) for that session, and the constants
+declared after it fold with the new value. A name the rules don't declare is an error that
+lists the ones they do. That makes constants the knobs of a pack: put a number you may want
+to tune in a `const`, and `wmc lab --set NAME=a,b,c` tries several (§17).
+
 ## 13. Cost
 
 Each op costs 1 fuel, and a search costs `(2r + 1)² / 8` more. A think that runs out of fuel
@@ -721,6 +727,20 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   cell again shows the ground cover under the actor. `f` follows the actor (the camera
   glides after it; moving the camera yourself lets go), and `Esc` closes the panel.
   When the actor dies, the panel keeps its last state, faded.
+- **`wmc lab <file> --set NAME=a,b,c`** runs the scenario test in `<file>` (a goal: its
+  `expect` lines, §14) once for every combination of the `--set` values (the first name
+  varies slowest), on each of its seeds, many runs at once: a world each, on one thread,
+  `--jobs N` at a time (one per core). Per variant it says whether it passed (`pass M` of
+  `seeds N` held every expectation), and per expectation on how many seeds it held and the
+  spread of its number across them: the lowest count an `always >=` saw, a mean, a rate
+  (`31.2 .. 44, median 38`). A run stops at its first sure failure (an `always` false, a
+  `never` true), and its later lines read `not reached`, so a hopeless variant costs little;
+  `--full` runs every seed to its end. `--seeds` and `--pass` override the scenario's,
+  `--csv <file>` writes every verdict as a row. The report is the same whatever `--jobs`
+  says. An optimized build (`cargo build --profile fast`) runs it several times faster.
+  ```sh
+  wmc lab goals/fox_pressure.scenario --set HUNT=6,8,10 --set FULL=16h,20h --seeds 8 --pass 7
+  ```
 - **`wmc observe <time> [w h seed] --scenario <file>`** makes the scenario's world (on no
   disk; its `run` and `expect` lines are not run), steps it for that time (ticks, or
   `90min`, `2h`, `4d`) and reports how each kind lives and dies: how many are alive over

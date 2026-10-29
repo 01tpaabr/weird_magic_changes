@@ -28,9 +28,12 @@ the agent is its heaviest user.
    `expect mean METRIC`, `expect mean COUNTER K per day` (a rate), each over `from T to T`;
    `eaten K by K2`, `died K of NEED`; `seeds N` + `pass M` (`--seeds`, `--pass`). One
    runner, `sim::run_checks`, for `wmc scenario`, the docs' examples and the fuzzer.
-3. **`wmc lab`.** A scenario across seeds x knob values in parallel processes (an
-   optimized build), early stop when an `always` fails, one table row per variant (pass
-   rate, key numbers with their spread). Knobs are `const`s: `--set NAME=a,b,c`.
+3. **`wmc lab`** (done, decision 42): a scenario's goals for every combination of
+   `--set NAME=a,b,c` values, on each seed, `--jobs` runs at once (in-process threads, a
+   world each on one thread, not processes); a run stops at its first sure failure unless
+   `--full`; per variant its verdict, per expectation its seeds and the spread of its key
+   number; `--csv`. `--set NAME=V` sets a const for any command. No pruning of hopeless
+   variants yet (it would make the set of runs depend on timing).
 4. **The skill** (`.claude/skills/world-tuning/`): the protocol (goal as properties ->
    baseline story from `observe` -> prediction -> sweep -> explain misses -> confirm on a
    bigger world and more seeds, +-20% on each knob -> lock in as a test in

@@ -7,8 +7,12 @@
 //! - [`render`]: `Stage` -> `CellFrame` (glyph, fg, bg per cell) -> tilemap tiles.
 //! - [`play`]: the windowed game: `PlayPlugin`, its resources and systems.
 //! - [`packs`], [`compile`], [`rules_for`]: which rules the app runs (packs
-//!   from `--rules` or `WMC_RULES`, a save's own packs, or the built-in ones).
+//!   from `--rules` or `WMC_RULES`, a save's own packs, or the built-in ones),
+//!   with the constants `--set` gives ([`set_consts`]).
 //! - [`why`]: `wmc why`, one actor's think explained.
+//! - [`inspect`]: the inspector panel of `wmc play`.
+//! - [`observe`]: `wmc observe`, how each kind lives and dies over a run.
+//! - [`lab`]: `wmc lab`, a scenario's goals across const values and seeds.
 
 // A narrowing `as` either is a checked conversion or says why the value
 // fits (or that the truncation is the point). Tests may narrow freely.
@@ -18,15 +22,32 @@ pub mod camera;
 pub mod clock;
 pub mod highlight;
 pub mod inspect;
+pub mod lab;
 pub mod observe;
 pub mod play;
 pub mod render;
 pub mod why;
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use anyhow::Context;
+use sim_core::rules::ConstSet;
 use sim_core::{Kinds, Store};
+
+static CONSTS: OnceLock<Vec<ConstSet>> = OnceLock::new();
+
+/// The constants the command line sets (`--set NAME=V`) for every rule set
+/// this session compiles, a hot reload's too. `main` sets them once,
+/// before anything compiles; later calls change nothing.
+pub fn set_consts(consts: Vec<ConstSet>) {
+    let _ = CONSTS.set(consts);
+}
+
+/// The session's constants ([`set_consts`]); none unless set.
+pub fn consts() -> &'static [ConstSet] {
+    CONSTS.get().map_or(&[], Vec::as_slice)
+}
 
 /// The rule packs a session asked for: the `--rules` paths, else
 /// `WMC_RULES` (paths separated by `:`; empty entries are skipped, so an
@@ -53,15 +74,25 @@ pub fn packs_or(cli: &[String], scenario: &[String]) -> Vec<PathBuf> {
     }
 }
 
-/// Compile `packs` as one rule set (`sim_core::rules::compile_packs`);
-/// none is the rules built into the binary.
+/// Compile `packs` as one rule set (`sim_core::rules::compile_packs`),
+/// with the session's constants ([`consts`]); no pack is the rules built
+/// into the binary.
 pub fn compile(packs: &[PathBuf]) -> anyhow::Result<Kinds> {
+    compile_with(packs, consts())
+}
+
+/// [`compile`] with these constants set (`wmc lab`'s variants).
+pub fn compile_with(packs: &[PathBuf], consts: &[ConstSet]) -> anyhow::Result<Kinds> {
+    // Errors name their file (`file:line:col: ...`, or the path that failed).
     if packs.is_empty() {
-        return Ok(Kinds::builtin());
+        if consts.is_empty() {
+            return Ok(Kinds::builtin());
+        }
+        return sim_core::rules::compile_files_with(&sim_core::rules::builtin::FILES, consts)
+            .map_err(|e| anyhow::anyhow!("{e}"));
     }
     let paths: Vec<&Path> = packs.iter().map(PathBuf::as_path).collect();
-    // Errors name their file (`file:line:col: ...`, or the path that failed).
-    sim_core::rules::compile_packs(&paths).map_err(|e| anyhow::anyhow!("{e}"))
+    sim_core::rules::compile_packs_with(&paths, consts).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
 /// The rules for the world in `store`: the session's packs, else (opening

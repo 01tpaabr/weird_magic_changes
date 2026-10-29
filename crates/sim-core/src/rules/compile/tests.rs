@@ -2027,3 +2027,27 @@ fn packs_merge_in_order_and_duplicates_name_both_files() {
     assert!(err.contains("gone"), "{err}");
     std::fs::remove_dir_all(&root).unwrap();
 }
+
+/// `--set NAME=V`: a constant takes the value given, the constants after it
+/// fold with it, and a name the rules do not declare is an error that
+/// lists the ones they do.
+#[test]
+fn a_const_set_from_outside_replaces_the_declared_one() {
+    let text = "const RATE = 2
+                const TWICE = RATE * 2
+                kind k { glyph \"k\"  mem m
+                  when true => m = TWICE }";
+    let value = |kinds: &Kinds| kinds.code.iter().any(|op| op.imm == 2 * 7);
+    let plain = compile_files_with(&[("t.rules", text)], &[]).unwrap();
+    let set = compile_files_with(&[("t.rules", text)], &[("RATE".into(), 7)]).unwrap();
+    assert!(!value(&plain) && value(&set), "TWICE folded with RATE = 7");
+    assert_ne!(plain.hash, set.hash, "other code, another rule set");
+    let e = compile_files_with(&[("t.rules", text)], &[("RAET".into(), 7)]).unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "--set: `RAET`: the rules declare no such const (they declare: RATE, TWICE)"
+    );
+    let e = compile_files_with(&[("t.rules", "kind k { glyph \"k\" }")], &[("X".into(), 1)])
+        .unwrap_err();
+    assert!(e.to_string().ends_with("(they declare: none)"), "{e}");
+}

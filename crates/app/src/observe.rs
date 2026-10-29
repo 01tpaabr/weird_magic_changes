@@ -316,7 +316,7 @@ fn cause_key(kinds: &Kinds, kind: u16, c: Cause) -> String {
 }
 
 /// A CSV field: quoted when it holds a comma, a quote or a line break.
-fn field(s: &str) -> String {
+pub(crate) fn field(s: &str) -> String {
     if s.contains([',', '"', '\n', '\r']) {
         format!("\"{}\"", s.replace('"', "\"\""))
     } else {

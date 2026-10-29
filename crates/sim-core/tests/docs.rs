@@ -240,7 +240,9 @@ fn run_scenario(b: &Block) -> Result<(), (u32, String)> {
         let mut world = sim::new_world_with(&one, kinds.clone()).map_err(line_of)?;
         let mut failure = None;
         sim::run_checks(&mut world, &s.checks, |e| {
-            if let sim::Event::Expected { line, text, result } = e
+            if let sim::Event::Expected {
+                line, text, result, ..
+            } = e
                 && failure.is_none()
             {
                 match result {

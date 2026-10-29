@@ -46,7 +46,8 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   the built-in ones, on the same engine, tested against a plain Life.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), `wmc observe` (how each kind lives and dies over a run:
-  populations, deaths by cause, which rules fire), the inspector (click an actor in the game: the same,
+  populations, deaths by cause, which rules fire), `wmc lab` (a goal tried for every value
+  of a const, on many seeds at once), the inspector (click an actor in the game: the same,
   live, with `f` to follow it), hot reload (`r` in the game), and scenario tests
   (`wmc scenario`).
 
@@ -74,6 +75,7 @@ make run ARGS="run saves/dev 1000"             # headless: N ticks, µs per tick
 make run ARGS="why saves/dev 77 103 3000"      # after 3000 ticks, why the actor at (77, 103) does what it does
 make run ARGS="lint rules/"                    # compile the rules, print the kind table and the author lint
 make run ARGS="observe 2d 256 256 12"          # two game days: who is alive, who dies of what, which rules fire
+make run ARGS="lab meadow.scenario --set LOAD=15min,30min,1h"   # a goal for each value of a const, on its seeds
 make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test
 make run ARGS="play saves/life --scenario scenarios/life.scenario"   # Conway's Life instead
 make ci        # fmt, clippy, and every test (determinism at 1 and 8 threads included)

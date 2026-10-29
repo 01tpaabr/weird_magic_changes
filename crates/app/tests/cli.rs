@@ -240,6 +240,73 @@ fn observe_reports_who_died_of_what() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `wmc lab` runs a goal for every `--set` value on each seed: a variant
+/// per value, judged on its seeds, the same report however many runs go
+/// at once. `--set` with one value sets a const for any command; a list is
+/// for lab, and a name the rules lack is an error naming the ones they have.
+#[test]
+fn lab_sweeps_a_const_across_seeds() {
+    let dir = scratch("lab");
+    std::fs::write(
+        dir.join("blob.rules"),
+        "const BUD = 50\nkind blob { glyph \"b\"  cadence 16\n  when chance(BUD) and nearest free within 1 as c => spawn blob at c }\n",
+    )
+    .unwrap();
+    let goal = dir.join("goal.scenario");
+    std::fs::write(
+        &goal,
+        "rules blob.rules\nseed 7\nseeds 3\nsize 16 16\nterrain water_level 0 rock_on_soil 0 rock_on_water 0\nstart blob at (8, 8)\nrun 2h\nexpect always count blob <= 1\n",
+    )
+    .unwrap();
+    let goal = goal.to_str().unwrap();
+    let csv = dir.join("lab.csv");
+    let lab = |jobs: &str| {
+        let (ok, out, err) = wmc(&[
+            "lab",
+            goal,
+            "--set",
+            "BUD=0,50",
+            "--jobs",
+            jobs,
+            "--csv",
+            csv.to_str().unwrap(),
+        ]);
+        assert!(ok, "{err}");
+        out.lines()
+            .filter(|l| !l.starts_with("wall") && !l.starts_with("lab "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let one = lab("1");
+    assert_eq!(one, lab("3"), "the same report at 1 and 3 jobs");
+    assert!(
+        one.contains("variant 1   BUD=0   ok    3 of 3 seeds held every expectation"),
+        "{one}"
+    );
+    assert!(one.contains("variant 2   BUD=50  FAIL  0 of 3 seeds held every expectation, 3 needed; 3 stopped early"), "{one}");
+    assert!(one.contains("passed    1 (BUD=0)"), "{one}");
+    let rows = std::fs::read_to_string(&csv).unwrap();
+    assert_eq!(rows.lines().count(), 1 + 2 * 3, "{rows}");
+    // One value: any command takes it.
+    let (ok, out, err) = wmc(&["scenario", goal, "--set", "BUD=0"]);
+    assert!(ok && out.contains("3 of 3 seeds held"), "{out}{err}");
+    let (ok, _, err) = wmc(&["scenario", goal, "--set", "BUD=0,50"]);
+    assert!(!ok && err.contains("a list of values is for lab"), "{err}");
+    let (ok, _, err) = wmc(&["scenario", goal, "--set", "BUDS=1"]);
+    assert!(
+        !ok && err.contains("`BUDS`: the rules declare no such const (they declare: BUD)"),
+        "{err}"
+    );
+    let (ok, _, err) = wmc(&["scenario", goal, "--jobs", "2"]);
+    assert!(!ok && err.contains("only for lab"), "{err}");
+    let (ok, _, err) = wmc(&["lab", goal, "--set", "BUD=x"]);
+    assert!(
+        !ok && err.contains("`x` is not a number or a time"),
+        "{err}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A start that does not fit the rules is refused at its line, by `lint
 /// --scenario`, `scenario` and a new world alike: the `start` line, or the
 /// map row that draws it (not quoted as a `start` line the file lacks),
@@ -506,6 +573,21 @@ fn odd_command_lines_never_panic() {
         &["scenario", "tiny.scenario", "--pass", "1"],
         &["scenario", "tiny.scenario", "--pass", "x"],
         &["run", "s1", "1", "--seeds", "2"],
+        &["lab"],
+        &["lab", ""],
+        &["lab", "/nonexistent"],
+        &["lab", "bad.scenario"],
+        &["lab", "tiny.scenario"],
+        &["lab", "tiny.scenario", "tiny.scenario"],
+        &["lab", "tiny.scenario", "--set", "X=1,2"],
+        &["lab", "tiny.scenario", "--jobs", "0"],
+        &["lab", "tiny.scenario", "--seeds", "2", "--pass", "3"],
+        &["show", "--set", "=1"],
+        &["show", "--set", "1X=1"],
+        &["show", "--set", "X"],
+        &["show", "--set", "X=1", "--set", "X=2"],
+        &["show", "--set", "X=99999999999"],
+        &["run", "s1", "1", "--full"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);

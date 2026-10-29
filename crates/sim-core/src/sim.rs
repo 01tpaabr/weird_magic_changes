@@ -32,7 +32,7 @@ use crate::actors::{
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
-pub use crate::scenario::{Event, check_expect, expect, run_checks};
+pub use crate::scenario::{Event, check_expect, expect, run_checks, run_checks_until};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{
@@ -180,6 +180,14 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
         systems::tally.in_set(Phase::Advance),
         advance_tick.in_set(Phase::Advance),
     ));
+    // With one compute thread, the systems run on the thread that steps the
+    // world: a multi-threaded executor hands each to the pool's one thread,
+    // and worlds stepped from several threads at once (`wmc lab`) would wait
+    // on it in turn. Either way the systems run in one order (ambiguity is
+    // an error above), so the world is the same.
+    if crate::par::thread_count() <= 1 {
+        schedule.set_executor(bevy_ecs::schedule::SingleThreadedExecutor::new());
+    }
     world.add_schedule(schedule);
 }
 

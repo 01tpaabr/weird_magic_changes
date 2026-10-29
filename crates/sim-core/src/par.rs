@@ -91,7 +91,8 @@ where
     R: Send + 'static,
 {
     let batch = batch.max(1);
-    if items.len() <= batch {
+    // One compute thread: here, rather than queued for the pool's thread.
+    if items.len() <= batch || thread_count() <= 1 {
         return items.iter().map(f).collect();
     }
     let f = &f;
@@ -114,7 +115,7 @@ where
 {
     assert_eq!(items.len(), out.len(), "par_zip_mut: length mismatch");
     let batch = batch.max(1);
-    if items.len() <= batch {
+    if items.len() <= batch || thread_count() <= 1 {
         for (x, y) in items.iter().zip(out.iter_mut()) {
             f(x, y);
         }

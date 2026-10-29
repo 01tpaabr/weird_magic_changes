@@ -11,14 +11,19 @@
 //! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
 //!                                              step `ticks`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
+//! wmc lab <file>                               the scenario test in <file> for every combination
+//!                                              of `--set NAME=a,b,c` values, on each of its seeds,
+//!                                              many runs at once (`app::lab`); --seeds N, --pass M,
+//!                                              --jobs N, --full (no early stop), --csv <file>
 //! wmc observe <time> [w h seed]                make the scenario's world, step it for <time>
 //!                                              (ticks, or 90min, 2h, 4d) and report how its
 //!                                              kinds live and die (`app::observe`); takes
 //!                                              --every <time>, --csv <file>, --sample N,
 //!                                              --kind K (repeatable)
 //! ```
-//! Any command takes `--rules <pack>` (repeatable), `--scenario <file>` and
-//! `--threads N`, anywhere after its name. A pack is a directory of `*.rules` files or one
+//! Any command takes `--rules <pack>` (repeatable), `--scenario <file>`,
+//! `--set NAME=V` (repeatable: the rules' `const NAME` takes the value V)
+//! and `--threads N`, anywhere after its name. A pack is a directory of `*.rules` files or one
 //! file; packs compile as one rule set, in the order given. Without
 //! `--rules`, `WMC_RULES=<pack>:<pack>...` names them, else a saved world
 //! uses the packs it was last played with, else the built-in rules.
@@ -128,6 +133,24 @@ fn main() -> anyhow::Result<()> {
     };
     let seeds = count("--seeds", take_flag(&mut args, "--seeds")?.pop())?;
     let pass = count("--pass", take_flag(&mut args, "--pass")?.pop())?;
+    let jobs = take_flag(&mut args, "--jobs")?
+        .pop()
+        .map(|n| {
+            n.parse::<usize>()
+                .ok()
+                .filter(|n| (1..=1024).contains(n))
+                .context("--jobs needs a count from 1 to 1024")
+        })
+        .transpose()?;
+    let full = take_switch(&mut args, "--full");
+    let mut sets: Vec<(String, Vec<(String, i32)>)> = Vec::new();
+    for set in take_flag(&mut args, "--set")? {
+        let (name, values) = parse_set(&set)?;
+        if sets.iter().any(|(n, _)| *n == name) {
+            bail!("--set {name}: given twice");
+        }
+        sets.push((name, values));
+    }
     if let Some(n) = take_flag(&mut args, "--threads")?.pop() {
         let n: usize = n
             .parse()
@@ -146,13 +169,29 @@ fn main() -> anyhow::Result<()> {
     if strict && args.first().map(String::as_str) != Some("lint") {
         bail!("--strict is only for lint");
     }
-    if args.first().map(String::as_str) != Some("observe")
-        && (every.is_some() || csv.is_some() || sample.is_some() || !only.is_empty())
-    {
-        bail!("--every, --csv, --sample and --kind are only for observe");
+    let command = args.first().map(String::as_str);
+    if command != Some("observe") && (every.is_some() || sample.is_some() || !only.is_empty()) {
+        bail!("--every, --sample and --kind are only for observe");
     }
-    if args.first().map(String::as_str) != Some("scenario") && (seeds.is_some() || pass.is_some()) {
-        bail!("--seeds and --pass are only for scenario");
+    if !matches!(command, Some("observe" | "lab")) && csv.is_some() {
+        bail!("--csv is only for observe and lab");
+    }
+    if !matches!(command, Some("scenario" | "lab")) && (seeds.is_some() || pass.is_some()) {
+        bail!("--seeds and --pass are only for scenario and lab");
+    }
+    if command != Some("lab") && (jobs.is_some() || full) {
+        bail!("--jobs and --full are only for lab");
+    }
+    if command != Some("lab") {
+        // One value each: every rule set this session compiles takes them.
+        if let Some((name, _)) = sets.iter().find(|(_, v)| v.len() > 1) {
+            bail!("--set {name}=a,b,...: a list of values is for lab; one value here");
+        }
+        app::set_consts(
+            sets.iter()
+                .map(|(name, v)| (name.clone(), v[0].1))
+                .collect(),
+        );
     }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
@@ -217,6 +256,19 @@ fn main() -> anyhow::Result<()> {
             }
             observe(ticks, &setup(&args[2..])?, opts, csv.as_deref(), &only)
         }
+        Some("lab") => {
+            let f = args.get(1).context("lab needs a scenario file")?;
+            if let Some(a) = args.get(2) {
+                bail!("lab takes one file; unexpected {a:?}");
+            }
+            let runs = LabRuns {
+                seeds,
+                pass,
+                jobs,
+                full,
+            };
+            lab(f, &packs, &sets, runs, csv.as_deref())
+        }
         Some("scenario") => {
             let f = args.get(1).context("scenario needs a scenario file")?;
             if let Some(a) = args.get(2) {
@@ -241,11 +293,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             bail!(
-                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario` or `lint`"
+                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab` or `lint`"
             )
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M]; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
 }
@@ -576,6 +628,141 @@ fn observe(
     Ok(())
 }
 
+/// `--set NAME=V` or (for lab) `NAME=a,b,c`: the name, and each value as
+/// written and as a number (an integer, or a time in ticks).
+fn parse_set(set: &str) -> anyhow::Result<(String, Vec<(String, i32)>)> {
+    let (name, values) = set.split_once('=').with_context(|| {
+        format!("--set {set}: NAME=VALUE, the value a number or a time (12, -3, 90min, 2h, 1d)")
+    })?;
+    if name.is_empty()
+        || name.starts_with(|c: char| c.is_ascii_digit())
+        || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("--set {set}: `{name}` is not a const's name");
+    }
+    let values = values
+        .split(',')
+        .map(|v| {
+            sim_core::scenario::value_of(v)
+                .map(|n| (v.to_string(), n))
+                .with_context(|| {
+                    format!("--set {set}: `{v}` is not a number or a time (12, -3, 90min, 2h, 1d)")
+                })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((name.to_string(), values))
+}
+
+/// How `wmc lab` runs: on how many seeds and how many must pass (else the
+/// scenario's), how many at once (else one per core), and whether to run
+/// every seed to its end.
+struct LabRuns {
+    seeds: Option<u32>,
+    pass: Option<u32>,
+    jobs: Option<usize>,
+    full: bool,
+}
+
+/// At most this many variants (combinations of `--set` values) in a lab.
+const MAX_VARIANTS: usize = 1000;
+
+/// `wmc lab`: the scenario test in `file` for every combination of the
+/// `sets` values (one rule set each), on each of its seeds, many runs at
+/// once (`app::lab`): which variants pass, and each expectation's seeds and
+/// numbers. Each world runs on one thread unless `--threads` says more; a
+/// seed stops at its first sure failure unless `full`. Writes every verdict
+/// to `csv` too, if given.
+fn lab(
+    file: &str,
+    packs: &[String],
+    sets: &[(String, Vec<(String, i32)>)],
+    runs: LabRuns,
+    csv: Option<&str>,
+) -> anyhow::Result<()> {
+    let s = scenario(Some(file))?;
+    if !s.checks.iter().any(|c| matches!(c, Check::Expect { .. })) {
+        bail!("{file}: no `expect` lines: a lab judges a scenario test (RULES §14)");
+    }
+    let seeds = runs.seeds.unwrap_or(s.seeds);
+    let pass = runs.pass.or(s.pass).unwrap_or(seeds);
+    if pass > seeds {
+        bail!("{file}: it needs {pass} seeds to pass, but runs on {seeds}");
+    }
+    let combos = app::lab::variants(sets);
+    if combos.len() > MAX_VARIANTS {
+        bail!(
+            "{} combinations of --set values: at most {MAX_VARIANTS}",
+            combos.len()
+        );
+    }
+    let packs = app::packs_or(packs, &s.packs);
+    let variants = combos
+        .into_iter()
+        .map(|(label, consts)| {
+            let kinds = app::compile_with(&packs, &consts)?;
+            Ok(app::lab::Variant { label, kinds })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let kinds = &variants[0].kinds;
+    app::warn(kinds);
+    // What every run would refuse: the starts, and what the expectations name.
+    Placement::resolve(&s.starts, kinds, &s.terrain()).map_err(|e| match s.line_of(&e) {
+        Some(line) => anyhow::anyhow!("{file}:{line}: {e}"),
+        None => anyhow::anyhow!("{file}: {e}"),
+    })?;
+    for c in &s.checks {
+        if let Check::Expect { line, what, .. } = c {
+            sim::check_expect(kinds, what).map_err(|e| anyhow::anyhow!("{file}:{line}: {e}"))?;
+        }
+    }
+    // The runs are the parallelism: a world each, on one thread.
+    if par::thread_count() == 0 {
+        par::init_task_pool_with(Some(1));
+    }
+    let jobs = runs.jobs.unwrap_or_else(|| {
+        std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
+    });
+    let mut out = std::io::stdout().lock();
+    writeln!(
+        out,
+        "lab       {file}: {} variants x {seeds} seeds from {}, {pass} to pass; {jobs} runs at a time, {} thread a world; {}",
+        variants.len(),
+        s.seed,
+        par::thread_count(),
+        if runs.full {
+            "every run to its end"
+        } else {
+            "a run stops at its first sure failure"
+        }
+    )?;
+    if cfg!(debug_assertions) {
+        writeln!(
+            out,
+            "          a dev build: `cargo build --profile fast` and target/fast/wmc run labs several times faster"
+        )?;
+    }
+    let started = Instant::now();
+    let total = variants.len() * seeds as usize;
+    let step = (total / 10).max(1);
+    let results = app::lab::run(&s, &variants, seeds, jobs, runs.full, |done, total| {
+        if done % step == 0 || done == total {
+            eprintln!("lab: {done} of {total} runs");
+        }
+    });
+    writeln!(out)?;
+    write!(out, "{}", app::lab::report(file, &variants, &results, pass))?;
+    if let Some(path) = csv {
+        let f = std::fs::File::create(path).with_context(|| format!("writing {path}"))?;
+        let mut f = std::io::BufWriter::new(f);
+        app::lab::write_csv(&variants, &results, &mut f)
+            .and_then(|()| f.flush())
+            .with_context(|| format!("writing {path}"))?;
+        writeln!(out, "csv       {path}")?;
+    }
+    writeln!(out, "wall      {:.2?}", started.elapsed())?;
+    Ok(())
+}
+
 /// `wmc scenario`: make the scenario's world (no save), then its `run` and
 /// `expect` lines in order (`sim::run_checks`: windows watch the runs).
 /// Prints every expectation with what it found, and the checksums at the
@@ -622,7 +809,9 @@ fn scenario_test(
                     ticks += t;
                     format!("      run {t} ticks, to {}", Clock::at(start + ticks))
                 }
-                sim::Event::Expected { line, text, result } => {
+                sim::Event::Expected {
+                    line, text, result, ..
+                } => {
                     checked += 1;
                     let (ok, got) = verdict(&result);
                     failed += usize::from(!ok);
@@ -657,7 +846,10 @@ fn scenario_test(
         let (mut i, mut ok_n) = (0usize, 0usize);
         let mut failures = Vec::new();
         sim::run_checks(&mut world, &s.checks, |e| {
-            if let sim::Event::Expected { line, text, result } = e {
+            if let sim::Event::Expected {
+                line, text, result, ..
+            } = e
+            {
                 if held.len() <= i {
                     held.push((line, text.to_string(), 0));
                 }

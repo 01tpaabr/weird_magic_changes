@@ -41,7 +41,7 @@ use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, c
 
 mod checks;
 mod expect;
-pub use checks::{Event, run_checks};
+pub use checks::{Event, run_checks, run_checks_until};
 pub use expect::{check_expect, expect, expect_family, holds, measure};
 #[cfg(test)]
 mod fuzz;
@@ -682,6 +682,12 @@ pub fn ticks_of(w: &str) -> Option<u64> {
     value(w)
         .filter(|&t| t > 0)
         .and_then(|t| u64::try_from(t).ok())
+}
+
+/// A value as a scenario writes it (`12`, `-3`, `90min`, `2h`, `1d`): an
+/// integer, or a time in ticks. For tools that set one (`wmc --set N=2h`).
+pub fn value_of(w: &str) -> Option<i32> {
+    value(w)
 }
 
 /// `12`, `-3`, `90min`, `2h`, `1d`: an integer, or a time in ticks (the

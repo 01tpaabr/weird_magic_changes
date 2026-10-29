@@ -44,7 +44,12 @@ pub struct CompileError {
 }
 
 impl fmt::Display for CompileError {
+    /// `file:line:col: message`; `file: message` for an error about no
+    /// place in a file (line 0: a `--set`, a rule set too large).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.line == 0 {
+            return write!(f, "{}: {}", self.file, self.msg);
+        }
         write!(f, "{}:{}:{}: {}", self.file, self.line, self.col, self.msg)
     }
 }
@@ -58,9 +63,20 @@ pub fn compile(file: &str, text: &str) -> Result<Kinds> {
     compile_files(&[(file, text)])
 }
 
+/// A `const` set from outside the rules (`wmc --set NAME=V`): it replaces
+/// the value the rules declare, and constants declared after it fold with
+/// the new one.
+pub type ConstSet = (String, i32);
+
 /// Compile several files as one rule set, in the order given (callers sort
 /// by name). Kind and sub names are global across files.
 pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
+    compile_files_with(files, &[])
+}
+
+/// [`compile_files`] with some constants set from outside: each must name a
+/// `const` the files declare.
+pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result<Kinds> {
     if let Some((name, _)) = files.get(MAX_FILES) {
         return Err(CompileError {
             file: name.to_string(),
@@ -81,7 +97,7 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
         };
         p.file(&mut items)?;
     }
-    Gen::new(&items, files).generate()
+    Gen::new(&items, files, consts).generate()
 }
 
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
@@ -95,6 +111,15 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
 /// packs' absolute paths go in `debug.packs`: a save remembers them.
 pub fn compile_packs(
     packs: &[&std::path::Path],
+) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
+    compile_packs_with(packs, &[])
+}
+
+/// [`compile_packs`] with some constants set from outside
+/// ([`compile_files_with`]).
+pub fn compile_packs_with(
+    packs: &[&std::path::Path],
+    consts: &[ConstSet],
 ) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
     // Each pack once, where first given: a scenario's `rules` line and the
     // same `--rules` are one pack.
@@ -165,7 +190,7 @@ pub fn compile_packs(
         .iter()
         .map(|(n, t)| (n.as_str(), t.as_str()))
         .collect();
-    let mut kinds = compile_files(&files)?;
+    let mut kinds = compile_files_with(&files, consts)?;
     kinds.debug.packs = full_paths
         .iter()
         .map(|(_, f)| f.to_string_lossy().into_owned())
@@ -2132,6 +2157,8 @@ struct Gen<'a> {
     items: &'a [ItemAst],
     subs: &'a [SubAst],
     consts: &'a [ConstAst],
+    /// Constants set from outside the rules: they replace the declared value.
+    sets: &'a [ConstSet],
     /// Folded `const` values, in declaration order.
     const_vals: Vec<(String, i32)>,
     asm: Asm,
@@ -2276,9 +2303,10 @@ fn stmt_line(s: &Stmt) -> Option<u32> {
 }
 
 impl<'a> Gen<'a> {
-    fn new(items: &'a Items, files: &'a [(&'a str, &'a str)]) -> Self {
+    fn new(items: &'a Items, files: &'a [(&'a str, &'a str)], sets: &'a [ConstSet]) -> Self {
         Self {
             files,
+            sets,
             debug: DebugInfo {
                 files: files.iter().map(|(n, _)| n.to_string()).collect(),
                 ..DebugInfo::default()
@@ -2537,8 +2565,32 @@ impl<'a> Gen<'a> {
             if let Some(msg) = taken {
                 return Err(self.err(&c.at, msg));
             }
-            let v = self.fold(&c.value, &c.at)?;
+            let v = match self.sets.iter().find(|(n, _)| *n == c.name) {
+                Some(&(_, v)) => v,
+                None => self.fold(&c.value, &c.at)?,
+            };
             self.const_vals.push((c.name.clone(), v));
+        }
+        if let Some((name, _)) = self
+            .sets
+            .iter()
+            .find(|(n, _)| !self.consts.iter().any(|c| c.name == *n))
+        {
+            let mut declared: Vec<&str> = self.consts.iter().map(|c| c.name.as_str()).collect();
+            declared.sort_unstable();
+            return Err(CompileError {
+                file: "--set".into(),
+                line: 0,
+                col: 0,
+                msg: format!(
+                    "`{name}`: the rules declare no such const (they declare: {})",
+                    if declared.is_empty() {
+                        "none".into()
+                    } else {
+                        declared.join(", ")
+                    }
+                ),
+            });
         }
         for it in items {
             for (pn, pat) in &it.params {
