@@ -1,15 +1,17 @@
 //! The scenario test's `expect` lines, evaluated: what [`expect`] finds in
-//! a world, and what [`check_expect`] finds the rules lack without one.
-//! The parser is [`super::Scenario::parse`]; `wmc scenario` and `wmc lint
-//! --scenario` call these (as `sim::expect` and `sim::check_expect`).
+//! a world now, what [`measure`] reads for a metric, and what
+//! [`check_expect`] finds the rules lack without one. The parser is
+//! [`super::Scenario::parse`]; expectations over a window are watched by
+//! [`super::run_checks`]. `wmc scenario` and `wmc lint --scenario` call
+//! these (as `sim::run_checks` and `sim::check_expect`).
 
 use bevy_ecs::prelude::*;
 
-use super::{Agg, Expect, Who};
-use crate::actors::{ChunkActors, ChunkMinds};
+use super::{Agg, CauseIs, Expect, Metric, Who};
+use crate::actors::{Cause, ChunkActors, ChunkMinds, Tally};
 use crate::rules::Kinds;
 use crate::sim::{Tick, checksum};
-use crate::stage::{self, Pos};
+use crate::stage::{self, Pos, Stage};
 
 /// The kind ids an `expect` looks at: a kind's family, `only` the kind
 /// alone, as in the rules. An error when the rules have no such kind.
@@ -35,69 +37,106 @@ fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
         .or_else(|| d.mems.iter().position(|m| m == name).map(|i| (false, i)))
 }
 
+/// Whether the rules define every kind, need and memory `m` names.
+fn check_metric(kinds: &Kinds, m: &Metric) -> Result<(), String> {
+    match m {
+        Metric::Count(who) => {
+            expect_family(kinds, who)?;
+        }
+        Metric::Tally { who, cause, .. } => {
+            let ids = expect_family(kinds, who)?;
+            match cause {
+                Some(CauseIs::By(by)) => {
+                    expect_family(kinds, by)?;
+                }
+                Some(CauseIs::Of(need))
+                    if !ids
+                        .into_iter()
+                        .any(|k| kinds.def(k).need_named(need).is_some()) =>
+                {
+                    return Err(format!("`{}` has no need `{need}`", who.kind));
+                }
+                Some(CauseIs::Of(_)) => {}
+                None => {}
+            }
+        }
+        Metric::Value { name, who, .. } => {
+            if !expect_family(kinds, who)?.any(|k| expect_slot(kinds, k, name).is_some()) {
+                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Whether the rules define every kind, need and memory `e` names, without
 /// a world: `wmc lint --scenario` checks a test's `expect` lines with it.
 /// The same errors `expect` gives.
 pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
     match e {
-        Expect::Count { who, .. } | Expect::Tally { who, .. } => {
-            expect_family(kinds, who)?;
-        }
-        Expect::Value { name, who, .. } => {
-            if !expect_family(kinds, who)?.any(|k| expect_slot(kinds, k, name).is_some()) {
-                return Err(format!("`{}` has no need or memory `{name}`", who.kind));
-            }
-        }
-        Expect::At { who: Some(w), .. } => {
-            expect_family(kinds, w)?;
-        }
-        Expect::At { who: None, .. } | Expect::Checksum(_) | Expect::State(_) => {}
+        Expect::Is { metric, .. } | Expect::Mean { metric, .. } => check_metric(kinds, metric),
+        Expect::Over { cond, .. } => check_expect(kinds, cond),
+        Expect::At { who: Some(w), .. } => expect_family(kinds, w).map(|_| ()),
+        Expect::At { who: None, .. } | Expect::Checksum(_) | Expect::State(_) => Ok(()),
     }
-    Ok(())
 }
 
-/// What a scenario test's `expect` finds in `world` (`wmc scenario`):
-/// whether it holds, and what it saw, for the report. An error when it
-/// names a kind, need or memory the rules do not define (`check_expect`).
-/// A kind means its family, `only` the kind alone, as in the rules.
-pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
-    let kinds = world.resource::<Kinds>().clone();
-    check_expect(&kinds, e)?;
-    let family = |who: &Who| expect_family(&kinds, who);
-    Ok(match e {
-        Expect::Count { who, op, n } => {
-            let ids = family(who)?;
-            let c = world
-                .query::<&ChunkActors>()
-                .iter(world)
-                .flat_map(|a| &a.rows)
-                .filter(|r| ids.contains(&r.kind))
-                .count() as i64;
-            (op.holds(c, *n), c.to_string())
+/// The number `m` reads from `world` now: `None` for a `min|max|sum` over a
+/// kind with none alive. An error when it names what the rules lack. A kind
+/// means its family, `only` the kind alone, as in the rules.
+pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<i64>, String> {
+    check_metric(kinds, m)?;
+    let stage = world.resource::<Stage>();
+    let rows = stage
+        .active()
+        .iter()
+        .filter_map(|&(_, e)| Some((world.get::<ChunkActors>(e)?, world.get::<ChunkMinds>(e)?)));
+    Ok(match m {
+        Metric::Count(who) => {
+            let ids = expect_family(kinds, who)?;
+            let n: usize = rows
+                .map(|(a, _)| a.rows.iter().filter(|r| ids.contains(&r.kind)).count())
+                .sum();
+            Some(i64::try_from(n).unwrap_or(i64::MAX))
         }
-        Expect::Tally {
+        Metric::Tally {
             counter,
             who,
-            op,
-            n,
+            cause,
         } => {
-            let tally = world.resource::<crate::actors::Tally>();
-            let c: i64 = family(who)?.map(|k| tally.get(k, *counter) as i64).sum();
-            (op.holds(c, *n), c.to_string())
+            let tally = world.resource::<Tally>();
+            let ids = expect_family(kinds, who)?;
+            let n: u64 = match cause {
+                None => ids.map(|k| tally.get(k, *counter)).sum(),
+                Some(CauseIs::By(by)) => {
+                    let killers = expect_family(kinds, by)?;
+                    ids.flat_map(|k| tally.deaths_of(k))
+                        .filter(|(c, _)| matches!(c, Cause::Killed(b) if killers.contains(b)))
+                        .map(|(_, n)| n)
+                        .sum()
+                }
+                Some(CauseIs::Of(need)) => ids
+                    .filter_map(|k| {
+                        let slot = u8::try_from(kinds.def(k).need_named(need)?).ok()?;
+                        Some(
+                            tally
+                                .deaths_of(k)
+                                .filter(|(c, _)| *c == Cause::Starved(slot))
+                                .map(|(_, n)| n)
+                                .sum::<u64>(),
+                        )
+                    })
+                    .sum(),
+            };
+            Some(i64::try_from(n).unwrap_or(i64::MAX))
         }
-        Expect::Value {
-            agg,
-            name,
-            who,
-            op,
-            v,
-        } => {
-            let ids = family(who)?;
-            let slot = |k: u16| expect_slot(&kinds, k, name);
+        Metric::Value { agg, name, who } => {
+            let ids = expect_family(kinds, who)?;
+            let slot = |k: u16| expect_slot(kinds, k, name);
             // A decaying need as it stands now, as the next think will see it.
             let now = world.resource::<Tick>().0;
             let mut vals = Vec::new();
-            for (a, m) in world.query::<(&ChunkActors, &ChunkMinds)>().iter(world) {
+            for (a, m) in rows {
                 for (r, mind) in a.rows.iter().zip(&m.rows) {
                     if ids.contains(&r.kind)
                         && let Some((need, i)) = slot(r.kind)
@@ -111,20 +150,38 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
                     }
                 }
             }
-            let got = match agg {
+            match agg {
                 Agg::Min => vals.iter().min().copied(),
                 Agg::Max => vals.iter().max().copied(),
                 Agg::Sum => (!vals.is_empty()).then(|| vals.iter().sum()),
-            };
-            match got {
-                Some(g) => (op.holds(g, *v), g.to_string()),
-                None => (false, format!("no `{}` alive", who.kind)),
             }
         }
+    })
+}
+
+/// What a condition (`METRIC OP V`, `at ...`) finds in `world` now: whether
+/// it holds, what it saw, and the number it read, if any.
+pub fn holds(
+    world: &World,
+    kinds: &Kinds,
+    e: &Expect,
+) -> Result<(bool, String, Option<i64>), String> {
+    match e {
+        Expect::Is { metric, op, v } => Ok(match measure(world, kinds, metric)? {
+            Some(n) => (op.holds(n, *v), n.to_string(), Some(n)),
+            None => {
+                let who = match metric {
+                    Metric::Count(w)
+                    | Metric::Tally { who: w, .. }
+                    | Metric::Value { who: w, .. } => w,
+                };
+                (false, format!("no `{}` alive", who.kind), None)
+            }
+        }),
         Expect::At { x, y, who } => {
             let (cc, i) = Pos::new(*x, *y).split();
             let Some(cells) = stage::chunk(world, cc) else {
-                return Ok((false, "that chunk is not loaded".into()));
+                return Ok((false, "that chunk is not loaded".into(), None));
             };
             let here = cells.occupant[i]
                 .unpack()
@@ -133,24 +190,44 @@ pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
             let got = here.map_or("nobody".to_string(), |k| kinds.def(k).name.clone());
             let ok = match (who, here) {
                 (None, None) => true,
-                (Some(w), Some(k)) => family(w)?.contains(&k),
+                (Some(w), Some(k)) => expect_family(kinds, w)?.contains(&k),
                 (Some(w), None) => {
-                    family(w)?;
+                    expect_family(kinds, w)?;
                     false
                 }
                 (None, Some(_)) => false,
             };
-            (ok, got)
+            Ok((ok, got, None))
         }
+        Expect::Checksum(_) | Expect::State(_) | Expect::Over { .. } | Expect::Mean { .. } => {
+            Err("not a condition of one moment: `METRIC OP V` or `at ...`".into())
+        }
+    }
+}
+
+/// What a scenario test's `expect` finds in `world` now (`wmc scenario`):
+/// whether it holds, and what it saw, for the report. An error when it
+/// names a kind, need or memory the rules do not define (`check_expect`),
+/// or looks at a window: [`super::run_checks`] watches those.
+pub fn expect(world: &mut World, e: &Expect) -> Result<(bool, String), String> {
+    match e {
         Expect::Checksum(h) => {
             let c = checksum(world);
-            (c == *h, format!("{c:016x}"))
+            Ok((c == *h, format!("{c:016x}")))
         }
         Expect::State(h) => {
             let c = stage::checksum(world);
-            (c == *h, format!("{c:016x}"))
+            Ok((c == *h, format!("{c:016x}")))
         }
-    })
+        Expect::Over { .. } | Expect::Mean { .. } => Err(
+            "`always`, `never`, `eventually` and `mean` look at a run: check them with their scenario (`wmc scenario`)"
+                .into(),
+        ),
+        Expect::Is { .. } | Expect::At { .. } => {
+            let kinds = world.resource::<Kinds>();
+            holds(world, kinds, e).map(|(ok, got, _)| (ok, got))
+        }
+    }
 }
 
 #[cfg(test)]
@@ -233,18 +310,57 @@ mod tests {
             kind: k.into(),
             only: false,
         };
-        let count = |k: &str| Expect::Count {
-            who: who(k),
-            op: crate::scenario::Op::Eq,
-            n: 0,
-        };
-        let value = |name: &str, k: &str| Expect::Value {
-            agg: Agg::Max,
-            name: name.into(),
-            who: who(k),
+        let count = |k: &str| Expect::Is {
+            metric: Metric::Count(who(k)),
             op: crate::scenario::Op::Eq,
             v: 0,
         };
+        let value = |name: &str, k: &str| Expect::Is {
+            metric: Metric::Value {
+                agg: Agg::Max,
+                name: name.into(),
+                who: who(k),
+            },
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        let died_of = |need: &str| Expect::Is {
+            metric: Metric::Tally {
+                counter: crate::actors::life::DIED,
+                who: who("chicken"),
+                cause: Some(CauseIs::Of(need.into())),
+            },
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        let eaten_by = |k: &str| Expect::Is {
+            metric: Metric::Tally {
+                counter: crate::actors::life::EATEN,
+                who: who("chicken"),
+                cause: Some(CauseIs::By(who(k))),
+            },
+            op: crate::scenario::Op::Eq,
+            v: 0,
+        };
+        assert_eq!(check_expect(&kinds, &died_of("water")), Ok(()));
+        assert_eq!(
+            check_expect(&kinds, &died_of("nectar")),
+            Err("`chicken` has no need `nectar`".into())
+        );
+        assert_eq!(check_expect(&kinds, &eaten_by("fox")), Ok(()));
+        assert_eq!(
+            check_expect(&kinds, &eaten_by("wolf")),
+            Err("the rules have no kind `wolf`".into())
+        );
+        let over = Expect::Over {
+            over: crate::scenario::Over::Always,
+            cond: Box::new(count("wolf")),
+            window: crate::scenario::Window { from: 0, to: 9 },
+        };
+        assert_eq!(
+            check_expect(&kinds, &over),
+            Err("the rules have no kind `wolf`".into())
+        );
         assert_eq!(check_expect(&kinds, &count("fox")), Ok(()));
         assert_eq!(check_expect(&kinds, &value("food", "fox")), Ok(()));
         assert_eq!(

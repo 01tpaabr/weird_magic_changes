@@ -228,18 +228,39 @@ fn run_scenario(b: &Block) -> Result<(), (u32, String)> {
     if !s.checks.iter().any(|c| matches!(c, Check::Run(_))) {
         return Ok(());
     }
-    let mut world = sim::new_world_with(&s, kinds).map_err(line_of)?;
-    for c in &s.checks {
-        match c {
-            Check::Run(t) => (0..*t).for_each(|_| sim::step(&mut world)),
-            Check::Expect { line, text, what } => match sim::expect(&mut world, what) {
-                Ok((true, _)) => {}
-                Ok((false, got)) => return Err((*line, format!("{text}  (found {got})"))),
-                Err(e) => return Err((*line, e)),
-            },
+    // On each of its seeds; it must hold on `pass` of them (all, if not
+    // given), and the first failure of the first failing seed is the error.
+    let mut passed = 0;
+    let mut first_failure = None;
+    for k in 0..s.seeds {
+        let one = Scenario {
+            seed: s.seed.wrapping_add(u64::from(k)),
+            ..s.clone()
+        };
+        let mut world = sim::new_world_with(&one, kinds.clone()).map_err(line_of)?;
+        let mut failure = None;
+        sim::run_checks(&mut world, &s.checks, |e| {
+            if let sim::Event::Expected { line, text, result } = e
+                && failure.is_none()
+            {
+                match result {
+                    Ok((true, _)) => {}
+                    Ok((false, got)) => failure = Some((line, format!("{text}  (found {got})"))),
+                    Err(e) => failure = Some((line, e)),
+                }
+            }
+        });
+        match failure {
+            None => passed += 1,
+            Some(f) => {
+                first_failure.get_or_insert(f);
+            }
         }
     }
-    Ok(())
+    if passed >= s.pass.unwrap_or(s.seeds) {
+        return Ok(());
+    }
+    Err(first_failure.expect("a seed failed"))
 }
 
 /// Lines without comments or blanks, trimmed.
@@ -451,6 +472,10 @@ fn the_limits_table_is_the_codes() {
         (
             "chunks a scenario's `size` generates at creation".into(),
             vec![MAX_SIZE_CHUNKS as i64],
+        ),
+        (
+            "seeds a scenario test runs on".into(),
+            vec![i64::from(sim_core::scenario::MAX_SEEDS)],
         ),
         (
             "cells each way from (0, 0)".into(),

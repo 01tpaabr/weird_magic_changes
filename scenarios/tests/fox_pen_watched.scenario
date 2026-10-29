@@ -1,0 +1,29 @@
+# The fox pen (fox_pen.scenario) watched for two hours, on four seeds: each
+# starving fox eats its hen within minutes and is fed for the day, no fox
+# dies, and the hens die of nothing but foxes.
+seed 3
+seeds 4
+outside soil
+map {
+  ..................................................................
+  .###...........................................................###
+  .FC#...........................................................FC#
+  .###...........................................................###
+  ..................................................................
+}
+legend {
+  . soil
+  # rock
+  C chicken
+  F fox with (food = 2h)     # starving: it hunts at once
+}
+
+run 2h
+expect always count fox == 2                      # neither fox dies
+expect eventually count chicken == 0
+expect always count chicken == 0 from 10min       # both eaten within ten minutes
+expect never died chicken of water > 0            # nor do hens die of thirst
+expect always eaten chicken by fox == 2 from 10min
+expect mean eaten chicken per day == 24           # two in two hours
+expect mean count chicken < 0.2                   # hens lived a few minutes of 120
+expect mean min food of fox > 20h from 10min      # a hen is a fox's day

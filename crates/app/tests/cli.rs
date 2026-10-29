@@ -184,6 +184,8 @@ fn unused_arguments_are_refused() {
     assert!(!ok && err.contains("--strict is only for lint"), "{err}");
     let (ok, _, err) = wmc(&["run", dir, "1", "--every", "1h"]);
     assert!(!ok && err.contains("only for observe"), "{err}");
+    let (ok, _, err) = wmc(&["run", dir, "1", "--seeds", "2"]);
+    assert!(!ok && err.contains("only for scenario"), "{err}");
     let (ok, _, err) = wmc(&["observe", "2h", "10", "10", "1", "extra"]);
     assert!(
         !ok && err.contains("unexpected argument \"extra\""),
@@ -497,6 +499,13 @@ fn odd_command_lines_never_panic() {
         &["observe", "3", "--rules", "bad.rules"],
         &["show", "--every", "1h"],
         &["run", "s1", "1", "--csv", "x.csv"],
+        &["scenario", "tiny.scenario", "--seeds", "0"],
+        &["scenario", "tiny.scenario", "--seeds", "1001"],
+        &["scenario", "tiny.scenario", "--seeds", "2"],
+        &["scenario", "tiny.scenario", "--seeds", "2", "--pass", "3"],
+        &["scenario", "tiny.scenario", "--pass", "1"],
+        &["scenario", "tiny.scenario", "--pass", "x"],
+        &["run", "s1", "1", "--seeds", "2"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);

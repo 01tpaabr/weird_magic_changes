@@ -24,9 +24,10 @@ the agent is its heaviest user.
 
 1. **`wmc observe`** (done, decision 40): alive over time, deaths by cause, needs, states,
    last results, sampled decisions and rules that fire; summary + long CSV.
-2. **Goals over time.** `expect always ... from 2d`, `expect mean ... from 4d`, rates per
-   day (`expect rate eaten chicken per day >= 40`); `--seeds N --pass M` for "on 7 of 8
-   seeds". Scenario syntax, so `scenario/fuzz.rs` and RULES §14 grow with it.
+2. **Goals over time** (done, decision 41): `expect always|never|eventually COND`,
+   `expect mean METRIC`, `expect mean COUNTER K per day` (a rate), each over `from T to T`;
+   `eaten K by K2`, `died K of NEED`; `seeds N` + `pass M` (`--seeds`, `--pass`). One
+   runner, `sim::run_checks`, for `wmc scenario`, the docs' examples and the fuzzer.
 3. **`wmc lab`.** A scenario across seeds x knob values in parallel processes (an
    optimized build), early stop when an `always` fails, one table row per variant (pass
    rate, key numbers with their spread). Knobs are `const`s: `--set NAME=a,b,c`.

@@ -7,6 +7,7 @@
 //! wmc lint <pack>...                           compile rule packs and print what they hold
 //! wmc scenario <file>                          a scenario test: make its world, then its
 //!                                              `run` and `expect` lines; exit 1 if one fails
+//!                                              (on each of its seeds: --seeds N, --pass M)
 //! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
 //!                                              step `ticks`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
@@ -111,6 +112,22 @@ fn main() -> anyhow::Result<()> {
     let csv = take_flag(&mut args, "--csv")?.pop();
     let sample = take_flag(&mut args, "--sample")?.pop();
     let only = take_flag(&mut args, "--kind")?;
+    let count = |flag: &str, v: Option<String>| -> anyhow::Result<Option<u32>> {
+        v.map(|v| {
+            v.parse::<u32>()
+                .ok()
+                .filter(|n| (1..=sim_core::scenario::MAX_SEEDS).contains(n))
+                .with_context(|| {
+                    format!(
+                        "{flag} needs a count from 1 to {}",
+                        sim_core::scenario::MAX_SEEDS
+                    )
+                })
+        })
+        .transpose()
+    };
+    let seeds = count("--seeds", take_flag(&mut args, "--seeds")?.pop())?;
+    let pass = count("--pass", take_flag(&mut args, "--pass")?.pop())?;
     if let Some(n) = take_flag(&mut args, "--threads")?.pop() {
         let n: usize = n
             .parse()
@@ -133,6 +150,9 @@ fn main() -> anyhow::Result<()> {
         && (every.is_some() || csv.is_some() || sample.is_some() || !only.is_empty())
     {
         bail!("--every, --csv, --sample and --kind are only for observe");
+    }
+    if args.first().map(String::as_str) != Some("scenario") && (seeds.is_some() || pass.is_some()) {
+        bail!("--seeds and --pass are only for scenario");
     }
     let file = file.as_deref();
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
@@ -202,7 +222,7 @@ fn main() -> anyhow::Result<()> {
             if let Some(a) = args.get(2) {
                 bail!("scenario takes one file; unexpected {a:?}");
             }
-            scenario_test(f, &packs)
+            scenario_test(f, &packs, seeds, pass)
         }
         Some("lint") => {
             // As for a new world: these, else `WMC_RULES`, else the scenario's.
@@ -225,7 +245,7 @@ fn main() -> anyhow::Result<()> {
             )
         }
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file>; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
+            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M]; any takes --rules <pack> (repeatable), --scenario <file>, --threads N"
         ),
     }
 }
@@ -557,52 +577,126 @@ fn observe(
 }
 
 /// `wmc scenario`: make the scenario's world (no save), then its `run` and
-/// `expect` lines in order. Prints every expectation with what it found,
-/// and the checksums at the end (equal at any thread count); fails if any
-/// expectation does.
-fn scenario_test(file: &str, packs: &[String]) -> anyhow::Result<()> {
+/// `expect` lines in order (`sim::run_checks`: windows watch the runs).
+/// Prints every expectation with what it found, and the checksums at the
+/// end (equal at any thread count); fails if any expectation does. With
+/// several seeds (`seeds N` in the file, or `seeds`), it runs once per
+/// seed, `seed`, `seed + 1`, ..., prints each seed's verdict, then how many
+/// seeds each expectation held on; it fails when fewer than `pass` seeds
+/// (all, if not given) held every expectation.
+fn scenario_test(
+    file: &str,
+    packs: &[String],
+    seeds: Option<u32>,
+    pass: Option<u32>,
+) -> anyhow::Result<()> {
     let s = scenario(Some(file))?;
     let kinds = app::compile(&app::packs_or(packs, &s.packs))?;
     app::warn(&kinds);
-    let mut world = sim::new_world_with(&s, kinds).map_err(|e| match s.line_of(&e) {
-        Some(line) => anyhow::anyhow!("{file}:{line}: {e}"),
-        None => anyhow::anyhow!("{file}: {e}"),
-    })?;
+    let seeds = seeds.unwrap_or(s.seeds);
+    let pass = pass.or(s.pass).unwrap_or(seeds);
+    if pass > seeds {
+        bail!("{file}: it needs {pass} seeds to pass, but runs on {seeds}");
+    }
+    let new_world = |seed: u64| {
+        let one = Scenario { seed, ..s.clone() };
+        sim::new_world_with(&one, kinds.clone()).map_err(|e| match s.line_of(&e) {
+            Some(line) => anyhow::anyhow!("{file}:{line}: {e}"),
+            None => anyhow::anyhow!("{file}: {e}"),
+        })
+    };
     let mut out = std::io::stdout().lock();
-    let (mut checked, mut failed) = (0, 0);
-    for c in &s.checks {
-        match c {
-            Check::Run(t) => {
-                for _ in 0..*t {
-                    sim::step(&mut world);
+    let verdict = |result: &Result<(bool, String), String>| match result {
+        Ok((true, got)) => (true, got.clone()),
+        Ok((false, got)) => (false, got.clone()),
+        Err(e) => (false, e.clone()),
+    };
+    if seeds == 1 {
+        let mut world = new_world(s.seed)?;
+        let start = sim::tick(&world);
+        let (mut ticks, mut checked, mut failed) = (0u64, 0, 0);
+        let mut written = Ok(());
+        sim::run_checks(&mut world, &s.checks, |e| {
+            let line = match e {
+                sim::Event::Ran(t) => {
+                    ticks += t;
+                    format!("      run {t} ticks, to {}", Clock::at(start + ticks))
                 }
-                writeln!(
-                    out,
-                    "      run {t} ticks, to {}",
-                    Clock::at(sim::tick(&world))
-                )?;
+                sim::Event::Expected { line, text, result } => {
+                    checked += 1;
+                    let (ok, got) = verdict(&result);
+                    failed += usize::from(!ok);
+                    let mark = if ok { "ok  " } else { "FAIL" };
+                    format!("{mark}  {file}:{line}: {text}  ({got})")
+                }
+            };
+            if written.is_ok() {
+                written = writeln!(out, "{line}");
             }
-            Check::Expect { line, text, what } => {
-                checked += 1;
-                let (ok, got) = match sim::expect(&mut world, what) {
-                    Ok(r) => r,
-                    Err(e) => (false, e),
-                };
-                failed += usize::from(!ok);
-                let mark = if ok { "ok  " } else { "FAIL" };
-                writeln!(out, "{mark}  {file}:{line}: {text}  ({got})")?;
+        });
+        written?;
+        writeln!(out, "checksum:  {:016x}", sim::checksum(&mut world))?;
+        writeln!(out, "state:     {:016x}", stage::checksum(&mut world))?;
+        writeln!(
+            out,
+            "{checked} expectations, {failed} failed ({} threads)",
+            par::thread_count()
+        )?;
+        if failed > 0 {
+            bail!("{file}: {failed} of {checked} expectations failed");
+        }
+        return Ok(());
+    }
+
+    // Several seeds: a line per seed, then a line per expectation.
+    let (mut passed, mut sums, mut states) = (0u32, 0u64, 0u64);
+    let mut held: Vec<(u32, String, u32)> = Vec::new();
+    for k in 0..seeds {
+        let seed = s.seed.wrapping_add(u64::from(k));
+        let mut world = new_world(seed)?;
+        let (mut i, mut ok_n) = (0usize, 0usize);
+        let mut failures = Vec::new();
+        sim::run_checks(&mut world, &s.checks, |e| {
+            if let sim::Event::Expected { line, text, result } = e {
+                if held.len() <= i {
+                    held.push((line, text.to_string(), 0));
+                }
+                let (ok, got) = verdict(&result);
+                if ok {
+                    held[i].2 += 1;
+                    ok_n += 1;
+                } else {
+                    failures.push(format!("FAIL  {file}:{line}: {text}  ({got})"));
+                }
+                i += 1;
             }
+        });
+        let (c, st) = (sim::checksum(&mut world), stage::checksum(&mut world));
+        sums = sim_core::rng::splitmix64(sums ^ c);
+        states = sim_core::rng::splitmix64(states ^ st);
+        passed += u32::from(failures.is_empty());
+        let mark = if failures.is_empty() { "ok  " } else { "FAIL" };
+        writeln!(
+            out,
+            "seed {seed:<10} {mark}  {ok_n} of {i} held   checksum {c:016x}"
+        )?;
+        for f in failures {
+            writeln!(out, "                 {f}")?;
         }
     }
-    writeln!(out, "checksum:  {:016x}", sim::checksum(&mut world))?;
-    writeln!(out, "state:     {:016x}", stage::checksum(&mut world))?;
+    writeln!(out, "per expectation, over {seeds} seeds:")?;
+    for (line, text, n) in &held {
+        writeln!(out, "  {n:>4}/{seeds}  {file}:{line}: {text}")?;
+    }
+    writeln!(out, "checksum:  {sums:016x}")?;
+    writeln!(out, "state:     {states:016x}")?;
     writeln!(
         out,
-        "{checked} expectations, {failed} failed ({} threads)",
+        "{passed} of {seeds} seeds held every expectation, {pass} needed ({} threads)",
         par::thread_count()
     )?;
-    if failed > 0 {
-        bail!("{file}: {failed} of {checked} expectations failed");
+    if passed < pass {
+        bail!("{file}: {passed} of {seeds} seeds passed, {pass} needed");
     }
     Ok(())
 }

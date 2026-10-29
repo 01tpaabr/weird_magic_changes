@@ -77,3 +77,65 @@ fn a_failed_expectation_is_reported_and_fails() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("2 of 3 expectations failed"));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// On several seeds, each seed gets its verdict and each expectation its
+/// count of seeds; the run fails when fewer than `pass` seeds held them
+/// all. An expectation over a window says what it saw across it.
+#[test]
+fn seeds_are_reported_one_by_one_and_counted() {
+    let dir = std::env::temp_dir().join(format!("wmc-scenario-seeds-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("seeds.scenario");
+    std::fs::write(
+        &f,
+        "size 8 8\nseeds 3\nstart egg at (3, 3)\nrun 1h\nexpect always count egg == 1\nexpect eventually count egg == 2\n",
+    )
+    .unwrap();
+    let wmc = |extra: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_wmc"))
+            .env_remove("WMC_RULES")
+            .arg("scenario")
+            .arg(&f)
+            .args(extra)
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let (ok, out, err) = wmc(&[]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains("seed 42 ") && out.contains("seed 44 "),
+        "{out}"
+    );
+    assert!(out.contains("1 of 2 held"), "{out}");
+    assert!(
+        out.contains("expect eventually count egg == 2  (false at all 61 checks; it was 1)"),
+        "{out}"
+    );
+    assert!(out.contains("3/3  ") && out.contains("0/3  "), "{out}");
+    assert!(
+        out.contains("0 of 3 seeds held every expectation, 3 needed"),
+        "{out}"
+    );
+    assert!(err.contains("0 of 3 seeds passed, 3 needed"), "{err}");
+    // Fewer seeds, and a lower bar: it still fails, and the bar can't be
+    // higher than the seeds.
+    let (ok, out, _) = wmc(&["--seeds", "2", "--pass", "1"]);
+    assert!(
+        !ok && out.contains("0 of 2 seeds held every expectation, 1 needed"),
+        "{out}"
+    );
+    let (ok, _, err) = wmc(&["--seeds", "2", "--pass", "3"]);
+    assert!(
+        !ok && err.contains("it needs 3 seeds to pass, but runs on 2"),
+        "{err}"
+    );
+    // One seed: the report of a single run.
+    let (ok, out, _) = wmc(&["--seeds", "1"]);
+    assert!(!ok && out.contains("2 expectations, 1 failed"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}

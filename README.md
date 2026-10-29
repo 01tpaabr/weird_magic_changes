@@ -126,9 +126,13 @@ start grass 1 / 10
 start sheep 1 / 300
 start fox   1 / 20000
 
+seeds 8                           # on eight seeds, seven must hold
+pass 7
 run 2d
-expect count sheep >= 30          # the flock drinks, grazes and mostly survives
-expect min food of sheep > 12h    # nobody goes hungry
+expect count sheep >= 30                    # the flock drinks, grazes and mostly survives
+expect always count sheep >= 20 from 12h    # and never collapses on the way
+expect mean min food of sheep > 12h         # nobody goes hungry, on average
+expect mean eaten sheep by fox per day < 5  # foxes take a few
 ```
 
 ```

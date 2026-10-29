@@ -39,8 +39,10 @@ use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
 use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16};
 
+mod checks;
 mod expect;
-pub use expect::{check_expect, expect, expect_family};
+pub use checks::{Event, run_checks};
+pub use expect::{check_expect, expect, expect_family, holds, measure};
 #[cfg(test)]
 mod fuzz;
 
@@ -145,6 +147,18 @@ impl Op {
         })
     }
 
+    /// Does `a OP b` hold, for a mean or a rate (`==` is exact)?
+    pub fn holds_f(self, a: f64, b: f64) -> bool {
+        match self {
+            Op::Eq => a == b,
+            Op::Ne => a != b,
+            Op::Lt => a < b,
+            Op::Le => a <= b,
+            Op::Gt => a > b,
+            Op::Ge => a >= b,
+        }
+    }
+
     /// Does `a OP b` hold?
     pub fn holds(self, a: i64, b: i64) -> bool {
         match self {
@@ -173,29 +187,57 @@ pub enum Agg {
     Sum,
 }
 
-/// What an `expect` checks.
+/// A number an `expect` reads from the world.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Expect {
-    /// `count [only] K OP N`: actors alive now.
-    Count {
-        who: Who,
-        op: Op,
-        n: i64,
-    },
-    /// `born|became|eaten|died|thinks|traps [only] K OP N`: the life
-    /// counters so far (`counter` is an `actors::life` index).
+pub enum Metric {
+    /// `count [only] K`: actors alive.
+    Count(Who),
+    /// `born|became|eaten|died|thinks|traps [only] K`: a life counter so
+    /// far (`counter` is an `actors::life` index); with `cause`, only the
+    /// deaths of that cause.
     Tally {
         counter: usize,
         who: Who,
-        op: Op,
-        n: i64,
+        cause: Option<CauseIs>,
     },
-    /// `min|max|sum NAME of [only] K OP V`: a need or memory over every
-    /// actor of the kind. With none alive it fails, whatever `OP V` says.
-    Value {
-        agg: Agg,
-        name: String,
-        who: Who,
+    /// `min|max|sum NAME of [only] K`: a need or memory over every actor of
+    /// the kind; with none alive, no number.
+    Value { agg: Agg, name: String, who: Who },
+}
+
+/// One cause of death, counted apart: `eaten K by [only] K2` (the bite
+/// that killed was one of K2's family), `died K of NEED` (that vital need
+/// ran out).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CauseIs {
+    By(Who),
+    Of(String),
+}
+
+/// How an expectation over time folds its checks of a condition: true at
+/// all of them, at none, at one at least.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Over {
+    Always,
+    Never,
+    Eventually,
+}
+
+/// The span an expectation over time looks at, in ticks since the world
+/// was made: `from T` (else 0) to `to T` (else the time of its line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub from: u64,
+    pub to: u64,
+}
+
+/// What an `expect` checks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Expect {
+    /// `METRIC OP V`: now. A `min|max|sum` over a kind with none alive
+    /// fails, whatever `OP V` says.
+    Is {
+        metric: Metric,
         op: Op,
         v: i64,
     },
@@ -209,10 +251,28 @@ pub enum Expect {
     /// `checksum HEX`: the world with the rules hash; `state HEX`: without.
     Checksum(u64),
     State(u64),
+    /// `always|never|eventually COND [from T] [to T]`: COND (an `Is` or an
+    /// `At`) at every check of the window (`run_checks` makes them): true
+    /// at all of them, at none, at one at least.
+    Over {
+        over: Over,
+        cond: Box<Expect>,
+        window: Window,
+    },
+    /// `mean METRIC OP V [from T] [to T]`: the metric's average over the
+    /// window's checks; `mean COUNTER [only] K ... per day OP V`: how much
+    /// the counter grew per day across the window.
+    Mean {
+        metric: Metric,
+        per_day: bool,
+        op: Op,
+        v: f64,
+        window: Window,
+    },
 }
 
 /// A scenario test's statements, in the order written.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Check {
     /// `run T`: step T ticks.
     Run(u64),
@@ -240,23 +300,11 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     }
 }
 
-/// The words after `expect`.
-fn expectation(rest: &str) -> Result<Expect, String> {
-    const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, or `expect checksum|state HEX`";
-    let words: Vec<&str> = rest.split_whitespace().collect();
-    // `OP V` ending the line at `words[i..]`.
-    let op_value = |i: usize| -> Result<(Op, i64), String> {
-        match words[i.min(words.len())..] {
-            [op, v] => Ok((
-                Op::parse(op).ok_or_else(|| format!("`{op}` is not ==, !=, <, <=, > or >="))?,
-                value(v).map(i64::from).ok_or_else(|| {
-                    format!("`{v}` is not a number or a time (12, 90min, 2h, 1d)")
-                })?,
-            )),
-            _ => Err(FORMS.into()),
-        }
-    };
-    let counter = |w: &str| match w {
+const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first three after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
+const MEAN_FORMS: &str = "expected `expect mean count|min|max|sum ... OP V` or `expect mean born|became|eaten|died|thinks|traps [only] KIND per day OP V`, then `[from T] [to T]`";
+
+fn counter(w: &str) -> Option<usize> {
+    match w {
         "born" => Some(crate::actors::life::BORN),
         "became" => Some(crate::actors::life::BECAME),
         "eaten" => Some(crate::actors::life::EATEN),
@@ -264,43 +312,232 @@ fn expectation(rest: &str) -> Result<Expect, String> {
         "thinks" => Some(crate::actors::life::THINKS),
         "traps" => Some(crate::actors::life::TRAPS),
         _ => None,
-    };
-    let agg = |w: &str| match w {
+    }
+}
+
+fn agg(w: &str) -> Option<Agg> {
+    match w {
         "min" => Some(Agg::Min),
         "max" => Some(Agg::Max),
         "sum" => Some(Agg::Sum),
         _ => None,
-    };
+    }
+}
+
+/// A metric at the start of `words`, and the index after it.
+fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
     let first = *words.first().ok_or(FORMS)?;
     if first == "count" {
-        let (who, i) = who_at(&words, 1).ok_or(FORMS)?;
-        let (op, n) = op_value(i)?;
-        return Ok(Expect::Count { who, op, n });
+        let (who, i) = who_at(words, 1).ok_or(FORMS)?;
+        return Ok((Metric::Count(who), i));
     }
     if let Some(counter) = counter(first) {
-        let (who, i) = who_at(&words, 1).ok_or(FORMS)?;
-        let (op, n) = op_value(i)?;
-        return Ok(Expect::Tally {
-            counter,
-            who,
-            op,
-            n,
-        });
+        let (who, i) = who_at(words, 1).ok_or(FORMS)?;
+        use crate::actors::life::{DIED, EATEN};
+        let (cause, i) = match words.get(i).copied() {
+            Some("by") if counter == EATEN => {
+                let (by, j) =
+                    who_at(words, i + 1).ok_or("expected `eaten [only] KIND by [only] KIND`")?;
+                (Some(CauseIs::By(by)), j)
+            }
+            Some("of") if counter == DIED => {
+                let need = words
+                    .get(i + 1)
+                    .filter(|w| is_name(w))
+                    .ok_or("expected `died [only] KIND of NEED`")?;
+                (Some(CauseIs::Of(need.to_string())), i + 2)
+            }
+            Some("by" | "of") => {
+                return Err("`by KIND` counts only `eaten`, `of NEED` only `died`".into());
+            }
+            _ => (None, i),
+        };
+        return Ok((
+            Metric::Tally {
+                counter,
+                who,
+                cause,
+            },
+            i,
+        ));
     }
     if let Some(agg) = agg(first) {
         let name = words.get(1).filter(|w| is_name(w)).ok_or(FORMS)?;
         if words.get(2) != Some(&"of") {
             return Err(FORMS.into());
         }
-        let (who, i) = who_at(&words, 3).ok_or(FORMS)?;
-        let (op, v) = op_value(i)?;
-        return Ok(Expect::Value {
-            agg,
-            name: name.to_string(),
-            who,
-            op,
-            v,
-        });
+        let (who, i) = who_at(words, 3).ok_or(FORMS)?;
+        let name = name.to_string();
+        return Ok((Metric::Value { agg, name, who }, i));
+    }
+    Err(FORMS.into())
+}
+
+/// `OP V` ending the line at `words[i..]`.
+fn op_value(words: &[&str], i: usize) -> Result<(Op, i64), String> {
+    match words[i.min(words.len())..] {
+        [op, v] => Ok((
+            Op::parse(op).ok_or_else(|| format!("`{op}` is not ==, !=, <, <=, > or >="))?,
+            value(v)
+                .map(i64::from)
+                .ok_or_else(|| format!("`{v}` is not a number or a time (12, 90min, 2h, 1d)"))?,
+        )),
+        _ => Err(FORMS.into()),
+    }
+}
+
+/// `[from T] [to T]` ending `words`: the words before it, and the window,
+/// on a line reached `now` ticks after the world was made.
+fn window<'a, 'w>(words: &'a [&'w str], now: u64) -> Result<(&'a [&'w str], Window), String> {
+    let mut body = words;
+    let mut bound = |key: &str| -> Result<Option<u64>, String> {
+        let [rest @ .., k, t] = body else {
+            return Ok(None);
+        };
+        if *k != key {
+            return Ok(None);
+        }
+        let ticks = value(t)
+            .and_then(|v| u64::try_from(v).ok())
+            .ok_or_else(|| format!("`{key} {t}`: a time since the world began (90min, 2h, 1d)"))?;
+        body = rest;
+        Ok(Some(ticks))
+    };
+    let to = bound("to")?;
+    let from = bound("from")?;
+    let window = Window {
+        from: from.unwrap_or(0),
+        to: to.unwrap_or(now),
+    };
+    for (edge, at) in [("starts", window.from), ("ends", window.to)] {
+        if at > now {
+            return Err(format!(
+                "the window {edge} at {}, but this line comes at {}: `run` longer before it, or move the window",
+                span(at),
+                span(now)
+            ));
+        }
+    }
+    if window.from > window.to {
+        return Err(format!(
+            "the window starts at {}, after it ends ({})",
+            span(window.from),
+            span(window.to)
+        ));
+    }
+    Ok((body, window))
+}
+
+/// Ticks as a scenario writes a time, largest units first: `2d 3h`,
+/// `45min`, `7 ticks`, `0`.
+pub fn span(t: u64) -> String {
+    use crate::time::{TICKS_PER_DAY, TICKS_PER_HOUR, TICKS_PER_MINUTE};
+    if t > 0 && t < TICKS_PER_MINUTE {
+        return format!("{t} ticks");
+    }
+    let parts: Vec<String> = [
+        (t / TICKS_PER_DAY, "d"),
+        (t % TICKS_PER_DAY / TICKS_PER_HOUR, "h"),
+        (t % TICKS_PER_HOUR / TICKS_PER_MINUTE, "min"),
+    ]
+    .into_iter()
+    .filter(|(n, _)| *n > 0)
+    .map(|(n, unit)| format!("{n}{unit}"))
+    .collect();
+    if parts.is_empty() {
+        "0".into()
+    } else {
+        parts.join(" ")
+    }
+}
+
+/// The words after `expect`, on a line reached `now` ticks after the world
+/// was made (the `run` lines before it).
+fn expectation(rest: &str, now: u64) -> Result<Expect, String> {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    match words.first().copied() {
+        Some(w @ ("always" | "never" | "eventually")) => {
+            let over = match w {
+                "always" => Over::Always,
+                "never" => Over::Never,
+                _ => Over::Eventually,
+            };
+            let (body, window) = window(&words[1..], now)?;
+            match point(&body.join(" "))? {
+                Expect::Checksum(_) | Expect::State(_) => Err(format!(
+                    "`{w}` takes `METRIC OP V` or `at (X, Y) KIND|nobody`, not a checksum"
+                )),
+                cond => Ok(Expect::Over {
+                    over,
+                    cond: Box::new(cond),
+                    window,
+                }),
+            }
+        }
+        Some("mean") => {
+            let (body, window) = window(&words[1..], now)?;
+            let (metric, i) = metric_at(body).map_err(|_| MEAN_FORMS.to_string())?;
+            let (per_day, i) = match body.get(i..i + 2) {
+                Some(["per", "day"]) => (true, i + 2),
+                _ => (false, i),
+            };
+            let [op, v] = body[i.min(body.len())..] else {
+                return Err(MEAN_FORMS.into());
+            };
+            let op =
+                Op::parse(op).ok_or_else(|| format!("`{op}` is not ==, !=, <, <=, > or >="))?;
+            let v = v
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .or_else(|| value(v).map(f64::from))
+                .ok_or_else(|| {
+                    format!("`{v}` is not a number, a decimal or a time (12, 1.5, 90min, 2h, 1d)")
+                })?;
+            match (&metric, per_day) {
+                (Metric::Tally { .. }, false) => Err(
+                    "`mean` of a counter is how much it grows per day: `expect mean eaten KIND per day OP V`"
+                        .into(),
+                ),
+                (Metric::Tally { .. }, true) if window.from == window.to => Err(
+                    "a rate needs a window longer than zero: a `run` before this line, or `from` and `to`"
+                        .into(),
+                ),
+                (Metric::Count(_) | Metric::Value { .. }, true) => Err(
+                    "only a counter (born, became, eaten, died, thinks, traps) has a rate per day"
+                        .into(),
+                ),
+                _ => Ok(Expect::Mean {
+                    metric,
+                    per_day,
+                    op,
+                    v,
+                    window,
+                }),
+            }
+        }
+        _ => {
+            if let [.., "from" | "to", _] = words[..]
+                && point(rest).is_err()
+            {
+                return Err(
+                    "a window (`from T`, `to T`) only follows `always`, `never`, `eventually` or `mean`"
+                        .into(),
+                );
+            }
+            point(rest)
+        }
+    }
+}
+
+/// An expectation about now: `METRIC OP V`, `at ...`, `checksum`, `state`.
+fn point(rest: &str) -> Result<Expect, String> {
+    let words: Vec<&str> = rest.split_whitespace().collect();
+    let first = *words.first().ok_or(FORMS)?;
+    if first == "count" || counter(first).is_some() || agg(first).is_some() {
+        let (metric, i) = metric_at(&words)?;
+        let (op, v) = op_value(&words, i)?;
+        return Ok(Expect::Is { metric, op, v });
     }
     if first == "at" || first.starts_with("at(") {
         let tail = rest.trim_start().strip_prefix("at").unwrap_or("");
@@ -350,7 +587,15 @@ pub struct Scenario {
     /// written; in a file, relative to it. `--rules` and `WMC_RULES` come
     /// first, and a saved world keeps its own.
     pub packs: Vec<String>,
+    /// `seeds N`: a scenario test runs on `seed`, `seed + 1`, ... (`N` in
+    /// all, 1 when not given); `pass M`: it passes when every expectation
+    /// held on at least `M` of them (all, when not given).
+    pub seeds: u32,
+    pub pass: Option<u32>,
 }
+
+/// The most seeds a scenario test runs on (`seeds N`).
+pub const MAX_SEEDS: u32 = 1000;
 
 /// A scenario that does not parse: where and why.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -405,6 +650,8 @@ impl Default for Scenario {
             map: None,
             checks: Vec::new(),
             packs: Vec::new(),
+            seeds: 1,
+            pass: None,
         }
     }
 }
@@ -636,6 +883,10 @@ impl Scenario {
         let mut total = 0u64;
         let mut seed_line: Option<u32> = None;
         let mut size_line: Option<u32> = None;
+        let mut seeds_line: Option<u32> = None;
+        let mut pass_line: Option<u32> = None;
+        // Ticks the `run` lines so far step: where an `expect` comes.
+        let mut now = 0u64;
         // Where each terrain field was set, in `GenParams` order.
         let mut terrain_lines: [Option<u32>; 4] = [None; 4];
         let mut rows: Option<(u32, Vec<(u32, String)>)> = None;
@@ -664,6 +915,38 @@ impl Scenario {
                     .ok_or_else(|| err(line_no, format!("expected {what}")))
             };
             match head {
+                "seeds" | "pass" => {
+                    let at = if head == "seeds" {
+                        &mut seeds_line
+                    } else {
+                        &mut pass_line
+                    };
+                    if let Some(first) = *at {
+                        return Err(err(
+                            line_no,
+                            format!("a second `{head}` (first at line {first})"),
+                        ));
+                    }
+                    *at = Some(line_no);
+                    let n = match rest[..] {
+                        [n] => n
+                            .parse::<u32>()
+                            .ok()
+                            .filter(|n| (1..=MAX_SEEDS).contains(n)),
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        err(
+                            line_no,
+                            format!("expected `{head} N`, N from 1 to {MAX_SEEDS}"),
+                        )
+                    })?;
+                    if head == "seeds" {
+                        s.seeds = n;
+                    } else {
+                        s.pass = Some(n);
+                    }
+                }
                 "seed" => {
                     if let Some(first) = seed_line {
                         return Err(err(
@@ -961,9 +1244,10 @@ impl Scenario {
                         )
                     })?;
                     s.checks.push(Check::Run(t as u64));
+                    now = now.saturating_add(t as u64);
                 }
                 "expect" => {
-                    let what = expectation(&rest.join(" ")).map_err(|m| err(line_no, m))?;
+                    let what = expectation(&rest.join(" "), now).map_err(|m| err(line_no, m))?;
                     s.checks.push(Check::Expect {
                         line: line_no,
                         text: line.to_string(),
@@ -974,7 +1258,7 @@ impl Scenario {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect)"
+                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect, seeds, pass)"
                         ),
                     ));
                 }
@@ -985,6 +1269,14 @@ impl Scenario {
             line,
             msg,
         };
+        if let (Some(m), Some(line)) = (s.pass, pass_line)
+            && m > s.seeds
+        {
+            return Err(err(
+                line,
+                format!("`pass {m}`, but it runs on {} seeds (`seeds N`)", s.seeds),
+            ));
+        }
         let Some((map_line, drawn)) = rows else {
             if let Some((line, _)) = legend {
                 return Err(err(line, "a legend without a map".into()));
@@ -1462,6 +1754,176 @@ mod tests {
         assert!(Scenario::parse("p", "rules").is_err());
     }
 
+    /// Expectations over a window: `always`, `never`, `eventually` take a
+    /// condition, `mean` a metric (a counter per day); a window defaults to
+    /// the whole run before the line and may not reach past it; `by` and
+    /// `of` count deaths by cause; `seeds` and `pass` run it on several
+    /// seeds.
+    #[test]
+    fn expectations_over_a_window_parse() {
+        use crate::time::{days, hours};
+        let s = Scenario::parse(
+            "t",
+            "seeds 8
+             pass 7
+             run 2d
+             expect always count chicken >= 200 from 1d
+             expect never died chicken of water > 0
+             expect eventually at (3, 4) nobody from 2h to 1d
+             expect mean count fox >= 2.5 from 12h
+             expect mean eaten chicken by only fox per day >= 40 from 1d
+             expect eaten chick by fox == 0
+             run 1d
+             expect mean min food of fox > 12h to 2d",
+        )
+        .unwrap();
+        assert_eq!((s.seeds, s.pass), (8, Some(7)));
+        let who = |kind: &str, only| Who {
+            kind: kind.into(),
+            only,
+        };
+        let whats: Vec<&Expect> = s
+            .checks
+            .iter()
+            .filter_map(|c| match c {
+                Check::Expect { what, .. } => Some(what),
+                Check::Run(_) => None,
+            })
+            .collect();
+        let w = |from, to| Window { from, to };
+        assert_eq!(
+            whats[0],
+            &Expect::Over {
+                over: Over::Always,
+                cond: Box::new(Expect::Is {
+                    metric: Metric::Count(who("chicken", false)),
+                    op: Op::Ge,
+                    v: 200
+                }),
+                window: w(days(1), days(2)),
+            }
+        );
+        assert_eq!(
+            whats[1],
+            &Expect::Over {
+                over: Over::Never,
+                cond: Box::new(Expect::Is {
+                    metric: Metric::Tally {
+                        counter: crate::actors::life::DIED,
+                        who: who("chicken", false),
+                        cause: Some(CauseIs::Of("water".into())),
+                    },
+                    op: Op::Gt,
+                    v: 0
+                }),
+                window: w(0, days(2)),
+            }
+        );
+        assert!(
+            matches!(whats[2], Expect::Over { over: Over::Eventually, window, .. }
+            if *window == w(hours(2), days(1)))
+        );
+        assert_eq!(
+            whats[3],
+            &Expect::Mean {
+                metric: Metric::Count(who("fox", false)),
+                per_day: false,
+                op: Op::Ge,
+                v: 2.5,
+                window: w(hours(12), days(2)),
+            }
+        );
+        assert_eq!(
+            whats[4],
+            &Expect::Mean {
+                metric: Metric::Tally {
+                    counter: crate::actors::life::EATEN,
+                    who: who("chicken", false),
+                    cause: Some(CauseIs::By(who("fox", true))),
+                },
+                per_day: true,
+                op: Op::Ge,
+                v: 40.0,
+                window: w(days(1), days(2)),
+            }
+        );
+        assert!(matches!(
+            whats[5],
+            Expect::Is {
+                metric: Metric::Tally {
+                    cause: Some(CauseIs::By(_)),
+                    ..
+                },
+                ..
+            }
+        ));
+        assert!(
+            matches!(whats[6], Expect::Mean { per_day: false, window, v, .. }
+            if *window == w(0, days(2)) && *v == hours(12) as f64)
+        );
+        // Errors, on their line.
+        for (text, want) in [
+            (
+                "expect always count fox > 1 to 1h",
+                "the window ends at 1h, but this line comes at 0",
+            ),
+            (
+                "run 2h\nexpect always count fox > 1 from 3h",
+                "the window starts at 3h, but this line comes at 2h",
+            ),
+            (
+                "run 2h\nexpect always count fox > 1 from 2h to 1h",
+                "starts at 2h, after it ends (1h)",
+            ),
+            (
+                "run 2h\nexpect always count fox > 1 from -1h",
+                "`from -1h`: a time",
+            ),
+            (
+                "run 2h\nexpect count fox > 1 from 1h",
+                "a window (`from T`, `to T`) only follows",
+            ),
+            ("expect always checksum 00ff", "takes `METRIC OP V` or `at"),
+            (
+                "run 1d\nexpect mean eaten fox >= 1",
+                "`mean` of a counter is how much it grows per day",
+            ),
+            (
+                "expect mean eaten fox per day >= 1",
+                "a rate needs a window longer than zero",
+            ),
+            (
+                "run 1d\nexpect mean count fox per day >= 1",
+                "only a counter",
+            ),
+            ("run 1d\nexpect mean count fox", "expected `expect mean"),
+            (
+                "run 1d\nexpect mean count fox >= x",
+                "`x` is not a number, a decimal or a time",
+            ),
+            (
+                "expect died fox by chicken > 0",
+                "`by KIND` counts only `eaten`",
+            ),
+            ("expect eaten fox of water > 0", "`of NEED` only `died`"),
+            (
+                "expect died fox of > 0",
+                "expected `died [only] KIND of NEED`",
+            ),
+            ("seeds 0", "expected `seeds N`, N from 1 to 1000"),
+            ("seeds 1001", "expected `seeds N`"),
+            ("pass 2\npass 3", "a second `pass`"),
+            ("seeds 4\npass 5", "t:2: `pass 5`, but it runs on 4 seeds"),
+        ] {
+            let e = Scenario::parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(want), "{text}: {e}");
+        }
+        assert_eq!(Scenario::parse("t", "seed 3").unwrap().seeds, 1);
+        assert_eq!(span(0), "0");
+        assert_eq!(span(7), "7 ticks");
+        assert_eq!(span(days(2) + hours(3) + 45), "2d 3h 3min");
+    }
+
     /// A scenario test's lines, every form, in the order written.
     #[test]
     fn run_and_expect_lines_parse_in_order() {
@@ -1494,24 +1956,30 @@ mod tests {
             .collect();
         assert_eq!(s.checks[0], Check::Run(crate::time::days(2)));
         assert_eq!(s.checks[3], Check::Run(90));
+        let tally = |counter, who| Metric::Tally {
+            counter,
+            who,
+            cause: None,
+        };
         assert_eq!(
             whats,
             [
-                &Expect::Count {
-                    who: who("chicken", false),
+                &Expect::Is {
+                    metric: Metric::Count(who("chicken", false)),
                     op: Op::Eq,
-                    n: 0
+                    v: 0
                 },
-                &Expect::Tally {
-                    counter: crate::actors::life::EATEN,
-                    who: who("chick", true),
+                &Expect::Is {
+                    metric: tally(crate::actors::life::EATEN, who("chick", true)),
                     op: Op::Ge,
-                    n: 2
+                    v: 2
                 },
-                &Expect::Value {
-                    agg: Agg::Max,
-                    name: "food".into(),
-                    who: who("fox", false),
+                &Expect::Is {
+                    metric: Metric::Value {
+                        agg: Agg::Max,
+                        name: "food".into(),
+                        who: who("fox", false),
+                    },
                     op: Op::Gt,
                     v: crate::time::hours(23) as i64
                 },
@@ -1527,17 +1995,15 @@ mod tests {
                 },
                 &Expect::Checksum(0x8e1f_d4fd_7f84_a868),
                 &Expect::State(0xff),
-                &Expect::Tally {
-                    counter: crate::actors::life::TRAPS,
-                    who: who("hen", false),
+                &Expect::Is {
+                    metric: tally(crate::actors::life::TRAPS, who("hen", false)),
                     op: Op::Eq,
-                    n: 0
+                    v: 0
                 },
-                &Expect::Tally {
-                    counter: crate::actors::life::THINKS,
-                    who: who("fox", true),
+                &Expect::Is {
+                    metric: tally(crate::actors::life::THINKS, who("fox", true)),
                     op: Op::Gt,
-                    n: 3
+                    v: 3
                 },
             ]
         );

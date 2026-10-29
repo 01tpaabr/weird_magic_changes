@@ -32,7 +32,7 @@ use crate::actors::{
 use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
-pub use crate::scenario::{check_expect, expect};
+pub use crate::scenario::{Event, check_expect, expect, run_checks};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
 use crate::stage::worldgen::{GenParams, Terrain, generate_many};
 use crate::stage::{
@@ -877,7 +877,7 @@ mod fuzz;
 mod tests {
     use super::*;
     use crate::actors::{Cause, Tally, life};
-    use crate::scenario::{Agg, Expect, Who};
+    use crate::scenario::{Agg, Expect, Metric, Who};
     use crate::stage::{Feature, Ground};
 
     /// 150 x 70 cells, nobody placed: the streaming and save tests count
@@ -2007,12 +2007,14 @@ mod tests {
         for _ in 0..200 {
             step(&mut w);
         }
-        let water = |agg| Expect::Value {
-            agg,
-            name: "water".into(),
-            who: Who {
-                kind: "pool".into(),
-                only: false,
+        let water = |agg| Expect::Is {
+            metric: Metric::Value {
+                agg,
+                name: "water".into(),
+                who: Who {
+                    kind: "pool".into(),
+                    only: false,
+                },
             },
             op: Op::Eq,
             v: hours(2) as i64 - 200,

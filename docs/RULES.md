@@ -502,7 +502,7 @@ expect became chick == 1
 |---|---|
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
 | `expect count K OP N` | actors of K alive now |
-| `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died |
+| `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K (no actor: the check fails) |
 | `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell; the cell must be inside the world |
@@ -510,6 +510,59 @@ expect became chick == 1
 
 `OP` is one of `== != < <= > >=`. A kind means its family, as in the rules; `only K` means
 K alone (`expect count only chick == 1`).
+
+**Expectations over time.** The lines above check one moment. A goal is usually about a
+stretch of the run: the hens never die out, foxes eat so many a day. Four words look at a
+window of it instead:
+
+| line | holds when |
+|---|---|
+| `expect always COND [from T] [to T]` | COND held at every check in the window. COND is any line above but `checksum` and `state` |
+| `expect never COND ...` | it held at no check |
+| `expect eventually COND ...` | it held at one check at least |
+| `expect mean METRIC OP V ...` | the average, over the checks, of `count K` or `min\|max\|sum NAME of K` (a check with none alive is left out); `V` may be a decimal (`2.5`) |
+| `expect mean COUNTER K per day OP V ...` | how much a counter (`born`, `became`, `eaten`, `died`, `thinks`, `traps`, with its `by` or `of`) grew per day across the window: a rate |
+
+The window runs `from T` (else the world's start) `to T` (else the line itself), both times
+since the world was made, and it must lie within the `run` lines before its line. Its checks
+fall at its start, its end and every whole minute between (every 15 ticks), so a condition
+that lasts less than a minute can slip between two; a rate reads its counter at the two
+ends. The report says what it saw: `true at all 121 checks; it was 2`, `false at 3h 15min
+(180); from 150 to 260`, `first true at 1min (0)`, `mean 18.4 over 721 checks`, `24 per
+day: 2 in 2h`.
+
+**Several seeds.** One seed can be lucky. `seeds N` runs the test on seeds `seed`,
+`seed + 1`, ... (`N` of them, at most 1000), and `pass M` makes it pass when every
+expectation held on at least `M` of them (all, when not given); `wmc scenario --seeds N
+--pass M` overrides both. The report gives a line per seed (its verdict, what failed on it,
+its checksum), then how many seeds each expectation held on: `7/8`.
+
+```scenario
+# watched_pen.scenario
+seed 3
+seeds 4
+pass 3
+outside rock
+map {
+  .....
+  .###.
+  .FC#.
+  .###.
+}
+legend {
+  . soil
+  # rock
+  C chicken
+  F fox with (food = 2h)    # starving: it hunts at once
+}
+
+run 2h
+expect always count fox == 1                        # the fox lives
+expect eventually count chicken == 0                # and eats the hen
+expect never died chicken of water > 0              # she was not thirsty
+expect mean eaten chicken by fox per day >= 12      # one in two hours
+expect mean count chicken < 0.1                     # she lived a few minutes of 120
+```
 
 A scenario names kinds, so it has to fit the rules: a start naming a kind the rules don't
 define, or a trait, refuses the new world (a save's are skipped, §15), and so does one on
@@ -709,6 +762,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | rules files per rule set | 65536 |
 | a chain of `extends` | 128 kinds and traits below the one that extends them |
 | chunks a scenario's `size` generates at creation | 4096 (4096 x 4096 cells) |
+| seeds a scenario test runs on | 1000 |
 | cells each way from (0, 0) | 1000000000 (x and y run from -1000000000 to 999999999; beyond, rock and nobody, §14) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
