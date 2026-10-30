@@ -11,25 +11,38 @@
 # A bud's `seg` is DEPTH * 100 + cells left in its segment. A bud started with
 # `with (sleep = N)` waits N thinks before it sprouts, so a grove can grow in
 # turns.
+#
+# A tree lives TREE_LIFE ticks, then its trunk's foot turns to a stump and it
+# withers from there: a cell withers when the cell it grew from (right behind
+# it, by its heading) has, then falls. When it is gone the stump buds again,
+# and the dice grow another tree.
 
 const TRUNK = 12         # cells in the trunk
 const RATIO = 70         # each depth's segments this percent of the last's
 const DEPTH = 6          # branchings before the tips blossom
 const SPREAD = 25        # chance in 100 that a branch turns 90 degrees, not 45
 const GROW = 2           # ticks between a bud's thinks
-const WOOD_STILL = 1073741824
+const TREE_LIFE = 1200   # ticks from the trunk's foot turning to wood until it is a stump
+const FALL = 64          # ticks a withered cell hangs on before it falls
+const REGROW = 480       # ticks a stump waits for the old tree to fall
+const WOOD_CADENCE = 8   # ticks between a grown cell's looks behind it
 
-kind bud {
-  glyph "*"
-  color "#d6ff8a"
+# Everything a tree is made of: a cell of the picture, with where it grew
+# from (`heading`) and whether it is the trunk's foot (`root`).
+trait limb {
   cover
   solid
-  cadence GROW
   sight 1
-  mem heading, seg, sleep, phase
+  mem heading, seg, sleep, phase, root
+}
+
+kind bud extends limb {
+  glyph "*"
+  color "#d6ff8a"
+  cadence GROW
 
   when sleep > 0 => { sleep -= 1  idle }
-  when heading == 0 => { heading = 1  seg = TRUNK }        # a planted bud: the trunk, north; falls through
+  when heading == 0 => { root = 1  heading = 1  seg = TRUNK }   # a planted bud: the trunk, north; falls through
   when seg % 100 > 0 and phase == 0 => {                   # lays its segment: the next cell
     phase = 3
     spawn bud at dir(heading) with (heading = heading, seg = seg - 1)
@@ -62,10 +75,31 @@ sub blossom() {
   if chance(70) { become petal } else { become petal_white }
 }
 
-trait grown {
-  cover
-  solid
-  cadence WOOD_STILL
+# The cell right behind a heading: where a cell grew from.
+sub behind(h) {
+  return (h + 3) % 8 + 1
+}
+
+# Wood and blossom: the trunk's foot turns to a stump when the tree is old;
+# the rest withers when what it grew from has.
+trait grown extends limb {
+  cadence WOOD_CADENCE
+  when root == 1 and age >= TREE_LIFE => become stump
+  when root == 0 and (is(dir(behind(heading)), withered) or is(dir(behind(heading)), stump)) => become withered
+}
+
+kind withered extends limb {
+  glyph "%"
+  color "#5d4b3a"
+  cadence WOOD_CADENCE
+  when age >= FALL => die
+}
+
+kind stump extends limb {
+  glyph "_"
+  color "#4a3020"
+  cadence WOOD_CADENCE
+  when age >= REGROW => { heading = 0  seg = 0  phase = 0  sleep = rand(40)  become bud }
 }
 
 kind bark        extends grown { glyph "#"  color "#6b4226" }

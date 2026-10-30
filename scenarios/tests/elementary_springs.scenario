@@ -1,0 +1,26 @@
+# A board that flows (packs/elementary): its top row is springs, the middle
+# one always lit (`odds = 100`), the rest never. The first pick draws rule 90's
+# triangle, 729 lit cells in 64 rows; 384 ticks on the springs pick again,
+# the board is erased from the top and redrawn behind, the same triangle with
+# its colour bands one step on.
+rules ../../packs/elementary
+seed 1
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start spring 1 / 1 in (0, 0) to (127, 0)
+start unset 1 / 1 in (0, 1) to (127, 63)
+start spring at (64, 0) with (odds = 100)
+
+run 200
+expect count unset == 0
+expect count lit == 729
+expect at (64, 0) spring_lit
+expect at (32, 32) only lit_5          # the first pick: rows 32 to 39, band 4, one step on
+expect at (64, 32) unlit
+run 400                                # 600: picked again at about 386, redrawn by about 520
+expect count unset == 0
+expect count lit == 729
+expect at (32, 32) only lit            # two steps on: band 0
+expect eventually count unset > 1000 from 200 to 600   # the erase wave went through
+expect traps unset == 0
+expect traps spring == 0

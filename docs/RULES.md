@@ -655,13 +655,16 @@ checks a whole row against a plain simulation of the machine.
 Four more packs draw pictures, each with a scenario in `scenarios/` and a test in
 `scenarios/tests/` checked against a plain simulation. `packs/elementary` is any of
 Wolfram's 256 one-dimensional rules (`const RULE`), a row a generation: a cell waits until
-the three above it are decided, so rule 90 from one cell draws the Sierpinski triangle.
+the three above it are decided, so rule 90 from one cell draws the Sierpinski triangle; with
+a top row of `spring`s, which pick again every so often, the board is erased and redrawn in a
+wave, and never stands still.
 `packs/cyclic` is a cyclic automaton of 16 colours, where a cell takes the next colour round
 the ring once a neighbour has it; from soup, spirals. `packs/turmite` is Langton's ant and
 any turmite of up to 8 colours; each ant's rule is its memory, so a scenario starts ants
 with different rules (`start ant at (48, 48) with (turns = 12, colours = 4)`).
 `packs/lsystem` grows trees as the turtle reading of the L-system `X -> F[+X][-X]`, with
-dice in every segment and branch. `scenarios/glider_gun.scenario` is Gosper's glider gun in
+dice in every segment and branch; an old tree withers from its stump (each cell when the one it
+grew from has) and grows again. `scenarios/glider_gun.scenario` is Gosper's glider gun in
 `packs/life` with an eater that swallows its gliders, and
 `scenarios/fox_pen_showcase.scenario` a fox and a flock in a small walled pen. Every name is
 global, so packs meant to share a world keep their consts and traits apart

@@ -5,27 +5,38 @@
 # single lit cell draws the Sierpinski triangle (scenarios/elementary.scenario);
 # `--set RULE=30` is chaos, `--set RULE=110` is Turing complete.
 #
-# Every cell starts `unset` and waits for the three above it; then it turns lit
-# or unlit for good and stops thinking. Above the top row nothing is lit.
+# Every cell starts `unset` and waits for the three above it; then it is lit
+# or unlit for as long as they stay decided. Above the top row nothing is lit.
+#
+# A board can flow instead of stand: give its top row `spring`s. A spring
+# lights with `odds` chances in 100 (its memory: `with (odds = 100)` always),
+# holds for SPRING_LIFE ticks, then picks again; a cell whose parent goes
+# back to unset goes back too, so each pick erases the board in a wave from
+# the top and redraws it right behind, the colour bands one step on
+# (scenarios/gallery.scenario).
 
 const RULE = 90
 const ROW_CADENCE = 2        # an unset cell looks up every 2 ticks, staggered: a ragged front
-const BAND = 8           # rows of one colour of lit cells
-const ROW_STILL = 1073741824 # a decided cell: about once in 1500 game days
+const BAND = 8               # rows of one colour of lit cells
+const SPRING_LIFE = 384      # ticks a spring holds before it picks again
 
-kind unset {
+trait row_cell {
+  cover
+  solid                      # a pixel of the picture
+  sight 1
+}
+
+kind unset extends row_cell {
   glyph ","
   color "#30303a"
-  cover
-  solid                    # a pixel of the picture
   cadence ROW_CADENCE
-  sight 1
 
   when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => idle
   when true => {
     let v = RULE
     repeat is(at(x - 1, y - 1), lit) * 4 + is(north, lit) * 2 + is(at(x + 1, y - 1), lit) { v = v / 2 }
-    if v % 2 == 1 { shine(y / BAND) } else { become unlit }
+    look = look_of(north)    # the generation above: its colours
+    if v % 2 == 1 { shine(y / BAND + look_of(north)) } else { become unlit }
   }
 }
 
@@ -36,10 +47,11 @@ sub shine(band) {
   else if b == 3 { become lit_3 } else if b == 4 { become lit_4 } else { become lit_5 }
 }
 
-trait decided {
-  cover
-  solid
-  cadence ROW_STILL
+# A decided cell: back to unset as soon as a parent is (it looks every tick,
+# so it never misses one).
+trait decided extends row_cell {
+  cadence 1
+  when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => become unset
 }
 
 kind unlit extends decided { glyph "."  color "#14141c" }
@@ -49,3 +61,28 @@ kind lit_2 extends lit     { glyph "#"  color "#f5e663" }
 kind lit_3 extends lit     { glyph "#"  color "#6be37b" }
 kind lit_4 extends lit     { glyph "#"  color "#5ab8ff" }
 kind lit_5 extends lit     { glyph "#"  color "#b57bff" }
+
+# A spring and what it picked. Its `epoch` counts its picks; its look carries
+# it down the board, where it shifts the colour bands.
+trait source {
+  mem odds, epoch
+}
+
+kind spring extends unset, source {
+  glyph "^"
+  when true => {
+    epoch += 1
+    look = epoch % 6
+    if chance(odds) { become spring_lit } else { become spring_unlit }
+  }
+}
+
+kind spring_lit extends lit, source {
+  glyph "^"
+  when age >= SPRING_LIFE => become spring
+}
+
+kind spring_unlit extends unlit, source {
+  glyph "^"
+  when age >= SPRING_LIFE => become spring
+}

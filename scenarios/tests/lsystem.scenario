@@ -1,7 +1,8 @@
 # Two L-system trees (packs/lsystem): each trunk is 13 cells of bark (the
 # planted bud and TRUNK more), the second waits 40 thinks to sprout, and both
-# finish growing, every bud turned into wood or blossom. The dice shape the
-# crowns, so past the trunks the counts hold only for this seed.
+# finish growing, every bud turned into wood or blossom. Past TREE_LIFE they
+# wither from their stumps, fall and grow again. The dice shape the crowns,
+# so past the trunks the counts hold only for this seed.
 rules ../../packs/lsystem
 seed 1
 size 64 64
@@ -22,3 +23,13 @@ expect eventually count bud == 0 from 400
 expect count shoot >= 100
 expect count petal > 0
 expect traps bud == 0
+run 900                        # 1500: past TREE_LIFE, both trunks' feet are stumps
+expect count stump == 2
+expect count withered > 0      # and the trees wither from them
+run 600                        # 2100: fallen, and grown again from the stumps
+expect count stump == 0
+expect count withered == 0
+expect count bark == 26
+expect eventually count bud == 0 from 1500 to 2100
+expect traps stump == 0
+expect traps withered == 0
