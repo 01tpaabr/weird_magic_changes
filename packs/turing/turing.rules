@@ -27,7 +27,7 @@ const E0 = 0            # E: halt 0LA (halts writing 0)
 const E1 = 1
 
 const TAPE_CADENCE = 1  # the head and the live tape think every tick
-const STILL = 1073741824  # a finished cell: about once in 1500 game days
+const TAPE_STILL = 1073741824  # a finished cell: about once in 1500 game days
 
 # The head: a standing actor on the cell it reads. A step is two thinks: the
 # first reads and writes (the cell under it turns into what its look says, or
@@ -93,7 +93,7 @@ sub written(m) {
 # A cell of the tape: ground cover, under the head. It turns into what the
 # head standing on it wrote, and copies itself into the row below once that
 # row is open: the head stands under it, or a neighbour below has its copy.
-trait cell {
+trait symbol {
   cover
   tags tape
   cadence TAPE_CADENCE
@@ -109,13 +109,13 @@ trait cell {
 # and those it did, coloured by the state that wrote them. Once the row below
 # has its copy, a cell never changes again: it turns into its still twin,
 # which looks the same and does not think.
-kind one    extends cell { glyph "#"  color "#e6e6e6"  when is(south, tape) => become one_done }
+kind one    extends symbol { glyph "#"  color "#e6e6e6"  when is(south, tape) => become one_done }
 kind one_a  extends one  { glyph "#"  color "#ff5a50"  when is(south, tape) => become one_a_done }
 kind one_b  extends one  { glyph "#"  color "#ffc83c"  when is(south, tape) => become one_b_done }
 kind one_c  extends one  { glyph "#"  color "#5adc6e"  when is(south, tape) => become one_c_done }
 kind one_d  extends one  { glyph "#"  color "#50aaff"  when is(south, tape) => become one_d_done }
 kind one_e  extends one  { glyph "#"  color "#c878ff"  when is(south, tape) => become one_e_done }
-kind zero   extends cell { glyph "."  color "#24242c"  when is(south, tape) => become zero_done }
+kind zero   extends symbol { glyph "."  color "#24242c"  when is(south, tape) => become zero_done }
 kind zero_a extends zero { glyph "."  color "#5a2420"  when is(south, tape) => become zero_a_done }
 kind zero_b extends zero { glyph "."  color "#5a4818"  when is(south, tape) => become zero_b_done }
 kind zero_c extends zero { glyph "."  color "#205a2c"  when is(south, tape) => become zero_c_done }
@@ -125,7 +125,7 @@ kind zero_e extends zero { glyph "."  color "#4a2c5a"  when is(south, tape) => b
 trait done {
   cover
   tags tape
-  cadence STILL
+  cadence TAPE_STILL
 }
 
 kind one_done    extends done { glyph "#"  color "#e6e6e6" }

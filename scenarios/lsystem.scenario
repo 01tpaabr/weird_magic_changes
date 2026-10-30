@@ -1,0 +1,17 @@
+# A grove of L-system trees (the pack is packs/lsystem): each bud grows its
+# segment a cell a think, then splits in two, six times over, and the last
+# tips blossom. The dice vary every segment and branch, so no two trees are
+# alike; they sprout one after another, as their `sleep` runs out.
+#
+#   make run ARGS="play saves/lsystem --scenario scenarios/lsystem.scenario"
+#
+# A tree is grown in about 300 ticks and then stands still.
+rules ../packs/lsystem
+seed 1
+size 192 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0    # all soil
+start bud at (24, 62)
+start bud at (64, 62) with (sleep = 60)
+start bud at (104, 62) with (sleep = 120)
+start bud at (144, 62) with (sleep = 180)
+start bud at (176, 62) with (sleep = 240)

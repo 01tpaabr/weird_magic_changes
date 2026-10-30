@@ -9,15 +9,15 @@
 # or unlit for good and stops thinking. Above the top row nothing is lit.
 
 const RULE = 90
-const CADENCE = 2        # an unset cell looks up every 2 ticks, staggered: a ragged front
+const ROW_CADENCE = 2        # an unset cell looks up every 2 ticks, staggered: a ragged front
 const BAND = 8           # rows of one colour of lit cells
-const STILL = 1073741824 # a decided cell: about once in 1500 game days
+const ROW_STILL = 1073741824 # a decided cell: about once in 1500 game days
 
 kind unset {
   glyph ","
   color "#30303a"
   cover
-  cadence CADENCE
+  cadence ROW_CADENCE
   sight 1
 
   when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => idle
@@ -37,7 +37,7 @@ sub shine(band) {
 
 trait decided {
   cover
-  cadence STILL
+  cadence ROW_STILL
 }
 
 kind unlit extends decided { glyph "."  color "#14141c" }

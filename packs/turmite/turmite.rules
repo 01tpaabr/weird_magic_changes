@@ -12,7 +12,7 @@
 
 const TURNS = 1          # Langton's ant: right on blank (bit 0), left on paint
 const COLOURS = 2        # blank and one paint; at most 8
-const CADENCE = 1        # an ant takes two thinks a step
+const ANT_CADENCE = 1        # an ant takes two thinks a step
 
 # A step is two thinks: the first reads, turns and paints (a blank cell gets
 # paint; a painted one turns into what the ant's look says), the second moves.
@@ -20,7 +20,7 @@ const CADENCE = 1        # an ant takes two thinks a step
 kind ant {
   glyph "@"
   color "#ffffff"
-  cadence CADENCE
+  cadence ANT_CADENCE
   sight 1
   mem heading, turns, colours, go, steps
 
@@ -70,7 +70,7 @@ sub repaint(n) {
 # standing on it says, or wears off back to blank (255).
 trait ink {
   cover
-  cadence CADENCE
+  cadence ANT_CADENCE
   sight 0
 
   when is(here, ant) and look_of(here) == 255 => die

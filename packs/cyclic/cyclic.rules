@@ -8,11 +8,11 @@
 # board as it stood when the tick began: one generation a tick, as in Life.
 
 const THRESHOLD = 1      # neighbours of the next colour that take a cell
-const CADENCE = 1        # ticks a generation
+const HUE_CADENCE = 1        # ticks a generation
 
 trait hue {
   cover
-  cadence CADENCE
+  cadence HUE_CADENCE
   sight 1
 }
 

@@ -1,0 +1,24 @@
+# Two L-system trees (packs/lsystem): each trunk is 13 cells of bark (the
+# planted bud and TRUNK more), the second waits 40 thinks to sprout, and both
+# finish growing, every bud turned into wood or blossom. The dice shape the
+# crowns, so past the trunks the counts hold only for this seed.
+rules ../../packs/lsystem
+seed 1
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start bud at (14, 62)
+start bud at (48, 62) with (sleep = 40)
+
+run 26                         # the first trunk is 13 thinks tall
+expect at (14, 50) bark
+expect at (14, 49) nobody
+expect at (48, 61) nobody      # the second has not sprouted
+expect at (48, 62) bud
+run 574
+expect count bud == 0          # both grown
+expect count bark == 26
+expect at (48, 50) bark
+expect eventually count bud == 0 from 400
+expect count shoot >= 100
+expect count petal > 0
+expect traps bud == 0

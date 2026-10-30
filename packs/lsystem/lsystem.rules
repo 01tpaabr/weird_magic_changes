@@ -1,0 +1,75 @@
+# A branching tree from an L-system, as a pack: the turtle reading of
+# X -> F[+X][-X], where F is a segment, + and - turn 45 degrees and the
+# brackets are a branch. A bud is the turtle: it lays its segment one cell a
+# think, buds the next cell and turns into wood; at a segment's end it puts
+# out two buds, turned left and right, each with a segment about two thirds
+# as long, until the last ones blossom. Each segment's length and each
+# branch's angle vary a little by the dice, so every tree on a board is its
+# own (scenarios/lsystem.scenario). A branch turns 90 degrees now and then,
+# but never toward the ground where 45 will do.
+#
+# A bud's `seg` is DEPTH * 100 + cells left in its segment. A bud started with
+# `with (sleep = N)` waits N thinks before it sprouts, so a grove can grow in
+# turns.
+
+const TRUNK = 12         # cells in the trunk
+const RATIO = 70         # each depth's segments this percent of the last's
+const DEPTH = 6          # branchings before the tips blossom
+const SPREAD = 25        # chance in 100 that a branch turns 90 degrees, not 45
+const GROW = 2           # ticks between a bud's thinks
+const WOOD_STILL = 1073741824
+
+kind bud {
+  glyph "*"
+  color "#d6ff8a"
+  cover
+  cadence GROW
+  sight 1
+  mem heading, seg, sleep, phase
+
+  when sleep > 0 => { sleep -= 1  idle }
+  when heading == 0 => { heading = 1  seg = TRUNK }        # a planted bud: the trunk, north; falls through
+  when seg % 100 > 0 and phase == 0 => {                   # lays its segment: the next cell
+    phase = 3
+    spawn bud at dir(heading) with (heading = heading, seg = seg - 1)
+  }
+  when seg / 100 >= DEPTH and phase == 0 => blossom()     # a last segment's end
+  when phase == 0 => { phase = 1  branch(heading, -1, seg / 100 + 1) }
+  when phase == 1 => { phase = 3  branch(heading, 1, seg / 100 + 1) }
+  when true => wood(seg / 100)
+}
+
+# A branch off heading H to the side S (-1 left, 1 right), at depth D.
+sub branch(h, s, d) {
+  let turn = 1
+  if chance(SPREAD) { turn = 2 }
+  let to = (h - 1 + s * turn + 8) % 8 + 1
+  if to >= 4 and to <= 6 { to = (h - 1 + s + 8) % 8 + 1 }   # not toward the ground, if 45 degrees will do
+  let len = TRUNK
+  repeat d { len = len * RATIO / 100 }
+  len = max(1, len * (75 + rand(50)) / 100)
+  spawn bud at dir(to) with (heading = to, seg = d * 100 + len)
+}
+
+sub wood(d) {
+  if d == 0 { become bark } else if d == 1 { become bough }
+  else if d == 2 { become branch_wood } else if d == 3 { become twig }
+  else { become shoot }
+}
+
+sub blossom() {
+  if chance(70) { become petal } else { become petal_white }
+}
+
+trait grown {
+  cover
+  cadence WOOD_STILL
+}
+
+kind bark        extends grown { glyph "#"  color "#6b4226" }
+kind bough       extends grown { glyph "#"  color "#7d5a35" }
+kind branch_wood extends grown { glyph "#"  color "#7a7a3a" }
+kind twig        extends grown { glyph "#"  color "#5c9a3c" }
+kind shoot       extends grown { glyph "#"  color "#79c84f" }
+kind petal       extends grown { glyph "*"  color "#ff8fc0" }
+kind petal_white extends grown { glyph "*"  color "#fff0f6" }
