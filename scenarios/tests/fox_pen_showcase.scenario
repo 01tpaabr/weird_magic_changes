@@ -1,0 +1,58 @@
+# A fox and a flock in a walled pen (the built-in kinds, rules/): a dozen
+# hens graze the meadow and the seeds, drink at the pond and lay eggs; a fox
+# in the middle wakes hungry, stalks them and eats where the flock is thick.
+# The hens flee it, so the hunt is a chase round the pond.
+#
+#   (scenarios/fox_pen_showcase.scenario plays it; this checks it on 4 seeds)
+seed 1
+seeds 4
+pass 3                         # a hen or a chick dies on 12 seeds in 16; the fox lives on all 16
+outside rock
+
+map {
+  ################################################
+  #...,.......,..................................#
+  #.,..........,.,.,...,,......s.................#
+  #....,.......,.....,...........,.,...,,.,......#
+  #..,..................s.,..,....,...,..........#
+  #..............,.......................,.......#
+  #.....C.................,....~~~~~~~~~.........#
+  #.......C..,..........,.....~~~~~~~~~~~.....,..#
+  #.......s....s..,...,....,.~~~~~~~~~~~~~......s#
+  #,.,,C...,...............s.~~~~~~~~~~~~~......,#
+  #....,.s.......,...........~~~~~~~~~~~~~,.,....#
+  #....................,......~~~~~~~~~~~....s..,#
+  #...,s.,...........,.........~~~~~~~~~.........#
+  #...........,.,..s.,..#..............,.....,...#
+  #........,,.,,.,,.......................#......#
+  #,....,,...,,,.,,,,.....,......,............,..#
+  #....,,,.,C,,,,,,,,,......,....................#
+  #,..,,,,,,,,.,,,,,,,,..........................#
+  #...,,,.,..,,,,,s,..,...C.........,,...........#
+  #...s,,.,,,,,,,,,,..,..s,....,......,..........#
+  #....,,,,,......C.,s..........F.........C....s.#
+  #...,,,C,,,.,.,,,,,,,....,...........s.,....,..#
+  #.....,,.,,,,.C.,.,,........,....,....s.,.C....#
+  #.,,..,..,,,.,,,.,,.C.............s...C........#
+  #.........,,,.,.,..........,.,....,........s...#
+  #...............,.,.....,............,......,.,#
+  #s.....................,........,...........,..#
+  ################################################
+}
+legend {
+  . soil
+  # rock
+  ~ water
+  , grass
+  s seed
+  C chicken
+  F fox with (food = 10h)      # hungry from the start
+}
+
+run 1d
+expect eaten chicken by fox >= 1         # the fox hunts the flock
+expect always count fox == 1             # and with 10 hours of food at the start, living a day means it ate
+expect always count chicken >= 8         # nor does it empty the pen in a day
+expect born egg >= 4                     # the flock lays
+expect traps chicken == 0
+expect traps fox == 0

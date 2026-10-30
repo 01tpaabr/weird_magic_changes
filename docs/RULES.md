@@ -632,6 +632,21 @@ turns into a still twin with a very long `cadence`, which costs almost nothing.
 `scenarios/turing.scenario` draws its first 10 000 steps; `scenarios/tests/turing.scenario`
 checks a whole row against a plain simulation of the machine.
 
+Four more packs draw pictures, each with a scenario in `scenarios/` and a test in
+`scenarios/tests/` checked against a plain simulation. `packs/elementary` is any of
+Wolfram's 256 one-dimensional rules (`const RULE`), a row a generation: a cell waits until
+the three above it are decided, so rule 90 from one cell draws the Sierpinski triangle.
+`packs/cyclic` is a cyclic automaton of 16 colours, where a cell takes the next colour round
+the ring once a neighbour has it; from soup, spirals. `packs/turmite` is Langton's ant and
+any turmite of up to 8 colours; each ant's rule is its memory, so a scenario starts ants
+with different rules (`start ant at (48, 48) with (turns = 12, colours = 4)`).
+`packs/lsystem` grows trees as the turtle reading of the L-system `X -> F[+X][-X]`, with
+dice in every segment and branch. `scenarios/glider_gun.scenario` is Gosper's glider gun in
+`packs/life` with an eater that swallows its gliders, and
+`scenarios/fox_pen_showcase.scenario` a fox and a flock in a small walled pen. Every name is
+global, so packs meant to share a world keep their consts and traits apart
+(`TAPE_STILL`, `ROW_CADENCE`); all of these compile together with the built-in kinds.
+
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
 keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
