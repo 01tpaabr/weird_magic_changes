@@ -8,7 +8,9 @@
 //! - **Scenarios**, **Packs**: the scenario and rules files, each with what
 //!   its header comment says and whether it compiles (the lint); Enter opens
 //!   it in the user's editor (`WMC_EDITOR`, else the system's text editor).
-//!   `r` in a world reloads edited rules.
+//!   `r` in a world reloads edited rules. Their first row makes a new one
+//!   from a template ([`scenario_template`], [`pack_template`]): a world that
+//!   runs, every line explained, to change.
 //! - **Quit**.
 //!
 //! The keyboard or the mouse: pointing at a row chooses it, a click opens
@@ -73,6 +75,13 @@ pub enum Action {
     Quit,
 }
 
+/// What a new file from a template is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Make {
+    Scenario,
+    Pack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Page {
     Main,
@@ -85,6 +94,11 @@ pub enum Page {
     },
     Scenarios,
     Packs,
+    /// The name of a new scenario or pack.
+    Make {
+        what: Make,
+        text: String,
+    },
 }
 
 /// A save directory, newest first.
@@ -179,9 +193,11 @@ impl Menu {
         match &self.page {
             Page::Main => MAIN.len(),
             Page::Load => self.saves.len(),
-            Page::New | Page::Scenarios => self.scenarios.len(),
-            Page::Name { .. } => 0,
-            Page::Packs => self.rules.len(),
+            Page::New => self.scenarios.len(),
+            // The first row makes a new one.
+            Page::Scenarios => self.scenarios.len() + 1,
+            Page::Packs => self.rules.len() + 1,
+            Page::Name { .. } | Page::Make { .. } => 0,
         }
     }
 
@@ -205,8 +221,9 @@ impl Menu {
 
     /// A click on list item `i`: chosen, then opened, as Enter.
     pub fn click(&mut self, i: usize) -> Option<Action> {
-        // The name page lists one row: the name.
-        if (matches!(self.page, Page::Name { .. }) && i == 0) || i < self.len() {
+        // The name pages list one row: the name.
+        let naming = matches!(self.page, Page::Name { .. } | Page::Make { .. });
+        if (naming && i == 0) || i < self.len() {
             self.hover(i);
             return self.key(Key::Enter);
         }
@@ -238,6 +255,41 @@ impl Menu {
                             scenario: scenario.clone(),
                             dir,
                         });
+                    }
+                }
+            }
+            return None;
+        }
+        if let Page::Make { what, text } = &mut self.page {
+            let what = *what;
+            let back = match what {
+                Make::Scenario => Page::Scenarios,
+                Make::Pack => Page::Packs,
+            };
+            match key {
+                Key::Char(c) if ident_char(c, text.is_empty()) && text.len() < NAME_MAX => {
+                    text.push(c);
+                }
+                Key::Char(_) | Key::Up | Key::Down => {}
+                Key::Erase if !text.is_empty() => {
+                    text.pop();
+                }
+                Key::Erase | Key::Back => self.go(back),
+                Key::Enter => {
+                    let name = text.clone();
+                    match make(&self.root, what, &name) {
+                        Ok(open) => {
+                            self.go(back);
+                            self.rescan();
+                            self.at = match what {
+                                Make::Scenario => self.scenarios.iter().position(|f| *f == open),
+                                Make::Pack => self.rules.iter().position(|r| r.path == open),
+                            }
+                            .map_or(0, |i| i + 1);
+                            self.note = Some((format!("made {}", shown(&open)), true));
+                            return Some(Action::Edit(open));
+                        }
+                        Err(e) => self.note = Some((e, false)),
                     }
                 }
             }
@@ -278,14 +330,25 @@ impl Menu {
                     };
                 }
             }
-            Page::Scenarios => return self.scenarios.get(self.at).cloned().map(Action::Edit),
+            Page::Scenarios | Page::Packs if self.at == 0 => {
+                let what = if self.page == Page::Scenarios {
+                    Make::Scenario
+                } else {
+                    Make::Pack
+                };
+                self.page = Page::Make {
+                    what,
+                    text: String::new(),
+                };
+            }
+            Page::Scenarios => return self.scenarios.get(self.at - 1).cloned().map(Action::Edit),
             Page::Packs => {
                 return self
                     .rules
-                    .get(self.at)
+                    .get(self.at - 1)
                     .map(|r| Action::Edit(r.path.clone()));
             }
-            Page::Name { .. } => {}
+            Page::Name { .. } | Page::Make { .. } => {}
         }
         None
     }
@@ -368,6 +431,7 @@ impl Menu {
                 "up/down, wheel or point: choose | enter or click: open | esc or right click: back"
             }
             Page::Name { .. } => "type a name | enter or click: make the world | esc: back",
+            Page::Make { .. } => "type a name | enter or click: make it and open it | esc: back",
             Page::Scenarios | Page::Packs => {
                 "choose | enter or click: edit (WMC_EDITOR, else the system's) | esc: back"
             }
@@ -398,11 +462,28 @@ impl Menu {
             ),
             Page::Scenarios => (
                 "Scenarios: enter opens the file".into(),
-                self.scenarios.iter().map(|f| item(stem(f))).collect(),
+                std::iter::once(("+ New scenario".to_string(), OK))
+                    .chain(self.scenarios.iter().map(|f| item(stem(f))))
+                    .collect(),
             ),
             Page::Packs => (
                 "Packs: their rules files; enter opens one".into(),
-                self.rules.iter().map(|r| item(rules_name(r))).collect(),
+                std::iter::once(("+ New pack".to_string(), OK))
+                    .chain(self.rules.iter().map(|r| item(rules_name(r))))
+                    .collect(),
+            ),
+            Page::Make { what, text } => (
+                match what {
+                    Make::Scenario => "New scenario: its name".to_string(),
+                    Make::Pack => "New pack: its name".to_string(),
+                },
+                vec![(
+                    match what {
+                        Make::Scenario => format!("scenarios/{text}_"),
+                        Make::Pack => format!("packs/{text}_"),
+                    },
+                    TITLE_FG,
+                )],
             ),
             Page::Name { scenario, text } => (
                 format!("New world from {}: its name", stem(scenario)),
@@ -429,9 +510,36 @@ impl Menu {
                 _ => vec![],
             },
             Page::Load => self.saves.get(self.at).map(save_about).unwrap_or_default(),
+            Page::Scenarios | Page::Packs if self.at == 0 => vec![(
+                match self.page {
+                    Page::Scenarios => {
+                        "A new scenario from a template: a world that runs, \
+                                        every line explained, to change."
+                    }
+                    _ => {
+                        "A new pack from a template: two kinds that run, every \
+                          line explained, and a scenario to try them in."
+                    }
+                }
+                .into(),
+                DIM,
+            )],
+            Page::Make { what, .. } => vec![(
+                match what {
+                    Make::Scenario => "Lowercase letters, digits and _: the file is \
+                                       scenarios/<name>.scenario."
+                        .to_string(),
+                    Make::Pack => "Lowercase letters, digits and _: the pack is \
+                                   packs/<name>/, its kinds <name>_walker and <name>_moss, \
+                                   and scenarios/<name>.scenario tries it."
+                        .to_string(),
+                },
+                DIM,
+            )],
             Page::New | Page::Scenarios | Page::Name { .. } => {
                 let f = match &self.page {
                     Page::Name { scenario, .. } => Some(scenario.clone()),
+                    Page::Scenarios => self.scenarios.get(self.at - 1).cloned(),
                     _ => self.scenarios.get(self.at).cloned(),
                 };
                 match f {
@@ -443,7 +551,7 @@ impl Menu {
                     None => vec![],
                 }
             }
-            Page::Packs => match self.rules.get(self.at).cloned() {
+            Page::Packs => match self.rules.get(self.at - 1).cloned() {
                 Some(r) => self
                     .about
                     .entry(r.path.clone())
@@ -587,6 +695,122 @@ fn rules_name(r: &RulesFile) -> String {
         return name_of(&r.path);
     }
     format!("{}/{}", name_of(&r.pack), name_of(&r.path))
+}
+
+/// A character of a new scenario's or pack's name: it names kinds and
+/// constants too, so an identifier, lowercase.
+fn ident_char(c: char, first: bool) -> bool {
+    c.is_ascii_lowercase() || (!first && (c.is_ascii_digit() || c == '_'))
+}
+
+/// Make a scenario or a pack (and a scenario to try it) named `name` from its
+/// template under `root`; the file to open, or why not.
+pub fn make(root: &Path, what: Make, name: &str) -> Result<PathBuf, String> {
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(|c| ident_char(c, true)) || !chars.all(|c| ident_char(c, false)) {
+        return Err("a name of lowercase letters, digits and _, from a letter".into());
+    }
+    let scenario = root.join("scenarios").join(format!("{name}.scenario"));
+    let (open, files) = match what {
+        Make::Scenario => (scenario.clone(), vec![(scenario, scenario_template(name))]),
+        Make::Pack => {
+            let rules = root.join("packs").join(name).join(format!("{name}.rules"));
+            let (pack, try_it) = pack_template(name);
+            (rules.clone(), vec![(rules, pack), (scenario, try_it)])
+        }
+    };
+    if let Some((taken, _)) = files.iter().find(|(f, _)| f.exists()) {
+        return Err(format!("{} is taken", shown(taken)));
+    }
+    if what == Make::Pack && root.join("packs").join(name).exists() {
+        return Err(format!("packs/{name} is taken"));
+    }
+    for (f, text) in files {
+        let dir = f.parent().expect("a file in a directory");
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&f, text))
+            .map_err(|e| format!("could not write {}: {e}", shown(&f)))?;
+    }
+    Ok(open)
+}
+
+/// A new scenario: the built-in kinds on a noise terrain, every line
+/// explained.
+pub fn scenario_template(name: &str) -> String {
+    format!(
+        r##"# {name}: a new world. Every line is in docs/RULES.md, section 14 (scenarios).
+# Change it and save; the menu's New world makes a world of it, Scenarios
+# says whether it fits its rules.
+#
+# The rule packs the world runs, relative to this file. None: the built-in
+# kinds (chickens, foxes, bees, grass, flowers, trees). Several add up:
+# rules ../packs/life
+seed 1                          # the dice: terrain, who starts where, every think
+size 128 96                     # cells made at the start; the rest as the camera comes
+terrain water_scale 12 water_level 0.25 rock_on_soil 0.03 rock_on_water 0.01
+
+# Who starts where: a share of the walkable cells (everywhere, or `in (x0, y0)
+# to (x1, y1)`), or one at a cell: `start fox at (10, 20) with (food = 6h)`.
+start grass   1 / 6
+start seed    1 / 80
+start flower  1 / 200
+start chicken 1 / 300
+start fox     1 / 3000
+
+# A test, if you like: step, then check (`wmc scenario scenarios/{name}.scenario`).
+# run 1d
+# expect count chicken > 0
+"##
+    )
+}
+
+/// A new pack, `packs/<name>/<name>.rules`, and a scenario to try it. Every
+/// name in a world's rules is global, so its kinds and constant carry the
+/// pack's name.
+pub fn pack_template(name: &str) -> (String, String) {
+    let upper = name.to_uppercase();
+    let rules = format!(
+        r##"# {name}: a new pack. Kinds, rules, senses and actions are in docs/RULES.md;
+# `wmc lint packs/{name}` checks it, scenarios/{name}.scenario plays it, and in
+# a world `r` reloads it as you change it. Every name is global across the
+# packs a world runs, so this pack's carry its name.
+
+const {upper}_SPREAD = 4        # chances in 100 that moss spreads, each of its thinks
+
+# A walker: wanders, and leaves moss where it stands on bare ground.
+kind {name}_walker {{
+  glyph "@"
+  color "#ffd166"
+  cadence 4                     # thinks every 4 ticks
+  sight 1                       # sees the cells around it
+
+  when is(here, bare) => spawn {name}_moss at here
+  when true => move random free
+}}
+
+# Moss: ground cover, a whole cell of green, that creeps onto bare ground.
+kind {name}_moss {{
+  glyph ","
+  color "#5c9a3c"
+  cover                         # lies under whoever stands on it
+  solid                         # drawn as a whole cell of its colour
+  cadence 64
+  sight 1
+
+  when chance({upper}_SPREAD) and nearest bare within 1 as b => spawn {name}_moss at b
+}}
+"##
+    );
+    let scenario = format!(
+        r##"# {name}: a world of the pack in packs/{name}. New world in the menu makes it.
+rules ../packs/{name}
+seed 1
+size 128 96
+terrain water_scale 12 water_level 0.2 rock_on_soil 0.03 rock_on_water 0
+start {name}_walker 1 / 400
+"##
+    );
+    (rules, scenario)
 }
 
 fn name_char(c: char) -> bool {
@@ -947,6 +1171,7 @@ mod tests {
         let root = tree("edit");
         let mut m = Menu::scan(&root);
         m.go(Page::Packs);
+        m.key(Key::Down); // past "+ New pack" and the built-in rules/x.rules
         m.key(Key::Down);
         assert_eq!(
             m.key(Key::Enter),
@@ -964,6 +1189,7 @@ mod tests {
                 .any(|l| l.contains("pack p: 1 kinds, 0 warnings"))
         );
         m.go(Page::Scenarios);
+        m.key(Key::Down); // past "+ New scenario"
         assert_eq!(
             m.key(Key::Enter),
             Some(Action::Edit(root.join("scenarios/a.scenario")))
@@ -1022,6 +1248,102 @@ mod tests {
         assert!(matches!(m.page, Page::Name { .. }));
         assert!(m.click(0).is_some(), "the name's row makes the world");
         assert_eq!(m.click(999), None);
+    }
+
+    /// `+ New scenario` and `+ New pack`: a name that can name kinds, never
+    /// over a file; the new file is listed, chosen and opened.
+    #[test]
+    fn new_files_come_from_templates() {
+        let root = tree("make");
+        let mut m = Menu::scan(&root);
+        m.go(Page::Scenarios);
+        assert_eq!(m.key(Key::Enter), None);
+        assert_eq!(
+            m.page,
+            Page::Make {
+                what: Make::Scenario,
+                text: String::new()
+            }
+        );
+        for c in "9My-new_1".chars() {
+            m.key(Key::Char(c));
+        }
+        assert_eq!(
+            m.page,
+            Page::Make {
+                what: Make::Scenario,
+                text: "ynew_1".into()
+            },
+            "lowercase, digits and _, from a letter"
+        );
+        let made = root.join("scenarios/ynew_1.scenario");
+        assert_eq!(m.key(Key::Enter), Some(Action::Edit(made.clone())));
+        assert!(made.is_file());
+        assert_eq!(m.page, Page::Scenarios);
+        assert_eq!(m.scenarios.get(m.at - 1), Some(&made), "listed and chosen");
+        m.go(Page::Scenarios);
+        m.key(Key::Enter);
+        for c in "a".chars() {
+            m.key(Key::Char(c));
+        }
+        assert_eq!(m.key(Key::Enter), None, "a.scenario is there already");
+        assert!(m.note.as_ref().unwrap().0.contains("is taken"));
+        m.key(Key::Back);
+        m.go(Page::Packs);
+        m.key(Key::Enter);
+        for c in "fern".chars() {
+            m.key(Key::Char(c));
+        }
+        let rules = root.join("packs/fern/fern.rules");
+        assert_eq!(m.key(Key::Enter), Some(Action::Edit(rules.clone())));
+        assert!(rules.is_file() && root.join("scenarios/fern.scenario").is_file());
+        assert_eq!(m.rules.get(m.at - 1).map(|r| &r.path), Some(&rules));
+        assert!(make(&root, Make::Pack, "fern").is_err(), "taken");
+        assert!(make(&root, Make::Pack, "").is_err());
+    }
+
+    /// Both templates make worlds that run: their packs compile, their
+    /// starts fit, nothing traps, and the pack's moss spreads.
+    #[test]
+    fn the_templates_make_worlds_that_run() {
+        let root = tree("templates");
+        let runs = |f: &Path, extra: &str| {
+            let text = std::fs::read_to_string(f).unwrap() + extra;
+            std::fs::write(f, text).unwrap();
+            let s = crate::read_scenario(&f.to_string_lossy()).unwrap();
+            let packs: Vec<PathBuf> = s.packs.iter().map(PathBuf::from).collect();
+            let kinds = crate::compile(&packs).unwrap();
+            assert!(
+                kinds
+                    .debug
+                    .diagnostics
+                    .iter()
+                    .all(|d| d.level != sim_core::rules::Level::Warning),
+                "{:?}",
+                kinds.debug.diagnostics
+            );
+            let mut world = sim_core::sim::new_world_with(&s, kinds).unwrap();
+            let mut failed = Vec::new();
+            sim_core::sim::run_checks(&mut world, &s.checks, |e| {
+                if let sim_core::sim::Event::Expected { text, result, .. } = e
+                    && !matches!(result, Ok((true, _)))
+                {
+                    failed.push(format!("{text}: {result:?}"));
+                }
+            });
+            assert!(failed.is_empty(), "{}: {failed:?}", f.display());
+        };
+        let f = make(&root, Make::Scenario, "meadow").unwrap();
+        runs(
+            &f,
+            "run 2h\nexpect count chicken > 0\nexpect traps chicken == 0\nexpect traps fox == 0\n",
+        );
+        make(&root, Make::Pack, "moss").unwrap();
+        runs(
+            &root.join("scenarios/moss.scenario"),
+            "run 1h\nexpect count moss_moss > 100\nexpect count moss_walker > 0\n\
+             expect traps moss_walker == 0\nexpect traps moss_moss == 0\n",
+        );
     }
 
     #[test]

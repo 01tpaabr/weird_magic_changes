@@ -635,6 +635,11 @@ even once the packs are back (pass `--rules` to return to them). `wmc lint --sce
 `--rules`, positional pack or `WMC_RULES`), lints the ones the scenario names, the same order
 as for a new world.
 
+The main menu (`wmc` alone) makes a new pack from a template: Packs, then `+ New pack` and a
+name, writes `packs/<name>/<name>.rules` (two small kinds, every line explained, their names
+carrying the pack's) and `scenarios/<name>.scenario` to try it in, and opens the rules in your
+editor; Scenarios, then `+ New scenario`, does the same for a scenario.
+
 A pack need not build on the built-in kinds. `packs/life` is Conway's Game of Life in two
 kinds, `dead` and `alive`, and nothing else. `scenarios/life.scenario` plays it on an
 endless board of random soup; `scenarios/tests/life_soup.scenario` checks a drawn soup's
