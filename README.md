@@ -45,6 +45,8 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
 - **Other worlds.** `packs/life` is Conway's Game of Life as a pack: two kinds, none of
   the built-in ones, on the same engine, tested against a plain Life. `packs/village` is a
   small social world: villagers who work, rest and give to poorer neighbours.
+  `packs/turing` is a Turing machine (the 5-state busy beaver) drawn as the history of its
+  tape, one row per sweep of the head.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), `wmc observe` (how each kind lives and dies over a run:
   populations, deaths by cause and per head over time, who kills whom, which rules fire, and with

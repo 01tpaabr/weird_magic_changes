@@ -1,0 +1,14 @@
+# The 5-state busy beaver (the pack is packs/turing) drawn as its history: a
+# row a sweep of the head, the cells it wrote that sweep coloured by the
+# state that wrote them, older ones white, zeros dark. Its first 10 000 steps
+# fill about 185 x 174 cells, mostly to the left of where it starts.
+#
+#   make run ARGS="play saves/turing --scenario scenarios/turing.scenario"
+#
+# It takes two ticks a step and one more a sweep: 10 000 steps are about
+# 20 200 ticks, 42 minutes at 1x and under 3 at 16x.
+rules ../packs/turing
+seed 1
+size 256 256
+terrain water_level 0 rock_on_soil 0 rock_on_water 0    # all soil: the blank tape
+start head at (220, 1)

@@ -1,0 +1,96 @@
+# The busy beaver's history (packs/turing) against a plain simulation of the
+# machine: after 1468 steps the head stands where the machine's head is, and
+# a whole row of the picture, the 63rd sweep, is cell for cell what the tape
+# held when the head turned there, 73 cells across the chunk border at x = 64:
+# the twelve cells this sweep wrote at its left end (in states B, C and D),
+# then the 1 0 0 pattern the copy wave carried down from the rows above.
+rules ../../packs/turing
+seed 1
+size 128 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start head at (90, 1)
+
+run 200
+expect max steps of head == 94          # two ticks a step, one more a sweep
+expect at (86, 13) head
+run 2801                                # and its move
+expect max steps of head == 1468
+expect at (44, 66) head                 # the 66th row, in state D
+expect traps head == 0
+expect traps one == 0
+expect traps zero == 0
+expect at (32, 63) nobody             # the 63rd row, from end to end: finished, so still
+expect at (33, 63) only one_done
+expect at (34, 63) only one_b_done
+expect at (35, 63) only one_b_done
+expect at (36, 63) only one_b_done
+expect at (37, 63) only one_b_done
+expect at (38, 63) only one_b_done
+expect at (39, 63) only one_b_done
+expect at (40, 63) only one_b_done
+expect at (41, 63) only one_b_done
+expect at (42, 63) only one_b_done
+expect at (43, 63) only one_c_done
+expect at (44, 63) only one_d_done
+expect at (45, 63) only zero_done
+expect at (46, 63) only zero_done
+expect at (47, 63) only one_done
+expect at (48, 63) only zero_done
+expect at (49, 63) only zero_done
+expect at (50, 63) only one_done
+expect at (51, 63) only zero_done
+expect at (52, 63) only zero_done
+expect at (53, 63) only one_done
+expect at (54, 63) only zero_done
+expect at (55, 63) only zero_done
+expect at (56, 63) only one_done
+expect at (57, 63) only zero_done
+expect at (58, 63) only zero_done
+expect at (59, 63) only one_done
+expect at (60, 63) only zero_done
+expect at (61, 63) only zero_done
+expect at (62, 63) only one_done
+expect at (63, 63) only zero_done
+expect at (64, 63) only zero_done
+expect at (65, 63) only one_done
+expect at (66, 63) only zero_done
+expect at (67, 63) only zero_done
+expect at (68, 63) only one_done
+expect at (69, 63) only zero_done
+expect at (70, 63) only zero_done
+expect at (71, 63) only one_done
+expect at (72, 63) only zero_done
+expect at (73, 63) only zero_done
+expect at (74, 63) only one_done
+expect at (75, 63) only zero_done
+expect at (76, 63) only zero_done
+expect at (77, 63) only one_done
+expect at (78, 63) only zero_done
+expect at (79, 63) only zero_done
+expect at (80, 63) only one_done
+expect at (81, 63) only zero_done
+expect at (82, 63) only zero_done
+expect at (83, 63) only one_done
+expect at (84, 63) only zero_done
+expect at (85, 63) only zero_done
+expect at (86, 63) only one_done
+expect at (87, 63) only zero_done
+expect at (88, 63) only zero_done
+expect at (89, 63) only one_done
+expect at (90, 63) only zero_done
+expect at (91, 63) only zero_done
+expect at (92, 63) only one_done
+expect at (93, 63) only zero_done
+expect at (94, 63) only zero_done
+expect at (95, 63) only one_done
+expect at (96, 63) only zero_done
+expect at (97, 63) only zero_done
+expect at (98, 63) only one_done
+expect at (99, 63) only zero_done
+expect at (100, 63) only zero_done
+expect at (101, 63) only one_done
+expect at (102, 63) only zero_done
+expect at (103, 63) only zero_done
+expect at (104, 63) only one_done
+expect at (105, 63) only one_done
+expect at (106, 63) nobody

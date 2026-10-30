@@ -1,0 +1,142 @@
+# A Turing machine, as a pack, drawn as its history: one row of the world per
+# sweep of the head, the tape as it stood when the head turned around. The
+# machine is the 5-state busy beaver champion, which halts after 47 176 870
+# steps with 4098 ones on its tape; scenarios/turing.scenario draws its first
+# sweeps. Any machine of 2 symbols and up to 5 states runs by changing the
+# table below (or `--set A0=...`).
+#
+# The head walks the current row. Each step it reads the cell it stands on,
+# writes, and moves one cell along the row. When it turns around, it steps
+# down one row as well, and the row it left is copied into the new one by a
+# wave that runs out from under the head along the tape, one cell a tick each
+# way: the head takes two ticks a step, so the wave is always ahead of it.
+# Every read is of a neighbouring cell: no rule sees farther than one cell.
+
+# The table: a state and the symbol read give WRITE * 100 + RIGHT * 10 + NEXT,
+# with RIGHT 1 for a move right, 0 for left, and NEXT the state, 1 (A) to 5
+# (E), or 0 to halt. `1RB` is 112, `0LE` is 5.
+const A0 = 112          # A: 1RB 1LC
+const A1 = 103
+const B0 = 113          # B: 1RC 1RB
+const B1 = 112
+const C0 = 114          # C: 1RD 0LE
+const C1 = 5
+const D0 = 101          # D: 1LA 1LD
+const D1 = 104
+const E0 = 0            # E: halt 0LA (halts writing 0)
+const E1 = 1
+
+const TAPE_CADENCE = 1  # the head and the live tape think every tick
+const STILL = 1073741824  # a finished cell: about once in 1500 game days
+
+# The head: a standing actor on the cell it reads. A step is two thinks: the
+# first reads and writes (the cell under it turns into what its look says, or
+# a blank cell gets one), the second moves. On a new row it waits one think
+# for the copy of the cell it stands on.
+kind head {
+  glyph "@"
+  color "#ffffff"
+  cadence TAPE_CADENCE
+  sight 1
+  mem st, way, go, down, waited, halted, steps
+
+  when halted == 1 => idle
+  when go != 0 => {                                  # the move of the step
+    let to = go
+    go = 0
+    look = 0
+    if down == 1 { waited = 0  move at(x + to, y + 1) } else { move at(x + to, y) }
+  }
+  when down == 1 and waited == 0 => { waited = 1  idle }   # on a new row: its copy comes
+  when true => {                                     # read and write
+    down = 0
+    let t = 0
+    if is(here, one) { t = rule(st, 1) } else { t = rule(st, 0) }
+    let code = 1 + (t / 100) * 5 + st                # the cell it writes: see `written`
+    let right = (t / 10) % 10
+    go = right * 2 - 1
+    if way != 0 and go != way { down = 1 }           # turns around: the next row
+    way = go
+    steps += 1
+    if t % 10 == 0 { halted = 1 } else { st = t % 10 - 1 }
+    if is(here, tape) { look = code  idle } else { put(code) }
+  }
+}
+
+# The table's entry for state S (0 for A) reading SYM.
+sub rule(s, sym) {
+  if s == 0 { if sym == 1 { return A1 } else { return A0 } }
+  if s == 1 { if sym == 1 { return B1 } else { return B0 } }
+  if s == 2 { if sym == 1 { return C1 } else { return C0 } }
+  if s == 3 { if sym == 1 { return D1 } else { return D0 } }
+  if sym == 1 { return E1 }
+  return E0
+}
+
+# A written cell, by its mark: 1 + WRITE * 5 + the writer's state.
+sub put(m) {
+  if m == 1 { spawn zero_a at here } else if m == 2 { spawn zero_b at here }
+  else if m == 3 { spawn zero_c at here } else if m == 4 { spawn zero_d at here }
+  else if m == 5 { spawn zero_e at here } else if m == 6 { spawn one_a at here }
+  else if m == 7 { spawn one_b at here } else if m == 8 { spawn one_c at here }
+  else if m == 9 { spawn one_d at here } else { spawn one_e at here }
+}
+
+sub written(m) {
+  if m == 1 { become zero_a } else if m == 2 { become zero_b }
+  else if m == 3 { become zero_c } else if m == 4 { become zero_d }
+  else if m == 5 { become zero_e } else if m == 6 { become one_a }
+  else if m == 7 { become one_b } else if m == 8 { become one_c }
+  else if m == 9 { become one_d } else { become one_e }
+}
+
+# A cell of the tape: ground cover, under the head. It turns into what the
+# head standing on it wrote, and copies itself into the row below once that
+# row is open: the head stands under it, or a neighbour below has its copy.
+trait cell {
+  cover
+  tags tape
+  cadence TAPE_CADENCE
+  sight 1
+
+  when look_of(here) > 0 and is(here, head) => written(look_of(here))
+  when is(south, bare) and (is(south, head) or is(at(x - 1, y + 1), tape) or is(at(x + 1, y + 1), tape)) => {
+    if is(here, one) { spawn one at south } else { spawn zero at south }
+  }
+}
+
+# A 1 and a 0 the head did not write this sweep (copied from the row above),
+# and those it did, coloured by the state that wrote them. Once the row below
+# has its copy, a cell never changes again: it turns into its still twin,
+# which looks the same and does not think.
+kind one    extends cell { glyph "#"  color "#e6e6e6"  when is(south, tape) => become one_done }
+kind one_a  extends one  { glyph "#"  color "#ff5a50"  when is(south, tape) => become one_a_done }
+kind one_b  extends one  { glyph "#"  color "#ffc83c"  when is(south, tape) => become one_b_done }
+kind one_c  extends one  { glyph "#"  color "#5adc6e"  when is(south, tape) => become one_c_done }
+kind one_d  extends one  { glyph "#"  color "#50aaff"  when is(south, tape) => become one_d_done }
+kind one_e  extends one  { glyph "#"  color "#c878ff"  when is(south, tape) => become one_e_done }
+kind zero   extends cell { glyph "."  color "#24242c"  when is(south, tape) => become zero_done }
+kind zero_a extends zero { glyph "."  color "#5a2420"  when is(south, tape) => become zero_a_done }
+kind zero_b extends zero { glyph "."  color "#5a4818"  when is(south, tape) => become zero_b_done }
+kind zero_c extends zero { glyph "."  color "#205a2c"  when is(south, tape) => become zero_c_done }
+kind zero_d extends zero { glyph "."  color "#20405a"  when is(south, tape) => become zero_d_done }
+kind zero_e extends zero { glyph "."  color "#4a2c5a"  when is(south, tape) => become zero_e_done }
+
+trait done {
+  cover
+  tags tape
+  cadence STILL
+}
+
+kind one_done    extends done { glyph "#"  color "#e6e6e6" }
+kind one_a_done  extends done { glyph "#"  color "#ff5a50" }
+kind one_b_done  extends done { glyph "#"  color "#ffc83c" }
+kind one_c_done  extends done { glyph "#"  color "#5adc6e" }
+kind one_d_done  extends done { glyph "#"  color "#50aaff" }
+kind one_e_done  extends done { glyph "#"  color "#c878ff" }
+kind zero_done   extends done { glyph "."  color "#24242c" }
+kind zero_a_done extends done { glyph "."  color "#5a2420" }
+kind zero_b_done extends done { glyph "."  color "#5a4818" }
+kind zero_c_done extends done { glyph "."  color "#205a2c" }
+kind zero_d_done extends done { glyph "."  color "#20405a" }
+kind zero_e_done extends done { glyph "."  color "#4a2c5a" }

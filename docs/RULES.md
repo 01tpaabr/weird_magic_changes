@@ -622,7 +622,15 @@ live count against a plain Life's up to generation 100, and `life_patterns.scena
 a blinker, a block and a glider. `packs/village` is a small social world, one kind in two
 states: villagers work for wealth (a need with `decay 0`), rest when tired, and `give` to a
 neighbour whose `look` says it is poorer; `scenarios/tests/village.scenario` holds its
-goals (how many at work, the mean and the lowest wealth).
+goals (how many at work, the mean and the lowest wealth). `packs/turing` is a Turing machine
+of 2 symbols and up to 5 states, the 5-state busy beaver by default, drawn as its history:
+a row of the world each sweep of the head. The head is a standing actor that keeps its state
+in memory; the tape is ground cover that turns into what the head standing on it wrote
+(`look_of(here)`), and a turn of the head opens the row below, which a wave copies one cell a
+tick from the row above, so that no rule reads farther than a neighbour. A finished cell
+turns into a still twin with a very long `cadence`, which costs almost nothing.
+`scenarios/turing.scenario` draws its first 10 000 steps; `scenarios/tests/turing.scenario`
+checks a whole row against a plain simulation of the machine.
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
