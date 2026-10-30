@@ -62,6 +62,14 @@ Goal metrics work for any world: `count [only] K [in STATE]`, `min|max|sum|avg N
 traps [only] K` (with `eaten K by K2`, `died K of NEED`), each at a moment, over a window
 (`always`, `never`, `eventually`), as a `mean`, or a counter `per day`.
 
+observe's CSV is long, `tick,day,hour,kind,metric,value`, a row per sample, kind and
+metric: `alive`; counts since the previous sample (`born`, `died`, `death.<cause>`, the
+last only when nonzero); needs (`need.<name>.p50` and the like: ticks for a decaying need,
+21 600 a day, where the summary prints time; points for a `decay 0` need); states. Deaths
+per head over time are not printed yet: sum a cause's `death.<cause>` rows over a day and
+divide by that day's mean `alive`. A cause whose rate per head only grows is a stock
+filling up (the fox goal's thirst: seeds piling up on the shores).
+
 ## Cost and speed
 
 - Build once: `cargo build --profile fast -p app --bin wmc` (about 3 minutes from cold, 10
@@ -73,9 +81,10 @@ traps [only] K` (with `eaten K by K2`, `died K of NEED`), each at a moment, over
 - Know the price before choosing a size. Day one is the cheapest day: populations grow, and
   a 16-day 192x192 ecosystem run costs 2 to 4 times as much a day as its first day. Time one
   `wmc scenario` of the goal first. Measured: the fox goal (256x256, 16 days) is 158 s a lab
-  variant (8 seeds at once, 8 cores), its 192x192 tier 96 s; 600 Life generations on
-  128x128 (16 384 actors thinking every tick) about 2 s a seed; a 2-day village (64x64,
-  about 120 villagers) a few hundredths of a second.
+  variant (8 seeds at once, 8 cores), its 192x192 tier 96 s; over 32 days 4 to 6 minutes,
+  and its long run (64 days, step 6) 18 minutes: count that in the budget. 600 Life
+  generations on 128x128 (16 384 actors thinking every tick): about 2 s a seed; a 2-day
+  village (64x64, about 120 villagers): a few hundredths of a second.
 - A lab spends little on what fails: a run stops at its first sure failure, and a variant
   stops once more seeds failed than `pass` allows (a fox lab of 3 hopeless variants x 8
   seeds: 176 s down to 45 s). `--full` runs everything, for numbers rather than verdicts.
@@ -104,7 +113,10 @@ every step below writes in it. `tuning/<goal>/runs/` holds CSVs and is not commi
    | "stable" | a lowest and a highest (`always >=`, `always <=`) |
 
    A request for change ("more", "faster") takes its number from the baseline: outside the
-   baseline's range across seeds (above its best seed), or noise passes it. A request that
+   baseline's range across seeds (above its best seed), or noise passes it. Look at how
+   that best seed got its number first: if it boomed and ate its resource out, "above it"
+   asks for a binge (over 32 days the original fox rules killed most by eating the flock
+   out; the kill lines came from rules that kept the floor instead). A request that
    comes with a floor ("but never die out") needs that floor as its own line, with a margin
    under it (half the baseline's usual lowest, say), and often a floor for the actor of the
    change too (the hunters must not die out either). Windows start after the start-up
@@ -112,9 +124,11 @@ every step below writes in it. `tuning/<goal>/runs/` holds CSVs and is not commi
    cohorts). Count `only` what you mean: `eaten chicken` counts chicks too.
    Write a fast tier beside it, `goal-fast.scenario`, for iterating: a smaller world or a
    shorter run, each threshold taken from its own baseline by the same rule as the full
-   one. Prefer a tier that is harsher than the full goal (a variant that passes it passes
-   the full one), and never one too short to show what the goal turns on (the founders
-   ageing out, the second generation). The full goal decides. A "never" or "always" needs a
+   one, unless that baseline's best seed is a collapse or a binge: then scale the full
+   goal's lines (by area, for a smaller world). Prefer a tier that is harsher than the
+   full goal (a variant that passes it passes the full one), and never one too short to
+   show what the goal turns on (the founders ageing out, the second generation). The full
+   goal decides. A "never" or "always" needs a
    `run` longer than the slowest cycle (a lifespan, a birth interval, a boom and its bust):
    the fox goal held its 16 days, and in 32 the foxes died out on every seed, the flock on
    five.
