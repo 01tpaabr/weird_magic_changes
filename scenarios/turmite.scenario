@@ -1,0 +1,18 @@
+# Turmites (the pack is packs/turmite): Langton's ant in the middle, which
+# wanders in chaos for about 10 000 steps and then builds its highway, and
+# three others with rules of their own, set by their starts: LLRR grows a
+# symmetric knot, RLLR a framed square, and LRRRRRLL, all eight colours, a
+# square with its diagonals.
+#
+#   make run ARGS="play saves/turmite --scenario scenarios/turmite.scenario"
+#
+# An ant takes two ticks a step. Bit C of `turns` is the turn on colour C,
+# 1 right and 0 left, the first colour the lowest bit: LLRR is 0b1100 = 12.
+rules ../packs/turmite
+seed 1
+size 256 256
+terrain water_level 0 rock_on_soil 0 rock_on_water 0    # all soil
+start ant at (128, 128)
+start ant at (48, 48) with (turns = 12, colours = 4)
+start ant at (208, 48) with (turns = 9, colours = 4)
+start ant at (128, 208) with (turns = 62, colours = 8)

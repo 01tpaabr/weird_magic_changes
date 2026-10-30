@@ -1,0 +1,34 @@
+# A cyclic cellular automaton, as a pack: every cell holds one of 16 colours
+# in a ring, and a cell takes the next colour round the ring when at least
+# THRESHOLD of its eight neighbours already have it. From random soup the
+# colours eat each other in waves until spirals take the board, Griffeath's
+# "demons" (scenarios/cyclic.scenario). The last colour's next is the first.
+#
+# Every cell holds one actor, and all of them think every tick against the
+# board as it stood when the tick began: one generation a tick, as in Life.
+
+const THRESHOLD = 1      # neighbours of the next colour that take a cell
+const CADENCE = 1        # ticks a generation
+
+trait hue {
+  cover
+  cadence CADENCE
+  sight 1
+}
+
+kind hue0  extends hue { glyph "0"  color "#f23c3c"  when count hue1 within 1 >= THRESHOLD => become hue1 }
+kind hue1  extends hue { glyph "1"  color "#f2803c"  when count hue2 within 1 >= THRESHOLD => become hue2 }
+kind hue2  extends hue { glyph "2"  color "#f2c43c"  when count hue3 within 1 >= THRESHOLD => become hue3 }
+kind hue3  extends hue { glyph "3"  color "#dbf23c"  when count hue4 within 1 >= THRESHOLD => become hue4 }
+kind hue4  extends hue { glyph "4"  color "#97f23c"  when count hue5 within 1 >= THRESHOLD => become hue5 }
+kind hue5  extends hue { glyph "5"  color "#53f23c"  when count hue6 within 1 >= THRESHOLD => become hue6 }
+kind hue6  extends hue { glyph "6"  color "#3cf269"  when count hue7 within 1 >= THRESHOLD => become hue7 }
+kind hue7  extends hue { glyph "7"  color "#3cf2ae"  when count hue8 within 1 >= THRESHOLD => become hue8 }
+kind hue8  extends hue { glyph "8"  color "#3cf2f2"  when count hue9 within 1 >= THRESHOLD => become hue9 }
+kind hue9  extends hue { glyph "9"  color "#3caef2"  when count hue10 within 1 >= THRESHOLD => become hue10 }
+kind hue10 extends hue { glyph "a"  color "#3c69f2"  when count hue11 within 1 >= THRESHOLD => become hue11 }
+kind hue11 extends hue { glyph "b"  color "#533cf2"  when count hue12 within 1 >= THRESHOLD => become hue12 }
+kind hue12 extends hue { glyph "c"  color "#973cf2"  when count hue13 within 1 >= THRESHOLD => become hue13 }
+kind hue13 extends hue { glyph "d"  color "#db3cf2"  when count hue14 within 1 >= THRESHOLD => become hue14 }
+kind hue14 extends hue { glyph "e"  color "#f23cc4"  when count hue15 within 1 >= THRESHOLD => become hue15 }
+kind hue15 extends hue { glyph "f"  color "#f23c80"  when count hue0 within 1 >= THRESHOLD => become hue0 }

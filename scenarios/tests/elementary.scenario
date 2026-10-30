@@ -1,0 +1,27 @@
+# Rule 90 (packs/elementary) from one lit cell: the Sierpinski triangle, whose
+# first 64 rows hold 3^6 = 729 lit cells, checked against a plain simulation of
+# the automaton. Each row waits for the three cells above it, so the ragged
+# front of staggered thinks still draws the exact triangle.
+rules ../../packs/elementary
+seed 1
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start unset 1 / 1
+start lit at (64, 0)
+
+run 4
+expect at (63, 1) lit                  # the first row below: both neighbours of the seed
+expect at (65, 1) lit
+expect at (64, 1) unlit
+run 200
+expect count unset == 0                # every row decided
+expect count lit == 729
+expect at (60, 4) lit
+expect at (64, 4) unlit
+expect at (32, 32) only lit_4          # rows 32 to 39: the fifth band
+expect at (96, 32) only lit_4
+expect at (33, 32) unlit
+expect at (64, 32) unlit               # the hole in the middle
+expect at (1, 63) only lit_1           # the bottom row, out to the edges
+expect at (126, 63) unlit
+expect traps unset == 0

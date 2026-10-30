@@ -1,0 +1,65 @@
+# The cyclic automaton (packs/cyclic) on a drawn 24 x 24 soup of its 16 colours,
+# against a plain simulation of it: a cell takes the next colour when one of its
+# eight neighbours has it. By generation 60 a few colours have eaten the rest
+# of this small board: hue4 holds 254 of its 576 cells.
+rules ../../packs/cyclic
+seed 1
+outside rock                   # nothing beyond the board
+map {
+  a4c123b1612dd272d1371c17
+  149d439536b3216fdaeeb975
+  729fae923d5a4fd12aabfe22
+  8f219e9cb0eb53f16947ccf2
+  5ec84d8dbc74254770f58904
+  dba41ecccc3fc1626e53a130
+  43b026c48bbf33feff9243a8
+  f506b40928b5b7a767c76fb0
+  08f86bebb2737f6a6f0fb23c
+  6f5da2cec255404e4fb44003
+  4d6608697a8d41bed440e504
+  54f31af3176813e02ea68ef7
+  86e4d3cea27d26934b484e73
+  cf575dcad6ba2b0aee0ca923
+  732881584d8c4fa2815d2802
+  827283e0ad84173581569969
+  e58b081006f7e3dfc967a64c
+  b14028d512c9791e558e08ba
+  a7196b50ac2f86702824c1c0
+  99724caf4941d4072014b3ce
+  107f80e222f828767efc2f91
+  624a8940f1f836f99eee3692
+  f09e2e8c662248b483b7ffc0
+  50fec94dbca3a0aac36098b2
+}
+legend {
+  0 hue0
+  1 hue1
+  2 hue2
+  3 hue3
+  4 hue4
+  5 hue5
+  6 hue6
+  7 hue7
+  8 hue8
+  9 hue9
+  a hue10
+  b hue11
+  c hue12
+  d hue13
+  e hue14
+  f hue15
+}
+
+run 1
+expect at (12, 12) hue3        # generation 1
+expect at (5, 17) hue8
+expect at (20, 3) hue12
+expect count hue0 == 42
+run 59                         # generation 60
+expect count hue4 == 254
+expect count hue5 == 116
+expect count hue6 == 135
+expect count hue11 == 0
+expect at (0, 0) hue10
+expect at (23, 23) hue2
+expect at (12, 12) hue4

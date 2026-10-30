@@ -1,0 +1,49 @@
+# An elementary cellular automaton, as a pack, drawn as its history: each row
+# of the world is the generation after the row above it. A cell of a row is
+# decided by the three cells above it (left, centre, right), by Wolfram's rule
+# number: bit L * 4 + C * 2 + R of RULE says whether it is lit. Rule 90 from a
+# single lit cell draws the Sierpinski triangle (scenarios/elementary.scenario);
+# `--set RULE=30` is chaos, `--set RULE=110` is Turing complete.
+#
+# Every cell starts `unset` and waits for the three above it; then it turns lit
+# or unlit for good and stops thinking. Above the top row nothing is lit.
+
+const RULE = 90
+const CADENCE = 2        # an unset cell looks up every 2 ticks, staggered: a ragged front
+const BAND = 8           # rows of one colour of lit cells
+const STILL = 1073741824 # a decided cell: about once in 1500 game days
+
+kind unset {
+  glyph ","
+  color "#30303a"
+  cover
+  cadence CADENCE
+  sight 1
+
+  when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => idle
+  when true => {
+    let v = RULE
+    repeat is(at(x - 1, y - 1), lit) * 4 + is(north, lit) * 2 + is(at(x + 1, y - 1), lit) { v = v / 2 }
+    if v % 2 == 1 { shine(y / BAND) } else { become unlit }
+  }
+}
+
+# A lit cell, coloured by its band of rows.
+sub shine(band) {
+  let b = band % 6
+  if b == 0 { become lit } else if b == 1 { become lit_1 } else if b == 2 { become lit_2 }
+  else if b == 3 { become lit_3 } else if b == 4 { become lit_4 } else { become lit_5 }
+}
+
+trait decided {
+  cover
+  cadence STILL
+}
+
+kind unlit extends decided { glyph "."  color "#14141c" }
+kind lit   extends decided { glyph "#"  color "#ff6b6b" }
+kind lit_1 extends lit     { glyph "#"  color "#ffb347" }
+kind lit_2 extends lit     { glyph "#"  color "#f5e663" }
+kind lit_3 extends lit     { glyph "#"  color "#6be37b" }
+kind lit_4 extends lit     { glyph "#"  color "#5ab8ff" }
+kind lit_5 extends lit     { glyph "#"  color "#b57bff" }

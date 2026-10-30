@@ -1,0 +1,14 @@
+# An elementary cellular automaton (the pack is packs/elementary) drawn as its
+# history: rule 90 from one lit cell, which draws the Sierpinski triangle, one
+# row a generation, downward, in bands of colour. `--set RULE=30` (or any rule
+# from 0 to 255) draws another.
+#
+#   make run ARGS="play saves/elementary --scenario scenarios/elementary.scenario"
+#
+# Every cell starts unset, but the one lit cell on the top row.
+rules ../packs/elementary
+seed 1
+size 256 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0    # all soil
+start unset 1 / 1
+start lit at (128, 0)

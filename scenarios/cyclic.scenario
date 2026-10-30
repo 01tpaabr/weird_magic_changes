@@ -1,0 +1,28 @@
+# A cyclic cellular automaton (the pack is packs/cyclic): a soup of 16 colours,
+# a sixteenth of the cells each, where a cell takes the next colour round the
+# ring when a neighbour has it. Waves sweep the soup, and within a few hundred
+# generations spirals take the whole board. One generation a tick.
+#
+#   make run ARGS="play saves/cyclic --scenario scenarios/cyclic.scenario"
+#
+# The board goes on as far as you scroll, fresh soup from the same seed.
+rules ../packs/cyclic
+seed 1
+size 256 256
+terrain water_level 0 rock_on_soil 0 rock_on_water 0    # all soil
+start hue0  1 / 16
+start hue1  1 / 16
+start hue2  1 / 16
+start hue3  1 / 16
+start hue4  1 / 16
+start hue5  1 / 16
+start hue6  1 / 16
+start hue7  1 / 16
+start hue8  1 / 16
+start hue9  1 / 16
+start hue10 1 / 16
+start hue11 1 / 16
+start hue12 1 / 16
+start hue13 1 / 16
+start hue14 1 / 16
+start hue15 1 / 16

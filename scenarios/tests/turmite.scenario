@@ -1,0 +1,26 @@
+# Two turmites (packs/turmite) apart, against a plain simulation of each:
+# Langton's ant (the pack's default rule) and an LLRR ant (`turns = 12,
+# colours = 4`), set by the start. Langton's has built its highway by step
+# 12 000 and walked down it to the south-west; LLRR grows in place.
+rules ../../packs/turmite
+seed 1
+size 128 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start ant at (64, 64)
+start ant at (110, 16) with (turns = 12, colours = 4)
+
+run 2000                       # 1000 steps each
+expect at (72, 58) ant         # Langton's
+expect at (110, 16) ant        # LLRR, back where it started
+expect count ink1 == 118       # all Langton's: LLRR has no colour 1 yet
+expect count ink2 == 32
+expect count ink3 == 24
+run 22000                      # 12 000 steps each
+expect max steps of ant == 12000
+expect at (8, 96) ant          # down the highway
+expect at (112, 12) ant
+expect count ink1 == 1029      # 952 Langton's, 77 LLRR's
+expect count ink2 == 174
+expect count ink3 == 89
+expect count ink4 == 0         # two colours and four: no fifth
+expect traps ant == 0

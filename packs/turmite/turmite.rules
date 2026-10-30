@@ -1,0 +1,86 @@
+# Langton's ant and its many-coloured cousins (turmites), as a pack. An ant
+# reads the colour of its cell, turns right or left by that colour, paints the
+# cell the next colour round the ring, and steps forward. Langton's ant (two
+# colours: right on blank, left on painted) wanders in chaos for about 10 000
+# steps, then builds a "highway" and walks off along it forever. Other rules
+# grow symmetric shapes, spirals, or fill triangles.
+#
+# The rule is a number: bit C of TURNS is the turn on colour C (1 right, 0
+# left), with COLOURS colours, blank (no paint) the first. An ant started with
+# `with (turns = T, colours = N)` runs its own: `turns = 12, colours = 4` is
+# LLRR, which grows a symmetric, ever-larger shape.
+
+const TURNS = 1          # Langton's ant: right on blank (bit 0), left on paint
+const COLOURS = 2        # blank and one paint; at most 8
+const CADENCE = 1        # an ant takes two thinks a step
+
+# A step is two thinks: the first reads, turns and paints (a blank cell gets
+# paint; a painted one turns into what the ant's look says), the second moves.
+# A move into a taken cell waits for it.
+kind ant {
+  glyph "@"
+  color "#ffffff"
+  cadence CADENCE
+  sight 1
+  mem heading, turns, colours, go, steps
+
+  when colours == 0 => { colours = COLOURS  turns = TURNS }    # falls through
+  when heading == 0 => heading = 1                             # north; falls through
+  when go == 1 => { go = 2  look = 0  move dir(heading) }
+  when go == 2 and blocked => move dir(heading)                # the cell was taken: again
+  when true => {
+    go = 1
+    steps += 1
+    let c = colour()
+    let t = turns
+    repeat c { t = t / 2 }
+    if t % 2 == 1 { heading = (heading + 1) % 8 + 1 } else { heading = (heading + 5) % 8 + 1 }   # 90 degrees
+    let n = (c + 1) % colours
+    if c == 0 { paint(n) } else if n == 0 { look = 255  idle } else { look = n  idle }
+  }
+}
+
+# The colour of the cell the ant stands on: 0 blank, else its paint.
+sub colour() {
+  if is(here, ink1) { return 1 }
+  if is(here, ink2) { return 2 }
+  if is(here, ink3) { return 3 }
+  if is(here, ink4) { return 4 }
+  if is(here, ink5) { return 5 }
+  if is(here, ink6) { return 6 }
+  if is(here, ink7) { return 7 }
+  return 0
+}
+
+sub paint(n) {
+  if n == 1 { spawn ink1 at here } else if n == 2 { spawn ink2 at here }
+  else if n == 3 { spawn ink3 at here } else if n == 4 { spawn ink4 at here }
+  else if n == 5 { spawn ink5 at here } else if n == 6 { spawn ink6 at here }
+  else { spawn ink7 at here }
+}
+
+sub repaint(n) {
+  if n == 1 { become ink1 } else if n == 2 { become ink2 }
+  else if n == 3 { become ink3 } else if n == 4 { become ink4 }
+  else if n == 5 { become ink5 } else if n == 6 { become ink6 }
+  else { become ink7 }
+}
+
+# Paint: ground cover under the ant, which turns into the colour the ant
+# standing on it says, or wears off back to blank (255).
+trait ink {
+  cover
+  cadence CADENCE
+  sight 0
+
+  when is(here, ant) and look_of(here) == 255 => die
+  when is(here, ant) and look_of(here) > 0 => repaint(look_of(here))
+}
+
+kind ink1 extends ink { glyph "#"  color "#f2f2f2" }
+kind ink2 extends ink { glyph "#"  color "#ff6b6b" }
+kind ink3 extends ink { glyph "#"  color "#ffd166" }
+kind ink4 extends ink { glyph "#"  color "#06d6a0" }
+kind ink5 extends ink { glyph "#"  color "#4cc9f0" }
+kind ink6 extends ink { glyph "#"  color "#b388ff" }
+kind ink7 extends ink { glyph "#"  color "#ff8fab" }
