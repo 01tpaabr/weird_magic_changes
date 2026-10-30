@@ -47,7 +47,7 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   small social world: villagers who work, rest and give to poorer neighbours.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), `wmc observe` (how each kind lives and dies over a run:
-  populations, deaths by cause and per head, who kills whom, which rules fire, and with
+  populations, deaths by cause and per head over time, who kills whom, which rules fire, and with
   `--gates` which term of each rule's condition stops it), `wmc lab` (a goal tried for
   every value of a const, on many seeds at once), `wmc rates` (each rule's odds and lifespans in day
   units), the inspector (click an actor in the game: the same,

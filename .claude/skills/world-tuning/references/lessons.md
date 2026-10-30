@@ -19,8 +19,9 @@ them too hungry to breed (`food > 20h` stopped their litters). The long run foun
   trees drop seeds on every free cell within 2, and only hens eating seeds clear them. A big
   flock (the old rules: 840 hens) holds the woods at ~2400 seeds; a flock the foxes keep at
   ~200 cannot, so fewer hens meant more seeds meant more thirst. Rule: when the prey dies
-  after its predator, compute each cause of death per head over time (observe's CSV), and
-  look for a stock that only grows. A third kind can make the floor.
+  after its predator, read each cause of death per head over time (scripted here from
+  observe's CSV; observe prints it since), and look for a stock that only grows. A third
+  kind can make the floor.
 - **Change the inflow, not the stock's lifetime.** Seeds that rot after 3 days changed
   nothing (5967 seeds at day 32 against 5951): the trees' rain (~2000 a day) re-seeded the
   shore faster. A quarter of the rain (`TREE_SUN` 4 to 16: ~3.2 to ~1.2 seeds a tree-day)

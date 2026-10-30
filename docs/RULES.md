@@ -761,7 +761,9 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   disk; its `run` and `expect` lines are not run), steps it for that time (ticks, or
   `90min`, `2h`, `4d`) and reports how each kind lives and dies: how many are alive over
   time and the lowest count; births and deaths per day, deaths by cause (`eaten by fox`,
-  `no water`, `own die`) and per head (deaths a day over the mean alive); who kills whom
+  `no water`, `own die`) and per head (deaths a day over the mean alive), and per kind and
+  cause the same per head in about 8 windows over the run (a rate that only grows is a
+  stock filling up); who kills whom
   (`kills a day`: per killer kind, all and per head, and of which kinds); and per kind, its
   typical needs, how many are in each state, what its thinks decide, the rules that fire
   most (by `file:line`), and how its actions turn out (`BLOCKED 14%`). Decisions and rules

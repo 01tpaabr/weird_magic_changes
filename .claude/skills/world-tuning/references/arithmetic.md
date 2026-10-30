@@ -121,8 +121,9 @@ think, less the 64 ticks it burns meanwhile, from 6h to 22h: about 17 thinks of 
 ## Per head, and equilibrium
 
 For each population write, per individual and per day, births `b` and deaths `d` by cause,
-as functions of the others; observe prints today's (`per head`, and `kills a day ... per
-head`). It grows while `b > d`.
+as functions of the others; observe prints them over the run (`per head`, and `kills a
+day ... per head`) and per window (`deaths a day per head, over time`). It grows while
+`b > d`.
 - A victim's predation hazard: `kills a day per killer x killers / victims`. More victims,
   same killers: each one's risk falls. That is what lets them recover, if the killers do
   not grow with them at once.

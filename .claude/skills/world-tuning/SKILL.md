@@ -51,7 +51,7 @@ discriminating between hypotheses you wrote down, not for sampling the space bli
 | the rules, in day units | `wmc rates [packs] [--kind K]` | thinks a day, needs' durations, each rule's odds a think and times a day, lifespans |
 | one actor, one think | `wmc why <dir> <x> <y> [ticks] --scenario f`; the inspector in `wmc play` (click an actor) | which rules it checks, which fires, under each rule that did not the term that was false (`false: food < 20h`), what it decides |
 | one mechanism | a probe: a tiny drawn-map scenario with `run`/`expect` lines | one rate in isolation (a fox penned with N hens: kills a day; two villagers: one gift) |
-| the world over time | `wmc observe <time> --scenario f [--kind K] [--gates] [--csv f]` | alive over time; births and deaths a day by cause and per head; who kills whom (per killer and per head); needs; states; decisions; rules that fire |
+| the world over time | `wmc observe <time> --scenario f [--kind K] [--gates] [--csv f]` | alive over time; births and deaths a day by cause and per head, and deaths per head over time by cause; who kills whom (per killer and per head); needs; states; decisions; rules that fire |
 | why a rule (doesn't) fire | `wmc observe ... --gates` | per rule: thinks that reached it and fired it; per term of its condition, how many of the thinks that got that far it stopped (the binding gate stops most), with a position and time to `wmc why` |
 | the goal | `wmc scenario f` (`seeds N`, `pass M`, `expect always\|never\|eventually\|mean ... from T to T`) | does it hold, on how many seeds, what each expectation saw; seeds run in parallel |
 | the knobs | `wmc lab f --set K=a,b,c [--set ...] [--seeds N] [--full] [--csv f]` | which values hold the goal; each expectation's spread across seeds (median: mean of the middle two for an even count) |
@@ -65,10 +65,12 @@ traps [only] K` (with `eaten K by K2`, `died K of NEED`), each at a moment, over
 observe's CSV is long, `tick,day,hour,kind,metric,value`, a row per sample, kind and
 metric: `alive`; counts since the previous sample (`born`, `died`, `death.<cause>`, the
 last only when nonzero); needs (`need.<name>.p50` and the like: ticks for a decaying need,
-21 600 a day, where the summary prints time; points for a `decay 0` need); states. Deaths
-per head over time are not printed yet: sum a cause's `death.<cause>` rows over a day and
-divide by that day's mean `alive`. A cause whose rate per head only grows is a stock
-filling up (the fox goal's thirst: seeds piling up on the shores).
+21 600 a day, where the summary prints time; points for a `decay 0` need); states. The
+summary's `deaths a day per head, over time` gives each kind's causes in about 8 windows. A
+cause whose rate per head only grows is a stock filling up: with the fox world's old seed
+rate, thirst per hen went 0.014, 0.030, 0.065, 0.151, 0.230, 0.421, 0.695, 3.03 a day,
+window by window of 4 days, while deaths to foxes peaked at day 12 (seeds piling up on
+the shores).
 
 ## Cost and speed
 

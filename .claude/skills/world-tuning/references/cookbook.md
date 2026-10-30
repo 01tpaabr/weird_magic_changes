@@ -149,9 +149,10 @@ Access to water is a resource too, and standing actors take it: a drinker drinks
 a free cell next to water. In the built-in world seeds that land on a shore never sprout or
 dry out, and the trees kept raining them, so the woods filled the shores within weeks
 wherever the hens (who eat seeds) were few: thirst deaths per hen rose tenfold and the
-flock died after its foxes. Watch thirst deaths *per head over time*: a cause that only
-grows is a stock filling up. Change its inflow (`TREE_SUN`: fewer seeds per tree), not its
-lifetime (rotting seeds changed nothing: the rain refilled the shore faster).
+flock died after its foxes. Watch thirst deaths *per head over time* (observe's `deaths a
+day per head, over time`): a cause that only grows is a stock filling up. Change its
+inflow (`TREE_SUN`: fewer seeds per tree), not its lifetime (rotting seeds changed
+nothing: the rain refilled the shore faster).
 
 ## Time
 

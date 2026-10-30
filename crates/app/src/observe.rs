@@ -25,7 +25,7 @@ use bevy::prelude::World;
 use sim_core::actors::{Cause, Tally, life};
 use sim_core::rng::splitmix64;
 use sim_core::rules::vm::{Action, need_now, result};
-use sim_core::time::{Clock, TICKS_PER_DAY, TICKS_PER_HOUR};
+use sim_core::time::{Clock, TICKS_PER_DAY, TICKS_PER_HOUR, TICKS_PER_MINUTE};
 use sim_core::{ChunkActors, ChunkCoord, ChunkMinds, Kinds, Stage, sim};
 
 use crate::why::{checked_rules, duration, state_name};
@@ -449,6 +449,30 @@ fn need_value(decays: bool, v: f64) -> String {
     }
 }
 
+/// A positive rate to about three figures: `0.012`, `0.93`, `12.5`.
+fn sig3(v: f64) -> String {
+    match v {
+        v if v < 0.001 => "<.001".into(),
+        v if v < 1.0 => format!("{v:.3}"),
+        v if v < 10.0 => format!("{v:.2}"),
+        v if v < 100.0 => format!("{v:.1}"),
+        v => format!("{v:.0}"),
+    }
+}
+
+/// The largest unit a span of ticks is a whole number of, and its suffix:
+/// a day `d`, an hour `h`, a minute `m`, or a tick (none).
+fn unit_of(ticks: u64) -> (u64, &'static str) {
+    [
+        (TICKS_PER_DAY, "d"),
+        (TICKS_PER_HOUR, "h"),
+        (TICKS_PER_MINUTE, "m"),
+    ]
+    .into_iter()
+    .find(|&(unit, _)| ticks.is_multiple_of(unit))
+    .unwrap_or((1, ""))
+}
+
 /// `n` of `total` as a whole percentage; `<1%` for some that rounds to 0.
 fn pct(n: u64, total: u64) -> String {
     match (n * 100 + total / 2) / total.max(1) {
@@ -458,9 +482,9 @@ fn pct(n: u64, total: u64) -> String {
 }
 
 /// The one-screen summary: alive over time, deaths and births per day by
-/// cause, then, per kind (all, or those named in `only`), its typical
-/// needs, states, what it decides, the rules that fire most and how its
-/// actions turn out.
+/// cause, deaths a day per head over time by cause, then, per kind (all,
+/// or those named in `only`), its typical needs, states, what it decides,
+/// the rules that fire most and how its actions turn out.
 pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
     let mut s = String::new();
     let (Some(first), Some(last)) = (report.samples.first(), report.samples.last()) else {
@@ -533,6 +557,15 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
         s,
         "\nper day          born  became    died  per head  causes of death"
     );
+    // Deaths a day per head over time, per kind and cause: about 8
+    // windows on whole sample steps, each its deaths over its mean alive.
+    // A cause whose rate only grows is a stock filling up.
+    let wide = steps.div_ceil(8).max(1);
+    let windows: Vec<(usize, usize)> = (0..steps)
+        .step_by(wide)
+        .map(|a| (a, (a + wide).min(steps)))
+        .collect();
+    let mut over_time: Vec<(String, Vec<String>)> = Vec::new();
     for (k, name) in names.iter().enumerate() {
         let kind = u16::try_from(k).expect("kind ids are u16");
         let sum = |slot: usize| -> u64 {
@@ -562,6 +595,30 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
         };
         let mut ranked: Vec<(Cause, u64)> = causes.into_iter().collect();
         ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+        if !windows.is_empty() && (only.is_empty() || only.iter().any(|o| o == name)) {
+            for &(c, _) in &ranked {
+                let cells = windows
+                    .iter()
+                    .map(|&(a, b)| {
+                        let at = &report.samples[a..=b];
+                        let alive = at.iter().map(|sm| sm.kinds[k].alive).sum::<u64>() as f64
+                            / at.len() as f64;
+                        let died: u64 = at[1..]
+                            .iter()
+                            .map(|sm| sm.kinds[k].deaths.get(&c).copied().unwrap_or(0))
+                            .sum();
+                        let long =
+                            (at[at.len() - 1].tick - at[0].tick) as f64 / TICKS_PER_DAY as f64;
+                        match (alive > 0.0, died) {
+                            (false, _) => "-".into(),
+                            (true, 0) => "0".into(),
+                            (true, _) => sig3(died as f64 / alive / long),
+                        }
+                    })
+                    .collect();
+                over_time.push((format!("{name} {}", cause_name(kinds, kind, c)), cells));
+            }
+        }
         let why: Vec<String> = ranked
             .iter()
             .map(|&(c, n)| format!("{} {}", cause_name(kinds, kind, c), pct(n, dead)))
@@ -580,6 +637,29 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
             },
             why.join(", ")
         );
+    }
+    if !over_time.is_empty() {
+        let label = over_time.iter().map(|(l, _)| l.len()).max().unwrap_or(0);
+        let window = step_len * wide as u64;
+        let (unit, suffix) = unit_of(window);
+        let _ = writeln!(
+            s,
+            "\ndeaths a day per head, over time (each column: {}{suffix} from its time)",
+            window / unit
+        );
+        let _ = write!(s, "{:label$}", "");
+        for &(a, _) in &windows {
+            let at = (report.samples[a].tick - first.tick) / unit;
+            let _ = write!(s, "{:>7}", format!("{at}{suffix}"));
+        }
+        let _ = writeln!(s);
+        for (l, cells) in &over_time {
+            let _ = write!(s, "{l:<label$}");
+            for c in cells {
+                let _ = write!(s, "{c:>7}");
+            }
+            let _ = writeln!(s);
+        }
     }
 
     // Who kills whom: per killer kind, kills a day, per head, and of what.
@@ -1050,6 +1130,74 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("per head  causes of death"), "{text}");
+    }
+
+    /// A death rate that grows: the table over time shows it window by
+    /// window, a day and per head, and `-` where none of the kind lived.
+    #[test]
+    fn deaths_per_head_are_shown_over_time() {
+        let kinds = sim_core::rules::compile_files(&[(
+            "b.rules",
+            "kind blob { glyph \"b\" }  kind late { glyph \"l\" }",
+        )])
+        .unwrap();
+        // 16 hourly samples after the first, two to a window: 100 blobs
+        // throughout, w dying at each sample of window w; 10 `late` from
+        // the 8th hour, one dying at each sample after it.
+        let died = |n: u64| {
+            if n > 0 {
+                BTreeMap::from([(Cause::Died, n)])
+            } else {
+                BTreeMap::new()
+            }
+        };
+        let samples = (0..=16u64)
+            .map(|i| {
+                let blob = KindSample {
+                    alive: 100,
+                    deaths: died(i.saturating_sub(1) / 2),
+                    ..KindSample::default()
+                };
+                let late = KindSample {
+                    alive: if i >= 8 { 10 } else { 0 },
+                    deaths: died(u64::from(i > 8)),
+                    ..KindSample::default()
+                };
+                Sample {
+                    tick: i * TICKS_PER_HOUR,
+                    kinds: vec![blob, late],
+                }
+            })
+            .collect();
+        let r = Report {
+            samples,
+            rules: BTreeMap::new(),
+        };
+        let text = summary(&r, &kinds, &[]);
+        // Window w: 2w blobs in 2 hours, of 100: 0.24 w a day per head.
+        let table = "\ndeaths a day per head, over time (each column: 2h from its time)
+                 0h     2h     4h     6h     8h    10h    12h    14h
+blob own die      0  0.240  0.480  0.720  0.960   1.20   1.44   1.68
+late own die      -      -      -      0   2.40   2.40   2.40   2.40\n";
+        assert!(text.contains(table), "{text}");
+        let only = summary(&r, &kinds, &["late".into()]);
+        assert!(
+            only.contains("\nlate own die") && !only.contains("\nblob own die"),
+            "{only}"
+        );
+    }
+
+    #[test]
+    fn a_time_axis_reads_in_one_unit() {
+        assert_eq!(unit_of(4 * TICKS_PER_DAY), (TICKS_PER_DAY, "d"));
+        assert_eq!(unit_of(30 * TICKS_PER_HOUR), (TICKS_PER_HOUR, "h"));
+        assert_eq!(unit_of(30 * TICKS_PER_MINUTE), (TICKS_PER_MINUTE, "m"));
+        assert_eq!(unit_of(100), (1, ""));
+        assert_eq!(sig3(0.0004), "<.001");
+        assert_eq!(sig3(0.012_34), "0.012");
+        assert_eq!(sig3(1.234), "1.23");
+        assert_eq!(sig3(12.34), "12.3");
+        assert_eq!(sig3(6480.4), "6480");
     }
 
     #[test]
