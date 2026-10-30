@@ -3,9 +3,11 @@
 **Asked:** "foxes hunt more chickens, but chickens never die out" (2026-10-29), in the
 built-in world: the kinds in `rules/`, the world of `scenarios/default.scenario` (its
 terrain and `start` lines), on a size quick enough to iterate on.
-**Goal:** `goal.scenario` (256x256, 16 days, seeds 42..49, pass 7); fast tier
-`goal-fast.scenario` (192x192, 16 days, the same seeds and pass).
-**Budget:** the skill's default, 20 lab sweeps or 2 hours, from the user's go-ahead.
+**Goal:** `goal.scenario` (256x256, seeds 42..49, pass 7); fast tier `goal-fast.scenario`
+(192x192, the same seeds and pass). 16 days until experiment 10, 32 days since (the user,
+2026-10-30: "Yes, extend to 32d"; section "32 days" below, with its own lines).
+**Budget:** the skill's default, 20 lab sweeps or 2 hours, from the user's go-ahead (each
+time).
 **Cost:** a lab variant of `goal.scenario` is 158 s (8 worlds at once, `target/fast/wmc`,
 8 cores); of `goal-fast.scenario` 96 s. A 3-value sweep: ~8 min full, ~5 min fast, less
 when variants stop at their first sure failure. `wmc scenario goal.scenario` runs the
@@ -418,6 +420,198 @@ goal (labs 6, 7, 9: `runs/06.csv`, `07.csv`, `09.csv`); 8 more seeds, 50 .. 57 (
   starving exception that spares eggs and chicks, so the flock keeps renewing through the
   bust. Watch the peak fox count and the flock's lowest from day 16.
 
+## 32 days (2026-10-30, from 04:32)
+
+**Asked:** "Yes, extend to 32d" (the user, after experiment 10). Budget: 20 labs or 2 hours,
+from 04:32; the session's process died at ~05:05 (labs 12 and the baseline done, lab 13
+lost), and the budget restarted at 09:38 with the go-ahead relayed again.
+**Goal change:** `run 32d` in both files; the floors as agreed, over the whole month; the
+kill lines re-derived by the skill's rule ("above the baseline's best seed") from a 32-day
+baseline of the rules as of 1b76f0c (lab 11, `runs/11-32d.csv`): `>= 37 from 2d` (its
+seeds 22.2 .. 36.7) and `>= 40 from 9d` (19.4 .. 39.6). The fast tier's kill lines are
+those scaled by the area (21 and 23): by the same rule its own baseline would ask 32 and
+39, numbers set by one seed (46) whose foxes binge on the flock and then have none, and
+which no variant has come near.
+
+**The baseline over 32 days** (the rules as they were: `--set HUNT_FLOCK=0 --set
+DESPERATE=0 --set LITTER_HENS=15`, which compiles to them; `runs/base-32d-full.csv`, 489 s):
+
+| seed | kills 2d (>= 32) | kills 9d (>= 19) | lowest chickens | lowest foxes | highest foxes | mean hens from 16d |
+|---|---|---|---|---|---|---|
+| 42 | 10.7 | 5.8 | 163 | 1 | 11 | 642 |
+| 43 | 9.9 | 0.6 | **0** | 0 | 14 | 0 |
+| 44 | 33.7 | 38.0 | 170 | 2 | 63 | 906 |
+| 45 | 71.6 | 87.8 | **5** | 3 | 88 | 994 |
+| 46 | 67.4 | 81.7 | **0** | 0 | 78 | 504 |
+| 47 | 72.4 | 90.2 | **0** | 0 | 85 | 697 |
+| 48 | 64.5 | 78.2 | **0** | 0 | 68 | 372 |
+| 49 | 29.8 | 31.2 | 202 | 2 | 57 | 1220 |
+
+0 of 8 seeds hold every line (per line 5, 6, 3, 1 of 8). Over a month the old world
+boom-busts too, later: where the founders are few its flock booms to ~1000 hens, the
+litter gate at 15 opens at last, foxes rise to 57 .. 88 and eat the flock out (seeds 45 ..
+48). So over a month the old world kills more than the 1b76f0c rules do (median 49 a day
+from 2d, best 72), by eating its flock out: a "more" taken from it would ask for a binge,
+not a world where both kinds last. The kill lines take the 1b76f0c rules as the baseline
+instead (above their best seed: 37 and 40). Those rules (lab 11): 0 of 8 (kills 30 and 29
+a day, both floors 0 of 8).
+
+### 11. Why the tuned world dies after day 16 (observe, seeds 42 and 47)
+`wmc observe 32d 256 256 {42,47} --scenario runs/measure-full-32d.scenario --gates`
+(`runs/obs-32d-tuned-s{42,47}.{txt,csv}`), per 2 days:
+- **Seed 47, a fox boom:** 7 founders, 48 foxes by day 16 .. 18. From day 10 to 16 about 7
+  kits a day: each adult breeds every 5 days, the gates that stop its litter thinks are the
+  kits' age and the interval; the territory starts to bind only at the peak. 48 foxes kill
+  120 .. 135 a day against a flock that peaked at 385 hens on day 11: eaten out by day 20,
+  then 13 foxes a day starve.
+- **Seed 42, thirst:** a smaller boom (11 to 25 foxes, ~65 kills a day at the peak), but the
+  flock falls after the foxes are gone too. From day 18 the foxes kill under 11 a day and
+  the hens still go from 90 to 0 by day 28, of thirst. Hen thirst deaths per 100 hens a day:
+  1 .. 3 on days 0 .. 8, 6 .. 10 on days 8 .. 14, 21 .. 26 on 14 .. 20, 39 .. 93 on 20 .. 28.
+  Seed 47 too: 2, 11, 24, 35. Foxes die of thirst as well (29% of fox deaths on seed 42).
+- **Thirst follows the forest.** Seeds standing on seed 42: 190 on day 1, 2040 on day 13,
+  3300 on day 19, 5100 on day 27; trees 133, 480, 780, 1210. A seed next to water never
+  sprouts (`count water within 1 == 0`) and never dries out; trees grow only within 2 of
+  water and drop ~5 seeds a day each on free cells within 2 (`sun >= 4`). So the shores fill
+  with standing plants, and a thirsty hen walking to the water it remembers finds no free
+  cell beside it. Hens eat seeds: a big flock keeps the forest down. The old rules on seed
+  42 (`runs/obs-32d-base-s42.txt`), where the flock grows from 140 to 840 hens, hold seeds
+  at ~2400 and trees at ~690 from day 14, and hen thirst at 9 .. 11 per 100 a day. Under
+  the tuned foxes the flock stays at 130 .. 260 hens, the forest grows without end, and
+  thirst runs away as the flock shrinks: fewer hens, more seeds, more thirst.
+- **Check 1, a miss:** seeds that rot after 3 days (a scratch pack: `when age > SEED_ROT =>
+  die`) changed nothing on seed 42: 5967 seeds at day 32 against 5951, the same thirst. The
+  stock is not old seeds but the rain (~2000 a day by day 16), which re-seeds a shore cell
+  faster than a seed rots.
+- **Check 2:** a quarter of the rain (scratch pack, `sun >= 16`), seed 42: seeds 30 .. 110 and
+  trees 56 .. 122 all month, hen thirst 0.2 .. 8 per 100 a day (2 .. 5 mostly), and **both
+  kinds live to day 32**: foxes 11, 31 on day 17, 9 on day 25, 25 on day 32; hens 130, 250,
+  156 on day 21, 431; kills 50 .. 80 a day at the peak, 18 at the trough. A cycle that damps.
+
+So two things end the tuned world after day 16: the forest takes the water of a small
+flock, everywhere; and where the founders are few, the kits outgrow the flock (seed 47).
+The forest comes first: it kills the flock even after the foxes are gone, and with it
+fixed seed 42 cycles instead of dying.
+
+### 12. Fewer seeds per tree (lab 12, fast tier, 32 days)
+- **Change:** `sun >= 4` in the tree's seed rule becomes `sun >= TREE_SUN` (a const, 4 as
+  written: the same hash); sweep 4, 8, 16.
+- **Mechanism:** the forest is the hens' rival for the shore. A slower rain keeps it small,
+  so shore cells stay free whatever the flock's size, and a thinned flock can still drink
+  (a resource in the terrain, kept open).
+- **Prediction** (medians over the 8 seeds of `goal-fast.scenario`):
+  - seeds from day 16: thousands at 4, about a third at 8, under 150 at 16; trees likewise;
+  - hen thirst deaths from day 16: ~15 .. 25 a day at 4, a few at 16;
+  - chickens >= 60: 0 .. 2 of 8 at 4 (the control busts), 3 .. 5 at 8, 5 .. 7 at 16: a fox
+    boom like seed 47's can still eat a flock out;
+  - foxes >= 2: 0 .. 1 at 4, 4 .. 6 at 16 (they drink better too, and keep prey);
+  - kills from 2d (>= 21): up with the value, since foxes persist: ~15 .. 20 at 4, 25+ at 16;
+  - verdict: 16 holds on most seeds if the cycle damps as on seed 42; where it does not, the
+    fox boom is the next lever (fewer kits: the interval, or the litter gate).
+- **Run:** `wmc lab runs/m32-fast.scenario --set TREE_SUN=4,8,16 --full --csv runs/12.csv`
+- **Result** (lab 12, 698 s; judged against the fast tier's lines as they were then, 21 and
+  9; medians; seeds that held each line):
+
+  | TREE_SUN | kills 2d | kills 9d | chickens >= 60 (lowest) | foxes >= 2 (lowest) | highest foxes | seeds from 16d | trees from 16d | hen thirst a day from 16d | seeds held |
+  |---|---|---|---|---|---|---|---|---|---|
+  | 4 (as written) | 15.9, 3/8 | 15.8, 6/8 | 0/8 (0 .. 41) | 0/8 (0 .. 1) | 13 .. 39 | 540 .. 1870 | 131 .. 463 | 0.7 .. 41 | 0 |
+  | 8 | 24.0, 6/8 | 26.2, 8/8 | 4/8 (0 .. 139) | 3/8 (0 .. 6) | | | | | 3 |
+  | 16 | 25.5, 7/8 | 28.6, 8/8 | 4/8 (0 .. 123) | 4/8 (0 .. 8) | 18 .. 46 | 15 .. 181 | 15 .. 77 | 1.6 .. 12.6 | 4 |
+
+- **Against the prediction:** the forest shrank as predicted (seeds from day 16 ~20 times
+  fewer at 16, trees ~8 times) and every line rose with the value, as predicted. The
+  floors held on 4 seeds at 16, at the low end of the 5 .. 7 predicted. Seeds 43, 44, 45, 49
+  hold everything (highest foxes 18 .. 22); 46, 47, 48 lose the flock at days 17 .. 21 and
+  then the foxes (highest foxes 40, 29, 46); 42 dips under 60 at day 25 (42 hens) and loses
+  its foxes at day 30 (highest 28). So what is left is the fox boom: where the foxes pass
+  ~25 on this tier, they eat the flock out. Its kills from 9d (20.9 .. 35.8) also clear the
+  new line (23) on 6 seeds.
+
+### 13. Fewer kits a fox: the litter interval (lab 13, full goal, 32 days)
+- **Change:** `last_litter = day + 5` becomes `day + LITTER_GAP` (a const, 5 as written:
+  the same hash); sweep 5, 7, 10 with `TREE_SUN=16`.
+- **Why not the litter gate:** a booming flock is dense everywhere a fox is, so it passes
+  any hens-within-16 count (10 or 15): a higher gate only stops births in a thin flock,
+  after the boom. And the territory (`count fox within 16 < 2`, which counts the fox
+  itself) is already as strict as `sight 16` allows: no other fox in its square. The
+  interval caps the rate: an adult breeds at most once in LITTER_GAP days, so a boom grows
+  more slowly and the flock has time to thin before the foxes are many.
+- **Arithmetic:** a fox breeds from age 2 and lives ~9.1 days (`mortal(6d, 3)`): kits a life
+  if the gates are open ~1 + P(alive at 7.5) + P(alive at 12.5) ≈ 1.75 at 5 days, ~1.3 at 7
+  (ages 2.5 and 9.5), ~1.1 at 10. So at 10 foxes barely replace themselves even when fed;
+  at 7 they grow at about half the rate of 5.
+- **Prediction** (full goal; kills against 37 and 40):
+  - 5: like lab 12's 16 on more founders: booms on the seeds with few founders (45 .. 48 in
+    the baseline): 4 .. 6 of 8 hold the floors; kills from 2d ~40 .. 55;
+  - 7: highest foxes about 0.7 times as many, booms slower: the floors on 6 .. 8 seeds; kills
+    ~35 .. 45 from 2d: the kill lines may fail on some seeds;
+  - 10: no boom, foxes at about the founders' number (7 .. 14): kills ~25 .. 35: the kill
+    lines fail on most seeds; foxes may age out where the founders are few: 2 .. 5 of 8;
+  - verdict: 7, if any.
+- **Run:** `wmc lab runs/m32-full.scenario --set TREE_SUN=16 --set LITTER_GAP=5,7,10 --csv
+  runs/13.csv` (no `--full`: a variant stops once it cannot pass; started 09:39 with the
+  copy's old kill lines, 32 and 19, so its verdicts are re-read against 37 and 40 from the
+  CSV's numbers)
+- **Result** (lab 13, 863 s; against the goal's lines as they are now; medians):
+
+  | LITTER_GAP (TREE_SUN 16) | kills 2d (>= 37) | kills 9d (>= 40) | chickens >= 100 (lowest) | foxes >= 3 (lowest) | highest foxes | foxes from 16d | fox births a day | hens from 16d | seeds held |
+  |---|---|---|---|---|---|---|---|---|---|
+  | 5 | 43.7, 44.4 | 46.0, 47.8 | 205, 220 | 2 of 4: 8, 14; **2** on 44 and 45 at days 26 .. 28 | 31 .. 40 | 18.8, 24.3 | 2.3 .. 2.4 | 189 .. 236 | 2 of 4, stopped |
+  | 7 | 45.3 .. 48.6 (46.7) | 49.1 .. 54.5 (50.2) | 124 .. 243 (205) | 4 .. 14 (8) | 31 .. 45 | 17.8 .. 25.8 | 2.1 .. 2.6 | 144 .. 230 | **8/8** |
+  | **10** | 41.5 .. 62.2 (53.0) | 45.3 .. 71.3 (57.4) | 171 .. 243 (224) | 5 .. 13 (8) | 29 .. 42 | 18.3 .. 30.6 | 2.2 .. 3.1 | 208 .. 302 | **8/8** |
+
+  No fox starved in any run (`died fox of food` 0).
+- **Against the prediction:** 5 failed as predicted, on the foxes: they rose to 40 and fell
+  under 3 late (seeds 44, 45). 7 held as predicted, its kills clear of the lines. 10 was the
+  miss: predicted to fail the kill lines with foxes at the founders' number, it held 8 of 8
+  with the most kills (53 a day against 47) and the highest floors.
+- **Explained** (from the lab's numbers, not followed in time): fox births are the same at 7
+  and 10 (2.1 .. 2.6 against 2.2 .. 3.1 a day), so once the foxes level off it is not the
+  interval that limits births but the other gates (prey, territory, a fed fox); the
+  interval limits how fast a boom can run. At 10 a fox raises about one kit (its next would
+  come at age ~12, past most lives), so the foxes can only grow slowly, and the flock grows
+  ahead of them: more foxes on average from day 16 (25 against 20, median) on a bigger flock
+  (hens from day 16: 208 .. 302 against 144 .. 230), whose lowest stays higher (113 .. 195
+  against 82 .. 151). My arithmetic counted the kits a life and forgot that the flock grows
+  meanwhile: R0 near 1 is enough when nearly every fox gets its kit, and it did.
+
+### 14 .. 17. Confirm: TREE_SUN 16, LITTER_GAP 10
+Both 7 and 10 pass; 10 holds the floors further from their lines (lowest hens 171 against
+124) and kills more. Confirmed with each knob at about -20% and +20% (labs 14, 15), seeds
+50 .. 57 (lab 16, `runs/m32-full-s50.scenario`), and the long run at twice the goal (lab 17,
+64 days, `runs/m64-full.scenario`, `--full`). Full goal, against its lines as they are now
+(lowest .. median over the seeds that ran to the end):
+
+| variant (32 days) | seeds held | kills 2d (>= 37) | kills 9d (>= 40) | lowest chickens (>= 100) | lowest foxes (>= 3) |
+|---|---|---|---|---|---|
+| **16, 10, seeds 42 .. 49** (lab 13) | **8/8** | 41.5 .. 53.0 | 45.3 .. 57.4 | 171 .. 243 | 5 .. 13 |
+| **16, 10, seeds 50 .. 57** (lab 16) | **8/8** | 45.0 .. 48.1 | 46.7 .. 50.9 | 179 .. 263 | 8 .. 14 |
+| `TREE_SUN` 13 (lab 14) | 7/8: seed 46's foxes fall to 2 | 48.2 .. 49.9 | 51.1 .. 54.9 | 194 .. 238 | 7 .. 14 |
+| `TREE_SUN` 19 (lab 14) | 7/8: seed 47's flock touches 99 | 44.4 .. 54.2 | 47.4 .. 60.4 | 198 .. 249 | 7 .. 11 |
+| `LITTER_GAP` 8 (lab 15) | 8/8 | 42.3 .. 47.9 | 46.2 .. 51.9 | 155 .. 243 | 4 .. 11 |
+| `LITTER_GAP` 12 (lab 15) | 8/8 | 46.1 .. 51.5 | 51.2 .. 55.4 | 197 .. 247 | 7 .. 14 |
+| (`LITTER_GAP` 7, lab 13) | 8/8 | 45.3 .. 46.7 | 49.1 .. 50.2 | 124 .. 243 | 4 .. 14 |
+| (`LITTER_GAP` 5, lab 13) | 2 of 4, stopped: foxes fall to 2 | | | | |
+
+- **The long run** (lab 17, 64 days, 1098 s): 7 of 8 seeds hold every line for 64 days.
+  The flock never fell below 171 on any seed (from day 32: 199 .. 319); kills from day 32
+  52.7 .. 76 a day on the 7. On seed 47 the foxes fell to 2 at day 33.3 and died out, just
+  past the goal's window (its kills then end: 27 a day over the 64 days), and its flock
+  grew to 2224 hens with nothing to eat it. **Explained** (`wmc observe 36d 256 256 47 ...
+  --gates`, `runs/obs-36d-s47.txt`): a boom and a cohort. Foxes 7 to 38 by day 21 (2 .. 6
+  kits a day while the flock held ~400 hens), and the flock fell to ~125 hens on days 26
+  .. 30. Thin, it is out of reach (switching), so the foxes stayed hungry: of the litter
+  thinks past the age term, `food > 20h` stopped 318 .. 346 per 2 days from day 22, and
+  births stopped at day 26. The kits of the boom then died of age together (every fox
+  death was age) between days 26 and 34, while the flock recovered from day 30, too late:
+  3 foxes at day 33, none at 34. So a boom can still happen where the founders are few
+  (here 7) and the flock grows large; the interval makes it slower and the floor holds, but
+  one cohort can age out in the trough. Not yet tried: litters for a fox below 20h when it
+  has never bred, or the interval at 12 (lab 15: lowest foxes 7 .. 14 over 32 days).
+- The interval holds from 7 to 12 and fails at 5. The rain holds from 13 to 19, each end
+  losing one seed (7 of 8, as the goal allows): 16 sits in a band whose lower end lies
+  somewhere between 8 (3 of 8 on the fast tier, lab 12) and 13, not measured on the full goal.
+
 ### Later, if needed
 2. **Prey switching, the floor:** the fox walks toward chickens only where there are at
    least `HUNT_FLOCK` within 8 (`count chicken within 8 >= HUNT_FLOCK and nearest meat
@@ -429,7 +623,33 @@ goal (labs 6, 7, 9: `runs/06.csv`, `07.csv`, `09.csv`); 8 more seeds, 50 .. 57 (
 4. **Kept in reserve:** fewer chicks dying of thirst (half the chick deaths on seed 42)
    raises the flock's surplus, so the same flock feeds more foxes.
 
-## Decision
+## Decision (32 days)
+
+In `rules/plants.rules`: `TREE_SUN = 16` (a tree drops a seed every 16 sunny thinks, ~1.2
+a tree-day, not every 4, ~3.2). In `rules/animals.rules`: `LITTER_GAP = 10` (a fox's next
+kit 10 days after its last, not 5). Labs in this part: 7 (12 .. 17 and the 32-day
+baseline), from 04:32 to ~05:05 and 09:38 to ~10:50.
+
+| full goal, 32 days | kills 2d (>= 37) | kills 9d (>= 40) | chickens >= 100 | foxes >= 3 | seeds held |
+|---|---|---|---|---|---|
+| the old rules | 49.1 median, 5/8 | 58.1, 6/8 | 3/8 (0 .. 5 on the other 5) | 1/8 | 0 of 8 |
+| the 16-day rules (1b76f0c) | 30.0, 0/8 | 29.4, 0/8 | 0/8 (0 .. 86) | 0/8 (0) | 0 of 8 |
+| **now**, seeds 42 .. 49 | 53.0, 8/8 | 57.4, 8/8 | 8/8 (171 .. 243) | 8/8 (5 .. 13) | **8 of 8** |
+| **now**, seeds 50 .. 57 | 48.1, 8/8 | 50.9, 8/8 | 8/8 (179 .. 263) | 8/8 (8 .. 14) | **8 of 8** |
+| now, 64 days, seeds 42 .. 49 | 55.7, 7/8 | 57.7, 7/8 | 8/8 (171 .. 243) | 7/8 (0 on 47) | 7 of 8 |
+
+Why it works: the woods no longer fill the shores, so a flock the foxes keep small can
+still drink, and the flock's floor (switching) is no longer undone by thirst. A fox
+raises about one kit, so the foxes grow only about as fast as the flock lets them and do
+not boom past it; the flock grows ahead and feeds more of them, all month.
+
+Fragile: the rain has a narrow band (13 and 19 lose a seed each; its lower end is
+unmeasured between 8 and 13); a boom can still form where the founders are few and the
+flock grows big, and its cohort can age out in the trough after: seed 47's foxes died out
+at day 33 of 64. Kill lines are measured against the 16-day rules' 32-day run (37, 40);
+the old rules, over a month, kill more (49 a day) by eating their flock out.
+
+## Decision (16 days)
 
 In `rules/animals.rules` (2026-10-30): `LITTER_HENS = 10` (a kit needs 10 hens within 16,
 not 15), `HUNT_FLOCK = 4` (a fox walks toward prey, or eats what is next to it, only with

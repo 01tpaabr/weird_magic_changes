@@ -1,0 +1,32 @@
+# A fed fox among a flock raises a kit once it is two days old, and then waits
+# LITTER_GAP days for the next: about one kit in its ~9-day life, so foxes
+# grow no faster than the flock can feed them (at a kit every 5 days they
+# boomed and ate the flock out within a month: tuning/foxes-hunt-more).
+seed 5
+outside soil
+map {
+  gggggggggggggggggggggggggggg
+  ggCgggCgggCgggCgggCgggCggggg
+  gggggggggggggggggggggggggggg
+  ggggCg~~~~~~~~~~~~ggCggggggg
+  gggggg~~~~~~~~~~~~gggggggggg
+  ggCggg~~~~~~~~~~~~gggCgggggg
+  gggggg~~~~~~~~~~~~gggggggggg
+  ggggCg~~~~~~~~~~~~ggCggggggg
+  gggggggggggggggggggggggggggg
+  ggCgggCgggCgggCgggCgggCggggg
+  ggggggggggggFggggggggggggggg
+  ggCgggCgggCgggCgggCgggCggggg
+  gggggggggggggggggggggggggggg
+  gggggggggggggggggggggggggggg
+}
+legend {
+  g grass
+  ~ water
+  C chicken
+  F fox
+}
+
+run 84h
+expect born fox == 1                       # one kit
+expect max last_litter of fox >= 12        # its day (2 or 3) + 10: no other before day 12

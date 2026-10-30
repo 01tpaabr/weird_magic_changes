@@ -18,6 +18,13 @@ kind seed extends rooted(2, 1d, 1d) {
                                 => become tree              # ~20 lit thinks; not in thick woods, not on the shore
 }
 
+# A seed next to water never sprouts and never dries out, so every seed that
+# lands on a shore stays there until a hen eats it. At a seed every 4 sunny
+# thinks the woods filled the shores within days wherever the flock was small,
+# and the hens could no longer reach the water (tuning/foxes-hunt-more,
+# experiment 11; scenarios/tests/shore.scenario).
+const TREE_SUN = 16                 # sunny thinks a tree needs for each seed it drops
+
 kind tree extends rooted(2, 3d, 3d) {
   glyph "T"
   color "#3f9e4d"
@@ -29,5 +36,5 @@ kind tree extends rooted(2, 3d, 3d) {
 
   inherit rooted                    # water within 2 keeps it three days
   when light > 128 and water > 1d => sun += 1
-  when sun >= 4 and nearest free within 2 as c => { sun = 0; spawn seed at c }    # a seed per ~4 sunny thinks: ~5 a day
+  when sun >= TREE_SUN and nearest free within 2 as c => { sun = 0; spawn seed at c }    # about a seed a day
 }

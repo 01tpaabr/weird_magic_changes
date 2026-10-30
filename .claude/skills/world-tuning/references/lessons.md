@@ -4,6 +4,44 @@ What tuning this project's worlds has taught, newest first. Each entry: what was
 happened (with numbers), why, and the rule of thumb. Add one at the end of every tuning
 (protocol step 8); keep the numbers, they are what makes a lesson reusable.
 
+## 2026-10-30: the fox goal over 32 days (`tuning/foxes-hunt-more/notes.md`, from "32 days")
+
+The 16-day rules died after day 16 on every seed (lab 11). Over 32 days, 256x256: from 0
+of 8 seeds to 8 of 8 in 2 changes (16 of 16 seeds; each knob at -20% and +20% holds 7 or 8
+of 8). Kills a day 30 to 53 (median, from day 2); lowest chickens 171 .. 243 (floor 100);
+lowest foxes 5 .. 13 (floor 3). Run 64 days: 7 of 8, the flock never under 171, and on
+seed 47 the foxes died out at day 33: a boom's cohort aged out while the thinned flock kept
+them too hungry to breed (`food > 20h` stopped their litters). The long run found it.
+- **The prey can die of something that grows with time, not with the predator.** On seed
+  42 the foxes were gone by day 22 and the hens still went from 90 to 0, of thirst: thirst
+  deaths per 100 hens a day 1 .. 3 on days 0 .. 8, 21 .. 26 on 14 .. 20, 39 .. 93 later. The
+  woods had filled the shores: a seed next to water never sprouts and never dries out, the
+  trees drop seeds on every free cell within 2, and only hens eating seeds clear them. A big
+  flock (the old rules: 840 hens) holds the woods at ~2400 seeds; a flock the foxes keep at
+  ~200 cannot, so fewer hens meant more seeds meant more thirst. Rule: when the prey dies
+  after its predator, compute each cause of death per head over time (observe's CSV), and
+  look for a stock that only grows. A third kind can make the floor.
+- **Change the inflow, not the stock's lifetime.** Seeds that rot after 3 days changed
+  nothing (5967 seeds at day 32 against 5951): the trees' rain (~2000 a day) re-seeded the
+  shore faster. A quarter of the rain (`TREE_SUN` 4 to 16: ~3.2 to ~1.2 seeds a tree-day)
+  kept ~100 seeds and ~120 trees, thirst at 2 .. 5, and both kinds lived to day 32 on seed 42.
+- **A density gate cannot stop a boom in a dense prey.** A booming flock passes "10 hens
+  within 16" wherever a fox stands, so a higher gate only stops births after the boom; and
+  `count fox within 16 < 2` (the fox counts itself) is already the strictest territory
+  `sight 16` allows. The litter interval caps the rate: at a kit every 5 days foxes rose to
+  40 and then fell under 3 (2 of 4 seeds); at 7 and 10 every seed held. 10 (about one kit
+  a life) killed *more* (53 a day against 47): births were the same (~2.5 a day) and the
+  flock grew ahead of the foxes, so the foxes averaged more on a bigger flock. Predicted to
+  fail on kills: I counted kits a life and forgot that the prey grows meanwhile.
+- **A longer window can turn the baseline's "more" into a binge.** Over 32 days the old
+  rules killed 49 a day (median; best 72) by letting the flock boom and then eating it out:
+  "above its best seed" would have asked for that. The kill lines came from the 16-day
+  rules' 32-day run instead (above its best: 37 and 40), and the fast tier's by area: its
+  own best seed was another binge (32 and 39 by the rule, never reached).
+- **A probe of a world-level mechanism can be tiny.** A hen by a pond ringed with 10 trees
+  (20x14 cells, 4 days, `scenarios/tests/shore.scenario`) dies of thirst on 3 seeds of 4 at
+  the old rain and lives on 4 of 4 at the new: the month-long collapse in half a second.
+
 ## 2026-10-30: the fox goal met (`tuning/foxes-hunt-more/notes.md`)
 
 "Foxes hunt more chickens, but chickens never die out", 256x256, 16 days: from 0 of 8

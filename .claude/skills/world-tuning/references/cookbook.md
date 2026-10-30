@@ -79,8 +79,8 @@ Watch the prey's `eaten by` share and its `no food` deaths together.
 
 ### Births that need a resource: the numerical response
 
-Consumers that breed only where their resource is dense cannot outgrow it. The fox's litter
-rule needs 15 hens within 16 cells, a kit every 5 days at most:
+Consumers that breed only where their resource is dense do not breed where it is thin. The
+fox's litter rule needed 15 hens within 16 cells, a kit every 5 days at most:
 
 ```text
 when age > 2d and food > 20h and day + 1 > last_litter and chance(2)
@@ -94,6 +94,13 @@ day at a mean of 30 hens, 0.06 at 229, 0.75 .. 1.8 at 390 .. 480. Before relaxin
 rule, `--gates` it: the term that stops the thinks that pass the dice is the one to move.
 Knobs: the count (in a `const`, to sweep), the interval, the dice. Count `only` the
 resource that matters (counting chicks too once let foxes boom and crash the hens).
+
+Such a gate does not stop a boom: while the resource booms, every consumer stands where it
+is dense, so any count passes, and the gate closes only once the resource is thin, with
+the consumers already many. The interval caps the rate instead. Over 32 days, foxes with a
+kit every 5 days rose to 40 and fell under 3; with one every 10 (past most of a fox's
+~9-day life: about one kit each) every seed held, with more kills, since the flock grew
+ahead of the foxes. Lifetime young near 1 is enough when nearly every adult gets its one.
 
 ### Carrying capacity: births that need room
 
@@ -138,14 +145,23 @@ kind sheep extends drinker(8, 2h, 3) { glyph "s"  sight 8 }   # sees water 8 off
 Knobs: the trait's arguments, the terrain (`terrain water_level`, `water_scale`), where the
 `start` lines put them. Watch `expect never died K of water > 0`.
 
+Access to water is a resource too, and standing actors take it: a drinker drinks only from
+a free cell next to water. In the built-in world seeds that land on a shore never sprout or
+dry out, and the trees kept raining them, so the woods filled the shores within weeks
+wherever the hens (who eat seeds) were few: thirst deaths per hen rose tenfold and the
+flock died after its foxes. Watch thirst deaths *per head over time*: a cause that only
+grows is a stock filling up. Change its inflow (`TREE_SUN`: fewer seeds per tree), not its
+lifetime (rotting seeds changed nothing: the rain refilled the shore faster).
+
 ## Time
 
 ### Delays and oscillations
 
 Time between cause and effect (an egg hatches in 8h, a chick is a hen at 2 days, a kit every
 5 days) lets a population overshoot before its brake bites: boom, then bust. Shorter delays,
-or brakes that act on the present (density gates, satiation), damp it. Watch both ends:
-`expect always count K >= low` and `expect always count K <= high`.
+brakes that act on the present (density gates, satiation), or a cap on the birth rate (the
+interval above) damp it. Watch both ends: `expect always count K >= low` and `expect always
+count K <= high`, over a run longer than the cycle.
 
 ### Cohorts and lockstep: stagger at birth
 
@@ -295,6 +311,12 @@ From `tuning/foxes-hunt-more/notes.md` (2026-10-29).
    high-ratio seeds. Then the floor: switching (hunt hens only with `HUNT_FLOCK` or more
    within 8). Then, if rates are short, a hungrier fox (eating below 21h or 22h: smaller,
    more meals).
+4. What happened: a lower litter gate alone crashed every flock (lockstep litters);
+   switching plus the gate at 10 and a starving exception met the 16 days on 8 of 8. Run
+   for 32 days, the same rules died on every seed: a fox boom on some, and on all a flock
+   dying of thirst as the woods filled the shores. Extended to 32 days: fewer seeds per tree
+   (`TREE_SUN` 4 to 16) and about one kit a fox (`LITTER_GAP` 5 to 10) held 16 of 16 seeds
+   (lessons.md, both 2026-10-30 entries).
 
 ### A society: "the poorest keep up"
 

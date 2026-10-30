@@ -1,8 +1,9 @@
 # The fast tier of goal.scenario, for iterating: the same world and the same
-# 16 days on 192x192 (0.56 of the area, ~1.6x faster), each threshold taken
-# from this world's own baseline the way goal.scenario takes its own. It is
-# harsher than the full goal (fewer founders: hens die out on 2 seeds of 8,
-# foxes on 3); goal.scenario decides.
+# 32 days on 192x192 (0.56 of the area, ~1.6x faster). Its kill lines are the
+# full goal's scaled by the area: by the full goal's rule its own baseline
+# would ask 32 and 39, set by one seed whose foxes eat the flock out (notes.md).
+# The floors are its 16-day ones (half its usual lowest hens; 3 foxes x 0.56).
+# It is harsher than the full goal (fewer founders); goal.scenario decides.
 rules ../../rules
 seed 42
 seeds 8
@@ -16,8 +17,8 @@ start hive    1 / 20000
 start grass   1 / 20
 start seed    1 / 100
 
-run 16d
-expect mean eaten chicken by fox per day >= 21 from 2d   # twice this baseline's 10.4 a day (7.9 .. 16.7)
-expect mean eaten chicken by fox per day >= 9 from 9d    # twice its 4.4 (0 .. 21.3)
-expect always count chicken >= 60 from 2d                # half its usual lowest (122; 0 on seeds 42 and 43)
-expect always count fox >= 2 from 2d                     # its lowest is 0 .. 3, median 1
+run 32d
+expect mean eaten chicken by fox per day >= 21 from 2d   # the full goal's 37 x 0.56 (its baseline: 9.1 .. 31.5, median 15.9)
+expect mean eaten chicken by fox per day >= 23 from 9d   # the full goal's 40 x 0.56 (7.3 .. 38.2, median 15.8)
+expect always count chicken >= 60 from 2d                # half its 16-day usual lowest (122); its baseline: 0 .. 41
+expect always count fox >= 2 from 2d                     # its baseline: 0 .. 1

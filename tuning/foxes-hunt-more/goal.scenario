@@ -1,7 +1,10 @@
 # Goal: foxes hunt more chickens, but chickens never die out (notes.md).
 # The built-in world (scenarios/default.scenario: its terrain and starts) on
-# 256x256, for 16 days, on 8 seeds: the founding foxes die of age from day 6,
-# so a run this long shows whether their kits keep the hunting going.
+# 256x256, for 32 days, on 8 seeds: past the founders' wave (they die of age
+# from day 6) and past a boom and bust of their kits, which the first 16 days
+# hid (notes.md, experiment 10). Kills are taken from the 32-day baseline of
+# the rules as of 1b76f0c (runs/11-32d.csv): above its best seed. The floors
+# are the 16-day goal's, over the whole month.
 # `chicken` is the family (hens and chicks), as in the rules; eggs are not.
 rules ../../rules
 seed 42
@@ -16,8 +19,8 @@ start hive    1 / 20000
 start grass   1 / 20
 start seed    1 / 100
 
-run 16d
-expect mean eaten chicken by fox per day >= 32 from 2d   # hunt more: twice the baseline's 16.2 a day (13.2 .. 26.6)
-expect mean eaten chicken by fox per day >= 19 from 9d   # and still, once the founders age out: twice its 9.4 (1.9 .. 33.9)
-expect always count chicken >= 100 from 2d               # never die out: half the baseline's usual lowest (200; 0 on seed 43)
-expect always count fox >= 3 from 2d                     # nor do the hunters: the baseline's lowest is 0 .. 7, median 2.5
+run 32d
+expect mean eaten chicken by fox per day >= 37 from 2d   # hunt more: above that baseline's best seed (36.7; 22.2 .. 36.7, median 30)
+expect mean eaten chicken by fox per day >= 40 from 9d   # and all month: above its best (39.6; 19.4 .. 39.6, median 29.4)
+expect always count chicken >= 100 from 2d               # never die out: half the 16-day baseline's usual lowest (200); that baseline: 0 .. 86
+expect always count fox >= 3 from 2d                     # nor do the hunters: that baseline's foxes die out on all 8 seeds

@@ -5,12 +5,13 @@
 # flower 4, hive 5, bee 6, grass 7, seed 8, tree 9.
 
 # The fox's balance, tuned for tuning/foxes-hunt-more (foxes hunt more
-# chickens, chickens never die out, over 16 days): foxes breed where the flock
-# is and hunt only where it is thick. Past 16 days they still boom and bust
-# (its notes.md, experiment 10).
+# chickens, chickens never die out, over 32 days): foxes breed where the flock
+# is, hunt only where it is thick, and raise about one kit a life, so they
+# cannot outgrow the flock (at a kit every 5 days they boomed and bust).
 const LITTER_HENS = 10              # hens within 16 a fox needs to raise a kit
 const HUNT_FLOCK = 4                # hens within 8 a fox needs to hunt there: a thin flock is safe
 const DESPERATE = 16h               # below this a fox eats what is next to it, flock or not
+const LITTER_GAP = 10               # days from a fox's kit to its next: past its ~9-day life, mostly
 
 # What hens and chicks do alike, in this order: run when hurt, drink when
 # desperate (fox or not), flee a fox, find and drink water (a drinker, which
@@ -97,6 +98,6 @@ kind fox extends mortal(6d, 3), drinker(8, 6h, 2) {
   when hour >= 9 and hour < 17 and food >= 12h => { look = 1  idle }   # sleeps through the day when fed
   when age > 2d and food > 20h and day + 1 > last_litter and chance(2)
        and count fox within 16 < 2 and count only chicken within 16 >= LITTER_HENS   # hens, not chicks: counting chicks let foxes boom
-       and nearest free within 1 as c => { last_litter = day + 5  spawn fox at c }  # a kit every 5 days: fed, its own ground, prey on it
+       and nearest free within 1 as c => { last_litter = day + LITTER_GAP  spawn fox at c }  # fed, its own ground, prey on it
   when true                        => wander()                      # patrols
 }
