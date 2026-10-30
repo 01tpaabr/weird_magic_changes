@@ -430,13 +430,15 @@ start hive at (77, 103)                        # exactly there
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks, at most 4096 of them (4096 x 4096 cells); the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
+| `start K N / D in (X0, Y0) to (X1, Y1)` | | this share of the walkable cells in that region, both corners included: X0 to X1 across, Y0 to Y1 down |
 | `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
 
 `seed`, `size`, `map`, `legend` and `outside` come once, and each terrain field once (several
-`terrain` lines add up); `rules` and `start` lines add up.
+`terrain` lines add up); `rules` and `start` lines add up. A kind has one share everywhere and
+one in each region at most.
 
 **The edge of the world.** The world is a billion cells each way from (0, 0): x and y run
 from -1000000000 to 999999999. A position past that in a `start` or `expect` line is an
@@ -446,7 +448,24 @@ or spawn there is `BLOCKED`. The camera stops at the edge too.
 
 Each walkable cell draws one number in [0, 1), and the shares cut that range into intervals
 in the order written: a cell starts at most one kind, the shares add up to at most 1, and
-reordering the lines moves who starts where. A share is exact to one part in 2^24 (the smallest is 1 / 16777216), so
+reordering the lines moves who starts where. A share with a region takes part only on the
+cells inside it, in its place among the lines: on any cell, the shares that hold it are cut in
+the order written, and they must add up to at most 1 there. So two regions that do not meet
+can each be filled whole, and several worlds share one board side by side:
+
+```scenario
+# two boards on one world: a Life soup on the left, every cell of the right a dead one
+rules ../packs/life
+seed 1
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start alive 3 / 8 in (0, 0) to (63, 63)
+start dead  5 / 8 in (0, 0) to (63, 63)
+start dead  1 / 1 in (64, 0) to (127, 63)
+```
+
+Where regions overlap, an error names the line and a cell where the shares pass 1. A share
+is exact to one part in 2^24 (the smallest is 1 / 16777216), so
 halves, quarters and eighths add up exactly (`start alive 3 / 8` and `start dead 5 / 8` fill
 every cell), while `1 / 3` and `2 / 3` leave about one cell in 16.7 million empty. An explicit start takes its cell, whatever the
 shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
@@ -830,6 +849,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | a chain of `extends` | 128 kinds and traits below the one that extends them |
 | chunks a scenario's `size` generates at creation | 4096 (4096 x 4096 cells) |
 | seeds a scenario test runs on | 1000 |
+| shares with a region in a scenario | 256 |
 | cells each way from (0, 0) | 1000000000 (x and y run from -1000000000 to 999999999; beyond, rock and nobody, §14) |
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword

@@ -480,6 +480,10 @@ fn the_limits_table_is_the_codes() {
             vec![i64::from(sim_core::scenario::MAX_SEEDS)],
         ),
         (
+            "shares with a region in a scenario".into(),
+            vec![n(sim_core::scenario::MAX_REGION_SHARES)],
+        ),
+        (
             "cells each way from (0, 0)".into(),
             vec![i64::from(sim_core::WORLD_EXTENT)],
         ),

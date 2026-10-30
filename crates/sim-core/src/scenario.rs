@@ -8,6 +8,7 @@
 //! size 256 256                                  # cells, rounded up to whole chunks
 //! terrain water_level 0.18 rock_on_soil 0.02    # any GenParams field; the others default
 //! start chicken 1 / 400                         # this share of walkable cells, by kind name
+//! start grass 1 / 2 in (0, 0) to (63, 31)       # a share of the walkable cells in a region
 //! start hive at (77, 103)                       # exactly there
 //! start fox at (80, 100) with (food = 2h)       # newborn, but hungry
 //! map {                                         # drawn cells from (0, 0); no comments inside
@@ -37,7 +38,9 @@ use std::fmt;
 
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
-use crate::stage::{CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16};
+use crate::stage::{
+    CHUNK_CELLS, CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16,
+};
 
 mod checks;
 mod expect;
@@ -62,11 +65,66 @@ pub const MAX_SIZE_CHUNKS: u64 = 4096;
 const _: () = assert!(MAX_SIZE_CHUNKS * CHUNK_SIZE as u64 <= WORLD_EXTENT as u64);
 const _: () = assert!(MAP_CELLS <= WORLD_EXTENT as usize);
 
+/// The most shares with a region a scenario may hold: where regions
+/// overlap, the shares on a cell must still add up to at most one, and
+/// checking that takes the cube of their number.
+pub const MAX_REGION_SHARES: usize = 256;
+
+/// `in (x0, y0) to (x1, y1)`: the cells a share is limited to, both corners
+/// included.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Region {
+    pub x0: i32,
+    pub y0: i32,
+    pub x1: i32,
+    pub y1: i32,
+}
+
+impl Region {
+    #[inline]
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        (self.x0..=self.x1).contains(&x) && (self.y0..=self.y1).contains(&y)
+    }
+
+    /// Does it hold any cell of chunk `c`?
+    pub fn meets(&self, c: ChunkCoord) -> bool {
+        let (lo, hi) = (c.cell(0), c.cell(CHUNK_CELLS - 1));
+        self.x0 <= hi.x && lo.x <= self.x1 && self.y0 <= hi.y && lo.y <= self.y1
+    }
+
+    /// Both corners in the world, the first above and left of the second
+    /// (or on its row or column), else why not.
+    pub fn check(&self) -> Result<(), String> {
+        in_world(self.x0, self.y0)?;
+        in_world(self.x1, self.y1)?;
+        if self.x0 > self.x1 || self.y0 > self.y1 {
+            return Err(format!(
+                "a region runs from its top-left corner to its bottom-right: ({}, {}) is not above and left of ({}, {})",
+                self.x0, self.y0, self.x1, self.y1
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Display for Region {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Region { x0, y0, x1, y1 } = self;
+        write!(f, "in ({x0}, {y0}) to ({x1}, {y1})")
+    }
+}
+
 /// Where a kind starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
-    /// `start K n / d`: this share of walkable cells.
-    Share { kind: String, num: u32, den: u32 },
+    /// `start K n / d [in (x0, y0) to (x1, y1)]`: this share of walkable
+    /// cells, everywhere or in the region.
+    Share {
+        kind: String,
+        num: u32,
+        den: u32,
+        region: Option<Region>,
+    },
     /// `start K at (x, y) [with (name = v, ...)]`: exactly there, newborn
     /// but for the needs and memory `with` sets.
     At {
@@ -75,6 +133,52 @@ pub enum Start {
         y: i32,
         with: Vec<(String, i32)>,
     },
+}
+
+/// Where the shares add up to more than one on a cell: the index of the last
+/// share that holds it, and the cell. A share with no region holds every
+/// cell; the most the shares on one cell add up to is reached on a cell
+/// whose x is some region's left edge and y some region's top (or anywhere,
+/// with no regions), so those are the cells to try.
+pub fn share_peak(starts: &[Start]) -> Option<(usize, i32, i32)> {
+    let shares: Vec<(usize, u64, Option<Region>)> = starts
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            Start::Share { region, .. } => Some((i, u64::from(s.share()), *region)),
+            Start::At { .. } => None,
+        })
+        .collect();
+    let everywhere: u64 = shares.iter().filter(|s| s.2.is_none()).map(|s| s.1).sum();
+    let mut xs: Vec<i32> = shares.iter().filter_map(|s| s.2.map(|r| r.x0)).collect();
+    let mut ys: Vec<i32> = shares.iter().filter_map(|s| s.2.map(|r| r.y0)).collect();
+    for v in [&mut xs, &mut ys] {
+        v.sort_unstable();
+        v.dedup();
+        if v.is_empty() {
+            v.push(0);
+        }
+    }
+    for &y in &ys {
+        for &x in &xs {
+            let mut sum = everywhere;
+            for &(_, share, region) in &shares {
+                if region.is_some_and(|r| r.contains(x, y)) {
+                    sum += share;
+                }
+            }
+            if sum > u64::from(PLACE_ONE) {
+                let last = shares
+                    .iter()
+                    .rev()
+                    .find(|s| s.2.is_none_or(|r| r.contains(x, y)))
+                    .map(|s| s.0)
+                    .expect("a cell over one holds a share");
+                return Some((last, x, y));
+            }
+        }
+    }
+    None
 }
 
 impl Start {
@@ -109,7 +213,18 @@ impl Start {
 impl fmt::Display for Start {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Start::Share { kind, num, den } => write!(f, "start {kind} {num} / {den}"),
+            Start::Share {
+                kind,
+                num,
+                den,
+                region,
+            } => {
+                write!(f, "start {kind} {num} / {den}")?;
+                match region {
+                    Some(r) => write!(f, " {r}"),
+                    None => Ok(()),
+                }
+            }
             Start::At { kind, x, y, with } => {
                 write!(f, "start {kind} at ({x}, {y})")?;
                 if !with.is_empty() {
@@ -898,13 +1013,15 @@ impl Scenario {
     /// Parse a scenario's text. Unknown statements and terrain fields, a
     /// second `seed`, `size`, `outside` or terrain field, shares that are
     /// not `0 < n / d <= 1` or place nobody (below `1 / PLACE_ONE`), two
-    /// shares for one kind,
-    /// shares summing above one, a map that does not fit its legend or
+    /// shares for one kind in one region (or both everywhere), a region not
+    /// in the world or turned inside out, more than [`MAX_REGION_SHARES`]
+    /// with one, shares summing above one on any cell, a map that does not fit its legend or
     /// its size, and a legend entry the map never uses are errors. Kind, need and memory names are checked later,
     /// against the rules ([`Placement::resolve`]).
     pub fn parse(file: &str, text: &str) -> Result<Scenario, ScenarioError> {
         let mut s = Scenario::default();
         let mut total = 0u64;
+        let mut regions = 0usize;
         let mut seed_line: Option<u32> = None;
         let mut size_line: Option<u32> = None;
         let mut seeds_line: Option<u32> = None;
@@ -1085,7 +1202,28 @@ impl Scenario {
                         });
                         s.start_lines.push(line_no);
                     } else {
-                        let parts: Vec<&str> = tail.split('/').map(str::trim).collect();
+                        // `N / D`, then maybe `in (X0, Y0) to (X1, Y1)`.
+                        let (share, region) = match tail.split_once(" in") {
+                            None => (tail.as_str(), None),
+                            Some((share, region)) => {
+                                const FORM: &str =
+                                    "expected `start KIND N / D in (X0, Y0) to (X1, Y1)`";
+                                let (x0, y0, after) =
+                                    xy(region).ok_or_else(|| err(line_no, FORM.into()))?;
+                                let (x1, y1, after) = after
+                                    .trim_start()
+                                    .strip_prefix("to")
+                                    .and_then(xy)
+                                    .ok_or_else(|| err(line_no, FORM.into()))?;
+                                if !after.trim().is_empty() {
+                                    return Err(err(line_no, FORM.into()));
+                                }
+                                let r = Region { x0, y0, x1, y1 };
+                                r.check().map_err(|m| err(line_no, m))?;
+                                (share, Some(r))
+                            }
+                        };
+                        let parts: Vec<&str> = share.split('/').map(str::trim).collect();
                         let (num, den) = match parts[..] {
                             [n, d] => (n.parse::<u32>(), d.parse::<u32>()),
                             _ => return Err(err(line_no, "expected `start KIND N / D`".into())),
@@ -1096,16 +1234,31 @@ impl Scenario {
                         if num == 0 || den == 0 || num > den {
                             return Err(err(line_no, "a share is N / D with 0 < N <= D".into()));
                         }
-                        if s.starts
-                            .iter()
-                            .any(|o| matches!(o, Start::Share { kind: k, .. } if k == kind))
-                        {
-                            return Err(err(line_no, format!("two shares for `{kind}`")));
+                        if s.starts.iter().any(|o| {
+                            matches!(o, Start::Share { kind: k, region: r, .. } if k == kind && *r == region)
+                        }) {
+                            return Err(err(
+                                line_no,
+                                match region {
+                                    None => format!("two shares for `{kind}`"),
+                                    Some(r) => format!("two shares for `{kind}` {r}"),
+                                },
+                            ));
+                        }
+                        if region.is_some() {
+                            regions += 1;
+                            if regions > MAX_REGION_SHARES {
+                                return Err(err(
+                                    line_no,
+                                    format!("more than {MAX_REGION_SHARES} shares with a region"),
+                                ));
+                            }
                         }
                         let start = Start::Share {
                             kind: kind.to_string(),
                             num,
                             den,
+                            region,
                         };
                         if start.share() == 0 {
                             return Err(err(
@@ -1115,7 +1268,11 @@ impl Scenario {
                                 ),
                             ));
                         }
-                        total += u64::from(start.share());
+                        // Shares everywhere: the sum so far. With regions, the
+                        // cells where they overlap, once all are read.
+                        if region.is_none() {
+                            total += u64::from(start.share());
+                        }
                         if total > u64::from(PLACE_ONE) {
                             return Err(err(line_no, "the shares add up to more than 1".into()));
                         }
@@ -1293,6 +1450,12 @@ impl Scenario {
             line,
             msg,
         };
+        if let Some((last, x, y)) = share_peak(&s.starts) {
+            return Err(err(
+                s.start_lines[last],
+                format!("the shares at ({x}, {y}) add up to more than 1"),
+            ));
+        }
         if let (Some(m), Some(line)) = (s.pass, pass_line)
             && m > s.seeds
         {
@@ -1540,10 +1703,15 @@ pub struct Explicit {
 /// A scenario's starts resolved against a kind table: what worldgen places.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Placement {
-    /// Cumulative upper bounds in the order the shares are written: a
-    /// walkable cell whose draw is below a bound, and not below the
-    /// previous one, starts that kind (`None`: a saved share whose kind
-    /// the rules lack, which keeps its interval and places nobody).
+    /// The shares in the order written, each with its region: at a
+    /// walkable cell, those whose region holds it (or that have none) cut
+    /// the draw's range into intervals in this order, and a cell whose draw
+    /// falls in one starts that kind (`None`: a saved share whose kind the
+    /// rules lack, which keeps its interval and places nobody).
+    shares: Vec<(u32, Option<Region>, Option<Placed>)>,
+    /// With no regions, the same as cumulative upper bounds: a cell whose
+    /// draw is below a bound, and not below the previous one, starts that
+    /// kind. Empty when a share has a region.
     bounds: Vec<(u32, Option<Placed>)>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
@@ -1584,7 +1752,7 @@ impl Placement {
     ) -> Result<Placement, StartError> {
         let mut missing: Vec<&str> = Vec::new();
         let mut first_missing = None;
-        let mut shares: Vec<(Option<Placed>, u32)> = Vec::new();
+        let mut shares: Vec<(u32, Option<Region>, Option<Placed>)> = Vec::new();
         // Each with its index in `starts`, for the error.
         let mut explicit: Vec<(Explicit, usize)> = Vec::new();
         for (at, s) in starts.iter().enumerate() {
@@ -1594,8 +1762,8 @@ impl Placement {
             };
             let Some(def) = kinds.by_name(s.kind()) else {
                 if saved {
-                    if let Start::Share { .. } = s {
-                        shares.push((None, s.share()));
+                    if let Start::Share { region, .. } = s {
+                        shares.push((s.share(), *region, None));
                     }
                     continue;
                 }
@@ -1613,7 +1781,12 @@ impl Placement {
                 cover: def.cover,
             };
             match s {
-                Start::Share { .. } => shares.push((Some(placed), s.share())),
+                Start::Share { kind, region, .. } => {
+                    if let Some(r) = region {
+                        r.check().map_err(|m| err(format!("`{kind}` {r}: {m}")))?;
+                    }
+                    shares.push((s.share(), *region, Some(placed)));
+                }
                 Start::At { kind, x, y, with } => {
                     in_world(*x, *y).map_err(|m| err(format!("`{kind}` at {m}")))?;
                     // Not quoted as a `start` line: a map may have drawn it.
@@ -1668,18 +1841,43 @@ impl Placement {
                 ),
             });
         }
-        let mut bounds = Vec::with_capacity(shares.len());
-        let mut upto = 0u64;
-        for (placed, share) in shares {
-            upto += u64::from(share);
-            if upto > u64::from(PLACE_ONE) {
-                return Err(StartError {
-                    start: None,
-                    msg: "the shares add up to more than 1".into(),
-                });
-            }
-            let upto = u32::try_from(upto).expect("at most PLACE_ONE, checked above");
-            bounds.push((upto, placed));
+        if starts
+            .iter()
+            .filter(|s| {
+                matches!(
+                    s,
+                    Start::Share {
+                        region: Some(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+            > MAX_REGION_SHARES
+        {
+            return Err(StartError {
+                start: None,
+                msg: format!("more than {MAX_REGION_SHARES} shares with a region"),
+            });
+        }
+        if let Some((last, x, y)) = share_peak(starts) {
+            let msg = if starts.iter().any(|s| {
+                matches!(
+                    s,
+                    Start::Share {
+                        region: Some(_),
+                        ..
+                    }
+                )
+            }) {
+                format!("the shares at ({x}, {y}) add up to more than 1")
+            } else {
+                "the shares add up to more than 1".into()
+            };
+            return Err(StartError {
+                start: Some(last),
+                msg,
+            });
         }
         // Stable: of two starts on one cell, the later is the error.
         explicit.sort_by_key(|(e, _)| (e.chunk.y, e.chunk.x, e.cell));
@@ -1694,22 +1892,57 @@ impl Placement {
             });
         }
         let explicit = explicit.into_iter().map(|(e, _)| e).collect();
-        Ok(Placement { bounds, explicit })
+        let mut bounds = Vec::new();
+        if shares.iter().all(|s| s.1.is_none()) {
+            let mut upto = 0;
+            for &(share, _, placed) in &shares {
+                // At most PLACE_ONE: share_peak checked.
+                upto += share;
+                bounds.push((upto, placed));
+            }
+        }
+        Ok(Placement {
+            shares,
+            bounds,
+            explicit,
+        })
     }
 
-    /// What a walkable cell whose placement draw is `u` (`0..PLACE_ONE`)
-    /// starts as, by the shares.
+    /// What the walkable cell `(x, y)`, whose placement draw is `u`
+    /// (`0..PLACE_ONE`), starts as, by the shares.
     #[inline]
-    pub fn placed(&self, u: u32) -> Option<Placed> {
-        self.bounds
-            .iter()
-            .find(|&&(upto, _)| u < upto)
-            .and_then(|&(_, p)| p)
+    pub fn placed(&self, u: u32, x: i32, y: i32) -> Option<Placed> {
+        if !self.bounds.is_empty() || self.shares.is_empty() {
+            return self
+                .bounds
+                .iter()
+                .find(|&&(upto, _)| u < upto)
+                .and_then(|&(_, p)| p);
+        }
+        let mut upto = 0u32;
+        for &(share, region, placed) in &self.shares {
+            if region.is_some_and(|r| !r.contains(x, y)) {
+                continue;
+            }
+            // At most PLACE_ONE on any cell: resolve checked.
+            upto += share;
+            if u < upto {
+                return placed;
+            }
+        }
+        None
     }
 
     /// Any shares that place a kind?
     pub fn has_shares(&self) -> bool {
-        self.bounds.iter().any(|&(_, p)| p.is_some())
+        self.shares.iter().any(|&(_, _, p)| p.is_some())
+    }
+
+    /// Any shares that place a kind in chunk `c`?
+    pub fn has_shares_in(&self, c: ChunkCoord) -> bool {
+        self.shares
+            .iter()
+            .any(|&(_, r, p)| p.is_some() && r.is_none_or(|r| r.meets(c)))
     }
 
     /// The explicit starts in chunk `c`, by cell.
@@ -1750,6 +1983,7 @@ mod tests {
             kind: kind.into(),
             num,
             den,
+            region: None,
         };
         assert_eq!(
             s.starts,
@@ -2377,11 +2611,11 @@ legend {
                 cover: true,
             },
         );
-        assert_eq!(pl.placed(0), Some(b));
-        assert_eq!(pl.placed(PLACE_ONE / 4 - 1), Some(b));
-        assert_eq!(pl.placed(PLACE_ONE / 4), Some(a));
-        assert_eq!(pl.placed(PLACE_ONE / 4 * 3 - 1), Some(a));
-        assert_eq!(pl.placed(PLACE_ONE / 4 * 3), None);
+        assert_eq!(pl.placed(0, 0, 0), Some(b));
+        assert_eq!(pl.placed(PLACE_ONE / 4 - 1, 0, 0), Some(b));
+        assert_eq!(pl.placed(PLACE_ONE / 4, 0, 0), Some(a));
+        assert_eq!(pl.placed(PLACE_ONE / 4 * 3 - 1, 0, 0), Some(a));
+        assert_eq!(pl.placed(PLACE_ONE / 4 * 3, 0, 0), None);
         assert!(pl.has_shares() && !Placement::default().has_shares());
         let e = Placement::resolve(
             &parse("start a 1 / 9\nstart wolf 1 / 9\nstart fox at (1, 1)\nstart wolf at (2, 2)"),
@@ -2441,6 +2675,183 @@ legend {
 
     /// `with` on a start names needs and memory; the map's terrain decides
     /// where a start may stand.
+    #[test]
+    fn region_shares_parse_print_and_fill_their_cells_only() {
+        let text = "start a 3 / 4 in (0, 0) to (63, 31)\n\
+                    start b 1 / 4 in (64, 16) to (95, 47)\n\
+                    start a 1 / 2 in (-10, 40) to (-1, 40)\n\
+                    start b 1 / 8";
+        let sc = Scenario::parse("t", text).unwrap();
+        let r = |x0, y0, x1, y1| Some(Region { x0, y0, x1, y1 });
+        assert_eq!(
+            sc.starts[1],
+            Start::Share {
+                kind: "b".into(),
+                num: 1,
+                den: 4,
+                region: r(64, 16, 95, 47),
+            }
+        );
+        // Printed as written, and that parses back the same.
+        let printed: Vec<String> = sc.starts.iter().map(ToString::to_string).collect();
+        assert_eq!(printed[0], "start a 3 / 4 in (0, 0) to (63, 31)");
+        assert_eq!(
+            Scenario::parse("t", &printed.join("\n")).unwrap().starts,
+            sc.starts
+        );
+        // On a cell, the shares that hold it, in the order written: in a's
+        // region a's three quarters, then b's eighth from everywhere.
+        let k = crate::rules::compile("t.rules", "kind a { }\nkind b { cover }").unwrap();
+        let p = GenParams::default();
+        let pl = Placement::resolve(&sc.starts, &k, &noise(7, &p)).unwrap();
+        let a = Placed {
+            kind: 0,
+            cover: false,
+        };
+        let b = Placed {
+            kind: 1,
+            cover: true,
+        };
+        let (eighth, quarter) = (PLACE_ONE / 8, PLACE_ONE / 4);
+        assert_eq!(pl.placed(0, 0, 0), Some(a));
+        assert_eq!(
+            pl.placed(3 * quarter - 1, 63, 31),
+            Some(a),
+            "both corners belong"
+        );
+        assert_eq!(pl.placed(3 * quarter, 0, 0), Some(b));
+        assert_eq!(pl.placed(3 * quarter + eighth, 0, 0), None);
+        assert_eq!(pl.placed(0, 64, 31), Some(b), "b's region, then b's eighth");
+        assert_eq!(pl.placed(quarter + eighth - 1, 64, 16), Some(b));
+        assert_eq!(pl.placed(quarter + eighth, 64, 16), None);
+        // Outside every region: b's eighth alone.
+        assert_eq!(pl.placed(0, 200, 200), Some(b));
+        assert_eq!(pl.placed(eighth, 200, 200), None);
+        assert_eq!(pl.placed(0, -5, 40), Some(a), "a negative region");
+        assert_eq!(pl.placed(0, -5, 41), Some(b));
+        // Chunks: b's everywhere-share reaches every chunk; with regions
+        // only, those the regions touch.
+        let only_regions = Scenario::parse("t", "start a 1 / 2 in (70, 0) to (70, 0)")
+            .unwrap()
+            .starts;
+        let pl = Placement::resolve(&only_regions, &k, &noise(7, &p)).unwrap();
+        assert!(pl.has_shares_in(ChunkCoord::new(1, 0)));
+        assert!(!pl.has_shares_in(ChunkCoord::new(0, 0)));
+        assert!(!pl.has_shares_in(ChunkCoord::new(1, 1)));
+        assert!(!pl.has_shares_in(ChunkCoord::new(-1, 0)));
+    }
+
+    #[test]
+    fn region_share_errors_name_the_line() {
+        for (text, want) in [
+            (
+                "start a 1 / 2 in (0, 0) to (9, 9)\nstart b 1 / 2 in (5, 5) to (20, 20)\nstart c 1 / 4 in (8, 2) to (8, 30)",
+                "t:3: the shares at (8, 5) add up to more than 1",
+            ),
+            (
+                "start a 1 / 2\nstart b 3 / 4 in (0, 0) to (0, 0)",
+                "t:2: the shares at (0, 0) add up to more than 1",
+            ),
+            (
+                "start a 1 / 2 in (0, 0) to (9, 9)\nstart a 1 / 3 in (0, 0) to (9, 9)",
+                "t:2: two shares for `a` in (0, 0) to (9, 9)",
+            ),
+            (
+                "start a 1 / 2 in (5, 0) to (4, 9)",
+                "t:1: a region runs from its top-left corner to its bottom-right",
+            ),
+            (
+                "start a 1 / 2 in (0, 0) to (1000000000, 9)",
+                "t:1: (1000000000, 9) is outside the world",
+            ),
+            (
+                "start a 1 / 2 in",
+                "expected `start KIND N / D in (X0, Y0) to (X1, Y1)`",
+            ),
+            ("start a 1 / 2 in (0, 0)", "expected `start KIND N / D in"),
+            (
+                "start a 1 / 2 in (0, 0) to (1, 1) now",
+                "expected `start KIND N / D in",
+            ),
+            (
+                "start a 1 / 2 into (0, 0) to (1, 1)",
+                "expected `start KIND N / D in",
+            ),
+        ] {
+            let e = Scenario::parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(want), "{text:?}: {e}");
+        }
+        // One kind in two regions, or in a region and everywhere: fine.
+        Scenario::parse(
+            "t",
+            "start a 1 / 2 in (0, 0) to (9, 9)\nstart a 1 / 2 in (10, 0) to (19, 9)\nstart a 1 / 4",
+        )
+        .unwrap();
+        // Disjoint regions each filled whole.
+        Scenario::parse(
+            "t",
+            "start a 1 / 1 in (0, 0) to (9, 9)\nstart b 1 / 1 in (10, 0) to (19, 9)",
+        )
+        .unwrap();
+        let many: String = (0..=MAX_REGION_SHARES)
+            .map(|i| format!("start a 1 / 1024 in ({i}, 0) to ({i}, 0)\n"))
+            .collect();
+        let e = Scenario::parse("t", &many).unwrap_err().to_string();
+        assert!(e.contains("more than 256 shares with a region"), "{e}");
+    }
+
+    /// The overlap check tries only the cells where some region's left
+    /// edge meets some region's top: against every cell, on random regions.
+    #[test]
+    fn share_peak_finds_the_fullest_cell() {
+        let mut state = 5u64;
+        let mut below = |n: u32| {
+            state = crate::rng::splitmix64(state);
+            u32::try_from(state % u64::from(n)).unwrap()
+        };
+        for case in 0..300 {
+            let n = 1 + below(6) as usize;
+            let starts: Vec<Start> = (0..n)
+                .map(|i| {
+                    let (x0, y0) = (below(12) as i32, below(12) as i32);
+                    let (x1, y1) = (x0 + below(6) as i32, y0 + below(6) as i32);
+                    Start::Share {
+                        kind: format!("k{i}"),
+                        num: 1 + below(4),
+                        den: 8,
+                        region: (below(5) > 0).then_some(Region { x0, y0, x1, y1 }),
+                    }
+                })
+                .collect();
+            let fullest = (0..20)
+                .flat_map(|y| (0..20).map(move |x| (x, y)))
+                .map(|(x, y)| {
+                    starts
+                        .iter()
+                        .filter(|s| match s {
+                            Start::Share { region, .. } => region.is_none_or(|r| r.contains(x, y)),
+                            Start::At { .. } => false,
+                        })
+                        .map(|s| u64::from(s.share()))
+                        .sum::<u64>()
+                })
+                .max()
+                .unwrap();
+            let peak = share_peak(&starts);
+            assert_eq!(
+                peak.is_some(),
+                fullest > u64::from(PLACE_ONE),
+                "case {case}: {starts:?}"
+            );
+            if let Some((last, x, y)) = peak {
+                let Start::Share { region, .. } = &starts[last] else {
+                    unreachable!()
+                };
+                assert!(region.is_none_or(|r| r.contains(x, y)), "case {case}");
+            }
+        }
+    }
+
     #[test]
     fn starts_set_needs_and_memory_by_name_on_the_map() {
         let k = crate::rules::compile(
@@ -2547,7 +2958,7 @@ legend {
         );
         let pl = Placement::resolve_saved(&starts, &k, &noise(1, &p)).unwrap();
         let (a, c) = (k.by_name("a").unwrap().id, k.by_name("c").unwrap().id);
-        let kind = |u: u32| pl.placed(u).map(|p| p.kind);
+        let kind = |u: u32| pl.placed(u, 0, 0).map(|p| p.kind);
         let eighth = PLACE_ONE / 8;
         assert_eq!(kind(0), Some(c));
         assert_eq!(kind(eighth), None, "b's interval");
@@ -2560,7 +2971,7 @@ legend {
         // Only missing kinds' shares: nothing to place.
         let only_b = Scenario::parse("t", "start b 1 / 2").unwrap().starts;
         let pl = Placement::resolve_saved(&only_b, &k, &noise(1, &p)).unwrap();
-        assert!(!pl.has_shares() && pl.placed(0).is_none());
+        assert!(!pl.has_shares() && pl.placed(0, 0, 0).is_none());
     }
 
     /// Hot reload keeps a start's `with` to what its kind still has, and

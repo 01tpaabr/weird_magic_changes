@@ -37,7 +37,7 @@ use bevy_ecs::resource::Resource;
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
 use crate::rules::Kinds;
-use crate::scenario::{DrawnMap, Start, in_world};
+use crate::scenario::{DrawnMap, Region, Start, in_world};
 use crate::stage::worldgen::GenParams;
 use crate::stage::{
     CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS,
@@ -230,13 +230,30 @@ impl Store {
             let tag = r.u8()?;
             let kind = r.str()?;
             starts.push(match tag {
-                0 => {
+                // 3: a share with a region (still format 9: saves without
+                // one read as before).
+                0 | 3 => {
                     // What `Scenario::parse` refuses: `share()` divides by `den`.
                     let (num, den) = (r.u32()?, r.u32()?);
                     if num == 0 || den == 0 || num > den {
                         return Err(bad(format!("share {num} / {den} for `{kind}`")));
                     }
-                    Start::Share { kind, num, den }
+                    let region = if tag == 3 {
+                        let (x0, y0, x1, y1) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
+                        let region = Region { x0, y0, x1, y1 };
+                        region
+                            .check()
+                            .map_err(|m| bad(format!("a share of `{kind}` {region}: {m}")))?;
+                        Some(region)
+                    } else {
+                        None
+                    };
+                    Start::Share {
+                        kind,
+                        num,
+                        den,
+                        region,
+                    }
                 }
                 // 2: an explicit start with `with` values (still format 9:
                 // saves without them read as before).
@@ -337,11 +354,22 @@ impl Store {
         w.len(m.starts.len());
         for s in &m.starts {
             match s {
-                Start::Share { kind, num, den } => {
-                    w.u8(0);
+                Start::Share {
+                    kind,
+                    num,
+                    den,
+                    region,
+                } => {
+                    w.u8(if region.is_some() { 3 } else { 0 });
                     w.str(kind);
                     w.u32(*num);
                     w.u32(*den);
+                    if let Some(r) = region {
+                        w.i32(r.x0);
+                        w.i32(r.y0);
+                        w.i32(r.x1);
+                        w.i32(r.y1);
+                    }
                 }
                 Start::At { kind, x, y, with } => {
                     w.u8(if with.is_empty() { 1 } else { 2 });
@@ -708,8 +736,20 @@ mod tests {
                     kind: "seed".into(),
                     num: 1,
                     den: 100,
+                    region: None,
                 },
                 Start::at("árvore", -3, 70000),
+                Start::Share {
+                    kind: "grass".into(),
+                    num: 3,
+                    den: 4,
+                    region: Some(Region {
+                        x0: -70000,
+                        y0: 2,
+                        x1: 999_999_999,
+                        y1: 2,
+                    }),
+                },
                 Start::At {
                     kind: "fox".into(),
                     x: 5,
@@ -794,6 +834,7 @@ mod tests {
                 kind: "seed".into(),
                 num,
                 den,
+                region: None,
             }];
             s.write_meta(&WorldMeta {
                 starts,

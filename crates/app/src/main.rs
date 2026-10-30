@@ -1056,9 +1056,12 @@ fn lint(
         kinds.hash
     )?;
     if let Some((f, s)) = &scenario {
-        let (mut share, mut at) = (0.0, 0);
+        let (mut share, mut at, mut regions) = (0.0, 0, 0);
         for st in &s.starts {
             match st {
+                Start::Share {
+                    region: Some(_), ..
+                } => regions += 1,
                 Start::Share { num, den, .. } => share += f64::from(*num) / f64::from(*den),
                 Start::At { .. } => at += 1,
             }
@@ -1079,11 +1082,11 @@ fn lint(
         };
         writeln!(
             out,
-            "scenario {f}: seed {} size {}x{}, {} shares ({:.2}% of walkable cells), {at} explicit starts{map}",
+            "scenario {f}: seed {} size {}x{}, {} shares ({:.2}% of walkable cells), {regions} in regions, {at} explicit starts{map}",
             s.seed,
             s.width,
             s.height,
-            s.starts.len() - at,
+            s.starts.len() - at - regions,
             share * 100.0
         )?;
     }

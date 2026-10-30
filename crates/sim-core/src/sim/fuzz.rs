@@ -33,9 +33,10 @@ struct Knobs {
     height: u32,
     /// `water_scale`, and the rest in hundredths.
     terrain: (u32, u32, u32, u32),
-    /// A kind and the `d` of its `start K 1 / d`; one past a whole is
-    /// left out.
-    shares: Vec<(Index, u32)>,
+    /// A kind, the `d` of its `start K 1 / d`, and maybe a region (its
+    /// top-left corner and how far the other is); one past a whole is left
+    /// out.
+    shares: Vec<(Index, u32, Option<(i32, i32, i32, i32)>)>,
     /// A kind and a cell, and maybe a need or mem it starts with (which,
     /// an edge or any value, the value); one on water, rock or a taken cell
     /// is left out.
@@ -51,7 +52,11 @@ fn knobs() -> impl Strategy<Value = Knobs> {
         (1u32..=40, 0u32..=60, 0u32..=20, 0u32..=20),
         // Now and then a crowd: every other cell, or every one.
         prop::collection::vec(
-            (any::<Index>(), prop_oneof![9 => 8u32..=64, 1 => 1u32..=2]),
+            (
+                any::<Index>(),
+                prop_oneof![9 => 8u32..=64, 1 => 1u32..=2],
+                prop::option::weighted(0.3, (0i32..128, 0i32..128, 0i32..96, 0i32..96)),
+            ),
             1..=3,
         ),
         prop::collection::vec(
@@ -104,7 +109,7 @@ fn case(p: &Program, k: &Knobs) -> Case {
     );
     let mut used: Vec<&str> = Vec::new();
     let mut whole = 0;
-    for (i, d) in &k.shares {
+    for (i, d, region) in &k.shares {
         if p.kinds.is_empty() {
             break;
         }
@@ -113,7 +118,16 @@ fn case(p: &Program, k: &Knobs) -> Case {
         if !used.contains(&kind) && whole + share <= crate::scenario::PLACE_ONE {
             used.push(kind);
             whole += share;
-            text += &format!("start {kind} 1 / {d}\n");
+            text += &match region {
+                None => format!("start {kind} 1 / {d}\n"),
+                Some((x, y, w, h)) => {
+                    format!(
+                        "start {kind} 1 / {d} in ({x}, {y}) to ({}, {})\n",
+                        x + w,
+                        y + h
+                    )
+                }
+            };
         }
     }
     // Only walkable cells, one start each: the terrain is the seed's.

@@ -109,7 +109,7 @@ pub fn generate_chunk(
     out.actors.rows.clear();
     out.minds.rows.clear();
     let explicit = placement.explicit_in(coord);
-    if explicit.is_empty() && !placement.has_shares() {
+    if explicit.is_empty() && !placement.has_shares_in(coord) {
         return;
     }
     // Explicit starts are sorted by cell: merge them into the cell walk.
@@ -118,7 +118,9 @@ pub fn generate_chunk(
         let p = coord.cell(i);
         let here = match explicit.next_if(|e| usize::from(e.cell) == i) {
             Some(e) => Some(e.placed),
-            None if out.cells.walkable(i) => placement.placed(placement_hash(seed, p.x, p.y)),
+            None if out.cells.walkable(i) => {
+                placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
+            }
             None => None,
         };
         if let Some(Placed { kind, cover }) = here {
@@ -304,7 +306,7 @@ mod tests {
                 "{x},{y}"
             );
             let want = if cells.walkable(i) {
-                pl.placed(placement_hash(7, x, y)).map(|p| p.kind)
+                pl.placed(placement_hash(7, x, y), x, y).map(|p| p.kind)
             } else {
                 None
             };

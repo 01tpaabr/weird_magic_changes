@@ -1,0 +1,23 @@
+# Shares in regions (`start K N / D in (X0, Y0) to (X1, Y1)`, both corners
+# included): a Life board (packs/life) of dead cells in one corner, and a
+# soup of 3 live cells in 8 in a 10 x 10 square across the chunk corner at
+# (64, 64). Every cell of a region is drawn for, and no cell outside one.
+rules ../../packs/life
+seed 1
+size 128 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start dead  1 / 1 in (0, 0) to (31, 31)
+start alive 3 / 8 in (60, 60) to (69, 69)
+start dead  5 / 8 in (60, 60) to (69, 69)
+
+expect count alive == 31         # of the soup's 100 cells: 3 / 8 would be 37.5
+expect count dead == 1093        # the corner's 1024 and the soup's other 69: every cell drawn
+expect at (0, 0) dead            # both corners of a region belong to it
+expect at (31, 31) dead
+expect at (32, 31) nobody        # and the cells just past it do not
+expect at (31, 32) nobody
+expect at (59, 60) nobody
+expect at (60, 59) nobody
+expect at (70, 69) nobody
+expect at (69, 70) nobody
+expect at (100, 100) nobody      # nor anywhere else

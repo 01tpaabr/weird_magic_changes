@@ -91,19 +91,28 @@ fn terrain() -> impl Strategy<Value = String> {
     )
 }
 
-/// Share lines, one per kind, each at most 1/8 so they add up to at most 1.
+/// Share lines, one per kind, each at most 1/8 so they add up to at most 1
+/// on any cell; some in a region, near the initial one or across chunks.
 fn shares() -> impl Strategy<Value = Vec<String>> {
-    prop::collection::vec((any::<Index>(), 1u32..=250, 8u32..=2000), 0..5).prop_map(|v| {
+    let region = prop::option::of((-80i32..200, -80i32..200, 0i32..150, 0i32..150));
+    prop::collection::vec((any::<Index>(), 1u32..=250, 8u32..=2000, region), 0..5).prop_map(|v| {
         let mut kinds: Vec<&str> = Vec::new();
         let mut lines = Vec::new();
-        for (k, num, den) in v {
+        for (k, num, den, region) in v {
             let kind = k.get(&KINDS.defs).name.as_str();
             if kinds.contains(&kind) {
                 continue;
             }
             kinds.push(kind);
             let num = 1 + num % (den / 8);
-            lines.push(format!("start {kind} {num} / {den}"));
+            lines.push(match region {
+                None => format!("start {kind} {num} / {den}"),
+                Some((x, y, w, h)) => format!(
+                    "start {kind} {num} / {den} in ({x}, {y}) to ({}, {})",
+                    x + w,
+                    y + h
+                ),
+            });
         }
         lines
     })
@@ -492,6 +501,13 @@ const LINES: &[&str] = &[
     "start fox 1 /",
     "start fox / 2",
     "start fox 0 / 0",
+    "start fox 1 / 2 in",
+    "start fox 1 / 2 in (1, 2)",
+    "start fox 1 / 2 in (1, 2) to",
+    "start fox 1 / 2 in (5, 5) to (1, 1)",
+    "start fox 1 / 2 in (0, 0) to (2147483647, 1)",
+    "start fox 1 / 1 in (0, 0) to (9, 9)",
+    "start fox 1 / 2 in (0,0) to (9,9) to (9, 9)",
     "start 1fox 1 / 2",
     "size",
     "size 1",

@@ -320,6 +320,7 @@ fn a_bad_world_header_never_panics() {
         kind: "grass".into(),
         num,
         den,
+        region: None,
     };
     let at = |x, y| Start::at("hive", x, y);
     // (what, the meta, whether opening refuses it)
@@ -357,6 +358,7 @@ fn a_bad_world_header_never_panics() {
                         kind: "seed".into(),
                         num: 1,
                         den: 2,
+                        region: None,
                     },
                 ],
                 ..meta.clone()
@@ -396,6 +398,63 @@ fn a_bad_world_header_never_panics() {
             true,
         ),
         (
+            "a region inside out",
+            WorldMeta {
+                starts: vec![Start::Share {
+                    kind: "grass".into(),
+                    num: 1,
+                    den: 2,
+                    region: Some(Region {
+                        x0: 9,
+                        y0: 0,
+                        x1: 3,
+                        y1: 5,
+                    }),
+                }],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "a region past the edge of the world",
+            WorldMeta {
+                starts: vec![Start::Share {
+                    kind: "grass".into(),
+                    num: 1,
+                    den: 2,
+                    region: Some(Region {
+                        x0: 0,
+                        y0: 0,
+                        x1: i32::MAX,
+                        y1: 5,
+                    }),
+                }],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "regions that overlap past one",
+            WorldMeta {
+                starts: vec![
+                    share(3, 4),
+                    Start::Share {
+                        kind: "seed".into(),
+                        num: 1,
+                        den: 2,
+                        region: Some(Region {
+                            x0: 4,
+                            y0: 4,
+                            x1: 4,
+                            y1: 4,
+                        }),
+                    },
+                ],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
             "starts at the ends of i32",
             WorldMeta {
                 starts: vec![
@@ -429,6 +488,7 @@ fn a_bad_world_header_never_panics() {
                         kind: "wyrm".into(),
                         num: 1,
                         den: 3,
+                        region: None,
                     },
                 ],
                 ..meta.clone()
