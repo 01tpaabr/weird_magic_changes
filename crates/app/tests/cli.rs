@@ -283,10 +283,18 @@ fn lab_sweeps_a_const_across_seeds() {
         one.contains("variant 1   BUD=0   ok    3 of 3 seeds held every expectation"),
         "{one}"
     );
-    assert!(one.contains("variant 2   BUD=50  FAIL  0 of 3 seeds held every expectation, 3 needed; 3 stopped early"), "{one}");
+    // Three of three to pass: one failed seed and BUD=50 gives up.
+    assert!(one.contains("variant 2   BUD=50  FAIL  0 of 1 seeds held every expectation, 3 needed; 1 stopped early; 2 not run, it could no longer pass"), "{one}");
     assert!(one.contains("passed    1 (BUD=0)"), "{one}");
     let rows = std::fs::read_to_string(&csv).unwrap();
-    assert_eq!(rows.lines().count(), 1 + 2 * 3, "{rows}");
+    assert_eq!(rows.lines().count(), 1 + 3 + 1, "{rows}");
+    // In full, every seed runs to its end.
+    let (ok, out, err) = wmc(&["lab", goal, "--set", "BUD=0,50", "--full"]);
+    assert!(
+        ok && out
+            .contains("variant 2   BUD=50  FAIL  0 of 3 seeds held every expectation, 3 needed\n"),
+        "{out}{err}"
+    );
     // One value: any command takes it.
     let (ok, out, err) = wmc(&["scenario", goal, "--set", "BUD=0"]);
     assert!(ok && out.contains("3 of 3 seeds held"), "{out}{err}");

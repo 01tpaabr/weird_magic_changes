@@ -7,8 +7,10 @@
 //! starved of which need, or a rule's own `die`); its needs over the alive
 //! (min, p10, median, p90, max, mean, decayed to now); how many are in each
 //! state; the last results of their actions; and, for up to `sample` of
-//! them, what their next think would decide and which rules would fire (a
-//! dry run, as the inspector does: nothing in the world changes).
+//! them, what their next think would decide and, per rule, whether it was
+//! reached, fired, or which term of its condition stopped it, with where
+//! one such actor stood (a dry run, as the inspector does: nothing in the
+//! world changes).
 //!
 //! The samples go to a long CSV (`tick,day,hour,kind,metric,value`) and a
 //! one-screen summary. Everything walks the chunks in coordinate order and
@@ -88,8 +90,32 @@ pub struct KindSample {
     pub sampled: u64,
     /// What those thinks decide: an action, `starved` or `trapped`.
     pub decisions: BTreeMap<&'static str, u64>,
-    /// Rules that fired in them, by `file:line`.
-    pub rules: BTreeMap<String, u64>,
+    /// The rules those thinks reached, by `file:line`.
+    pub rules: BTreeMap<String, RuleTally>,
+}
+
+/// Where an explained think stood, and when: (x, y, tick).
+pub type Seen = (i32, i32, u64);
+
+/// One rule over the thinks a sample explained.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleTally {
+    /// Thinks that checked its condition, and that ran its body.
+    pub reached: u64,
+    pub fired: u64,
+    /// Per term of its condition (`RuleInfo::terms`), the thinks it stopped:
+    /// false there, or trapped.
+    pub stopped: Vec<u64>,
+    /// The first think that fired it, and per term the first it stopped.
+    pub fired_at: Option<Seen>,
+    pub stopped_at: Vec<Option<Seen>>,
+}
+
+/// A rule's source: its text, from `when` to `=>`, and its terms.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RuleSource {
+    pub text: String,
+    pub terms: Vec<String>,
 }
 
 /// Every kind at one tick.
@@ -100,11 +126,11 @@ pub struct Sample {
 }
 
 /// A whole observation: the samples, from the first tick to the last, and
-/// the text of every rule they name.
+/// the source of every rule they name.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Report {
     pub samples: Vec<Sample>,
-    pub rule_text: BTreeMap<String, String>,
+    pub rules: BTreeMap<String, RuleSource>,
 }
 
 /// Step `world` for `ticks`, sampling at the start, every `opts.every`
@@ -115,7 +141,7 @@ pub fn observe(world: &mut World, ticks: u64, opts: Options) -> Report {
     let mut seen = world.resource::<Tally>().clone();
     report
         .samples
-        .push(sample(world, opts, &seen, &mut report.rule_text));
+        .push(sample(world, opts, &seen, &mut report.rules));
     let mut done = 0;
     while done < ticks {
         let n = every.min(ticks - done);
@@ -125,7 +151,7 @@ pub fn observe(world: &mut World, ticks: u64, opts: Options) -> Report {
         done += n;
         report
             .samples
-            .push(sample(world, opts, &seen, &mut report.rule_text));
+            .push(sample(world, opts, &seen, &mut report.rules));
         seen = world.resource::<Tally>().clone();
     }
     report
@@ -136,7 +162,7 @@ fn sample(
     world: &World,
     opts: Options,
     seen: &Tally,
-    rule_text: &mut BTreeMap<String, String>,
+    sources: &mut BTreeMap<String, RuleSource>,
 ) -> Sample {
     let kinds = world.resource::<Kinds>();
     let tally = world.resource::<Tally>();
@@ -223,15 +249,31 @@ fn sample(
                 action_name(e.intent.action)
             };
             *ks.decisions.entry(decision).or_default() += 1;
+            let at = cc.cell(usize::from(e.row.cell));
+            let seen = (at.x, at.y, tick);
             for c in checked_rules(kinds, &e)
                 .iter()
-                .filter(|c| c.verdict == "FIRED")
+                .filter(|c| !c.verdict.is_empty())
             {
                 let key = format!("{}:{}", c.file, c.rule.line);
-                rule_text
-                    .entry(key.clone())
-                    .or_insert_with(|| c.rule.text.clone());
-                *ks.rules.entry(key).or_default() += 1;
+                let terms = c.rule.terms.len();
+                sources.entry(key.clone()).or_insert_with(|| RuleSource {
+                    text: c.rule.text.clone(),
+                    terms: c.rule.terms.iter().map(|t| t.text.clone()).collect(),
+                });
+                let t = ks.rules.entry(key).or_insert_with(|| RuleTally {
+                    stopped: vec![0; terms],
+                    stopped_at: vec![None; terms],
+                    ..RuleTally::default()
+                });
+                t.reached += 1;
+                if c.verdict == "FIRED" {
+                    t.fired += 1;
+                    t.fired_at.get_or_insert(seen);
+                } else if let Some(i) = c.failed.filter(|&i| i < terms) {
+                    t.stopped[i] += 1;
+                    t.stopped_at[i].get_or_insert(seen);
+                }
             }
         }
     }
@@ -383,8 +425,12 @@ pub fn write_csv(report: &Report, kinds: &Kinds, out: &mut impl Write) -> io::Re
             for (d, n) in &ks.decisions {
                 row(&format!("decide.{d}"), n.to_string())?;
             }
-            for (r, n) in &ks.rules {
-                row(&format!("rule.{r}"), n.to_string())?;
+            for (r, t) in &ks.rules {
+                row(&format!("rule.{r}"), t.fired.to_string())?;
+                row(&format!("rule.{r}.reached"), t.reached.to_string())?;
+                for (i, n) in t.stopped.iter().enumerate() {
+                    row(&format!("rule.{r}.term{}", i + 1), n.to_string())?;
+                }
             }
         }
     }
@@ -466,10 +512,26 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
         duration(i64::try_from(span).unwrap_or(i64::MAX))
     );
 
-    // Births and deaths per day, deaths by cause.
+    // Births and deaths per day, deaths by cause; per head: of the mean
+    // alive over the samples.
+    let mean_alive = |k: usize| {
+        report
+            .samples
+            .iter()
+            .map(|sm| sm.kinds[k].alive)
+            .sum::<u64>() as f64
+            / report.samples.len() as f64
+    };
+    let per_day = |n: u64| {
+        if days > 0.0 {
+            n as f64 / days
+        } else {
+            n as f64
+        }
+    };
     let _ = writeln!(
         s,
-        "\nper day          born  became    died  causes of death"
+        "\nper day          born  became    died  per head  causes of death"
     );
     for (k, name) in names.iter().enumerate() {
         let kind = u16::try_from(k).expect("kind ids are u16");
@@ -504,14 +566,56 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
             .iter()
             .map(|&(c, n)| format!("{} {}", cause_name(kinds, kind, c), pct(n, dead)))
             .collect();
+        let head = mean_alive(k);
         let _ = writeln!(
             s,
-            "{name:<14}{:>7} {:>7} {:>7}  {}",
+            "{name:<14}{:>7} {:>7} {:>7} {:>9}  {}",
             rate(born),
             rate(became),
             rate(dead),
+            if head > 0.0 {
+                format!("{:.3}", per_day(dead) / head)
+            } else {
+                "-".into()
+            },
             why.join(", ")
         );
+    }
+
+    // Who kills whom: per killer kind, kills a day, per head, and of what.
+    let mut kills: BTreeMap<u16, BTreeMap<usize, u64>> = BTreeMap::new();
+    for sm in &report.samples {
+        for (victim, ks) in sm.kinds.iter().enumerate() {
+            for (&c, &n) in &ks.deaths {
+                if let Cause::Killed(by) = c {
+                    *kills.entry(by).or_default().entry(victim).or_default() += n;
+                }
+            }
+        }
+    }
+    if !kills.is_empty() {
+        let _ = writeln!(s, "\nkills a day       all  per head  of");
+        for (by, victims) in &kills {
+            let k = usize::from(*by);
+            let Some(name) = names.get(k) else { continue };
+            let all: u64 = victims.values().sum();
+            let head = mean_alive(k);
+            let of: Vec<String> = victims
+                .iter()
+                .map(|(&v, &n)| format!("{} {:.1}", names[v], per_day(n)))
+                .collect();
+            let _ = writeln!(
+                s,
+                "{name:<14}{:>7.1} {:>9}  {}",
+                per_day(all),
+                if head > 0.0 {
+                    format!("{:.2}", per_day(all) / head)
+                } else {
+                    "-".into()
+                },
+                of.join(", ")
+            );
+        }
     }
 
     // Per kind, over every sample.
@@ -581,8 +685,10 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
                 for (&d, &n) in &ks.decisions {
                     *decisions.entry(d).or_default() += n;
                 }
-                for (r, &n) in &ks.rules {
-                    *rules.entry(r.as_str()).or_default() += n;
+                for (r, t) in &ks.rules {
+                    if t.fired > 0 {
+                        *rules.entry(r.as_str()).or_default() += t.fired;
+                    }
                 }
             }
             let mut ranked: Vec<(&str, u64)> = decisions.into_iter().collect();
@@ -596,8 +702,8 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
             ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
             for (i, (r, n)) in ranked.iter().take(5).enumerate() {
                 // The source's alignment, collapsed.
-                let text = report.rule_text.get(*r).map_or(String::new(), |t| {
-                    t.split_whitespace().collect::<Vec<_>>().join(" ")
+                let text = report.rules.get(*r).map_or(String::new(), |t| {
+                    t.text.split_whitespace().collect::<Vec<_>>().join(" ")
                 });
                 let label = if i == 0 { "  fires" } else { "" };
                 let _ = writeln!(s, "{label:<9}{:>5}  {text}  [{r}]", pct(*n, sampled));
@@ -620,6 +726,105 @@ pub fn summary(report: &Report, kinds: &Kinds, only: &[String]) -> String {
         let traps: u64 = report.samples.iter().map(|sm| sm.kinds[k].events[5]).sum();
         if traps > 0 {
             let _ = writeln!(s, "  TRAPS    {traps} thinks trapped (`wmc why` shows one)");
+        }
+    }
+    s
+}
+
+/// Per kind (all, or those named in `only`), each of its rules the
+/// explained thinks reached, in code order: how many reached it and fired
+/// it, and per term of its condition how many of the thinks that got that
+/// far it stopped, each with where one such actor stood (`wmc why` it at
+/// that time to see the think). The term that stops most of the thinks
+/// reaching it is the gate that binds.
+pub fn rule_report(report: &Report, kinds: &Kinds, only: &[String]) -> String {
+    let mut s = String::new();
+    let Some(first) = report.samples.first() else {
+        return s;
+    };
+    let seen = |at: Option<Seen>| {
+        at.map_or(String::new(), |(x, y, t)| {
+            format!("   e.g. ({x}, {y}) after {} ticks", t - first.tick)
+        })
+    };
+    for (k, def) in kinds.defs.iter().enumerate() {
+        if !only.is_empty() && !only.contains(&def.name) {
+            continue;
+        }
+        let kind = u16::try_from(k).expect("kind ids are u16");
+        // Over every sample, by `file:line`.
+        let mut total: BTreeMap<&str, RuleTally> = BTreeMap::new();
+        let mut sampled = 0;
+        for sm in &report.samples {
+            let ks = &sm.kinds[k];
+            sampled += ks.sampled;
+            for (key, t) in &ks.rules {
+                let sum = total.entry(key.as_str()).or_insert_with(|| RuleTally {
+                    stopped: vec![0; t.stopped.len()],
+                    stopped_at: vec![None; t.stopped.len()],
+                    ..RuleTally::default()
+                });
+                sum.reached += t.reached;
+                sum.fired += t.fired;
+                sum.fired_at = sum.fired_at.or(t.fired_at);
+                for (i, (&n, &at)) in t.stopped.iter().zip(&t.stopped_at).enumerate() {
+                    if let Some(x) = sum.stopped.get_mut(i) {
+                        *x += n;
+                        sum.stopped_at[i] = sum.stopped_at[i].or(at);
+                    }
+                }
+            }
+        }
+        if total.is_empty() {
+            continue;
+        }
+        let _ = writeln!(
+            s,
+            "{} rules, over {sampled} explained thinks: reached, fired, and per term the thinks it stopped of those that got to it",
+            def.name
+        );
+        let files = &kinds.debug.files;
+        let mut shown = Vec::new();
+        for r in kinds.debug.rules.iter().filter(|r| r.kind == kind) {
+            let file = files.get(usize::from(r.file)).map_or("?", String::as_str);
+            let key = format!("{file}:{}", r.line);
+            let Some(t) = total.get(key.as_str()) else {
+                continue;
+            };
+            if shown.contains(&key) {
+                continue;
+            }
+            let src = report.rules.get(&key).cloned().unwrap_or_default();
+            let text: Vec<&str> = src.text.split_whitespace().collect();
+            let _ = writeln!(s, "  {key}  {}", text.join(" "));
+            let _ = writeln!(
+                s,
+                "    reached {} ({}), fired {} ({} of those){}",
+                t.reached,
+                pct(t.reached, sampled),
+                t.fired,
+                pct(t.fired, t.reached),
+                seen(t.fired_at)
+            );
+            if src.terms.len() > 1 {
+                let width = src.terms.iter().map(String::len).max().unwrap_or(0).min(48);
+                let mut got = t.reached;
+                for (i, term) in src.terms.iter().enumerate() {
+                    if got == 0 {
+                        let _ = writeln!(s, "    {term:<width$}  not reached");
+                        continue;
+                    }
+                    let n = t.stopped.get(i).copied().unwrap_or(0);
+                    let _ = writeln!(
+                        s,
+                        "    {term:<width$}  stopped {n} of {got} ({}){}",
+                        pct(n, got),
+                        seen(t.stopped_at.get(i).copied().flatten())
+                    );
+                    got = got.saturating_sub(n);
+                }
+            }
+            shown.push(key);
         }
     }
     s
@@ -679,6 +884,11 @@ mod tests {
             assert!(ks.sampled > 0 && ks.sampled <= 20 + 10, "{}", ks.sampled);
             assert_eq!(ks.decisions.values().sum::<u64>(), ks.sampled);
             assert!(ks.rules.keys().all(|r| r.contains(".rules:")));
+            // A rule reached either fired or one of its terms stopped it.
+            for t in ks.rules.values() {
+                assert_eq!(t.stopped.len(), t.stopped_at.len());
+                assert!(t.fired + t.stopped.iter().sum::<u64>() <= t.reached);
+            }
             assert_eq!(ks.needs.len(), kinds.def(CHICKEN).needs.len());
             assert_eq!(ks.results.iter().sum::<u64>(), ks.alive);
         }
@@ -744,6 +954,102 @@ mod tests {
             only.contains("\nfox\n") && !only.contains("\nchicken\n"),
             "{only}"
         );
+    }
+
+    /// A rule whose first term is false until a counter passes 5, and its
+    /// second after: the explained thinks stop at the first, then at the
+    /// second, and never fire it; `rule_report` says so per term, with
+    /// where a blob stood.
+    #[test]
+    fn each_rule_counts_the_term_that_stopped_it() {
+        let kinds = sim_core::rules::compile_files(&[(
+            "b.rules",
+            "kind blob { glyph \"b\"  cadence 1  mem m
+               when m > 5 and m < 3 => idle
+               when true => m += 1 }",
+        )])
+        .unwrap();
+        let s = sim_core::Scenario::parse(
+            "t",
+            "size 16 16
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0
+             start blob at (8, 8)",
+        )
+        .unwrap();
+        let mut w = sim::new_world_with(&s, kinds).unwrap();
+        let r = observe(
+            &mut w,
+            20,
+            Options {
+                every: 2,
+                sample: 10,
+            },
+        );
+        let key = "b.rules:2";
+        let mut sum = RuleTally::default();
+        for sm in &r.samples {
+            if let Some(t) = sm.kinds[0].rules.get(key) {
+                sum.reached += t.reached;
+                sum.fired += t.fired;
+                sum.stopped.resize(t.stopped.len(), 0);
+                for (a, b) in sum.stopped.iter_mut().zip(&t.stopped) {
+                    *a += b;
+                }
+            }
+        }
+        assert_eq!(sum.fired, 0);
+        assert_eq!(sum.stopped.len(), 2);
+        assert!(sum.stopped[0] > 0 && sum.stopped[1] > 0, "{sum:?}");
+        assert_eq!(sum.stopped.iter().sum::<u64>(), sum.reached);
+        let text = rule_report(&r, w.resource::<Kinds>(), &[]);
+        assert!(
+            text.starts_with("blob rules, over 11 explained thinks"),
+            "{text}"
+        );
+        assert!(
+            text.contains("  b.rules:2  when m > 5 and m < 3 => idle\n"),
+            "{text}"
+        );
+        assert!(text.contains("    m > 5  stopped "), "{text}");
+        assert!(text.contains("e.g. (8, 8) after 0 ticks"), "{text}");
+        assert!(text.contains("    m < 3  stopped "), "{text}");
+    }
+
+    /// The fox in a pen eats the hen: the summary counts the kill as the
+    /// fox's, a day's rate and per head, and the hen's death per head.
+    #[test]
+    fn kills_are_counted_per_killer_and_per_head() {
+        let s = sim_core::Scenario::parse(
+            "pen",
+            "seed 3
+             outside rock
+             map {
+               .....
+               .###.
+               .FC#.
+               .###.
+             }
+             legend {
+               . soil
+               # rock
+               C chicken
+               F fox with (food = 2h)
+             }",
+        )
+        .unwrap();
+        let mut w = sim::new_world_with(&s, Kinds::builtin()).unwrap();
+        let r = observe(&mut w, TICKS_PER_HOUR, Options::default());
+        let text = summary(&r, w.resource::<Kinds>(), &[]);
+        assert!(
+            text.contains("\nkills a day       all  per head  of\n"),
+            "{text}"
+        );
+        // One kill in an hour, by one fox: 24 a day, 24 per head.
+        assert!(
+            text.contains("\nfox              24.0     24.00  chicken 24.0\n"),
+            "{text}"
+        );
+        assert!(text.contains("per head  causes of death"), "{text}");
     }
 
     #[test]

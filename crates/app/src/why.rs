@@ -178,6 +178,17 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
                 c.verdict,
                 r.text
             );
+            // Which term stopped it, when its condition has several.
+            if let Some(t) = c.failed.and_then(|i| r.terms.get(i))
+                && r.terms.len() > 1
+            {
+                let what = if c.verdict == "TRAPPED" {
+                    "trapped in"
+                } else {
+                    "false:"
+                };
+                let _ = writeln!(s, "  {:<20} {:<6}   {what} {}", "", "", t.text);
+            }
         }
     }
 
@@ -246,6 +257,9 @@ pub struct Checked<'k> {
     /// `FIRED` (its body ran), `no` (its condition was false), `TRAPPED`
     /// (the think trapped in its condition), or blank (not reached).
     pub verdict: &'static str,
+    /// For `no` and `TRAPPED`, the term of its condition (`rule.terms`)
+    /// that was false or trapped: the last one the think entered.
+    pub failed: Option<usize>,
 }
 
 /// The rules the think in `e` could reach (the reflexes, then the current
@@ -270,14 +284,8 @@ pub fn checked_rules<'k>(kinds: &'k Kinds, e: &Explained) -> Vec<Checked<'k>> {
         .iter()
         .enumerate()
         .filter(|(_, r)| r.state.is_none_or(|st| st == e.before.state))
-        .map(|(i, &r)| Checked {
-            rule: r,
-            file: kinds
-                .debug
-                .files
-                .get(usize::from(r.file))
-                .map_or("?", String::as_str),
-            verdict: if visited(r.body_pc) {
+        .map(|(i, &r)| {
+            let verdict = if visited(r.body_pc) {
                 "FIRED"
             } else if trapped == Some(i) {
                 "TRAPPED"
@@ -285,7 +293,29 @@ pub fn checked_rules<'k>(kinds: &'k Kinds, e: &Explained) -> Vec<Checked<'k>> {
                 "no"
             } else {
                 ""
-            },
+            };
+            // The last op the think ran in the condition is in that term.
+            let failed = matches!(verdict, "no" | "TRAPPED")
+                .then(|| {
+                    let pc = e
+                        .trace
+                        .iter()
+                        .rev()
+                        .find(|st| (r.cond_pc..r.body_pc).contains(&st.pc))?
+                        .pc;
+                    r.terms.iter().rposition(|t| t.pc <= pc)
+                })
+                .flatten();
+            Checked {
+                rule: r,
+                file: kinds
+                    .debug
+                    .files
+                    .get(usize::from(r.file))
+                    .map_or("?", String::as_str),
+                verdict,
+                failed,
+            }
         })
         .collect()
 }

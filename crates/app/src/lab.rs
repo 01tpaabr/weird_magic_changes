@@ -6,15 +6,18 @@
 //! `always >=` saw, a mean, a rate: `sim::Event::Expected`).
 //!
 //! Each run is one world on one thread; `jobs` of them run at once, taking
-//! the next run from a shared counter. Results come back by index, so the
-//! report is the same however many jobs ran it, and on any thread count. A
-//! seed stops at its first sure failure (`sim::run_checks_until`) unless
-//! `full`: a variant that fails early costs little.
+//! the next run from a shared counter: every variant's first seed, then
+//! every variant's second, and so on. Results come back by index, so the
+//! report is the same however many jobs ran it, and on any thread count.
+//! Unless `full`, a run stops at its first sure failure
+//! (`sim::run_checks_until`), and a variant once more of its seeds failed
+//! than passing allows: it reports its seeds up to that one, in order,
+//! whichever later ones happened to run, and the rest do not need to.
 
 use std::fmt::Write as _;
 use std::io::{self, Write};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 use sim_core::rules::ConstSet;
@@ -56,8 +59,14 @@ pub struct Run {
     pub verdicts: Vec<Verdict>,
     /// It stopped at its first sure failure.
     pub stopped: bool,
-    /// Its world could not be made, or it panicked.
+    /// Its world could not be made, or it panicked; and the scenario's
+    /// line the error is about, if one is.
     pub error: Option<String>,
+    pub error_line: Option<u32>,
+    /// The world at the end, with and without the rules hash
+    /// (`sim::checksum`, `stage::checksum`); 0 after an error.
+    pub checksum: u64,
+    pub state: u64,
 }
 
 impl Run {
@@ -94,33 +103,56 @@ pub fn variants(sets: &[(String, Vec<(String, i32)>)]) -> Vec<(String, Vec<Const
 }
 
 /// Every variant on `seeds` seeds (`scenario.seed`, `+ 1`, ...), `jobs`
-/// at a time; `progress` hears each run end (done, total). Results in
-/// variant order, each variant's in seed order.
+/// at a time, `pass` of them to pass; `progress` hears each run end (done,
+/// total). Results in variant order, each variant's in seed order: all its
+/// seeds if `full`, else those up to the one that left it unable to pass.
 pub fn run(
     scenario: &Scenario,
     variants: &[Variant],
     seeds: u32,
     jobs: usize,
     full: bool,
+    pass: u32,
     progress: impl Fn(usize, usize) + Sync,
 ) -> Vec<Vec<Run>> {
-    let per = seeds as usize;
-    let total = variants.len() * per;
+    const FAILED: u8 = 1;
+    let (n, per) = (variants.len(), seeds as usize);
+    let total = n * per;
+    // More failed seeds than this and a variant cannot pass.
+    let allowed = if full {
+        per
+    } else {
+        per.saturating_sub(pass as usize)
+    };
+    // Per run, variant-major: FAILED once it ended so.
+    let ended: Vec<AtomicU8> = (0..total).map(|_| AtomicU8::new(0)).collect();
     let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let (tx, rx) = mpsc::channel();
     std::thread::scope(|s| {
         for _ in 0..jobs.clamp(1, total.max(1)) {
             let tx = tx.clone();
-            let (next, done, progress) = (&next, &done, &progress);
+            let (next, done, ended, progress) = (&next, &done, &ended, &progress);
             s.spawn(move || {
                 loop {
                     let i = next.fetch_add(1, Ordering::Relaxed);
                     if i >= total {
                         break;
                     }
-                    let (v, k) = (i / per, i % per);
-                    let seed = scenario.seed.wrapping_add(k as u64);
-                    let _ = tx.send((i, one(scenario, &variants[v].kinds, seed, full)));
+                    let (k, v) = (i / n, i % n);
+                    let at = v * per + k;
+                    // Seeds before this one already failed too often: this
+                    // one is past the report's end whatever the others say.
+                    let failed = (0..k)
+                        .filter(|&j| ended[v * per + j].load(Ordering::Relaxed) == FAILED)
+                        .count();
+                    if failed <= allowed {
+                        let seed = scenario.seed.wrapping_add(k as u64);
+                        let r = one(scenario, &variants[v].kinds, seed, full);
+                        if !r.held() {
+                            ended[at].store(FAILED, Ordering::Relaxed);
+                        }
+                        let _ = tx.send((at, r));
+                    }
                     progress(done.fetch_add(1, Ordering::Relaxed) + 1, total);
                 }
             });
@@ -131,9 +163,21 @@ pub fn run(
     for (i, r) in rx {
         runs[i] = Some(r);
     }
-    let mut runs = runs.into_iter().map(|r| r.expect("every run reports"));
-    (0..variants.len())
-        .map(|_| runs.by_ref().take(per).collect())
+    let mut runs = runs.into_iter();
+    (0..n)
+        .map(|_| {
+            let mut failed = 0;
+            let mut kept = Vec::new();
+            for r in runs.by_ref().take(per) {
+                if failed > allowed {
+                    continue;
+                }
+                let r = r.expect("a seed before its variant gave up ran");
+                failed += usize::from(!r.held());
+                kept.push(r);
+            }
+            kept
+        })
         .collect()
 }
 
@@ -146,8 +190,9 @@ fn one(scenario: &Scenario, kinds: &Kinds, seed: u64, full: bool) -> Run {
     };
     let mut verdicts = Vec::new();
     let work = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        let mut world = sim::new_world_with(&s, kinds.clone()).map_err(|e| e.to_string())?;
-        Ok::<bool, String>(sim::run_checks_until(&mut world, &s.checks, !full, |e| {
+        let mut world =
+            sim::new_world_with(&s, kinds.clone()).map_err(|e| (s.line_of(&e), e.to_string()))?;
+        let stopped = sim::run_checks_until(&mut world, &s.checks, !full, |e| {
             if let sim::Event::Expected {
                 line,
                 text,
@@ -167,18 +212,31 @@ fn one(scenario: &Scenario, kinds: &Kinds, seed: u64, full: bool) -> Run {
                     saw,
                 });
             }
-        }))
+        });
+        let sums = (
+            sim::checksum(&mut world),
+            sim_core::stage::checksum(&mut world),
+        );
+        Ok::<(bool, (u64, u64)), (Option<u32>, String)>((stopped, sums))
     }));
-    let (stopped, error) = match work {
-        Ok(Ok(stopped)) => (stopped, None),
-        Ok(Err(e)) => (false, Some(e)),
-        Err(_) => (false, Some("it panicked (stderr says where)".to_string())),
+    let (stopped, (checksum, state), error_line, error) = match work {
+        Ok(Ok((stopped, sums))) => (stopped, sums, None, None),
+        Ok(Err((line, e))) => (false, (0, 0), line, Some(e)),
+        Err(_) => (
+            false,
+            (0, 0),
+            None,
+            Some("it panicked (stderr says where)".to_string()),
+        ),
     };
     Run {
         seed,
         verdicts,
         stopped,
         error,
+        error_line,
+        checksum,
+        state,
     }
 }
 
@@ -189,13 +247,19 @@ fn num(x: f64) -> String {
 }
 
 /// `   (214 .. 260, median 231)`, or `   (24)` when they agree; nothing for
-/// no numbers.
+/// no numbers. The median of an even count is the mean of the middle two.
 fn spread(v: &mut [f64]) -> String {
     if v.is_empty() {
         return String::new();
     }
     v.sort_by(f64::total_cmp);
-    let (lo, hi, mid) = (v[0], v[v.len() - 1], v[v.len() / 2]);
+    let n = v.len();
+    let mid = if n.is_multiple_of(2) {
+        f64::midpoint(v[n / 2 - 1], v[n / 2])
+    } else {
+        v[n / 2]
+    };
+    let (lo, hi) = (v[0], v[n - 1]);
     if lo == hi {
         format!("   ({})", num(lo))
     } else {
@@ -204,9 +268,16 @@ fn spread(v: &mut [f64]) -> String {
 }
 
 /// The report: per variant, its verdict (a variant passes when at least
-/// `pass` seeds held every expectation), then per expectation the seeds it
-/// held on and the spread of its number; last, which variants passed.
-pub fn report(file: &str, variants: &[Variant], runs: &[Vec<Run>], pass: u32) -> String {
+/// `pass` of its `seeds` held every expectation), then per expectation the
+/// seeds it held on and the spread of its number; last, which variants
+/// passed.
+pub fn report(
+    file: &str,
+    variants: &[Variant],
+    runs: &[Vec<Run>],
+    seeds: u32,
+    pass: u32,
+) -> String {
     let mut s = String::new();
     let label = |v: &Variant| {
         if v.label.is_empty() {
@@ -221,15 +292,21 @@ pub fn report(file: &str, variants: &[Variant], runs: &[Vec<Run>], pass: u32) ->
         let held = rs.iter().filter(|r| r.held()).count();
         let ok = held >= pass as usize;
         let stopped = rs.iter().filter(|r| r.stopped).count();
+        let not_run = (seeds as usize).saturating_sub(rs.len());
         let _ = writeln!(
             s,
-            "variant {:<3} {:<width$}  {}  {held} of {} seeds held every expectation, {pass} needed{}",
+            "variant {:<3} {:<width$}  {}  {held} of {} seeds held every expectation, {pass} needed{}{}",
             i + 1,
             label(v),
             if ok { "ok  " } else { "FAIL" },
             rs.len(),
             if stopped > 0 {
                 format!("; {stopped} stopped early")
+            } else {
+                String::new()
+            },
+            if not_run > 0 {
+                format!("; {not_run} not run, it could no longer pass")
             } else {
                 String::new()
             }
@@ -327,6 +404,7 @@ mod tests {
         sets: &[(String, Vec<(String, i32)>)],
         jobs: usize,
         full: bool,
+        pass: u32,
     ) -> (Vec<Variant>, Vec<Vec<Run>>) {
         let scenario = Scenario::parse("goal", GOAL).unwrap();
         let variants: Vec<Variant> = variants(sets)
@@ -337,7 +415,15 @@ mod tests {
             })
             .collect();
         sim_core::par::init_task_pool();
-        let runs = run(&scenario, &variants, scenario.seeds, jobs, full, |_, _| {});
+        let runs = run(
+            &scenario,
+            &variants,
+            scenario.seeds,
+            jobs,
+            full,
+            pass,
+            |_, _| {},
+        );
         (variants, runs)
     }
 
@@ -371,7 +457,8 @@ mod tests {
 
     #[test]
     fn each_variant_is_judged_on_its_seeds() {
-        let (variants, runs) = lab(&bud(&[0, 50]), 4, false);
+        // One seed in three to pass: no variant gives up before its last.
+        let (variants, runs) = lab(&bud(&[0, 50]), 4, false, 1);
         assert_eq!(runs.len(), 2);
         assert_eq!(
             runs[0].iter().map(|r| r.seed).collect::<Vec<_>>(),
@@ -390,10 +477,10 @@ mod tests {
                 .iter()
                 .all(|r| r.stopped && !r.verdicts[0].held && !r.verdicts[1].reached())
         );
-        let text = report("goal", &variants, &runs, 3);
+        let text = report("goal", &variants, &runs, 3, 1);
         assert!(
             text.contains(
-                "variant 1   BUD=0   FAIL  0 of 3 seeds held every expectation, 3 needed"
+                "variant 1   BUD=0   FAIL  0 of 3 seeds held every expectation, 1 needed\n"
             ),
             "{text}"
         );
@@ -412,14 +499,37 @@ mod tests {
         assert!(text.ends_with("passed    none\n"), "{text}");
     }
 
+    /// A variant whose failed seeds already rule out passing reports the
+    /// seeds up to the one that did, the same on one job or four (with
+    /// four, its later seeds start before the first ends, and are dropped).
+    #[test]
+    fn a_variant_that_cannot_pass_gives_up() {
+        let one = lab(&bud(&[0, 50]), 1, false, 3);
+        let four = lab(&bud(&[0, 50]), 4, false, 3);
+        assert_eq!(one.1, four.1);
+        assert!(one.1.iter().all(|rs| rs.len() == 1 && rs[0].seed == 7));
+        let text = report("goal", &one.0, &one.1, 3, 3);
+        assert!(
+            text.contains(
+                "variant 1   BUD=0   FAIL  0 of 1 seeds held every expectation, 3 needed; 2 not run, it could no longer pass\n"
+            ),
+            "{text}"
+        );
+        // Every expectation's line counts the seeds that ran.
+        assert!(text.contains("   1/1    goal:7:"), "{text}");
+        // In full, every seed runs.
+        let full = lab(&bud(&[0, 50]), 4, true, 3);
+        assert!(full.1.iter().all(|rs| rs.len() == 3));
+    }
+
     #[test]
     fn the_report_is_the_same_however_many_jobs_run_it() {
-        let one = lab(&bud(&[0, 20, 50]), 1, true);
-        let four = lab(&bud(&[0, 20, 50]), 4, true);
+        let one = lab(&bud(&[0, 20, 50]), 1, true, 2);
+        let four = lab(&bud(&[0, 20, 50]), 4, true, 2);
         assert_eq!(one.1, four.1);
         assert_eq!(
-            report("g", &one.0, &one.1, 2),
-            report("g", &four.0, &four.1, 2)
+            report("g", &one.0, &one.1, 3, 2),
+            report("g", &four.0, &four.1, 3, 2)
         );
         // Run in full, a budding variant reads its rate on every seed.
         let rates: Vec<f64> = one.1[2]
@@ -444,6 +554,8 @@ mod tests {
         assert_eq!(spread(&mut []), "");
         assert_eq!(spread(&mut [24.0, 24.0]), "   (24)");
         assert_eq!(spread(&mut [3.0, 1.0, 2.5]), "   (1 .. 3, median 2.5)");
+        // An even count: the mean of the middle two.
+        assert_eq!(spread(&mut [4.0, 1.0, 2.0, 3.0]), "   (1 .. 4, median 2.5)");
         assert_eq!(num(0.126), "0.13");
     }
 }

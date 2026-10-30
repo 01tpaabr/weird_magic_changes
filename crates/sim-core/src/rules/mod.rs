@@ -92,11 +92,23 @@ pub struct RuleInfo {
     /// `body_pc` fired the rule.
     pub cond_pc: u32,
     pub body_pc: u32,
+    /// The terms of its condition's top-level `and`, as written, in order
+    /// (one term for a condition whose top level is an `or`). A think
+    /// that does not fire the rule stopped at the last term it entered:
+    /// that term was false.
+    pub terms: Vec<Term>,
     /// The trait or ancestor kind the rule was inherited from; `None` for
     /// the kind's own rules.
     pub via: Option<String>,
     /// What it does and how often, read off its source (`wmc rates`).
     pub shape: RuleShape,
+}
+
+/// One term of a rule's condition: its first op, and its source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Term {
+    pub pc: u32,
+    pub text: String,
 }
 
 /// What a rule does and how often, read off its source without running it

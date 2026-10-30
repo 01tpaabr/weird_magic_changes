@@ -28,7 +28,7 @@ use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
 use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo, RuleShape,
+    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
@@ -96,6 +96,8 @@ pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result
             at: 0,
             depth: 0,
             deepest: 0,
+            top: None,
+            conjuncts: Vec::new(),
         };
         p.file(&mut items)?;
     }
@@ -519,6 +521,9 @@ struct Rule {
     arrow_line: u32,
     cond: Cond,
     body: Vec<Stmt>,
+    /// Each term of the condition's top-level `and`: where it starts and
+    /// where the `and` (or the `=>`) after it is, as (line, column).
+    terms: Vec<((u32, u32), (u32, u32))>,
 }
 
 #[derive(Debug, Clone)]
@@ -722,6 +727,10 @@ struct Parser<'a> {
     /// current operand reached: see [`Self::nested`] and [`Self::chained`].
     depth: u32,
     deepest: u32,
+    /// While a rule's `when` is parsed, the depth of its top level; there,
+    /// the first token of each term of the top-level `and`.
+    top: Option<u32>,
+    conjuncts: Vec<usize>,
 }
 
 /// How deep one tree may be: a nesting and an operator in a chain are one
@@ -1369,9 +1378,26 @@ impl Parser<'_> {
             if !self.eat_kw("when") {
                 break;
             }
-            let cond = self.cond()?;
+            let first = self.at;
+            self.top = Some(self.depth);
+            let cond = self.cond();
+            self.top = None;
+            let cond = cond?;
+            let arrow = self.at;
             let arrow_line = self.pos().line;
             self.expect_sym("=>")?;
+            // Each term ends at the `and` before the next, the last at `=>`.
+            let starts = if matches!(cond, Cond::Or(..)) {
+                vec![first]
+            } else {
+                std::mem::take(&mut self.conjuncts)
+            };
+            let line_col = |i: usize| (self.tokens[i].line, self.tokens[i].col);
+            let terms = starts
+                .iter()
+                .zip(starts.iter().skip(1).map(|&s| s - 1).chain([arrow]))
+                .map(|(&a, b)| (line_col(a), line_col(b)))
+                .collect();
             // One statement may end in `;`, as in a block; a block may not.
             let single = !self.is_sym("{");
             let body = self.body()?;
@@ -1383,6 +1409,7 @@ impl Parser<'_> {
                 arrow_line,
                 cond,
                 body,
+                terms,
             })));
         }
         Ok(rules)
@@ -1710,12 +1737,18 @@ impl Parser<'_> {
 
     fn and_cond(&mut self) -> Result<Cond> {
         let outer = std::mem::replace(&mut self.deepest, self.depth);
+        let top = self.top == Some(self.depth);
+        let mut starts = vec![self.at];
         let mut c = self.not_cond()?;
         while self.eat_kw("and") {
+            starts.push(self.at);
             let left = std::mem::replace(&mut self.deepest, self.depth);
             let r = self.not_cond()?;
             self.chained(left)?;
             c = Cond::And(Box::new(c), Box::new(r));
+        }
+        if top {
+            self.conjuncts = starts;
         }
         self.deepest = self.deepest.max(outer);
         Ok(c)
@@ -2157,6 +2190,48 @@ impl<'a> Inst<'a> {
 
 fn gcd(a: u64, b: u64) -> u64 {
     if b == 0 { a } else { gcd(b, a % b) }
+}
+
+/// The `n` terms of `c`'s top-level `and` as the parser chained them (`a
+/// and b and c` is `And(And(a, b), c)`; a parenthesised `and` stays one
+/// term); fewer if `c` has fewer.
+fn conjuncts(c: &Cond, n: usize) -> Vec<&Cond> {
+    let mut parts = Vec::new();
+    let mut c = c;
+    while parts.len() + 1 < n
+        && let Cond::And(l, r) = c
+    {
+        parts.push(r.as_ref());
+        c = l;
+    }
+    parts.push(c);
+    parts.reverse();
+    parts
+}
+
+/// The source of `text` from one (line, column) to another (both from 1,
+/// columns in characters), comments dropped, on one line.
+fn source_between(text: &str, from: (u32, u32), to: (u32, u32)) -> String {
+    let byte = |line: &str, col: u32| {
+        line.char_indices()
+            .nth(col.saturating_sub(1) as usize)
+            .map_or(line.len(), |(b, _)| b)
+    };
+    let mut words = Vec::new();
+    for (n, line) in (1u32..).zip(text.lines()) {
+        if n < from.0 || n > to.0 {
+            continue;
+        }
+        let a = if n == from.0 { byte(line, from.1) } else { 0 };
+        let b = if n == to.0 {
+            byte(line, to.1)
+        } else {
+            line.len()
+        };
+        let part = line.get(a..b.max(a)).unwrap_or("");
+        words.extend(part.split('#').next().unwrap_or("").split_whitespace());
+    }
+    words.join(" ")
 }
 
 /// The first statement of `body` that ends the think, as `wmc rates` names
@@ -3714,7 +3789,17 @@ impl<'a> Gen<'a> {
         let next = self.asm.label();
         let cond_pc = self.asm.here();
         self.in_when = true;
-        self.cond(&rule.cond, next, true)?;
+        // Its terms one after another, the same code as the whole condition,
+        // each one's first op kept (`RuleInfo::terms`).
+        let mut parts = conjuncts(&rule.cond, rule.terms.len());
+        if parts.len() != rule.terms.len() {
+            parts = vec![&rule.cond];
+        }
+        let mut term_pcs = Vec::with_capacity(parts.len());
+        for part in &parts {
+            term_pcs.push(self.asm.here());
+            self.cond(part, next, true)?;
+        }
         self.in_when = false;
         let body_pc = self.asm.here();
         self.stmts(&rule.body)?;
@@ -3758,6 +3843,21 @@ impl<'a> Gen<'a> {
                 .collect::<Vec<_>>()
                 .join(" ")
         });
+        let source = self.files.get(file).map_or("", |(_, t)| *t);
+        let spans: Vec<((u32, u32), (u32, u32))> = if term_pcs.len() == rule.terms.len() {
+            rule.terms.clone()
+        } else {
+            let (from, to) = (rule.terms[0].0, rule.terms[rule.terms.len() - 1].1);
+            vec![(from, to)]
+        };
+        let terms = term_pcs
+            .iter()
+            .zip(&spans)
+            .map(|(&pc, &(from, to))| Term {
+                pc,
+                text: source_between(source, from, to),
+            })
+            .collect();
         let via = match (self.owner, self.cur) {
             (Some(o), Some(c)) if o != c => Some(self.inst_name(o).to_string()),
             _ => None,
@@ -3771,6 +3871,7 @@ impl<'a> Gen<'a> {
             text,
             cond_pc,
             body_pc,
+            terms,
             via,
             shape,
         });

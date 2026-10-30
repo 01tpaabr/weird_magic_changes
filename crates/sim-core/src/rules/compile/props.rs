@@ -57,6 +57,8 @@ fn parse(text: &str) -> Result<()> {
         at: 0,
         depth: 0,
         deepest: 0,
+        top: None,
+        conjuncts: Vec::new(),
     };
     p.file(&mut Items::default())
 }

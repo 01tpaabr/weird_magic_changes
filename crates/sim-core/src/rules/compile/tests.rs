@@ -2094,3 +2094,43 @@ fn a_rule_s_shape_is_read_off_its_source() {
     );
     assert!((shapes[1].dice_odds() - 0.01).abs() < 1e-12);
 }
+
+/// Each rule keeps the terms of its condition's top-level `and` as
+/// written (comments dropped, lines joined), each with its first op: a
+/// top-level `or` is one term, a parenthesised `and` stays one.
+#[test]
+fn a_rule_keeps_the_terms_of_its_condition() {
+    let kinds = compile_ok(
+        "kind k {
+           glyph \"k\"
+           mem m
+           when m > 1 and (m < 9 or m == 20) and not m == 4 => m = 0
+           when m > 1 or m < 0 => m = 1
+           when (m > 1 and m < 5) and m != 3   # a comment
+             and nearest free within 1 as c    # another
+             => spawn k at c
+           when true => m += 1
+         }",
+    );
+    let terms: Vec<Vec<&str>> = kinds
+        .debug
+        .rules
+        .iter()
+        .map(|r| r.terms.iter().map(|t| t.text.as_str()).collect())
+        .collect();
+    assert_eq!(
+        terms,
+        [
+            vec!["m > 1", "(m < 9 or m == 20)", "not m == 4"],
+            vec!["m > 1 or m < 0"],
+            vec!["(m > 1 and m < 5)", "m != 3", "nearest free within 1 as c"],
+            vec!["true"],
+        ]
+    );
+    // The terms split the condition's code in order.
+    for r in &kinds.debug.rules {
+        assert_eq!(r.terms[0].pc, r.cond_pc);
+        assert!(r.terms.windows(2).all(|w| w[0].pc < w[1].pc));
+        assert!(r.terms[r.terms.len() - 1].pc < r.body_pc);
+    }
+}
