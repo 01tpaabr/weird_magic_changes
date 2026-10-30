@@ -94,12 +94,21 @@ pub enum Page {
     },
     Scenarios,
     Packs,
-    /// The name of a new scenario or pack.
+    /// What to copy: a scenario, or a pack.
+    Pick {
+        what: Make,
+    },
+    /// The name of a new scenario or pack: from its template, or a copy of
+    /// `from`.
     Make {
         what: Make,
         text: String,
+        from: Option<PathBuf>,
     },
 }
+
+/// Rows before the files on the Scenarios and Packs pages: `+ New`, `+ Copy`.
+const FIRST: usize = 2;
 
 /// A save directory, newest first.
 #[derive(Debug, Clone)]
@@ -182,6 +191,17 @@ impl Menu {
         self.at = self.at.min(self.len().saturating_sub(1));
     }
 
+    /// The packs the rules files belong to, in their order, each once.
+    fn packs(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for r in &self.rules {
+            if out.last() != Some(&r.pack) {
+                out.push(r.pack.clone());
+            }
+        }
+        out
+    }
+
     /// Back to the first page, the lists read again: after a world was played.
     pub fn home(&mut self) {
         self.go(Page::Main);
@@ -195,8 +215,12 @@ impl Menu {
             Page::Load => self.saves.len(),
             Page::New => self.scenarios.len(),
             // The first row makes a new one.
-            Page::Scenarios => self.scenarios.len() + 1,
-            Page::Packs => self.rules.len() + 1,
+            Page::Scenarios => self.scenarios.len() + FIRST,
+            Page::Packs => self.rules.len() + FIRST,
+            Page::Pick {
+                what: Make::Scenario,
+            } => self.scenarios.len(),
+            Page::Pick { what: Make::Pack } => self.packs().len(),
             Page::Name { .. } | Page::Make { .. } => 0,
         }
     }
@@ -260,8 +284,8 @@ impl Menu {
             }
             return None;
         }
-        if let Page::Make { what, text } = &mut self.page {
-            let what = *what;
+        if let Page::Make { what, text, from } = &mut self.page {
+            let (what, from) = (*what, from.clone());
             let back = match what {
                 Make::Scenario => Page::Scenarios,
                 Make::Pack => Page::Packs,
@@ -277,7 +301,11 @@ impl Menu {
                 Key::Erase | Key::Back => self.go(back),
                 Key::Enter => {
                     let name = text.clone();
-                    match make(&self.root, what, &name) {
+                    let made = match &from {
+                        Some(from) => make_copy(&self.root, what, from, &name),
+                        None => make(&self.root, what, &name),
+                    };
+                    match made {
                         Ok(open) => {
                             self.go(back);
                             self.rescan();
@@ -285,7 +313,7 @@ impl Menu {
                                 Make::Scenario => self.scenarios.iter().position(|f| *f == open),
                                 Make::Pack => self.rules.iter().position(|r| r.path == open),
                             }
-                            .map_or(0, |i| i + 1);
+                            .map_or(0, |i| i + FIRST);
                             self.note = Some((format!("made {}", shown(&open)), true));
                             return Some(Action::Edit(open));
                         }
@@ -299,7 +327,13 @@ impl Menu {
         match key {
             Key::Up => self.at = self.at.checked_sub(1).unwrap_or(n.saturating_sub(1)),
             Key::Down => self.at = if self.at + 1 >= n { 0 } else { self.at + 1 },
-            Key::Back | Key::Erase => self.go(Page::Main),
+            Key::Back | Key::Erase => match self.page {
+                Page::Pick {
+                    what: Make::Scenario,
+                } => self.go(Page::Scenarios),
+                Page::Pick { what: Make::Pack } => self.go(Page::Packs),
+                _ => self.go(Page::Main),
+            },
             Key::Char('q') if self.page == Page::Main => return Some(Action::Quit),
             Key::Char(_) => {}
             Key::Enter => return self.enter(),
@@ -330,23 +364,48 @@ impl Menu {
                     };
                 }
             }
-            Page::Scenarios | Page::Packs if self.at == 0 => {
+            Page::Scenarios | Page::Packs if self.at < FIRST => {
                 let what = if self.page == Page::Scenarios {
                     Make::Scenario
                 } else {
                     Make::Pack
                 };
-                self.page = Page::Make {
-                    what,
-                    text: String::new(),
-                };
+                if self.at == 0 {
+                    self.page = Page::Make {
+                        what,
+                        text: String::new(),
+                        from: None,
+                    };
+                } else {
+                    self.go(Page::Pick { what });
+                }
             }
-            Page::Scenarios => return self.scenarios.get(self.at - 1).cloned().map(Action::Edit),
+            Page::Scenarios => {
+                return self
+                    .scenarios
+                    .get(self.at - FIRST)
+                    .cloned()
+                    .map(Action::Edit);
+            }
             Page::Packs => {
                 return self
                     .rules
-                    .get(self.at - 1)
+                    .get(self.at - FIRST)
                     .map(|r| Action::Edit(r.path.clone()));
+            }
+            Page::Pick { what } => {
+                let from = match what {
+                    Make::Scenario => self.scenarios.get(self.at).cloned(),
+                    Make::Pack => self.packs().get(self.at).cloned(),
+                };
+                if let Some(from) = from {
+                    let text = copy_name(&self.root, what, &from);
+                    self.go(Page::Make {
+                        what,
+                        text,
+                        from: Some(from),
+                    });
+                }
             }
             Page::Name { .. } | Page::Make { .. } => {}
         }
@@ -432,6 +491,7 @@ impl Menu {
             }
             Page::Name { .. } => "type a name | enter or click: make the world | esc: back",
             Page::Make { .. } => "type a name | enter or click: make it and open it | esc: back",
+            Page::Pick { .. } => "choose what to copy | enter or click: name the copy | esc: back",
             Page::Scenarios | Page::Packs => {
                 "choose | enter or click: edit (WMC_EDITOR, else the system's) | esc: back"
             }
@@ -462,20 +522,35 @@ impl Menu {
             ),
             Page::Scenarios => (
                 "Scenarios: enter opens the file".into(),
-                std::iter::once(("+ New scenario".to_string(), OK))
+                ["+ New scenario", "+ Copy of a scenario"]
+                    .into_iter()
+                    .map(|t| (t.to_string(), OK))
                     .chain(self.scenarios.iter().map(|f| item(stem(f))))
                     .collect(),
             ),
             Page::Packs => (
                 "Packs: their rules files; enter opens one".into(),
-                std::iter::once(("+ New pack".to_string(), OK))
+                ["+ New pack", "+ Copy of a pack"]
+                    .into_iter()
+                    .map(|t| (t.to_string(), OK))
                     .chain(self.rules.iter().map(|r| item(rules_name(r))))
                     .collect(),
             ),
-            Page::Make { what, text } => (
-                match what {
-                    Make::Scenario => "New scenario: its name".to_string(),
-                    Make::Pack => "New pack: its name".to_string(),
+            Page::Pick {
+                what: Make::Scenario,
+            } => (
+                "Copy of a scenario: which one".into(),
+                self.scenarios.iter().map(|f| item(stem(f))).collect(),
+            ),
+            Page::Pick { what: Make::Pack } => (
+                "Copy of a pack: which one".into(),
+                self.packs().iter().map(|p| item(name_of(p))).collect(),
+            ),
+            Page::Make { what, text, from } => (
+                match (what, from) {
+                    (Make::Scenario, None) => "New scenario: its name".to_string(),
+                    (Make::Pack, None) => "New pack: its name".to_string(),
+                    (_, Some(f)) => format!("Copy of {}: its name", name_of(f)),
                 },
                 vec![(
                     match what {
@@ -510,36 +585,61 @@ impl Menu {
                 _ => vec![],
             },
             Page::Load => self.saves.get(self.at).map(save_about).unwrap_or_default(),
-            Page::Scenarios | Page::Packs if self.at == 0 => vec![(
-                match self.page {
-                    Page::Scenarios => {
-                        "A new scenario from a template: a world that runs, \
-                                        every line explained, to change."
+            Page::Scenarios | Page::Packs if self.at < FIRST => {
+                let text = match (&self.page, self.at) {
+                    (Page::Scenarios, 0) => {
+                        "A new scenario from a template: a world that runs, every line \
+                         explained, to change."
+                    }
+                    (Page::Scenarios, _) => {
+                        "A copy of a scenario, to change: the same world under another name."
+                    }
+                    (_, 0) => {
+                        "A new pack from a template: two kinds that run, every line \
+                         explained, and a scenario to try them in."
                     }
                     _ => {
-                        "A new pack from a template: two kinds that run, every \
-                          line explained, and a scenario to try them in."
+                        "A copy of a pack, to change, and a scenario to try it. Its names \
+                         are the original's: a world runs one or the other."
                     }
+                };
+                vec![(text.into(), DIM)]
+            }
+            Page::Pick { what: Make::Pack } => {
+                let first = self
+                    .packs()
+                    .get(self.at)
+                    .and_then(|p| self.rules.iter().find(|r| r.pack == *p).cloned());
+                match first {
+                    Some(r) => self
+                        .about
+                        .entry(r.path.clone())
+                        .or_insert_with(|| rules_about(&r))
+                        .clone(),
+                    None => vec![],
                 }
-                .into(),
-                DIM,
-            )],
-            Page::Make { what, .. } => vec![(
-                match what {
-                    Make::Scenario => "Lowercase letters, digits and _: the file is \
-                                       scenarios/<name>.scenario."
+            }
+            Page::Make { what, from, .. } => vec![(
+                match (what, from) {
+                    (Make::Scenario, _) => "Lowercase letters, digits and _: the file is \
+                                            scenarios/<name>.scenario."
                         .to_string(),
-                    Make::Pack => "Lowercase letters, digits and _: the pack is \
-                                   packs/<name>/, its kinds <name>_walker and <name>_moss, \
-                                   and scenarios/<name>.scenario tries it."
+                    (Make::Pack, None) => "Lowercase letters, digits and _: the pack is \
+                                           packs/<name>/, its kinds <name>_walker and \
+                                           <name>_moss, and scenarios/<name>.scenario tries it."
                         .to_string(),
+                    (Make::Pack, Some(f)) => format!(
+                        "Lowercase letters, digits and _: the copy is packs/<name>/, and \
+                         scenarios/<name>.scenario tries it. Its names are {}'s.",
+                        name_of(f)
+                    ),
                 },
                 DIM,
             )],
-            Page::New | Page::Scenarios | Page::Name { .. } => {
+            Page::New | Page::Scenarios | Page::Name { .. } | Page::Pick { .. } => {
                 let f = match &self.page {
                     Page::Name { scenario, .. } => Some(scenario.clone()),
-                    Page::Scenarios => self.scenarios.get(self.at - 1).cloned(),
+                    Page::Scenarios => self.scenarios.get(self.at - FIRST).cloned(),
                     _ => self.scenarios.get(self.at).cloned(),
                 };
                 match f {
@@ -551,7 +651,7 @@ impl Menu {
                     None => vec![],
                 }
             }
-            Page::Packs => match self.rules.get(self.at - 1).cloned() {
+            Page::Packs => match self.rules.get(self.at - FIRST).cloned() {
                 Some(r) => self
                     .about
                     .entry(r.path.clone())
@@ -706,10 +806,7 @@ fn ident_char(c: char, first: bool) -> bool {
 /// Make a scenario or a pack (and a scenario to try it) named `name` from its
 /// template under `root`; the file to open, or why not.
 pub fn make(root: &Path, what: Make, name: &str) -> Result<PathBuf, String> {
-    let mut chars = name.chars();
-    if !chars.next().is_some_and(|c| ident_char(c, true)) || !chars.all(|c| ident_char(c, false)) {
-        return Err("a name of lowercase letters, digits and _, from a letter".into());
-    }
+    check_name(name)?;
     let scenario = root.join("scenarios").join(format!("{name}.scenario"));
     let (open, files) = match what {
         Make::Scenario => (scenario.clone(), vec![(scenario, scenario_template(name))]),
@@ -732,6 +829,158 @@ pub fn make(root: &Path, what: Make, name: &str) -> Result<PathBuf, String> {
             .map_err(|e| format!("could not write {}: {e}", shown(&f)))?;
     }
     Ok(open)
+}
+
+/// A lowercase identifier, else why it is not one.
+fn check_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    if !chars.next().is_some_and(|c| ident_char(c, true)) || !chars.all(|c| ident_char(c, false)) {
+        return Err("a name of lowercase letters, digits and _, from a letter".into());
+    }
+    Ok(())
+}
+
+/// The name a copy of `from` is offered: its own as an identifier, then
+/// `_copy`, then a number until it is free.
+pub fn copy_name(root: &Path, what: Make, from: &Path) -> String {
+    let base: String = stem(from)
+        .to_lowercase()
+        .chars()
+        .map(|c| if ident_char(c, false) { c } else { '_' })
+        .collect();
+    let base = if base.starts_with(|c: char| c.is_ascii_lowercase()) {
+        format!("{base}_copy")
+    } else {
+        format!("copy_{base}")
+    };
+    let taken = |n: &str| {
+        root.join("scenarios")
+            .join(format!("{n}.scenario"))
+            .exists()
+            || (what == Make::Pack && root.join("packs").join(n).exists())
+    };
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|i| format!("{base}{i}"))
+        .find(|n| !taken(n))
+        .expect("some number is free")
+}
+
+/// Copy the scenario or pack `from` under `root` as `name`; the file to
+/// open, or why not. A scenario is copied as it is (its packs, relative to
+/// `scenarios/`, still found). A pack's rules files go to
+/// `packs/<name>/`, its names unchanged (a world runs it or the original,
+/// not both), with `scenarios/<name>.scenario` to try it: a copy of the
+/// scenario that plays the original pack alone, if one does, else a bare one.
+pub fn make_copy(root: &Path, what: Make, from: &Path, name: &str) -> Result<PathBuf, String> {
+    check_name(name)?;
+    let scenario = root.join("scenarios").join(format!("{name}.scenario"));
+    let read = |f: &Path| {
+        std::fs::read_to_string(f).map_err(|e| format!("could not read {}: {e}", shown(f)))
+    };
+    let mut writes: Vec<(PathBuf, String)> = Vec::new();
+    match what {
+        Make::Scenario => {
+            let text = format!("# Copied from {}.\n{}", shown(from), read(from)?);
+            writes.push((scenario.clone(), text));
+        }
+        Make::Pack => {
+            let dir = root.join("packs").join(name);
+            if dir.exists() {
+                return Err(format!("{} is taken", shown(&dir)));
+            }
+            let note = format!(
+                "# Copied from {}. Its kinds, traits, subs and constants have the \
+                 original's names,\n# so a world runs this pack or that one, not both.\n",
+                shown(from)
+            );
+            let sources = if from.is_dir() {
+                files(from, "rules")
+            } else {
+                vec![from.to_path_buf()]
+            };
+            for f in &sources {
+                let to = if from.is_dir() {
+                    dir.join(f.file_name().expect("a file"))
+                } else {
+                    dir.join(format!("{name}.rules"))
+                };
+                writes.push((to, format!("{note}{}", read(f)?)));
+            }
+            if writes.is_empty() {
+                return Err(format!("{} holds no rules files", shown(from)));
+            }
+            writes.push((scenario.clone(), try_pack(root, from, name)));
+        }
+    }
+    if let Some((taken, _)) = writes.iter().find(|(f, _)| f.exists()) {
+        return Err(format!("{} is taken", shown(taken)));
+    }
+    let open = writes[0].0.clone();
+    for (f, text) in writes {
+        let dir = f.parent().expect("a file in a directory");
+        std::fs::create_dir_all(dir)
+            .and_then(|()| std::fs::write(&f, text))
+            .map_err(|e| format!("could not write {}: {e}", shown(&f)))?;
+    }
+    Ok(open)
+}
+
+/// A scenario for a copy of the pack `from` named `name`: the one under
+/// `root/scenarios` that plays `from` alone (the built-in rules: one that
+/// names no packs), its `rules` lines now the copy's; else a bare world.
+fn try_pack(root: &Path, from: &Path, name: &str) -> String {
+    let same = |a: &Path, b: &Path| {
+        a.canonicalize()
+            .ok()
+            .is_some_and(|a| Some(a) == b.canonicalize().ok())
+    };
+    let builtin = same(from, &root.join("rules"));
+    let plays = |f: &Path| {
+        crate::read_scenario(&f.to_string_lossy())
+            .ok()
+            .is_some_and(|s| match &s.packs[..] {
+                [] => builtin,
+                [p] => same(Path::new(p), from),
+                _ => false,
+            })
+    };
+    let rules = format!("rules ../packs/{name}");
+    match files(&root.join("scenarios"), "scenario")
+        .into_iter()
+        .find(|f| plays(f))
+    {
+        Some(f) => {
+            let text = std::fs::read_to_string(&f).unwrap_or_default();
+            let mut out = format!("# Copied from {}, to try packs/{name}.\n", shown(&f));
+            let mut placed = false;
+            for line in text.lines() {
+                let t = line.trim_start();
+                if t == "rules" || t.starts_with("rules ") {
+                    continue;
+                }
+                if !placed && !t.is_empty() && !t.starts_with('#') {
+                    out.push_str(&rules);
+                    out.push('\n');
+                    placed = true;
+                }
+                out.push_str(line);
+                out.push('\n');
+            }
+            if !placed {
+                out.push_str(&rules);
+                out.push('\n');
+            }
+            out
+        }
+        None => format!(
+            "# A world of packs/{name}, a copy of {}: add `start` lines for its kinds\n\
+             # (docs/RULES.md, section 14).\n{rules}\nseed 1\nsize 128 96\n",
+            shown(from)
+        ),
+    }
 }
 
 /// A new scenario: the built-in kinds on a noise terrain, every line
@@ -1045,6 +1294,7 @@ const TITLE: [&str; 5] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sim_core::Scenario;
 
     /// A directory with two saves, two scenarios and a pack, under the
     /// target dir (removed first).
@@ -1171,8 +1421,9 @@ mod tests {
         let root = tree("edit");
         let mut m = Menu::scan(&root);
         m.go(Page::Packs);
-        m.key(Key::Down); // past "+ New pack" and the built-in rules/x.rules
-        m.key(Key::Down);
+        for _ in 0..3 {
+            m.key(Key::Down); // past "+ New pack", "+ Copy of a pack", rules/x.rules
+        }
         assert_eq!(
             m.key(Key::Enter),
             Some(Action::Edit(root.join("packs/p/k.rules")))
@@ -1189,7 +1440,8 @@ mod tests {
                 .any(|l| l.contains("pack p: 1 kinds, 0 warnings"))
         );
         m.go(Page::Scenarios);
-        m.key(Key::Down); // past "+ New scenario"
+        m.key(Key::Down); // past "+ New scenario" and "+ Copy of a scenario"
+        m.key(Key::Down);
         assert_eq!(
             m.key(Key::Enter),
             Some(Action::Edit(root.join("scenarios/a.scenario")))
@@ -1262,7 +1514,8 @@ mod tests {
             m.page,
             Page::Make {
                 what: Make::Scenario,
-                text: String::new()
+                text: String::new(),
+                from: None
             }
         );
         for c in "9My-new_1".chars() {
@@ -1272,7 +1525,8 @@ mod tests {
             m.page,
             Page::Make {
                 what: Make::Scenario,
-                text: "ynew_1".into()
+                text: "ynew_1".into(),
+                from: None
             },
             "lowercase, digits and _, from a letter"
         );
@@ -1280,7 +1534,11 @@ mod tests {
         assert_eq!(m.key(Key::Enter), Some(Action::Edit(made.clone())));
         assert!(made.is_file());
         assert_eq!(m.page, Page::Scenarios);
-        assert_eq!(m.scenarios.get(m.at - 1), Some(&made), "listed and chosen");
+        assert_eq!(
+            m.scenarios.get(m.at - FIRST),
+            Some(&made),
+            "listed and chosen"
+        );
         m.go(Page::Scenarios);
         m.key(Key::Enter);
         for c in "a".chars() {
@@ -1297,7 +1555,7 @@ mod tests {
         let rules = root.join("packs/fern/fern.rules");
         assert_eq!(m.key(Key::Enter), Some(Action::Edit(rules.clone())));
         assert!(rules.is_file() && root.join("scenarios/fern.scenario").is_file());
-        assert_eq!(m.rules.get(m.at - 1).map(|r| &r.path), Some(&rules));
+        assert_eq!(m.rules.get(m.at - FIRST).map(|r| &r.path), Some(&rules));
         assert!(make(&root, Make::Pack, "fern").is_err(), "taken");
         assert!(make(&root, Make::Pack, "").is_err());
     }
@@ -1344,6 +1602,123 @@ mod tests {
             "run 1h\nexpect count moss_moss > 100\nexpect count moss_walker > 0\n\
              expect traps moss_walker == 0\nexpect traps moss_moss == 0\n",
         );
+    }
+
+    /// `+ Copy of`: pick, take the offered name, and the copy is made,
+    /// listed and opened; a pack's copy gets a scenario to try it.
+    #[test]
+    fn copies_of_scenarios_and_packs() {
+        let root = tree("copy");
+        std::fs::write(
+            root.join("scenarios/plays_p.scenario"),
+            "# p's world\nrules ../packs/p\nseed 3\nstart k 1 / 9\n",
+        )
+        .unwrap();
+        let mut m = Menu::scan(&root);
+        m.go(Page::Scenarios);
+        m.key(Key::Down);
+        m.key(Key::Enter);
+        assert_eq!(
+            m.page,
+            Page::Pick {
+                what: Make::Scenario
+            }
+        );
+        m.key(Key::Enter);
+        assert!(matches!(&m.page, Page::Make { text, from: Some(_), .. } if text == "a_copy"));
+        let made = root.join("scenarios/a_copy.scenario");
+        assert_eq!(m.key(Key::Enter), Some(Action::Edit(made.clone())));
+        let text = std::fs::read_to_string(&made).unwrap();
+        assert!(text.starts_with("# Copied from ") && text.ends_with("# A\n# is first\nseed 1\n"));
+        assert_eq!(
+            copy_name(&root, Make::Scenario, &root.join("scenarios/a.scenario")),
+            "a_copy2"
+        );
+
+        // A pack no scenario plays: a bare one to try it.
+        m.go(Page::Packs);
+        m.key(Key::Down);
+        m.key(Key::Enter);
+        assert_eq!(m.page, Page::Pick { what: Make::Pack });
+        m.key(Key::Down); // rules, then packs/p
+        m.key(Key::Enter);
+        assert!(matches!(&m.page, Page::Make { text, .. } if text == "p_copy"));
+        let lines: Vec<String> = m
+            .rows(100, 30)
+            .iter()
+            .map(|r| r.cells.iter().map(|c| char::from(c.0)).collect())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("> packs/p_copy_")),
+            "the name's row, chosen"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("Its names are p's")),
+            "{lines:?}"
+        );
+        let rules = root.join("packs/p_copy/k.rules");
+        assert_eq!(m.key(Key::Enter), Some(Action::Edit(rules.clone())));
+        assert!(
+            std::fs::read_to_string(&rules)
+                .unwrap()
+                .contains("kind k { }")
+        );
+        // plays_p.scenario plays packs/p alone: copied, its rules the copy's.
+        let s = std::fs::read_to_string(root.join("scenarios/p_copy.scenario")).unwrap();
+        assert!(
+            s.contains("rules ../packs/p_copy\nseed 3\nstart k 1 / 9"),
+            "{s}"
+        );
+        assert!(!s.contains("../packs/p\n"), "{s}");
+        let sc = crate::read_scenario(&root.join("scenarios/p_copy.scenario").to_string_lossy())
+            .unwrap();
+        let packs: Vec<PathBuf> = sc.packs.iter().map(PathBuf::from).collect();
+        sim_core::sim::new_world_with(&sc, crate::compile(&packs).unwrap()).unwrap();
+        // The built-in rules: the scenario that names no packs (a.scenario).
+        let open = make_copy(&root, Make::Pack, &root.join("rules"), "mine").unwrap();
+        assert_eq!(open, root.join("packs/mine/x.rules"));
+        let s = std::fs::read_to_string(root.join("scenarios/mine.scenario")).unwrap();
+        assert!(s.contains("# is first\nrules ../packs/mine\nseed 1"), "{s}");
+        // Never over a file; and a pack with nothing to copy says so.
+        assert!(make_copy(&root, Make::Pack, &root.join("packs/p"), "p_copy").is_err());
+        assert!(make_copy(&root, Make::Scenario, &made, "a").is_err());
+        std::fs::create_dir_all(root.join("packs/empty")).unwrap();
+        assert!(make_copy(&root, Make::Pack, &root.join("packs/empty"), "e2").is_err());
+    }
+
+    /// The real Life pack and its scenario, copied: the copy makes a world
+    /// of its own and runs.
+    #[test]
+    fn a_copy_of_life_runs() {
+        let root = tree("life-copy");
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        std::fs::create_dir_all(root.join("packs/life")).unwrap();
+        for (from, to) in [
+            ("packs/life/life.rules", "packs/life/life.rules"),
+            ("scenarios/life.scenario", "scenarios/life.scenario"),
+        ] {
+            std::fs::copy(repo.join(from), root.join(to)).unwrap();
+        }
+        make_copy(&root, Make::Pack, &root.join("packs/life"), "mylife").unwrap();
+        let f = root.join("scenarios/mylife.scenario");
+        let s = crate::read_scenario(&f.to_string_lossy()).unwrap();
+        assert_eq!(
+            s.packs,
+            [root.join("scenarios/../packs/mylife").to_string_lossy()]
+        );
+        let packs: Vec<PathBuf> = s.packs.iter().map(PathBuf::from).collect();
+        let mut world = sim_core::sim::new_world_with(
+            &Scenario {
+                width: 64,
+                height: 64,
+                ..s
+            },
+            crate::compile(&packs).unwrap(),
+        )
+        .unwrap();
+        for _ in 0..10 {
+            sim_core::sim::step(&mut world);
+        }
     }
 
     #[test]
