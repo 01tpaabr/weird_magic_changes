@@ -114,10 +114,15 @@ every step below writes in it. `tuning/<goal>/runs/` holds CSVs and is not commi
    shorter run, each threshold taken from its own baseline by the same rule as the full
    one. Prefer a tier that is harsher than the full goal (a variant that passes it passes
    the full one), and never one too short to show what the goal turns on (the founders
-   ageing out, the second generation). The full goal decides.
+   ageing out, the second generation). The full goal decides. A "never" or "always" needs a
+   `run` longer than the slowest cycle (a lifespan, a birth interval, a boom and its bust):
+   the fox goal held its 16 days, and in 32 the foxes died out on every seed, the flock on
+   five.
 2. **The baseline.** Measure before judging: a copy of the goal with every threshold
    loosened to always hold (`>= 0`, `<= 1000000`), run with `wmc lab copy.scenario --full
-   --csv runs/baseline.csv`, reports every expectation's number on every seed. Count the
+   --csv runs/baseline.csv`, reports every expectation's number on every seed. Change only
+   the `expect` lines of a copy and `grep -n '^run'` it: `run` lines add up (two `run 16d`
+   are 32 days). Count the
    founders per seed too: `start K 1 / 5000` places a different number on each seed, and
    ratios between kinds vary more (a lab of `run 1` and `expect count K >= 0` lines lists
    them). Then `wmc observe <T> --scenario ... --csv runs/obs.csv --gates` on two or three
@@ -144,11 +149,16 @@ every step below writes in it. `tuning/<goal>/runs/` holds CSVs and is not commi
    notebook.
 6. **Confirm.** The full goal file on more seeds (`--seeds 16`), and the margin: each knob
    you changed at about -20%, as chosen, and +20% in one lab (`--set K=0.8v,v,1.2v`). A goal
-   that holds only at the exact value is fragile: say so.
+   that holds only at the exact value is fragile: say so. Then the long run: the chosen
+   values at twice the goal's `run` (a loosened copy, `--full`), before you call it met. A
+   window can end just before a bust.
 7. **Lock it in.** Write the chosen values into the rules. Put the goal (or a fast version
    that still fails if the behaviour regresses) in `scenarios/tests/<name>.scenario`, so
    `make test` keeps it true at 1 and 8 threads. `wmc lint --strict`, `make ci`, commit with
-   the lab table in the message.
+   the lab table in the message. Rules that other things build on break those things: the
+   built-in `rules/` are fixtures for engine unit tests, scenario tests and the docs'
+   examples. Run `make test` after each change to such rules, and when a test breaks, find
+   the condition that tells its case from yours before rewriting the test.
 8. **Report, and keep the lesson.** What changed, why it works (the mechanism, in two
    sentences), the evidence (the lab's rows), the margin, what is still fragile. Add a dated
    entry to `references/lessons.md`: the mechanism and the numbers, so the next goal starts
