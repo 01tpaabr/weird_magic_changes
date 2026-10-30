@@ -9,6 +9,7 @@ happened (with numbers), why, and the rule of thumb. Add one at the end of every
 "Foxes hunt more chickens, but chickens never die out", 256x256, 16 days: from 0 of 8
 seeds to 8 of 8 (15 of 16), in 9 labs. Kills a day 16.2 to 51.5 (median, from day 2) and
 9.4 to 72.3 (from day 9); lowest chickens 188 .. 239 (floor 100); lowest foxes 7 .. 14.
+But past day 16 both kinds die out (the fifth point): met as written, not as meant.
 - **Relaxing the predator's birth gate alone overshoots.** The litter's prey gate (15
   hens within 16) was what bound (`--gates`: it stopped 100% of the thinks past the dice;
   the territory 10%). At 10, 8 and 6 births rose x2.6 .. x3.3 as predicted, but the
@@ -35,10 +36,17 @@ seeds to 8 of 8 (15 of 16), in 9 labs. Kills a day 16.2 to 51.5 (median, from da
 - **The margin found the edge.** `HUNT_FLOCK` 3 .. 5 and `DESPERATE` 13h .. 19h all pass;
   `LITTER_HENS` 8 fails the floor on 5 seeds, 12 passes 7 of 8: the goal holds from 10 to
   12, and 10 sits at its edge. Without the -20% run nobody would know.
-- **Long runs can hide a cycle.** A 32-day run (by mistake: a measurement copy took the
-  goal's `run 16d` with its head and then got a second) showed the gated design boom-bust
-  after day 19: foxes 34 .. 89, then under 3 on 5 seeds, the flock under 100 on 3. Run the
-  chosen design at twice the goal's length once; and `grep -n '^run'` a copy before a lab.
+- **The goal's window hid a bust: run twice its length before calling it met.** The tuned
+  rules, run 32 days after they were committed: foxes rose to 26 .. 52, the flock fell
+  under 100 between days 17.7 and 31, and both kinds died out on most seeds (foxes on all
+  8). The 16-day goal held because the bust began just after it. Switching kept the flock
+  dense, so litters ran on past what a thinning flock can feed, and foxes outlive the
+  flock's decline by days. An earlier 32-day run (by mistake: a measurement copy took the
+  goal's `run 16d` with its head, then got a second) had shown the fully gated design
+  boom-bust after day 19, and was read as that design's flaw, not the mechanism's. Rule:
+  run the chosen design at twice the goal's length before lock-in; a goal of "never" needs a
+  window longer than the slowest cycle (here the fox's ~9-day life and 5-day litters);
+  and `grep -n '^run'` a copy before a lab.
 - **What a test can hold.** The smallest world where this goal means anything costs ~96 s
   a seed in the fast build; a 128x128 world (28 s) had 1 .. 3 foxes and could not tell the
   old litter gate from the new. The goal stays in `tuning/`; `make test` keeps the

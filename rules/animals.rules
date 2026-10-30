@@ -4,9 +4,10 @@
 # files in name order: chicken 0, chick 1 (it extends chicken), egg 2, fox 3,
 # flower 4, hive 5, bee 6, grass 7, seed 8, tree 9.
 
-# The fox's balance, tuned so foxes hunt more chickens and chickens never die
-# out (tuning/foxes-hunt-more/notes.md): foxes breed where the flock is, hunt
-# only where it is thick, and so cannot eat a thinned flock out.
+# The fox's balance, tuned for tuning/foxes-hunt-more (foxes hunt more
+# chickens, chickens never die out, over 16 days): foxes breed where the flock
+# is and hunt only where it is thick. Past 16 days they still boom and bust
+# (its notes.md, experiment 10).
 const LITTER_HENS = 10              # hens within 16 a fox needs to raise a kit
 const HUNT_FLOCK = 4                # hens within 8 a fox needs to hunt there: a thin flock is safe
 const DESPERATE = 16h               # below this a fox eats what is next to it, flock or not

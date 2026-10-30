@@ -394,8 +394,29 @@ goal (labs 6, 7, 9: `runs/06.csv`, `07.csv`, `09.csv`); 8 more seeds, 50 .. 57 (
   fox leaves a lone hen 6 cells off alone: fails with the old rules) and
   `fox_flock.scenario` (it catches one of a flock of four). Nothing in `make test` fails if
   `LITTER_HENS` goes back to 15.
-- **The long run.** Lab 3 (32 days, the gated design) boom-busted after day 19; the chosen
-  design was not run past 16 days.
+- **The long run:** now run, below (10).
+
+### 10. The long run: the tuned rules for 32 days (2026-10-30, after the commit)
+- **Run:** `runs/measure-full-32d.scenario` (the full goal's world, `run 32d`, the same
+  lines plus floors from day 16), the rules as committed; `runs/11-32d.csv`, 223 s.
+- **Result: both kinds die out after the goal's window, on every seed.** Foxes rise to 26 ..
+  52, then fall below 3 between days 20.2 and 28.2 and die out on all 8 seeds. The flock
+  falls below 100 between days 17.7 and 31.1 (seeds 47, 44, 46, 48, 42, 45, 43, 49), to 0
+  on five seeds, 10 and 11 on two, 86 on one. Kills from day 16 to 32: 5.5 .. 19.3 a day.
+  The 16-day goal holds because the bust starts just after it.
+- **Inferred, not yet probed:** switching keeps the flock dense, so litters go on until
+  there are 26 .. 52 foxes, more than the flock can feed once it thins; foxes live ~9 days,
+  so their numbers lag the flock's decline. Then many foxes go hungry at once, fall below
+  `DESPERATE` and eat whatever is at their feet, and the eggs and chicks around the last
+  groups of hens go too: the flock stops renewing, then the foxes starve. The fully gated
+  design (lab 3: no starving exception) also boom-busted after day 19, but the flock fell
+  below 100 on 3 seeds of 8, not 8: the exception deepens the bust; the fox boom causes it.
+- **Next, if the goal is extended to 32 days** (it should be: "never die out" means more
+  than 16 days): a brake on fox numbers rather than on hunting. Candidates, each with a
+  prediction before it runs: a longer litter interval (`day + 5` as a const, 8 .. 10:
+  fewer kits a fox, a lower peak); litters only when well fed (`food > 22h`); or a
+  starving exception that spares eggs and chicks, so the flock keeps renewing through the
+  bust. Watch the peak fox count and the flock's lowest from day 16.
 
 ### Later, if needed
 2. **Prey switching, the floor:** the fox walks toward chickens only where there are at
@@ -427,8 +448,11 @@ the flock kept dense, the litter gate at 10 hens opens and foxes multiply where 
 is, so the second week has ~30 foxes hunting instead of the founders' few survivors: kills
 from day 9 go from 9.4 to 72 a day.
 
-Fragile: `LITTER_HENS` below 10 (the floor fails at 8); seed 55's first week; anything past
-16 days (not run with this design; the gated design boom-busted after day 19 in 32 days).
+Fragile: `LITTER_HENS` below 10 (the floor fails at 8); seed 55's first week; and above
+all **the long run: past day 16 the foxes boom (26 .. 52) and bust, and both kinds die out
+by day 20 .. 31 on all 8 seeds** (experiment 10). The goal as written (16 days) is met; the
+wish behind "never die out" is not, beyond it. Next: extend the goal to 32 days and brake
+the fox numbers (experiment 10's candidates).
 
 ## Lessons (so far)
 
