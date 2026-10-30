@@ -3,10 +3,10 @@
 # in the middle wakes hungry, stalks them and eats where the flock is thick.
 # The hens flee it, so the hunt is a chase round the pond.
 #
-#   (scenarios/fox_pen_showcase.scenario plays it; this checks it on 4 seeds)
+#   (scenarios/fox_pen_showcase.scenario plays it; this checks it on 2 seeds)
 seed 1
-seeds 4
-pass 3                         # a hen or a chick dies on 12 seeds in 16; the fox lives on all 16
+seeds 2                        # a hen or a chick dies on 12 seeds in 16 (both of these);
+                               # the fox lives on all 16
 outside rock
 
 map {

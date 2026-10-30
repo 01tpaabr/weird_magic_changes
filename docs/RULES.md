@@ -665,6 +665,8 @@ dice in every segment and branch. `scenarios/glider_gun.scenario` is Gosper's gl
 `scenarios/fox_pen_showcase.scenario` a fox and a flock in a small walled pen. Every name is
 global, so packs meant to share a world keep their consts and traits apart
 (`TAPE_STILL`, `ROW_CADENCE`); all of these compile together with the built-in kinds.
+`scenarios/gallery.scenario` runs them all on one board, each world in a rock frame and its
+soups in their own regions (§14), and checks that each runs as it does alone.
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor

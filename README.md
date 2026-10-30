@@ -49,6 +49,7 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   tape, one row per sweep of the head.
   `packs/elementary` (Wolfram's rules; rule 90 is the Sierpinski triangle), `packs/cyclic`
   (spirals), `packs/turmite` (Langton's ant) and `packs/lsystem` (trees) draw pictures.
+  `scenarios/gallery.scenario` runs all of them side by side on one board.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), `wmc observe` (how each kind lives and dies over a run:
   populations, deaths by cause and per head over time, who kills whom, which rules fire, and with
