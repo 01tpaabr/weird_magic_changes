@@ -11,6 +11,9 @@
 //!   `r` in a world reloads edited rules.
 //! - **Quit**.
 //!
+//! The keyboard or the mouse: pointing at a row chooses it, a click opens
+//! it, the wheel moves the choice, a right click goes back.
+//!
 //! Behind it the gallery runs (`scenarios/gallery.scenario`, else the
 //! built-in world). This module is the menu as data: its pages, what a key
 //! does to them ([`Menu::key`], which `play` turns into a world to open),
@@ -117,6 +120,12 @@ pub struct Menu {
     pub rules: Vec<RulesFile>,
     /// A line for the user, until the next key.
     pub note: Option<(String, bool)>,
+    /// The list's first row in view: it follows the chosen row, not the
+    /// pointer.
+    top: usize,
+    /// For each row of the text last drawn, the list item it shows: where
+    /// the pointer is.
+    shown: Vec<Option<usize>>,
     /// What each file says and whether it compiles, read when first shown.
     about: BTreeMap<PathBuf, Vec<(String, Color)>>,
 }
@@ -141,6 +150,8 @@ impl Menu {
             scenarios: Vec::new(),
             rules: Vec::new(),
             note: None,
+            top: 0,
+            shown: Vec::new(),
             about: BTreeMap::new(),
         };
         m.rescan();
@@ -177,6 +188,29 @@ impl Menu {
     fn go(&mut self, page: Page) {
         self.page = page;
         self.at = 0;
+        self.top = 0;
+    }
+
+    /// The list item the row `row` of the text last drawn shows, if any.
+    pub fn item_at(&self, row: usize) -> Option<usize> {
+        self.shown.get(row).copied().flatten()
+    }
+
+    /// The pointer moved onto list item `i`: it is the chosen one.
+    pub fn hover(&mut self, i: usize) {
+        if i < self.len() {
+            self.at = i;
+        }
+    }
+
+    /// A click on list item `i`: chosen, then opened, as Enter.
+    pub fn click(&mut self, i: usize) -> Option<Action> {
+        // The name page lists one row: the name.
+        if (matches!(self.page, Page::Name { .. }) && i == 0) || i < self.len() {
+            self.hover(i);
+            return self.key(Key::Enter);
+        }
+        None
     }
 
     /// What a key does: moves, changes the page, or asks for an [`Action`].
@@ -287,9 +321,16 @@ impl Menu {
         let left = 34.min(cols / 2);
         let about = self.about_chosen(cols.saturating_sub(left + 4));
         let body = rows.saturating_sub(out.len() + 3);
-        // Scroll so the chosen row stays in view.
-        let first = self.at.saturating_sub(body.saturating_sub(1));
+        // Scroll only as far as keeps the chosen row in view.
+        if self.at < self.top {
+            self.top = self.at;
+        } else if body > 0 && self.at >= self.top + body {
+            self.top = self.at + 1 - body;
+        }
+        let first = self.top;
+        self.shown = vec![None; out.len()];
         for i in 0..body {
+            self.shown.push(items.get(first + i).map(|_| first + i));
             let item = items.get(first + i);
             let chosen = item.is_some() && first + i == self.at;
             let bg = if chosen { CHOSEN_BG } else { TEXT_BG };
@@ -322,11 +363,13 @@ impl Menu {
 
     fn keys(&self) -> &'static str {
         match self.page {
-            Page::Main => "up/down choose | enter open | q quit",
-            Page::Load | Page::New => "up/down choose | enter open | esc back",
-            Page::Name { .. } => "type a name | enter make the world | esc back",
+            Page::Main => "up/down or point: choose | enter or click: open | q quit",
+            Page::Load | Page::New => {
+                "up/down, wheel or point: choose | enter or click: open | esc or right click: back"
+            }
+            Page::Name { .. } => "type a name | enter or click: make the world | esc: back",
             Page::Scenarios | Page::Packs => {
-                "up/down choose | enter edit (WMC_EDITOR, else the system's) | esc back"
+                "choose | enter or click: edit (WMC_EDITOR, else the system's) | esc: back"
             }
         }
     }
@@ -935,6 +978,50 @@ mod tests {
             text.iter()
                 .any(|l| l.contains("ok: ") && l.contains("seed 1"))
         );
+    }
+
+    /// The rows drawn say which item each shows; a move over one chooses it,
+    /// a click opens it; a long list scrolls with the choice, not the pointer.
+    #[test]
+    fn the_pointer_chooses_and_clicks_open() {
+        let root = tree("mouse");
+        for i in 0..30 {
+            std::fs::write(root.join(format!("scenarios/s{i:02}.scenario")), "seed 1\n").unwrap();
+        }
+        let mut m = Menu::scan(&root);
+        let text = |m: &mut Menu| -> Vec<String> {
+            m.rows(100, 24)
+                .iter()
+                .map(|r| r.cells.iter().map(|c| char::from(c.0)).collect())
+                .collect()
+        };
+        let lines = text(&mut m);
+        let row_of =
+            |lines: &[String], what: &str| lines.iter().position(|l| l.contains(what)).unwrap();
+        let load = row_of(&lines, "Load world");
+        assert_eq!(m.item_at(load), Some(1));
+        assert_eq!(m.item_at(0), None, "the title is no item");
+        m.hover(1);
+        assert_eq!(m.at, 1);
+        assert_eq!(m.click(2), None);
+        assert_eq!(m.page, Page::New, "New world opened");
+        // 32 scenarios, 15 rows of list: down to the 20th, then the pointer
+        // on the first row in view chooses it without scrolling.
+        let lines = text(&mut m);
+        let first = (0..lines.len()).find(|&r| m.item_at(r).is_some()).unwrap();
+        for _ in 0..20 {
+            m.key(Key::Down);
+        }
+        text(&mut m);
+        let top = m.item_at(first).unwrap();
+        assert!(top > 0, "scrolled");
+        m.hover(top);
+        text(&mut m);
+        assert_eq!(m.item_at(first), Some(top), "the list stays put");
+        assert_eq!(m.click(top), None);
+        assert!(matches!(m.page, Page::Name { .. }));
+        assert!(m.click(0).is_some(), "the name's row makes the world");
+        assert_eq!(m.click(999), None);
     }
 
     #[test]

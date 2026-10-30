@@ -753,17 +753,88 @@ fn handle_input(
     }
 }
 
-/// The menu's keys: arrows, Enter, Esc, Backspace and what is typed
-/// (layout-independent: the text a key makes), into [`Menu::key`]; what it
-/// asks for goes to [`Pending`], or opens a file in the editor here.
+/// Where the pointer was, and the wheel's pixels short of a row, for
+/// [`menu_input`].
+#[derive(Debug, Default, Clone, Copy, PartialEq)]
+struct MenuPointer {
+    at: Option<Vec2>,
+    rest: f32,
+}
+
+/// The menu's keys and mouse. Keys: arrows, Enter, Esc, Backspace and what
+/// is typed (layout-independent: the text a key makes), into [`Menu::key`].
+/// Mouse: moving over a row chooses it (only a move: a still pointer leaves
+/// the keys their choice), a click opens it, the wheel moves the choice, a
+/// right click goes back. What the menu asks for goes to [`Pending`], or
+/// opens a file in the editor here.
+#[allow(clippy::too_many_arguments)]
 fn menu_input(
     mut typed: MessageReader<KeyboardInput>,
     mut close: MessageReader<WindowCloseRequested>,
+    window: Query<&Window, With<PrimaryWindow>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    wheel: Res<AccumulatedMouseScroll>,
+    layout: Res<Layout>,
+    mut pointer: Local<MenuPointer>,
     mut menu: ResMut<Menu>,
     mut pending: ResMut<Pending>,
 ) {
     if close.read().next().is_some() {
         pending.exit = true;
+    }
+    let mut asked = Vec::new();
+    let (cw, ch) = (
+        layout.panel_cell.0.max(1) as f32,
+        layout.panel_cell.1.max(1) as f32,
+    );
+    let row = window
+        .single()
+        .ok()
+        .and_then(Window::physical_cursor_position)
+        .filter(|_| layout.visible && layout.menu_rows > 0)
+        .and_then(|at| {
+            let (x, y) = (at.x - layout.menu_x as f32, at.y - layout.menu_y as f32);
+            let inside = x >= 0.0
+                && y >= 0.0
+                && x < layout.menu_cols as f32 * cw
+                && y < layout.menu_rows as f32 * ch;
+            // A pixel inside the box over a row a dozen pixels tall.
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            inside.then_some(((y / ch) as usize, at))
+        });
+    if let Some((row, at)) = row {
+        let moved = pointer.at != Some(at);
+        pointer.at = Some(at);
+        if let Some(i) = menu.item_at(row) {
+            if moved {
+                menu.hover(i);
+            }
+            if mouse.just_pressed(MouseButton::Left) {
+                asked.push(menu.click(i));
+            }
+        }
+    } else {
+        pointer.at = None;
+    }
+    if mouse.just_pressed(MouseButton::Right) {
+        asked.push(menu.key(menu::Key::Back));
+    }
+    // A notch of the wheel, or a row's height of a trackpad's pixels, is a
+    // row; up moves the choice up.
+    pointer.rest += match wheel.unit {
+        MouseScrollUnit::Line => wheel.delta.y,
+        MouseScrollUnit::Pixel => wheel.delta.y * layout.scale / ch,
+    };
+    while pointer.rest >= 1.0 {
+        pointer.rest -= 1.0;
+        asked.push(menu.key(menu::Key::Up));
+    }
+    while pointer.rest <= -1.0 {
+        pointer.rest += 1.0;
+        asked.push(menu.key(menu::Key::Down));
+    }
+    if wheel.delta.y == 0.0 {
+        pointer.rest = 0.0;
     }
     for ev in typed.read() {
         if ev.state != ButtonState::Pressed {
@@ -780,14 +851,16 @@ fn menu_input(
                 _ => continue,
             },
         };
-        match menu.key(key) {
-            Some(menu::Action::Quit) => pending.exit = true,
-            Some(menu::Action::Edit(path)) => menu.note = Some(menu::edit(&path)),
-            Some(menu::Action::Load(dir)) => pending.open = Some(Open::Load(dir)),
-            Some(menu::Action::New { scenario, dir }) => {
+        asked.push(menu.key(key));
+    }
+    for action in asked.into_iter().flatten() {
+        match action {
+            menu::Action::Quit => pending.exit = true,
+            menu::Action::Edit(path) => menu.note = Some(menu::edit(&path)),
+            menu::Action::Load(dir) => pending.open = Some(Open::Load(dir)),
+            menu::Action::New { scenario, dir } => {
                 pending.open = Some(Open::New { scenario, dir });
             }
-            None => {}
         }
     }
 }
@@ -1463,6 +1536,88 @@ fn upload_tiles(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `menu_input` against a menu on screen: a click on a row opens it,
+    /// the wheel moves the choice, a right click goes back. (Synthetic
+    /// clicks posted to the window do not reach it, so this is the check.)
+    #[test]
+    fn the_menu_takes_clicks_the_wheel_and_a_right_click() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::RunSystemOnce;
+        use bevy::math::DVec2;
+        let root = std::env::temp_dir().join(format!("wmc-menu-input-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("scenarios")).unwrap();
+        for n in ["a", "b", "c", "d"] {
+            std::fs::write(root.join(format!("scenarios/{n}.scenario")), "seed 1\n").unwrap();
+        }
+        let mut menu = Menu::scan(&root);
+        let (cw, ch, x0, y0) = (8u32, 16u32, 100u32, 50u32);
+        let text: Vec<String> = menu
+            .rows(100, 26)
+            .iter()
+            .map(|r| r.cells.iter().map(|c| char::from(c.0)).collect())
+            .collect();
+        let row = text.iter().position(|l| l.contains("New world")).unwrap();
+        let mut world = World::new();
+        world.init_resource::<Messages<KeyboardInput>>();
+        world.init_resource::<Messages<WindowCloseRequested>>();
+        world.insert_resource(menu);
+        world.insert_resource(Pending::default());
+        world.insert_resource(AccumulatedMouseScroll::default());
+        world.insert_resource(Layout {
+            visible: true,
+            scale: 1.0,
+            panel_cell: (cw, ch),
+            menu_x: x0,
+            menu_y: y0,
+            menu_cols: 100,
+            menu_rows: 26,
+            ..Layout::default()
+        });
+        let mut window = Window::default();
+        let y = f64::from(y0 + ch * u32::try_from(row).unwrap() + ch / 2);
+        window.set_physical_cursor_position(Some(DVec2::new(f64::from(x0 + 5 * cw), y)));
+        world.spawn((window, PrimaryWindow));
+        let mut buttons = ButtonInput::<MouseButton>::default();
+        buttons.press(MouseButton::Left);
+        world.insert_resource(buttons);
+        world.run_system_once(menu_input).unwrap();
+        assert_eq!(
+            world.resource::<Menu>().page,
+            menu::Page::New,
+            "clicked open"
+        );
+
+        // Two notches down the wheel, the pointer off the box (each run here
+        // is a new system, which takes a still pointer for a move): the
+        // third scenario.
+        let mut windows = world.query::<&mut Window>();
+        windows
+            .single_mut(&mut world)
+            .unwrap()
+            .set_physical_cursor_position(None);
+        world.resource_mut::<ButtonInput<MouseButton>>().clear();
+        world.resource_mut::<AccumulatedMouseScroll>().delta = Vec2::new(0.0, -2.0);
+        world.resource_mut::<Menu>().rows(100, 26);
+        world.run_system_once(menu_input).unwrap();
+        assert_eq!(world.resource::<Menu>().at, 2);
+
+        // A right click: back to the first page.
+        world.resource_mut::<AccumulatedMouseScroll>().delta = Vec2::ZERO;
+        let mut buttons = world.resource_mut::<ButtonInput<MouseButton>>();
+        buttons.release_all();
+        buttons.clear();
+        buttons.press(MouseButton::Right);
+        world.run_system_once(menu_input).unwrap();
+        assert_eq!(world.resource::<Menu>().page, menu::Page::Main);
+        assert_eq!(
+            world.resource::<Pending>(),
+            &Pending::default(),
+            "nothing to open"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 
     #[test]
     fn policy_covers_the_view() {
