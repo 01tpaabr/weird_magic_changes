@@ -6,6 +6,8 @@
 //! - [`clock`]: real time -> number of sim ticks this frame (speed, pause, budget).
 //! - [`render`]: `Stage` -> `CellFrame` (glyph, fg, bg per cell) -> tilemap tiles.
 //! - [`play`]: the windowed game: `PlayPlugin`, its resources and systems.
+//! - [`menu`]: the main menu (`wmc` alone): saves, scenarios and packs on
+//!   disk, as pages and keys; `play` runs it over the gallery world.
 //! - [`packs`], [`compile`], [`rules_for`]: which rules the app runs (packs
 //!   from `--rules` or `WMC_RULES`, a save's own packs, or the built-in ones),
 //!   with the constants `--set` gives ([`set_consts`]).
@@ -24,6 +26,7 @@ pub mod clock;
 pub mod highlight;
 pub mod inspect;
 pub mod lab;
+pub mod menu;
 pub mod observe;
 pub mod play;
 pub mod rates;
@@ -74,6 +77,17 @@ pub fn packs_or(cli: &[String], scenario: &[String]) -> Vec<PathBuf> {
     } else {
         session
     }
+}
+
+/// A scenario file, its packs (`rules` lines) made relative to where it is.
+pub fn read_scenario(f: &str) -> anyhow::Result<sim_core::Scenario> {
+    let text = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
+    let mut s = sim_core::Scenario::parse(f, &text)?;
+    let dir = Path::new(f).parent().unwrap_or(Path::new(""));
+    for p in &mut s.packs {
+        *p = dir.join(&*p).to_string_lossy().into_owned();
+    }
+    Ok(s)
 }
 
 /// Compile `packs` as one rule set (`sim_core::rules::compile_packs`),

@@ -63,6 +63,7 @@ docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design
 
 ```
 make            build (dev: opt-level 1, deps opt-level 3, Bevy dynamic_linking)
+make run                           # the main menu over the gallery: load, make (from a scenario) or edit worlds
 make run ARGS="show 80 24 42"      # or ARGS="play saves/dev [w h seed]" (WASD, space=pause, .=step, [ ]=speed, p=save, r=reload rules, q=quit)
 make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + checksum (WMC_THREADS=1 must match)
                                    # show/play/run/why take --scenario <file> for a new world ([w h seed] override it)

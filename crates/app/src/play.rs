@@ -1,5 +1,12 @@
 //! The windowed game: a Bevy `App` around the sim.
 //!
+//! One app, one sim world at a time, on one of two [`Screen`]s: the menu
+//! ([`crate::menu`], `wmc` alone) over the gallery world, or a world played
+//! (`wmc play`, or one the menu opened). Opening another world is
+//! [`switch`]: what can fail first, then `sim::uninstall` and a new world
+//! installed in the same frame. The menu fits the gallery in the window, in
+//! daylight, with no status rows.
+//!
 //! A frame (`Update`, one chain, in this order):
 //! 1. `handle_input`: keys -> camera direction, clock/zoom toggles, pending save/step/reload/quit.
 //! 2. `advance_camera`: glide the camera by the frame's real `dt`.
@@ -34,6 +41,8 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, bail};
 use bevy::app::{TaskPoolOptions, TaskPoolPlugin};
 use bevy::camera::Projection;
+use bevy::input::ButtonState;
+use bevy::input::keyboard::{Key, KeyboardInput};
 use bevy::input::mouse::{AccumulatedMouseScroll, MouseScrollUnit};
 use bevy::log::{Level, LogPlugin};
 use bevy::prelude::*;
@@ -50,6 +59,7 @@ use sim_core::{Scenario, par, sim, time};
 use crate::camera::{Input, ViewCamera};
 use crate::clock::SimClock;
 use crate::inspect::{self, ALERT, DIM, FAINT, Inspector, KEYS, Line, Selection};
+use crate::menu::{self, Menu};
 use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
@@ -69,6 +79,15 @@ const MAX_DT: f64 = 0.1;
 /// at max speed this is how long each frame ticks for.
 pub const TICK_BUDGET: Duration = Duration::from_millis(10);
 const HELP: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | click inspect | f follow | p save | r reload rules | +/- zoom | q quit";
+/// [`HELP`] when quitting goes back to the menu.
+const HELP_HOME: &str = "wasd/arrows move (shift x4) | space pause | . step | [ ] speed | click inspect | f follow | p save | r reload rules | +/- zoom | q menu";
+/// The menu box: at most this many text cells, and its background's opacity.
+const MENU_COLS: u32 = 96;
+const MENU_ROWS: u32 = 26;
+const MENU_ALPHA: f32 = 0.8;
+/// Ticks the gallery runs before it starts over: its busy beaver's first
+/// 10 000 steps or so, about 5 minutes at the menu's 8x.
+const GALLERY_TICKS: u64 = 20_000;
 /// The inspector panel: two fifths of the window, held to this many columns
 /// of text cells.
 const PANEL_MIN: u32 = 40;
@@ -91,36 +110,7 @@ const HOVER_BG: Color = Color::rgb(0x3a, 0x3a, 0x4c);
 /// [`crate::rules_for`]), and run the window until quit.
 pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyhow::Result<()> {
     let store = Store::open(dir).with_context(|| format!("opening save dir {dir}"))?;
-    let mut app = App::new();
-    // `WMC_THREADS`, which `main` checked, unless `--threads` made the
-    // compute pool already (it wins, and the variable is not read).
-    let threads = match par::thread_count() {
-        0 => par::threads_from_env(),
-        _ => None,
-    };
-    let task_pool_options =
-        threads.map_or_else(TaskPoolOptions::default, TaskPoolOptions::with_num_threads);
-    app.add_plugins(
-        DefaultPlugins
-            .set(TaskPoolPlugin { task_pool_options })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    title: format!("wmc - {}", store.dir().display()),
-                    // Logical size (the backend applies the scale factor).
-                    resolution: WindowResolution::new(1280, 800),
-                    present_mode: PresentMode::AutoVsync,
-                    ..default()
-                }),
-                // We save before quitting, so the close button is ours to handle.
-                close_when_requested: false,
-                ..default()
-            })
-            .set(LogPlugin {
-                filter: "warn,app=info".into(),
-                level: Level::INFO,
-                ..default()
-            }),
-    );
+    let mut app = window_app(format!("wmc - {}", store.dir().display()));
     let kinds = crate::rules_for(&store, packs, &scenario.packs)?;
     let world = app.world_mut();
     sim::install_with(world, kinds);
@@ -136,12 +126,204 @@ pub fn run(dir: &str, scenario: &Scenario, name: &str, packs: &[String]) -> anyh
     let camera = camera_for(world, &store);
     app.insert_resource(store)
         .insert_resource(camera)
-        .insert_resource(ClearColor(VOID_BG.tint()))
+        .insert_resource(Screen::Play)
+        .insert_resource(Home(false))
         .add_plugins(PlayPlugin);
-    match app.run() {
+    exit(app.run())
+}
+
+/// The main menu (`wmc` with no arguments), over the gallery: open, make
+/// and edit worlds ([`crate::menu`]); quitting a world comes back here.
+pub fn menu() -> anyhow::Result<()> {
+    let mut app = window_app("wmc".into());
+    let cwd = std::env::current_dir().context("the working directory")?;
+    app.insert_resource(Menu::scan(&cwd))
+        .insert_resource(Screen::Menu)
+        .insert_resource(Home(true))
+        .add_plugins(PlayPlugin);
+    switch(app.world_mut(), Open::Gallery)?;
+    exit(app.run())
+}
+
+fn exit(e: AppExit) -> anyhow::Result<()> {
+    match e {
         AppExit::Success => Ok(()),
         AppExit::Error(code) => bail!("exited with code {code}"),
     }
+}
+
+/// The window and Bevy's plugins, no world yet.
+fn window_app(title: String) -> App {
+    let mut app = App::new();
+    // `WMC_THREADS`, which `main` checked, unless `--threads` made the
+    // compute pool already (it wins, and the variable is not read).
+    let threads = match par::thread_count() {
+        0 => par::threads_from_env(),
+        _ => None,
+    };
+    let task_pool_options =
+        threads.map_or_else(TaskPoolOptions::default, TaskPoolOptions::with_num_threads);
+    app.add_plugins(
+        DefaultPlugins
+            .set(TaskPoolPlugin { task_pool_options })
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title,
+                    // Logical size (the backend applies the scale factor).
+                    resolution: WindowResolution::new(1280, 800),
+                    present_mode: PresentMode::AutoVsync,
+                    ..default()
+                }),
+                // We save before quitting, so the close button is ours to handle.
+                close_when_requested: false,
+                ..default()
+            })
+            .set(LogPlugin {
+                filter: "warn,app=info".into(),
+                level: Level::INFO,
+                ..default()
+            }),
+    );
+    app.insert_resource(ClearColor(VOID_BG.tint()));
+    app
+}
+
+/// What a switch puts in place of the world on screen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Open {
+    /// The gallery, behind the menu.
+    Gallery,
+    /// The world saved in this directory.
+    Load(std::path::PathBuf),
+    /// A new world from this scenario file, saved in this directory.
+    New {
+        scenario: std::path::PathBuf,
+        dir: std::path::PathBuf,
+    },
+}
+
+/// The gallery's scenario and rules (`scenarios/gallery.scenario` under the
+/// working directory), else the built-in world: it is a background, never
+/// an error.
+fn gallery() -> (Scenario, Kinds) {
+    let read = || -> anyhow::Result<(Scenario, Kinds)> {
+        let s = crate::read_scenario(menu::GALLERY)?;
+        let packs: Vec<std::path::PathBuf> = s.packs.iter().map(Into::into).collect();
+        let kinds = crate::compile(&packs)?;
+        sim_core::scenario::Placement::resolve(&s.starts, &kinds, &s.terrain())
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        Ok((s, kinds))
+    };
+    read().unwrap_or_else(|e| {
+        warn!(
+            "the gallery ({}): {e:#}; the built-in world instead",
+            menu::GALLERY
+        );
+        (Scenario::builtin(), Kinds::builtin())
+    })
+}
+
+/// Put the world `open` names on screen in place of the one there (saved
+/// first by the caller, when it was played). What can fail (reading,
+/// compiling, fitting the starts) is done before the old world goes, so an
+/// error leaves it in place; a save that will not open after all brings
+/// the gallery back. Then the screen, the camera, the clock and the
+/// window's title follow.
+fn switch(world: &mut World, open: Open) -> anyhow::Result<()> {
+    enum Ready {
+        Create(Scenario, Option<Store>),
+        Open(Store),
+    }
+    let (kinds, ready) = match &open {
+        Open::Gallery => {
+            let (s, kinds) = gallery();
+            (kinds, Ready::Create(s, None))
+        }
+        Open::Load(dir) => {
+            let store = Store::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+            (crate::rules_for(&store, &[], &[])?, Ready::Open(store))
+        }
+        Open::New { scenario, dir } => {
+            let name = scenario.to_string_lossy();
+            let s = crate::read_scenario(&name)?;
+            let packs: Vec<std::path::PathBuf> = s.packs.iter().map(Into::into).collect();
+            let kinds = crate::compile(&packs)?;
+            sim_core::scenario::Placement::resolve(&s.starts, &kinds, &s.terrain())
+                .map_err(|e| crate::new_world_error(&name, s.line_of(&e), e))?;
+            let store = Store::open(dir).with_context(|| format!("making {}", dir.display()))?;
+            (kinds, Ready::Create(s, Some(store)))
+        }
+    };
+    sim::uninstall(world);
+    world.remove_resource::<Store>();
+    sim::install_with(world, kinds);
+    let made = match ready {
+        Ready::Create(s, store) => {
+            sim::create(world, &s).map_err(|e| anyhow::anyhow!("{e}"))?;
+            if let Some(store) = &store {
+                store
+                    .write_meta(&sim::meta(world))
+                    .context("writing save meta")?;
+            }
+            store
+        }
+        Ready::Open(store) => match sim::open(world, &store) {
+            Ok(true) => Some(store),
+            Ok(false) => {
+                switch(world, Open::Gallery)?;
+                bail!("{} holds no world", store.dir().display());
+            }
+            Err(e) => {
+                switch(world, Open::Gallery)?;
+                return Err(e).context(format!("reading {}", store.dir().display()));
+            }
+        },
+    };
+    let camera = match &made {
+        Some(store) => camera_for(world, store),
+        None => {
+            let c = world.resource::<SimConfig>();
+            ViewCamera::new(Pos::new(
+                i32::try_from(c.initial_width / 2).unwrap_or(0),
+                i32::try_from(c.initial_height / 2).unwrap_or(0),
+            ))
+        }
+    };
+    let title = match &made {
+        Some(store) => format!("wmc - {}", store.dir().display()),
+        None => "wmc".into(),
+    };
+    let screen = if made.is_some() {
+        Screen::Play
+    } else {
+        Screen::Menu
+    };
+    let mut clock = SimClock::default();
+    if screen == Screen::Menu {
+        // 8x: the gallery's busy beaver takes 32 steps a second.
+        for _ in 0..3 {
+            clock.faster();
+        }
+        if let Some(mut m) = world.get_resource_mut::<Menu>() {
+            m.home();
+        }
+    }
+    if let Some(store) = made {
+        world.insert_resource(store);
+    }
+    world.insert_resource(camera);
+    world.insert_resource(screen);
+    world.insert_resource(clock);
+    world.insert_resource(Selection::default());
+    world.insert_resource(Inspector::default());
+    world.insert_resource(MoveInput::default());
+    world.insert_resource(StreamInfo::default());
+    world.insert_resource(PanelView::default());
+    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+    if let Ok(mut w) = windows.single_mut(world) {
+        w.title = title;
+    }
+    Ok(())
 }
 
 /// The saved camera, or the middle of the initial region.
@@ -179,7 +361,8 @@ impl Plugin for PlayPlugin {
             .add_systems(
                 Update,
                 (
-                    handle_input,
+                    handle_input.run_if(resource_equals(Screen::Play)),
+                    menu_input.run_if(resource_equals(Screen::Menu)),
                     advance_camera,
                     layout,
                     stream_and_tick,
@@ -220,17 +403,34 @@ impl Zoom {
     }
 }
 
+/// What the window shows: the menu over the gallery, or a world played.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    Menu,
+    Play,
+}
+
+/// Whether quitting a world goes back to the menu (`wmc` alone) or quits
+/// (`wmc play`).
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Home(pub bool);
+
 /// Direction the movement keys push this frame.
 #[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct MoveInput(Input);
 
 /// One-shot requests from input, consumed by the exclusive system.
-#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Resource, Debug, Default, Clone, PartialEq, Eq)]
 struct Pending {
     save: bool,
     step: bool,
     reload: bool,
+    /// `q`: the menu, if there is one, else quit.
     quit: bool,
+    /// The window's close button: quit, from anywhere.
+    exit: bool,
+    /// The menu chose a world.
+    open: Option<Open>,
 }
 
 /// The map cell the player clicked this frame, for `inspect`.
@@ -310,12 +510,14 @@ impl PanelView {
     }
 }
 
-/// The cell frames of a frame: the map, the status rows, the inspector.
+/// The cell frames of a frame: the map, the status rows, the inspector,
+/// the menu.
 #[derive(Resource, Debug, Default)]
 struct Frames {
     map: CellFrame,
     status: CellFrame,
     panel: CellFrame,
+    menu: CellFrame,
 }
 
 /// The tile layers on screen.
@@ -326,6 +528,11 @@ struct Grids {
     /// Over the map's right side while an actor is selected.
     panel: Layer,
     panel_shown: bool,
+    /// In the middle, over the gallery, on the menu screen; the status
+    /// rows are hidden there.
+    menu: Layer,
+    menu_shown: bool,
+    status_shown: bool,
 }
 
 /// Where the map grid sits so that a fractional camera centre lands on the
@@ -407,6 +614,12 @@ pub struct Layout {
     pub panel_cols: u32,
     pub panel_rows: u32,
     pub panel_cell: (u32, u32),
+    /// The menu box, from pixel `(menu_x, menu_y)`, in text cells; `0 x 0`
+    /// while a world is played.
+    pub menu_x: u32,
+    pub menu_y: u32,
+    pub menu_cols: u32,
+    pub menu_rows: u32,
 }
 
 // ---- systems ---------------------------------------------------------------------------------
@@ -416,7 +629,8 @@ fn setup(mut commands: Commands) {
     let map = Layer::spawn(&mut commands, 0.0);
     let panel = Layer::spawn(&mut commands, 1.0);
     let status = Layer::spawn(&mut commands, 2.0);
-    for e in [panel.bg, panel.fg] {
+    let menu = Layer::spawn(&mut commands, 3.0);
+    for e in [panel.bg, panel.fg, menu.bg, menu.fg] {
         commands.entity(e).insert(Visibility::Hidden);
     }
     commands.insert_resource(Grids {
@@ -424,6 +638,9 @@ fn setup(mut commands: Commands) {
         status,
         panel,
         panel_shown: false,
+        menu,
+        menu_shown: false,
+        status_shown: true,
     });
 }
 
@@ -526,8 +743,50 @@ fn handle_input(
     let esc = keys.just_pressed(KeyCode::Escape);
     if esc && selection.uid.is_some() {
         selection.clear();
-    } else if esc || keys.just_pressed(KeyCode::KeyQ) || close.read().next().is_some() {
+    } else if esc || keys.just_pressed(KeyCode::KeyQ) {
         pending.quit = true;
+    }
+    if close.read().next().is_some() {
+        pending.exit = true;
+    }
+}
+
+/// The menu's keys: arrows, Enter, Esc, Backspace and what is typed
+/// (layout-independent: the text a key makes), into [`Menu::key`]; what it
+/// asks for goes to [`Pending`], or opens a file in the editor here.
+fn menu_input(
+    mut typed: MessageReader<KeyboardInput>,
+    mut close: MessageReader<WindowCloseRequested>,
+    mut menu: ResMut<Menu>,
+    mut pending: ResMut<Pending>,
+) {
+    if close.read().next().is_some() {
+        pending.exit = true;
+    }
+    for ev in typed.read() {
+        if ev.state != ButtonState::Pressed {
+            continue;
+        }
+        let key = match &ev.logical_key {
+            Key::ArrowUp => menu::Key::Up,
+            Key::ArrowDown => menu::Key::Down,
+            Key::Enter => menu::Key::Enter,
+            Key::Escape => menu::Key::Back,
+            Key::Backspace => menu::Key::Erase,
+            _ => match ev.text.as_ref().and_then(|t| t.chars().next()) {
+                Some(c) if !c.is_control() => menu::Key::Char(c),
+                _ => continue,
+            },
+        };
+        match menu.key(key) {
+            Some(menu::Action::Quit) => pending.exit = true,
+            Some(menu::Action::Edit(path)) => menu.note = Some(menu::edit(&path)),
+            Some(menu::Action::Load(dir)) => pending.open = Some(Open::Load(dir)),
+            Some(menu::Action::New { scenario, dir }) => {
+                pending.open = Some(Open::New { scenario, dir });
+            }
+            None => {}
+        }
     }
 }
 
@@ -560,6 +819,8 @@ fn layout(
     zoom: Res<Zoom>,
     camera: Res<ViewCamera>,
     selection: Res<Selection>,
+    screen: Res<Screen>,
+    config: Res<SimConfig>,
     mut layout: ResMut<Layout>,
     mut glyphs: ResMut<Glyphs>,
     mut images: ResMut<Assets<Image>>,
@@ -583,10 +844,18 @@ fn layout(
     {
         o.scale = scale;
     }
+    let menu = *screen == Screen::Menu;
     // `Zoom` holds the cell to a few dozen logical pixels and the scale is a
-    // DPI factor: a small whole number of pixels, at least 1.
+    // DPI factor: a small whole number of pixels, at least 1. The menu fits
+    // the gallery's whole initial region in the window instead.
     #[allow(clippy::cast_possible_truncation)]
-    let cell = ((zoom.cell_logical as f32) * scale).round().max(1.0) as u32;
+    let cell = if menu {
+        (width / config.initial_width.max(1))
+            .min(height / config.initial_height.max(1))
+            .max(1)
+    } else {
+        ((zoom.cell_logical as f32) * scale).round().max(1.0) as u32
+    };
     if glyphs.cell != cell {
         glyphs.tileset = images.add(GlyphAtlas::build(cell).tileset());
         glyphs.cell = cell;
@@ -599,10 +868,22 @@ fn layout(
         glyphs.text = images.add(GlyphAtlas::text(text_h).tileset());
         glyphs.text_h = text_h;
     }
-    let status_h = (STATUS_ROWS * cell).min(height);
+    let status_h = if menu {
+        0
+    } else {
+        (STATUS_ROWS * cell).min(height)
+    };
     let map_h = height - status_h;
     let map = map_layout(&camera, cell as usize, width as usize, map_h as usize);
     let status_cols = width.div_ceil(cell);
+    let (menu_cols, menu_rows) = if menu {
+        (
+            (width / text_w).saturating_sub(4).min(MENU_COLS),
+            (height / text_h).saturating_sub(2).min(MENU_ROWS),
+        )
+    } else {
+        (0, 0)
+    };
     let (panel_cols, panel_rows) = if selection.uid.is_some() {
         (
             (width * 2 / 5 / text_w)
@@ -628,6 +909,10 @@ fn layout(
         panel_cols,
         panel_rows,
         panel_cell: (text_w, text_h),
+        menu_x: (width - menu_cols * text_w) / 2,
+        menu_y: (height - menu_rows * text_h) / 2,
+        menu_cols,
+        menu_rows,
     };
     let (cols, rows) = (
         u32::try_from(map.cols).expect("the map is a window wide"),
@@ -639,7 +924,34 @@ fn layout(
         status: s,
         panel: p,
         panel_shown,
+        menu: mn,
+        menu_shown,
+        status_shown,
     } = &mut *grids;
+    let show_menu = menu_cols > 0 && menu_rows > 0;
+    if show_menu && (mn.cols, mn.rows, mn.cell, mn.cell_h) != (menu_cols, menu_rows, text_w, text_h)
+    {
+        mn.configure(
+            &mut commands,
+            menu_cols,
+            menu_rows,
+            (text_w, text_h),
+            &glyphs.text,
+        );
+    }
+    for (layer, shown, want) in [(&*mn, menu_shown, show_menu), (&*s, status_shown, !menu)] {
+        if *shown != want {
+            *shown = want;
+            let v = if want {
+                Visibility::Inherited
+            } else {
+                Visibility::Hidden
+            };
+            for e in [layer.bg, layer.fg] {
+                commands.entity(e).insert(v);
+            }
+        }
+    }
     if shown && (p.cols, p.rows, p.cell, p.cell_h) != (panel_cols, panel_rows, text_w, text_h) {
         p.configure(
             &mut commands,
@@ -663,7 +975,7 @@ fn layout(
     if (m.cols, m.rows, m.cell) != (cols, rows, cell) {
         m.configure(&mut commands, cols, rows, (cell, cell), &glyphs.tileset);
     }
-    if (s.cols, s.rows, s.cell) != (status_cols, STATUS_ROWS, cell) {
+    if !menu && (s.cols, s.rows, s.cell) != (status_cols, STATUS_ROWS, cell) {
         s.configure(
             &mut commands,
             status_cols,
@@ -685,9 +997,12 @@ fn stream_and_tick(world: &mut World) {
         u32::try_from(layout.map.cols).expect("the map is a window wide"),
         u32::try_from(layout.map.rows).expect("the map is a window tall"),
     );
-    let streamed = world.resource_scope(|world, store: Mut<Store>| {
-        sim::ensure_loaded(world, focus, policy, Some(&store))
-    });
+    // The gallery has no save: what leaves the view is dropped.
+    let store = world.remove_resource::<Store>();
+    let streamed = sim::ensure_loaded(world, focus, policy, store.as_ref());
+    if let Some(store) = store {
+        world.insert_resource(store);
+    }
     match streamed {
         Ok(s) if s.generated + s.read + s.unloaded + s.written > 0 => {
             world.resource_mut::<StreamInfo>().0 = Some(s);
@@ -708,20 +1023,44 @@ fn stream_and_tick(world: &mut World) {
         clock.run(dt, TICK_BUDGET, || sim::step(world));
     });
 
-    if pending.save || pending.quit {
+    let screen = *world.resource::<Screen>();
+    let leaving = pending.quit || pending.exit || pending.open.is_some();
+    if screen == Screen::Play && (pending.save || leaving) {
         match save(world) {
             Ok(n) => info!("saved {n} chunks"),
             Err(e) => {
                 error!("saving: {e:#}");
-                if pending.quit {
+                if leaving {
                     world.write_message(AppExit::error());
                     return;
                 }
             }
         }
     }
-    if pending.quit {
+    let home = world.resource::<Home>().0;
+    if pending.exit || (pending.quit && !(home && screen == Screen::Play)) {
         world.write_message(AppExit::Success);
+        return;
+    }
+    let open = if pending.quit {
+        Some(Open::Gallery)
+    } else {
+        pending.open
+    };
+    // The gallery starts over once its busy beaver has filled its panel.
+    let open = open.or_else(|| {
+        (screen == Screen::Menu && sim::tick(world) >= time::START_TICK + GALLERY_TICKS)
+            .then_some(Open::Gallery)
+    });
+    if let Some(open) = open
+        && let Err(e) = switch(world, open)
+    {
+        let text = format!("{e:#}");
+        error!("{text}");
+        match world.get_resource_mut::<Menu>() {
+            Some(mut m) => m.note = Some((text, false)),
+            None => world.resource_mut::<Notice>().show(text),
+        }
     }
 }
 
@@ -882,12 +1221,14 @@ fn render_frame(
     info: Res<StreamInfo>,
     notice: Res<Notice>,
     inspector: Res<Inspector>,
+    (screen, home, menu): (Res<Screen>, Res<Home>, Option<ResMut<Menu>>),
     mut pview: ResMut<PanelView>,
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
         return;
     }
+    let on_menu = *screen == Screen::Menu;
     let map = layout.map;
     frames.map.resize(map.cols, map.rows);
     let view = Viewport {
@@ -895,7 +1236,12 @@ fn render_frame(
         width: u32::try_from(map.cols).expect("the map is a window wide"),
         height: u32::try_from(map.rows).expect("the map is a window tall"),
     };
-    let light = brightness(time::daylight(tick.0));
+    // The gallery is shown in full daylight, whatever its hour.
+    let light = if on_menu {
+        255
+    } else {
+        brightness(time::daylight(tick.0))
+    };
     render_cells(
         |c| stage.chunk(c),
         Looks::of(&kinds),
@@ -958,6 +1304,20 @@ fn render_frame(
         }
     }
 
+    let (mc, mr) = (layout.menu_cols as usize, layout.menu_rows as usize);
+    frames.menu.resize(mc, mr);
+    if let Some(mut menu) = menu.filter(|_| on_menu && mc > 0 && mr > 0) {
+        let rows = menu.rows(mc, mr);
+        for i in 0..mr {
+            match rows.get(i) {
+                Some(r) => frames.menu.put_cells(i, &r.cells, r.bg),
+                None => frames.menu.put_text(i, "", TEXT_FG, TEXT_BG),
+            }
+        }
+    }
+    if on_menu {
+        return;
+    }
     let focus_chunk = camera.cell().split().0;
     let status = format!(
         "{} | {} | tick {} | cam ({:.1}, {:.1}) chunk ({}, {}) | {}x{} @ {}px | loaded {} | stream: {}",
@@ -987,9 +1347,10 @@ fn render_frame(
     let (alive, events) = life_lines(&kinds, &tally, &rows);
     frames.status.put_text(1, &alive, TEXT_FG, TEXT_BG);
     frames.status.put_text(2, &events, TEXT_FG, TEXT_BG);
+    let help = if home.0 { HELP_HOME } else { HELP };
     frames
         .status
-        .put_text(3, notice.current().unwrap_or(HELP), TEXT_FG, TEXT_BG);
+        .put_text(3, notice.current().unwrap_or(help), TEXT_FG, TEXT_BG);
 }
 
 /// The panel's last row: the keys, and which rows are in view when there
@@ -1071,10 +1432,14 @@ fn upload_tiles(
         .status
         .place(0.0, (layout.height - layout.status_h) as f32, w, h);
     let panel_at = grids.panel.place(layout.panel_x as f32, 0.0, w, h);
+    let menu_at = grids
+        .menu
+        .place(layout.menu_x as f32, layout.menu_y as f32, w, h);
     for (layer, frame, (bg_at, fg_at), alpha) in [
         (&grids.map, &frames.map, map_at, 1.0),
         (&grids.status, &frames.status, status_at, 1.0),
         (&grids.panel, &frames.panel, panel_at, PANEL_ALPHA),
+        (&grids.menu, &frames.menu, menu_at, MENU_ALPHA),
     ] {
         if frame.cols() == 0 || !layer.fits(frame) {
             continue;

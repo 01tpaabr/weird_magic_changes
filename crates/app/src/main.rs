@@ -1,6 +1,7 @@
 //! Entry point.
 //!
 //! ```text
+//! wmc                                          the main menu (`app::menu`), over the gallery
 //! wmc show [width] [height] [seed]             print the initial region once and exit
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
 //! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
@@ -115,6 +116,8 @@ fn main() -> anyhow::Result<()> {
                 .map_err(|a| anyhow::anyhow!("argument {a:?} is not UTF-8"))
         })
         .collect::<anyhow::Result<_>>()?;
+    // `wmc` alone opens the main menu; flags alone still need a command.
+    let alone = args.is_empty();
     let packs = take_flag(&mut args, "--rules")?;
     let file = take_flag(&mut args, "--scenario")?.pop();
     let strict = take_switch(&mut args, "--strict");
@@ -206,6 +209,7 @@ fn main() -> anyhow::Result<()> {
     let setup = |rest: &[String]| config(packs.clone(), file, rest);
     match args.first().map(String::as_str) {
         Some("show") => show(&setup(&args[1..])?),
+        Some("menu") => play::menu(),
         Some("play") => {
             let dir = save_dir(args.get(1), "play")?;
             let s = setup(&args[2..])?;
@@ -324,11 +328,12 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             bail!(
-                "unknown command {other:?}; use `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab`, `rates` or `lint`"
+                "unknown command {other:?}; use `menu`, `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab`, `rates` or `lint`"
             )
         }
+        None if alone => play::menu(),
         None => bail!(
-            "usage: wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
+            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
 }
@@ -337,17 +342,7 @@ fn main() -> anyhow::Result<()> {
 /// relative to it.
 fn scenario(file: Option<&str>) -> anyhow::Result<Scenario> {
     match file {
-        Some(f) => {
-            let text = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
-            let mut s = Scenario::parse(f, &text)?;
-            let dir = std::path::Path::new(f)
-                .parent()
-                .unwrap_or(std::path::Path::new(""));
-            for p in &mut s.packs {
-                *p = dir.join(&*p).to_string_lossy().into_owned();
-            }
-            Ok(s)
-        }
+        Some(f) => app::read_scenario(f),
         None => Ok(Scenario::builtin()),
     }
 }

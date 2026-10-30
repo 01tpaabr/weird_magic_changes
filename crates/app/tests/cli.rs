@@ -456,8 +456,8 @@ fn odd_command_lines_never_panic() {
     let dir = odd_fixtures("odd");
     let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
     let rules = rules.to_str().unwrap();
+    // No arguments at all is the menu, a window: not here.
     let cases: &[&[&str]] = &[
-        &[],
         &[""],
         &["nope"],
         &["SHOW"],
@@ -665,8 +665,8 @@ fn fuzz_config(cases: u32) -> proptest::test_runner::Config {
     }
 }
 
-/// What a generated command line is made of: no `play` (a window), and no
-/// number a tick count reads as long.
+/// What a generated command line is made of: no `play` or `menu` (a
+/// window), and no number a tick count reads as long.
 const WORDS: &[&str] = &[
     "show",
     "run",
@@ -724,6 +724,10 @@ fn generated_command_lines_never_panic() {
             .iter()
             .map(|w| if *w == "RULES" { rules } else { w })
             .collect();
+        // No words at all is the menu: a window.
+        if args.is_empty() {
+            return Ok(());
+        }
         no_panic(&dir, &[], &args);
         Ok(())
     });

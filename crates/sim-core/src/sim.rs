@@ -191,6 +191,29 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     world.add_schedule(schedule);
 }
 
+/// Take the sim out of a world again: every chunk entity, every resource
+/// [`install_with`], [`create`], [`open`] and a reload put in, and the
+/// `SimTick` schedule. What else the world holds (a window, a camera, an
+/// app's own resources) stays, so an app can install another world in its
+/// place. Unsaved changes are gone: [`save`] first.
+pub fn uninstall(world: &mut World) {
+    if let Some(stage) = world.remove_resource::<Stage>() {
+        for &(_, e) in stage.active() {
+            world.despawn(e);
+        }
+    }
+    world.remove_resource::<Tick>();
+    world.remove_resource::<CrossScratch>();
+    world.remove_resource::<crate::actors::Tally>();
+    world.remove_resource::<PendingRemap>();
+    world.remove_resource::<Unreadable>();
+    world.remove_resource::<Kinds>();
+    world.remove_resource::<SimConfig>();
+    if let Some(mut schedules) = world.get_resource_mut::<Schedules>() {
+        schedules.remove(SimTick);
+    }
+}
+
 fn advance_tick(mut tick: ResMut<Tick>) {
     tick.0 += 1;
 }
@@ -991,6 +1014,40 @@ mod tests {
         let w = new_world(&cfg(5));
         assert_eq!(tick(&w), START_TICK);
         assert_eq!(crate::time::Clock::at(tick(&w)).to_string(), "day 0 06:00");
+    }
+
+    /// A world installed where another was runs as if it were the first:
+    /// nothing of the old one is left, in entities, resources or schedule.
+    #[test]
+    fn a_world_installed_after_another_is_uninstalled_runs_as_a_fresh_one() {
+        let other = Scenario::parse(
+            "o",
+            "seed 9\nsize 128 64\nstart chicken 1 / 30\nstart grass 1 / 4",
+        )
+        .unwrap();
+        let mine = Scenario::parse(
+            "m",
+            "seed 3\nsize 64 64\nstart fox 1 / 200\nstart seed 1 / 9",
+        )
+        .unwrap();
+        let mut fresh = new_world(&mine);
+        let mut w = new_world(&other);
+        for _ in 0..40 {
+            step(&mut w);
+        }
+        uninstall(&mut w);
+        let chunks = w.query::<&ChunkCoord>().iter(&w).count();
+        assert_eq!(chunks, 0, "every chunk despawned");
+        assert!(!w.contains_resource::<Stage>() && !w.contains_resource::<Kinds>());
+        assert!(!w.contains_resource::<SimConfig>() && !w.contains_resource::<Tick>());
+        install_with(&mut w, Kinds::builtin());
+        create(&mut w, &mine).unwrap();
+        for _ in 0..40 {
+            step(&mut w);
+            step(&mut fresh);
+        }
+        assert_eq!(checksum(&mut w), checksum(&mut fresh));
+        assert_eq!(tick(&w), tick(&fresh));
     }
 
     #[test]
