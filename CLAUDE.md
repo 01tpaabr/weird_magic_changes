@@ -6,8 +6,8 @@ task pool is the parallelism. Design lives in `docs/`; the rules below apply reg
 
 **The product is the engine, the language and the author features**, so that other
 people can define their own worlds and use cases (README "Purpose", ARCHITECTURE
-decision 39). The built-in kinds (chickens, foxes, bees) and `packs/life` are example and
-test content, not the goal. A new capability is general (a sense, action, layer or tool
+decision 39). The built-in kinds (chickens, foxes, bees), `packs/life` and `packs/village`
+are example and test content, not the goal. A new capability is general (a sense, action, layer or tool
 any pack can use), never a special case for one kind.
 
 ## Priorities, in order
@@ -52,7 +52,7 @@ When two of these conflict, the higher one wins.
 crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), scenario, worldgen, store, rng, time, SimTick
 rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
-packs/              packs that stand alone (life/: Conway's Life), named by a scenario's `rules` line
+packs/              packs that stand alone (life/: Conway's Life, village/: a social world), named by a scenario's `rules` line
 scenarios/          *.scenario files: rules, seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
 tuning/             one folder per goal a world was tuned for (/world-tuning): goal.scenario, notes.md; runs/ is not committed
 docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
@@ -69,8 +69,9 @@ make run ARGS="run saves/dev 1000" # headless: step N ticks, print µs/tick + ch
                                    # and --rules <pack> (repeatable; a dir of *.rules or a file; else WMC_RULES=a:b, else the save's packs)
 make run ARGS="lint rules/ [pack...]"   # compile rule packs, print the kind table and the author lint (--scenario f: check it fits; --strict: warnings fail)
 make run ARGS="why saves/dev 77 103 3000"  # explain the next think of the actor at (x, y) after N ticks (-v: every op)
-make run ARGS="observe 4d --scenario f"     # how each kind lives and dies over time: alive, deaths by cause,
-                                   # what thinks decide, which rules fire (--every 1h --kind K --csv out.csv)
+make run ARGS="observe 4d --scenario f"     # how each kind lives and dies over time: alive, deaths by cause and
+                                   # per head, kills, what thinks decide, which rules fire; --gates: which
+                                   # term stops each rule (--every 1h --kind K --sample N --csv out.csv)
 make run ARGS="rates rules/ --kind fox"     # each kind's numbers in day units: thinks a day, needs, per rule
                                    # its dice a think and a day, lifespans past an age
 make run ARGS="lab f --set K=1,2,3"         # a scenario's goals for each value of a const, on its seeds, in

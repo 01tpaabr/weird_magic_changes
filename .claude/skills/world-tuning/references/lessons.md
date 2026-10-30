@@ -4,6 +4,54 @@ What tuning this project's worlds has taught, newest first. Each entry: what was
 happened (with numbers), why, and the rule of thumb. Add one at the end of every tuning
 (protocol step 8); keep the numbers, they are what makes a lesson reusable.
 
+## 2026-10-29: the first goal followed to its check-in, and the tools on other worlds
+
+From `tuning/foxes-hunt-more/notes.md` ("foxes hunt more chickens, but chickens never die
+out": 256x256, 16 days, 8 seeds; the baseline held on 0 of 8):
+- **A capped consumer's take is set by its threshold, not by its prey.** A fox eats below
+  20h with `food max 1d`: about 4 hours a meal whatever it eats, 5 or 6 meals a day, ~3 of
+  them kills (2.6 .. 3.6 a fox-day on 8 seeds; a hen takes two bites). The skill's first
+  arithmetic said one hen a day: wrong by the cap. Rule of thumb: acts a day ≈ burn /
+  (max - low).
+- **Founders vary by seed, and their ratio decided each world.** `start fox 1 / 5000` put
+  7 .. 14 foxes on 117 .. 147 hens: 10.4% foxes to hens ate the flock out by day 8 .. 12,
+  8.3% held it, 4.9 .. 6.8% let it grow 8 to 11 times. A flock yielded ~0.2 .. 0.3 chickens
+  per hen a day. Count the founders per seed before reading anything else.
+- **A density gate acts only above its density.** The litter's `count only chicken within
+  16 >= 15` needed ~7 times the starting density: fox births were 0 a day at a mean of 30
+  hens, 0.06 at 229, 0.75 .. 1.8 at 390 .. 480. Where foxes held the flock thinner they never
+  bred and died of age. The territory gate (`count fox within 16 < 2`) never closed (~0.2
+  other foxes per square). Find the binding gate (`--gates`) before relaxing one.
+- **Every cause of death, not the obvious one.** Thirst killed 10 .. 21 chickens a day, as
+  many as the foxes did.
+- **Founders die in a wave.** `mortal(6d, 3)`: 11, 6, 2, 1 foxes on days 6 to 9. A window
+  that starts before the wave measures the founders, not the world.
+- **Measure with loosened thresholds.** A copy of the goal with every line made to hold,
+  run with `lab --full`, gave every number on every seed. (`wmc scenario` then ran seeds one
+  after another, 7 minutes for 8; it runs them in parallel now.)
+- **A fast tier that is harsher, and long enough.** 192x192 for 16 days (96 s a variant
+  against 158 s) had fewer founders, so harsher: a variant passing it should pass the full
+  goal. A 10-day 256x256 run (81 s) was rejected: it ends before the founders age out,
+  which is what the goal turned on.
+
+The tools on worlds that are not ecosystems (this session):
+- **Life variants by lab.** 128x128, 600 generations, 4 seeds, means from generation 300:
+  B3/S23 5% alive, B3/S123 35%, B3/S234 51% (nearly frozen). A goal between two values of
+  an integer knob needs a die: a lonely cell surviving with `chance(SURVIVE)` gave 5.3%,
+  20.5%, 27%, 31%, 35% at 0, 25, 50, 75, 100. Concave: a quarter of the die, half the change.
+- **Lockstep founders.** Villagers all born full rested at once (none at work for ~70
+  minutes, every ~17 hours; observe's hourly samples missed it, the goal's minute checks
+  did not). `energy = 12h + rand(12h)` at birth: 96 .. 117 of 117 at work at every check.
+- **A transfer bigger than the gap it closes.** Gifts of 40 instead of 10 lowered the
+  poorest villager from 183 to 154: givers became the new poorest.
+- **When no lever of a mechanism moves a number, something else sets it.** Gap-sized gifts
+  and three times as many gifts moved the poorest only from 157 (no gifts) to 186: the
+  poorest founder started at 20 and drifts up ~165 a day, so ~185 at day 1, when the
+  window opened.
+- **A lab need not finish what cannot pass.** Once a variant has more failed seeds than
+  `pass` allows, its other seeds do not run: the fox lab of 3 hopeless variants x 8 seeds
+  went from 176 s to 45 s, same verdicts.
+
 ## 2026-10-29: the tools' first runs, on the built-in world
 
 - **Trees die of thirst within a day of growing.** `wmc observe 2d 256 256 12`: trees went

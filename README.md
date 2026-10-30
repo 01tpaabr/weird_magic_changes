@@ -14,8 +14,8 @@ worlds and their own use cases: what lives in a world (kinds, in rule packs), wh
 world is made of and who starts where (scenarios), and how to check that it behaves
 (scenario tests, the lint, `wmc why`).
 
-The chickens, foxes and bees in `rules/`, and Conway's Life in `packs/life`, are example
-content. They exercise and test the engine, show authors what the language can do, and
+The chickens, foxes and bees in `rules/`, Conway's Life in `packs/life` and the villagers
+in `packs/village` are example content. They exercise and test the engine, show authors what the language can do, and
 find where it falls short. They are not the product. When a piece of content needs
 something the engine lacks, the answer is a general capability any pack can use (a
 sense, an action, a layer, a tool), not a special case for that one kind.
@@ -42,12 +42,14 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
 - **Content as input.** Rule packs (`--rules`, or named by the scenario), scenario files
   (seed, size, terrain or a hand-drawn map, who starts where), and saves that reopen under
   other packs, with kinds matched by name.
-- **A second world.** `packs/life` is Conway's Game of Life as a pack: two kinds, none of
-  the built-in ones, on the same engine, tested against a plain Life.
+- **Other worlds.** `packs/life` is Conway's Game of Life as a pack: two kinds, none of
+  the built-in ones, on the same engine, tested against a plain Life. `packs/village` is a
+  small social world: villagers who work, rest and give to poorer neighbours.
 - **Author tooling.** `wmc lint` (with `--strict` for CI), `wmc why` (one actor's next
   think, explained rule by rule), `wmc observe` (how each kind lives and dies over a run:
-  populations, deaths by cause, which rules fire), `wmc lab` (a goal tried for every value
-  of a const, on many seeds at once), `wmc rates` (each rule's odds and lifespans in day
+  populations, deaths by cause and per head, who kills whom, which rules fire, and with
+  `--gates` which term of each rule's condition stops it), `wmc lab` (a goal tried for
+  every value of a const, on many seeds at once), `wmc rates` (each rule's odds and lifespans in day
   units), the inspector (click an actor in the game: the same,
   live, with `f` to follow it), hot reload (`r` in the game), and scenario tests
   (`wmc scenario`).

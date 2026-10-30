@@ -1,0 +1,17 @@
+# The village pack (packs/village): villagers work, rest and share. Founders
+# spread their energy at birth, so the village never rests all at once; work
+# outpaces the cost of living, so wealth grows; nobody dies of exhaustion.
+#
+#   make run ARGS="scenario scenarios/tests/village.scenario"
+#   make run ARGS="observe 2d --scenario scenarios/tests/village.scenario --gates"
+rules ../../packs/village
+seed 1
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start villager 1 / 40
+run 2d
+expect always count villager in WORK >= 80 from 6h    # of 117; seen 96 to 117
+expect never count villager in REST > 40 from 6h      # seen 0 to 21
+expect mean avg wealth of villager >= 200 from 1d     # seen 288
+expect always min wealth of villager >= 100 from 1d   # the poorest: seen 174 to 339
+expect died villager == 0

@@ -507,15 +507,16 @@ expect became chick == 1
 | line | |
 |---|---|
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
-| `expect count K OP N` | actors of K alive now |
+| `expect count K OP N` | actors of K alive now; `count K in STATE` only those in that state (`count villager in WORK`) |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
-| `expect min\|max\|sum NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K (no actor: the check fails) |
+| `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
 | `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
-`OP` is one of `== != < <= > >=`. A kind means its family, as in the rules; `only K` means
-K alone (`expect count only chick == 1`).
+`OP` is one of `== != < <= > >=`, and `V` a whole number or a time. A kind means its
+family, as in the rules; `only K` means K alone (`expect count only chick == 1`). A state is
+looked up by name in each kind of the family; one without it counts none.
 
 **Expectations over time.** The lines above check one moment. A goal is usually about a
 stretch of the run: the hens never die out, foxes eat so many a day. Four words look at a
@@ -526,7 +527,7 @@ window of it instead:
 | `expect always COND [from T] [to T]` | COND held at every check in the window. COND is any line above but `checksum` and `state` |
 | `expect never COND ...` | it held at no check |
 | `expect eventually COND ...` | it held at one check at least |
-| `expect mean METRIC OP V ...` | the average, over the checks, of `count K` or `min\|max\|sum NAME of K` (a check with none alive is left out); `V` may be a decimal (`2.5`) |
+| `expect mean METRIC OP V ...` | the average, over the checks, of `count K` or `min\|max\|sum\|avg NAME of K`, each with its `in STATE` (a check with none alive is left out); `V` may be a decimal (`2.5`) |
 | `expect mean COUNTER K per day OP V ...` | how much a counter (`born`, `became`, `eaten`, `died`, `thinks`, `traps`, with its `by` or `of`) grew per day across the window: a rate |
 
 The window runs `from T` (else the world's start) `to T` (else the line itself), both times
@@ -618,7 +619,10 @@ A pack need not build on the built-in kinds. `packs/life` is Conway's Game of Li
 kinds, `dead` and `alive`, and nothing else. `scenarios/life.scenario` plays it on an
 endless board of random soup; `scenarios/tests/life_soup.scenario` checks a drawn soup's
 live count against a plain Life's up to generation 100, and `life_patterns.scenario` tests
-a blinker, a block and a glider.
+a blinker, a block and a glider. `packs/village` is a small social world, one kind in two
+states: villagers work for wealth (a need with `decay 0`), rest when tired, and `give` to a
+neighbour whose `look` says it is poorer; `scenarios/tests/village.scenario` holds its
+goals (how many at work, the mean and the lowest wealth).
 
 A save also opens under packs that number things differently, which is what adding a pack
 does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
@@ -709,7 +713,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at
   (x, y) to think (up to its cadence, at least a day), and prints that think. It shows the
   actor's needs and memory, and every rule it checked: `FIRED`, `no` (condition false),
-  `TRAPPED` (the think trapped in its condition) or blank (not reached). Then the decision
+  `TRAPPED` (the think trapped in its condition) or blank (not reached); under a `no` whose
+  condition has several terms, the one that was false (`false: food < 20h`). Then the decision
   with its effects, what it wrote, the fuel spent, and after the real step where it went and
   its result. `-v` adds every op, up to the one that trapped.
 - **Click an actor in `wmc play`** to open the inspector, a see-through panel over the
@@ -739,12 +744,16 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   `--jobs N` at a time (one per core). Per variant it says whether it passed (`pass M` of
   `seeds N` held every expectation), and per expectation on how many seeds it held and the
   spread of its number across them: the lowest count an `always >=` saw, a mean, a rate
-  (`31.2 .. 44, median 38`). A run stops at its first sure failure (an `always` false, a
-  `never` true), and its later lines read `not reached`, so a hopeless variant costs little;
-  `--full` runs every seed to its end. `--seeds` and `--pass` override the scenario's,
-  `--csv <file>` writes every verdict as a row. The report is the same whatever `--jobs`
-  says. An optimized build (`cargo build --profile fast`, then `target/fast/wmc`) runs it
-  about twice as fast as a dev build.
+  (`31.2 .. 44, median 38`; the median of an even count is the mean of the middle two).
+  Runs go every variant's first seed, then every variant's second, and so on. A run stops
+  at its first sure failure (an `always` false, a `never` true), and its later lines read
+  `not reached`; and once more of a variant's seeds failed than `pass` allows, its later
+  seeds do not run (`2 not run, it could no longer pass`): a hopeless variant costs little
+  (a fox goal's lab of 3 variants x 8 seeds: 176 s down to 45 s). `--full` runs every seed
+  of every variant to its end. `--seeds` and `--pass` override the scenario's, `--csv
+  <file>` writes every verdict as a row. The report is the same whatever `--jobs` says. An
+  optimized build (`cargo build --profile fast`, then `target/fast/wmc`) runs it about
+  twice as fast as a dev build.
   ```sh
   wmc lab goals/fox_pressure.scenario --set HUNT=6,8,10 --set FULL=16h,20h --seeds 8 --pass 7
   ```
@@ -752,15 +761,21 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   disk; its `run` and `expect` lines are not run), steps it for that time (ticks, or
   `90min`, `2h`, `4d`) and reports how each kind lives and dies: how many are alive over
   time and the lowest count; births and deaths per day, deaths by cause (`eaten by fox`,
-  `no water`, `own die`); and per kind, its typical needs, how many are in each state, what
-  its thinks decide, the rules that fire most (by `file:line`), and how its actions turn
-  out (`BLOCKED 14%`). Decisions and rules come from dry runs of up to `--sample N` (100)
-  thinks per kind at each sample, as the inspector runs them: nothing in the world changes.
-  `--every <time>` sets how often it samples (an hour), `--kind K` details only some kinds,
-  and `--csv <file>` writes every sample as `tick,day,hour,kind,metric,value` rows, for a
-  closer look. The report is the same on any thread count.
+  `no water`, `own die`) and per head (deaths a day over the mean alive); who kills whom
+  (`kills a day`: per killer kind, all and per head, and of which kinds); and per kind, its
+  typical needs, how many are in each state, what its thinks decide, the rules that fire
+  most (by `file:line`), and how its actions turn out (`BLOCKED 14%`). Decisions and rules
+  come from dry runs of up to `--sample N` (100) thinks per kind at each sample, as the
+  inspector runs them: nothing in the world changes. `--gates` adds, per kind, each rule
+  those thinks reached: how many reached it and fired it, and per term of its condition's
+  top-level `and` how many of the thinks that got that far it stopped, so the gate that
+  binds is the one that stops most; each with where one such actor stood (`e.g. (77, 103)
+  after 97200 ticks`: `wmc why <dir> 77 103 97200 --scenario <file>` follows it). `--every
+  <time>` sets how often it samples (an hour), `--kind K` details only some kinds, and
+  `--csv <file>` writes every sample as `tick,day,hour,kind,metric,value` rows, for a closer
+  look. The report is the same on any thread count.
   ```sh
-  wmc observe 4d 128 128 7 --kind fox --kind chicken --csv fox.csv
+  wmc observe 4d 128 128 7 --kind fox --kind chicken --gates --csv fox.csv
   ```
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.

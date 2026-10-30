@@ -1,0 +1,37 @@
+# A village: a small social world on the same engine, with none of the
+# built-in kinds. Villagers work for wealth and tire, rest to get their energy
+# back, and the well-off give to a poorer neighbour. Wealth is points; a
+# neighbour sees only `look`, a tenth of it. States, `give` and `look` at
+# work, and goals over them: scenarios/tests/village.scenario.
+
+const WAGE = 2           # wealth a work think earns, four times in five
+const SHARE = 10         # wealth given to a poorer neighbour
+const RICH = 60          # from here on, a villager gives
+const COST = 1           # wealth each think costs
+
+kind villager {
+  glyph "v"
+  color "#d9a441"
+  cadence 64
+  sight 4
+  need energy max 1d vital           # runs down in a day; resting fills it
+  need wealth max 1000 decay 0       # points
+  mem gave, born
+
+  # Needs start full: each sets its own start, energy spread so that the
+  # village does not tire all at once.
+  when born == 0 => { born = 1  wealth = 20 + rand(40)  energy = 12h + rand(12h) }
+  when true => { look = clamp(wealth / 10, 0, 255)  wealth -= COST }
+  state WORK {
+    when energy < 6h => next REST
+    when wealth >= RICH and nearest villager within 2 as v and look_of(v) + 2 < look and gave == 0
+      => { gave = 4  give v wealth SHARE }
+    when gave > 0 => { gave -= 1  wealth += WAGE  move random free }    # a while before giving again
+    when chance(80) => { wealth += WAGE  move random free }
+    when true => move random free
+  }
+  state REST {
+    when energy >= 22h => next WORK
+    when true => { energy += 1h  idle }
+  }
+}
