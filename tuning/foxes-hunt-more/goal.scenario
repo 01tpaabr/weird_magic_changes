@@ -1,0 +1,23 @@
+# Goal: foxes hunt more chickens, but chickens never die out (notes.md).
+# The built-in world (scenarios/default.scenario: its terrain and starts) on
+# 256x256, for 16 days, on 8 seeds: the founding foxes die of age from day 6,
+# so a run this long shows whether their kits keep the hunting going.
+# `chicken` is the family (hens and chicks), as in the rules; eggs are not.
+rules ../../rules
+seed 42
+seeds 8
+pass 7
+size 256 256
+terrain water_scale 12 water_level 0.30 rock_on_soil 0.04 rock_on_water 0.01
+start chicken 1 / 400
+start fox     1 / 5000
+start flower  1 / 250
+start hive    1 / 20000
+start grass   1 / 20
+start seed    1 / 100
+
+run 16d
+expect mean eaten chicken by fox per day >= 32 from 2d   # hunt more: twice the baseline's 16.2 a day (13.2 .. 26.6)
+expect mean eaten chicken by fox per day >= 19 from 9d   # and still, once the founders age out: twice its 9.4 (1.9 .. 33.9)
+expect always count chicken >= 100 from 2d               # never die out: half the baseline's usual lowest (200; 0 on seed 43)
+expect always count fox >= 3 from 2d                     # nor do the hunters: the baseline's lowest is 0 .. 7, median 2.5

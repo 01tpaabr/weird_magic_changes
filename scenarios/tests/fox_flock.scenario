@@ -1,0 +1,13 @@
+# A starving fox and a flock of four hens 5 to 7 cells off: a flock is where a
+# fox hunts, so it catches one (fox_lone_hen.scenario: a lone hen it leaves).
+seed 5
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start fox at (10, 10) with (food = 2h)
+start chicken at (16, 10)
+start chicken at (16, 12)
+start chicken at (17, 11)
+start chicken at (15, 13)
+run 30min
+expect eaten chicken by fox >= 1                 # it caught one
+expect count fox == 1

@@ -4,6 +4,46 @@ What tuning this project's worlds has taught, newest first. Each entry: what was
 happened (with numbers), why, and the rule of thumb. Add one at the end of every tuning
 (protocol step 8); keep the numbers, they are what makes a lesson reusable.
 
+## 2026-10-30: the fox goal met (`tuning/foxes-hunt-more/notes.md`)
+
+"Foxes hunt more chickens, but chickens never die out", 256x256, 16 days: from 0 of 8
+seeds to 8 of 8 (15 of 16), in 9 labs. Kills a day 16.2 to 51.5 (median, from day 2) and
+9.4 to 72.3 (from day 9); lowest chickens 188 .. 239 (floor 100); lowest foxes 7 .. 14.
+- **Relaxing the predator's birth gate alone overshoots.** The litter's prey gate (15
+  hens within 16) was what bound (`--gates`: it stopped 100% of the thinks past the dice;
+  the territory 10%). At 10, 8 and 6 births rose x2.6 .. x3.3 as predicted, but the
+  founders turned 2 days old together and bred in lockstep, every kit killed ~3.4 a day
+  from birth, and one or two litters passed the flock's 7 .. 10 foxes per 100 hens: at 8
+  and 6 the flock died on every seed of the fast tier and then the foxes starved. Rule:
+  brake the killing at low prey density before raising the killers' births.
+- **Switching raised the floor and the kills.** A fox that hunts only with 4 hens within 8
+  (`count only chicken within 8 >= HUNT_FLOCK` on the walk toward prey and on the bite)
+  can never eat a thinned flock out. Predicted: a floor and fewer kills. Measured: the
+  floor (lowest 109 .. 136 on the fast tier, against 0 on two seeds) and *more* kills (29
+  against 18 a day at gate 10), because the flock it protects stays dense, the litter
+  gate opens more (2.1 kits a day against 0.44), and the second week has ~30 foxes. Rule:
+  a brake on consumption changes the resource, and the consumer's births follow the
+  resource; predict both effects.
+- **How a gate leaks matters.** Gating only the walk (the fox still eats what it bumps
+  into: it walks 5 000+ cells a day) kept the flock thinner, half the kits, late kills 47
+  against 80: 5 of 8 seeds. Gating the bite too broke content: a starving fox beside one
+  cornered hen ignored her (two scenario tests, engine unit tests, the docs' examples),
+  and seed 44's founders starved to one fox by day 2. A starving exception (`food <
+  DESPERATE`, 16h: above the 14h a first bite leaves a penned fox at, so it takes the
+  second) kept every test and passed 8 of 8. Rule: when a gate breaks old behaviour, look
+  for the condition that separates the old case from the new one before rewriting tests.
+- **The margin found the edge.** `HUNT_FLOCK` 3 .. 5 and `DESPERATE` 13h .. 19h all pass;
+  `LITTER_HENS` 8 fails the floor on 5 seeds, 12 passes 7 of 8: the goal holds from 10 to
+  12, and 10 sits at its edge. Without the -20% run nobody would know.
+- **Long runs can hide a cycle.** A 32-day run (by mistake: a measurement copy took the
+  goal's `run 16d` with its head and then got a second) showed the gated design boom-bust
+  after day 19: foxes 34 .. 89, then under 3 on 5 seeds, the flock under 100 on 3. Run the
+  chosen design at twice the goal's length once; and `grep -n '^run'` a copy before a lab.
+- **What a test can hold.** The smallest world where this goal means anything costs ~96 s
+  a seed in the fast build; a 128x128 world (28 s) had 1 .. 3 foxes and could not tell the
+  old litter gate from the new. The goal stays in `tuning/`; `make test` keeps the
+  mechanism: `fox_lone_hen.scenario` (fails with the old rules), `fox_flock.scenario`.
+
 ## 2026-10-29: the first goal followed to its check-in, and the tools on other worlds
 
 From `tuning/foxes-hunt-more/notes.md` ("foxes hunt more chickens, but chickens never die

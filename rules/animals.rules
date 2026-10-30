@@ -4,6 +4,13 @@
 # files in name order: chicken 0, chick 1 (it extends chicken), egg 2, fox 3,
 # flower 4, hive 5, bee 6, grass 7, seed 8, tree 9.
 
+# The fox's balance, tuned so foxes hunt more chickens and chickens never die
+# out (tuning/foxes-hunt-more/notes.md): foxes breed where the flock is, hunt
+# only where it is thick, and so cannot eat a thinned flock out.
+const LITTER_HENS = 10              # hens within 16 a fox needs to raise a kit
+const HUNT_FLOCK = 4                # hens within 8 a fox needs to hunt there: a thin flock is safe
+const DESPERATE = 16h               # below this a fox eats what is next to it, flock or not
+
 # What hens and chicks do alike, in this order: run when hurt, drink when
 # desperate (fox or not), flee a fox, find and drink water (a drinker, which
 # walks round what blocks it), eat.
@@ -80,14 +87,15 @@ kind fox extends mortal(6d, 3), drinker(8, 6h, 2) {
   inherit mortal                                                    # old age: ~6 days, then ~3 more on average
   when true                        => look = 0                      # awake, unless it sleeps below; falls through
   inherit drinker                                                   # remembers water within 8, drinks below 6h
-  when food < 20h and nearest meat within 1 as m => { chase = 0  eat m }
-  when food < 20h and nearest meat within 8 as m
+  when food < 20h and (food < DESPERATE or count only chicken within 8 >= HUNT_FLOCK)
+       and nearest meat within 1 as m => { chase = 0  eat m }       # where there is a flock; starving, whatever is at its feet
+  when food < 20h and count only chicken within 8 >= HUNT_FLOCK and nearest meat within 8 as m
        => { prey_x = x + m.dx  prey_y = y + m.dy  chase = 30  move toward m }
   when food < 20h and chase > 0 and dist(at(prey_x, prey_y)) > 0
        => { chase -= 1  move toward at(prey_x, prey_y) }            # to where it last saw prey
   when hour >= 9 and hour < 17 and food >= 12h => { look = 1  idle }   # sleeps through the day when fed
   when age > 2d and food > 20h and day + 1 > last_litter and chance(2)
-       and count fox within 16 < 2 and count only chicken within 16 >= 15   # hens, not chicks: counting chicks let foxes boom
+       and count fox within 16 < 2 and count only chicken within 16 >= LITTER_HENS   # hens, not chicks: counting chicks let foxes boom
        and nearest free within 1 as c => { last_litter = day + 5  spawn fox at c }  # a kit every 5 days: fed, its own ground, prey on it
   when true                        => wander()                      # patrols
 }

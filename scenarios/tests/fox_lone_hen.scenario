@@ -1,0 +1,11 @@
+# A starving fox and a lone hen 6 cells off, on open ground: the fox does not
+# go after her, since it hunts only where HUNT_FLOCK hens are within 8 (a thin
+# flock is safe: tuning/foxes-hunt-more). fox_flock.scenario is the other half.
+seed 5
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start fox at (10, 10) with (food = 2h)
+start chicken at (16, 10)
+run 10min
+expect always max chase of fox == 0 to 10min     # it never gave chase
+expect count chicken == 1                        # she lives
