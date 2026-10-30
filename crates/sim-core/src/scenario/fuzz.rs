@@ -199,6 +199,17 @@ fn check() -> impl Strategy<Value = String> {
                 d.name.clone()
             };
             let op = a.get(&ops);
+            // `in STATE` now and then: one of its states, or a name it lacks.
+            let state = match (wa + wb) % 4 {
+                0 => KINDS
+                    .debug
+                    .states
+                    .get(usize::from(d.id))
+                    .filter(|s| !s.is_empty())
+                    .map_or(" in nowhere".to_string(), |s| format!(" in {}", b.get(s))),
+                1 => " in nowhere".to_string(),
+                _ => String::new(),
+            };
             match form {
                 0 => format!("run {}", time_text(n.clamp(1, 3), false)),
                 1 => format!("expect {} {who} {op} {n}", b.get(&counters)),
@@ -214,8 +225,11 @@ fn check() -> impl Strategy<Value = String> {
                     } else {
                         b.get(&names)
                     };
-                    let agg = ["min", "max", "sum"][b.index(3)];
-                    format!("expect {agg} {name} of {who} {op} {}", time_text(n, only))
+                    let agg = ["min", "max", "sum", "avg"][b.index(4)];
+                    format!(
+                        "expect {agg} {name} of {who}{state} {op} {}",
+                        time_text(n, only)
+                    )
                 }
                 3 if n % 2 == 0 => format!("expect at ({n}, {}) nobody", n / 2),
                 3 => format!("expect at({n},{n}) {who}"),
@@ -223,17 +237,20 @@ fn check() -> impl Strategy<Value = String> {
                 5 => {
                     let over = ["always", "never", "eventually"][a.index(3)];
                     let cond = match b.index(3) {
-                        0 => format!("count {who} {op} {n}"),
+                        0 => format!("count {who}{state} {op} {n}"),
                         1 => format!("{} {who} {op} {n}", b.get(&counters)),
                         _ => format!("at ({n}, {}) nobody", n / 3),
                     };
                     format!("expect {over} {cond} @W{wa}{wb}")
                 }
-                6 if n % 2 == 0 => format!("expect mean count {who} {op} {n}.5 @W{wa}{wb}"),
+                6 if n % 2 == 0 => {
+                    format!("expect mean count {who}{state} {op} {n}.5 @W{wa}{wb}")
+                }
                 6 => {
                     let need = d.needs.first().map_or("food", |x| x.name.as_str());
+                    let agg = ["max", "avg"][a.index(2)];
                     format!(
-                        "expect mean max {need} of {who} {op} {} @W{wa}{wb}",
+                        "expect mean {agg} {need} of {who}{state} {op} {} @W{wa}{wb}",
                         time_text(n, true)
                     )
                 }

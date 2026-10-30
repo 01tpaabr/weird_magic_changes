@@ -7,6 +7,7 @@
 
 use bevy_ecs::prelude::*;
 
+use super::checks::decimal;
 use super::{Agg, CauseIs, Expect, Metric, Who};
 use crate::actors::{Cause, ChunkActors, ChunkMinds, Tally};
 use crate::rules::Kinds;
@@ -28,6 +29,30 @@ pub fn expect_family(kinds: &Kinds, who: &Who) -> Result<std::ops::Range<u16>, S
     Ok(k..end)
 }
 
+/// Per kind id, the index of its state `who` names (`in STATE`): `None`
+/// for a kind without one of that name. Without `in STATE`, empty. An
+/// error when no kind of the family has it.
+fn expect_states(kinds: &Kinds, who: &Who) -> Result<Vec<Option<u8>>, String> {
+    let ids = expect_family(kinds, who)?;
+    let Some(state) = &who.state else {
+        return Ok(Vec::new());
+    };
+    let states: Vec<Option<u8>> = (0..kinds.defs.len())
+        .map(|k| {
+            let k = u16::try_from(k).ok()?;
+            if !ids.contains(&k) {
+                return None;
+            }
+            let names = kinds.debug.states.get(usize::from(k))?;
+            u8::try_from(names.iter().position(|n| n == state)?).ok()
+        })
+        .collect();
+    if states.iter().all(Option::is_none) {
+        return Err(format!("`{}` has no state `{state}`", who.kind));
+    }
+    Ok(states)
+}
+
 /// Kind `k`'s slot for `name`, per kind (a family's kinds may lay slots out
 /// differently): a need slot of that name, else a mem slot. `true`: a need.
 fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
@@ -41,7 +66,7 @@ fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
 fn check_metric(kinds: &Kinds, m: &Metric) -> Result<(), String> {
     match m {
         Metric::Count(who) => {
-            expect_family(kinds, who)?;
+            expect_states(kinds, who)?;
         }
         Metric::Tally { who, cause, .. } => {
             let ids = expect_family(kinds, who)?;
@@ -64,6 +89,7 @@ fn check_metric(kinds: &Kinds, m: &Metric) -> Result<(), String> {
             if !expect_family(kinds, who)?.any(|k| expect_slot(kinds, k, name).is_some()) {
                 return Err(format!("`{}` has no need or memory `{name}`", who.kind));
             }
+            expect_states(kinds, who)?;
         }
     }
     Ok(())
@@ -81,23 +107,38 @@ pub fn check_expect(kinds: &Kinds, e: &Expect) -> Result<(), String> {
     }
 }
 
-/// The number `m` reads from `world` now: `None` for a `min|max|sum` over a
-/// kind with none alive. An error when it names what the rules lack. A kind
-/// means its family, `only` the kind alone, as in the rules.
-pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<i64>, String> {
+/// The number `m` reads from `world` now: `None` for a `min|max|sum|avg`
+/// over a kind with none alive. An error when it names what the rules
+/// lack. A kind means its family, `only` the kind alone, as in the rules;
+/// `in STATE`, only its actors in that state. Every number but an `avg` is
+/// whole (and exact: below 2^53).
+pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<f64>, String> {
     check_metric(kinds, m)?;
     let stage = world.resource::<Stage>();
     let rows = stage
         .active()
         .iter()
         .filter_map(|&(_, e)| Some((world.get::<ChunkActors>(e)?, world.get::<ChunkMinds>(e)?)));
+    // Is this actor one `who` looks at?
+    let looks = |who: &Who| -> Result<_, String> {
+        let (ids, states) = (expect_family(kinds, who)?, expect_states(kinds, who)?);
+        Ok(move |kind: u16, state: u8| {
+            ids.contains(&kind) && (states.is_empty() || states[usize::from(kind)] == Some(state))
+        })
+    };
     Ok(match m {
         Metric::Count(who) => {
-            let ids = expect_family(kinds, who)?;
+            let looks = looks(who)?;
             let n: usize = rows
-                .map(|(a, _)| a.rows.iter().filter(|r| ids.contains(&r.kind)).count())
+                .map(|(a, m)| {
+                    a.rows
+                        .iter()
+                        .zip(&m.rows)
+                        .filter(|(r, mind)| looks(r.kind, mind.state))
+                        .count()
+                })
                 .sum();
-            Some(i64::try_from(n).unwrap_or(i64::MAX))
+            Some(n as f64)
         }
         Metric::Tally {
             counter,
@@ -128,17 +169,17 @@ pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<i64>, 
                     })
                     .sum(),
             };
-            Some(i64::try_from(n).unwrap_or(i64::MAX))
+            Some(n as f64)
         }
         Metric::Value { agg, name, who } => {
-            let ids = expect_family(kinds, who)?;
+            let looks = looks(who)?;
             let slot = |k: u16| expect_slot(kinds, k, name);
             // A decaying need as it stands now, as the next think will see it.
             let now = world.resource::<Tick>().0;
             let mut vals = Vec::new();
             for (a, m) in rows {
                 for (r, mind) in a.rows.iter().zip(&m.rows) {
-                    if ids.contains(&r.kind)
+                    if looks(r.kind, mind.state)
                         && let Some((need, i)) = slot(r.kind)
                     {
                         vals.push(i64::from(if need {
@@ -150,10 +191,12 @@ pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<i64>, 
                     }
                 }
             }
+            let sum = || vals.iter().sum::<i64>() as f64;
             match agg {
-                Agg::Min => vals.iter().min().copied(),
-                Agg::Max => vals.iter().max().copied(),
-                Agg::Sum => (!vals.is_empty()).then(|| vals.iter().sum()),
+                Agg::Min => vals.iter().min().map(|&v| v as f64),
+                Agg::Max => vals.iter().max().map(|&v| v as f64),
+                Agg::Sum => (!vals.is_empty()).then(sum),
+                Agg::Avg => (!vals.is_empty()).then(|| sum() / vals.len() as f64),
             }
         }
     })
@@ -165,10 +208,10 @@ pub fn holds(
     world: &World,
     kinds: &Kinds,
     e: &Expect,
-) -> Result<(bool, String, Option<i64>), String> {
+) -> Result<(bool, String, Option<f64>), String> {
     match e {
         Expect::Is { metric, op, v } => Ok(match measure(world, kinds, metric)? {
-            Some(n) => (op.holds(n, *v), n.to_string(), Some(n)),
+            Some(n) => (op.holds_f(n, *v as f64), decimal(n), Some(n)),
             None => {
                 let who = match metric {
                     Metric::Count(w)
@@ -301,6 +344,70 @@ mod tests {
         assert!(!expect(&mut w, &Expect::State(c)).unwrap().0);
     }
 
+    /// A mean over a kind (`avg`), and only those in a state (`in STATE`),
+    /// for any count or need: a mean compares exactly, a state the kind
+    /// lacks is an error. People with 2, 3 and 6 wealth; those with 3 or
+    /// more go to REST at their first think.
+    #[test]
+    fn averages_and_states_read_the_world() {
+        use crate::scenario::Check;
+        let kinds = crate::rules::compile_files(&[(
+            "p.rules",
+            "kind person {
+               glyph \"p\"
+               cadence 1
+               need wealth max 100 decay 0
+               state WORK { when wealth >= 3 => next REST }
+               state REST { when true => idle }
+             }
+             kind rock_person { glyph \"r\"  need wealth max 100 decay 0 }",
+        )])
+        .unwrap();
+        let s = Scenario::parse(
+            "t",
+            "size 16 16
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0
+             start person at (2, 2) with (wealth = 2)
+             start person at (4, 4) with (wealth = 3)
+             start person at (6, 6) with (wealth = 6)
+             expect avg wealth of person == 11
+             run 1
+             expect count person in WORK == 1
+             expect count person in REST == 2
+             expect avg wealth of person > 3
+             expect avg wealth of person in REST > 4
+             expect sum wealth of person in WORK == 2
+             expect count person in SLEEP == 0
+             expect avg wealth of rock_person == 0
+             expect mean avg wealth of person == 11 from 0
+             expect always count person in REST <= 2",
+        )
+        .unwrap();
+        let mut w = crate::sim::new_world_with(&s, kinds).unwrap();
+        let mut got = Vec::new();
+        crate::sim::run_checks(&mut w, &s.checks, |e| {
+            if let crate::scenario::Event::Expected { result, value, .. } = e {
+                got.push((result, value));
+            }
+        });
+        let ok = |b: bool, v: &str, n: f64| (Ok((b, v.to_string())), Some(n));
+        assert_eq!(got[0], ok(false, "3.67", 11.0 / 3.0));
+        assert_eq!(got[1], ok(true, "1", 1.0));
+        assert_eq!(got[2], ok(true, "2", 2.0));
+        assert_eq!(got[3], ok(true, "3.67", 11.0 / 3.0));
+        assert_eq!(got[4], ok(true, "4.5", 4.5));
+        assert_eq!(got[5], ok(true, "2", 2.0));
+        assert_eq!(
+            got[6],
+            (Err("`person` has no state `SLEEP`".to_string()), None)
+        );
+        assert_eq!(got[7], (Ok((false, "no `rock_person` alive".into())), None));
+        // 11/3 at both checks of the window, a mean that is not 11.
+        assert!(matches!(&got[8], (Ok((false, saw)), Some(_)) if saw.starts_with("mean 3.67")));
+        assert!(matches!(&got[9], (Ok((true, _)), Some(n)) if *n == 2.0));
+        assert!(s.checks.iter().any(|c| matches!(c, Check::Run(1))));
+    }
+
     /// `check_expect` finds what an `expect` names that the rules lack,
     /// with no world: the errors `expect` gives when it reaches the line.
     #[test]
@@ -309,6 +416,7 @@ mod tests {
         let who = |k: &str| Who {
             kind: k.into(),
             only: false,
+            state: None,
         };
         let count = |k: &str| Expect::Is {
             metric: Metric::Count(who(k)),

@@ -2022,6 +2022,7 @@ mod tests {
                 who: Who {
                     kind: "pool".into(),
                     only: false,
+                    state: None,
                 },
             },
             op: Op::Eq,

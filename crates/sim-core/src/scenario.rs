@@ -172,19 +172,24 @@ impl Op {
     }
 }
 
-/// Which actors an `expect` looks at: a kind's family, or `only` it.
+/// Which actors an `expect` looks at: a kind's family, or `only` it; with
+/// `in STATE` (a count, a need or memory over them), only those in that
+/// state, each kind's state of that name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Who {
     pub kind: String,
     pub only: bool,
+    pub state: Option<String>,
 }
 
-/// How `min|max|sum` folds a need or memory over a kind's actors.
+/// How `min|max|sum|avg` folds a need or memory over a kind's actors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Agg {
     Min,
     Max,
     Sum,
+    /// The mean over them.
+    Avg,
 }
 
 /// A number an `expect` reads from the world.
@@ -200,8 +205,8 @@ pub enum Metric {
         who: Who,
         cause: Option<CauseIs>,
     },
-    /// `min|max|sum NAME of [only] K`: a need or memory over every actor of
-    /// the kind; with none alive, no number.
+    /// `min|max|sum|avg NAME of [only] K`: a need or memory over every
+    /// actor of the kind; with none alive, no number.
     Value { agg: Agg, name: String, who: Who },
 }
 
@@ -289,6 +294,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     let who = |kind: &str, only| Who {
         kind: kind.to_string(),
         only,
+        state: None,
     };
     match *words.get(i)? {
         "only" => {
@@ -300,8 +306,19 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     }
 }
 
-const FORMS: &str = "expected `expect count|born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum NAME of [only] KIND OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first three after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
-const MEAN_FORMS: &str = "expected `expect mean count|min|max|sum ... OP V` or `expect mean born|became|eaten|died|thinks|traps [only] KIND per day OP V`, then `[from T] [to T]`";
+const FORMS: &str = "expected `expect count [only] KIND [in STATE] OP N`, `expect born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|avg NAME of [only] KIND [in STATE] OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first four after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
+const MEAN_FORMS: &str = "expected `expect mean count|min|max|sum|avg ... OP V` or `expect mean born|became|eaten|died|thinks|traps [only] KIND per day OP V`, then `[from T] [to T]`";
+
+/// `[only] K [in STATE]` at `words[i..]`: who, and the next index.
+fn who_in(words: &[&str], i: usize) -> Option<(Who, usize)> {
+    let (mut who, i) = who_at(words, i)?;
+    if words.get(i) != Some(&"in") {
+        return Some((who, i));
+    }
+    let state = words.get(i + 1).filter(|w| is_name(w))?;
+    who.state = Some(state.to_string());
+    Some((who, i + 2))
+}
 
 fn counter(w: &str) -> Option<usize> {
     match w {
@@ -320,6 +337,7 @@ fn agg(w: &str) -> Option<Agg> {
         "min" => Some(Agg::Min),
         "max" => Some(Agg::Max),
         "sum" => Some(Agg::Sum),
+        "avg" => Some(Agg::Avg),
         _ => None,
     }
 }
@@ -328,7 +346,7 @@ fn agg(w: &str) -> Option<Agg> {
 fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
     let first = *words.first().ok_or(FORMS)?;
     if first == "count" {
-        let (who, i) = who_at(words, 1).ok_or(FORMS)?;
+        let (who, i) = who_in(words, 1).ok_or(FORMS)?;
         return Ok((Metric::Count(who), i));
     }
     if let Some(counter) = counter(first) {
@@ -366,7 +384,7 @@ fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
         if words.get(2) != Some(&"of") {
             return Err(FORMS.into());
         }
-        let (who, i) = who_at(words, 3).ok_or(FORMS)?;
+        let (who, i) = who_in(words, 3).ok_or(FORMS)?;
         let name = name.to_string();
         return Ok((Metric::Value { agg, name, who }, i));
     }
@@ -1787,6 +1805,7 @@ mod tests {
         let who = |kind: &str, only| Who {
             kind: kind.into(),
             only,
+            state: None,
         };
         let whats: Vec<&Expect> = s
             .checks
@@ -1951,6 +1970,7 @@ mod tests {
         let who = |kind: &str, only| Who {
             kind: kind.into(),
             only,
+            state: None,
         };
         let whats: Vec<&Expect> = s
             .checks

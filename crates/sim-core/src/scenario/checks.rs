@@ -36,7 +36,7 @@ pub enum Event<'a> {
 }
 
 /// `x` to two decimals, without trailing zeros: `0.03`, `24`, `2.5`.
-fn decimal(x: f64) -> String {
+pub(super) fn decimal(x: f64) -> String {
     let s = format!("{x:.2}");
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
@@ -58,13 +58,13 @@ struct Watch<'a> {
     /// (`always` false, `never` or `eventually` true), with what it saw.
     first: Option<(u64, String)>,
     /// The lowest and highest number read.
-    range: Option<(i64, i64)>,
+    range: Option<(f64, f64)>,
     /// `mean`: the sum of the numbers read, and how many there were.
     sum: f64,
     read: u64,
     /// `mean ... per day`: the counter at the window's start and end.
-    at_from: Option<i64>,
-    at_to: Option<i64>,
+    at_from: Option<f64>,
+    at_to: Option<f64>,
 }
 
 impl<'a> Watch<'a> {
@@ -110,11 +110,11 @@ impl<'a> Watch<'a> {
     }
 
     /// A rate's growth per day, once both ends of its window were read.
-    fn rate(&self) -> Option<(f64, i64)> {
+    fn rate(&self) -> Option<(f64, f64)> {
         let (a, b) = (self.at_from?, self.at_to?);
         let w = self.window;
         let days = (w.to - w.from) as f64 / TICKS_PER_DAY as f64;
-        Some(((b - a) as f64 / days, b - a))
+        Some(((b - a) / days, b - a))
     }
 
     /// The key number ([`Event::Expected`]).
@@ -134,7 +134,7 @@ impl<'a> Watch<'a> {
                     Over::Never | Over::Eventually if down => lo,
                     _ => return None,
                 };
-                Some(pick as f64)
+                Some(pick)
             }
             Expect::Mean { per_day: false, .. } => {
                 (self.read > 0).then(|| self.sum / self.read as f64)
@@ -144,7 +144,7 @@ impl<'a> Watch<'a> {
         }
     }
 
-    fn widen(&mut self, n: Option<i64>) {
+    fn widen(&mut self, n: Option<f64>) {
         if let Some(n) = n {
             self.range = Some(self.range.map_or((n, n), |(lo, hi)| (lo.min(n), hi.max(n))));
         }
@@ -186,7 +186,7 @@ impl<'a> Watch<'a> {
                             self.at_to = n;
                         }
                     } else if let Some(n) = n {
-                        self.sum += n as f64;
+                        self.sum += n;
                         self.read += 1;
                     }
                 }
@@ -201,8 +201,8 @@ impl<'a> Watch<'a> {
             return Err(e.clone());
         }
         let range = match self.range {
-            Some((lo, hi)) if lo == hi => format!("; it was {lo}"),
-            Some((lo, hi)) => format!("; from {lo} to {hi}"),
+            Some((lo, hi)) if lo == hi => format!("; it was {}", decimal(lo)),
+            Some((lo, hi)) => format!("; from {} to {}", decimal(lo), decimal(hi)),
             None => String::new(),
         };
         let n = match self.checks {
@@ -259,7 +259,7 @@ impl<'a> Watch<'a> {
                     format!(
                         "{} per day: {} in {}",
                         decimal(rate),
-                        grew,
+                        decimal(grew),
                         span(w.to - w.from)
                     ),
                 )
@@ -396,7 +396,7 @@ fn point(
 ) -> (Result<(bool, String), String>, Option<f64>) {
     match e {
         Expect::Is { .. } | Expect::At { .. } => match holds(world, kinds, e) {
-            Ok((ok, got, n)) => (Ok((ok, got)), n.map(|n| n as f64)),
+            Ok((ok, got, n)) => (Ok((ok, got)), n),
             Err(e) => (Err(e), None),
         },
         _ => (expect(world, e), None),
