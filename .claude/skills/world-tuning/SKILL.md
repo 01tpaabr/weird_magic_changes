@@ -66,7 +66,8 @@ traps [only] K` (with `eaten K by K2`, `died K of NEED`), each at a moment, over
 
 - Build once: `cargo build --profile fast -p app --bin wmc` (about 3 minutes from cold, 10
   seconds after a small change), then run `target/fast/wmc`: about twice as fast as `make
-  run`. Rebuild after changing Rust, not rules: but the built-in `rules/` are compiled in,
+  run`; a release build is no faster (measured), only slower to rebuild. Rebuild after
+  changing Rust, not rules: but the built-in `rules/` are compiled in,
   so a goal file names its packs with a `rules` line (`rules ../../rules`, relative to the
   file) and edits take effect without a rebuild. Any command takes `--set NAME=V`.
 - Know the price before choosing a size. Day one is the cheapest day: populations grow, and
@@ -78,7 +79,9 @@ traps [only] K` (with `eaten K by K2`, `died K of NEED`), each at a moment, over
 - A lab spends little on what fails: a run stops at its first sure failure, and a variant
   stops once more seeds failed than `pass` allows (a fox lab of 3 hopeless variants x 8
   seeds: 176 s down to 45 s). `--full` runs everything, for numbers rather than verdicts.
-- One run is one world on one thread, `--jobs` at a time (default: every core).
+- One run is one world on one thread, `--jobs` at a time (default: every core). On this
+  Mac's 4 performance and 4 efficiency cores, every core still wins: 40 Life runs took 17
+  to 28 s at 8 jobs, 33 s at 4.
 
 ## The protocol
 
