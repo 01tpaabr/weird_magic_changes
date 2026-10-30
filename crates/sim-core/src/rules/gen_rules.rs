@@ -632,6 +632,9 @@ impl<'a> G<'a> {
             if self.maybe(10) {
                 d.push("cover".into());
             }
+            if self.maybe(10) {
+                d.push("solid".into());
+            }
             if self.maybe(40) {
                 d.push(format!("cadence {}", 1u32 << self.n(10)));
             }
@@ -1539,7 +1542,7 @@ impl<'a> G<'a> {
         // Declarations: each single one at most once; need and mem names distinct.
         let mut decls = Vec::new();
         let singles = [
-            "glyph", "color", "cover", "cadence", "sight", "fuel", "food", "bite",
+            "glyph", "color", "cover", "solid", "cadence", "sight", "fuel", "food", "bite",
         ];
         for w in singles {
             if !self.maybe(30) || (is_trait && (w == "glyph" || w == "color")) {
@@ -1548,7 +1551,7 @@ impl<'a> G<'a> {
             decls.push(match w {
                 "glyph" => "glyph \"g\"".to_string(),
                 "color" => "color \"#00ff7f\"".to_string(),
-                "cover" => "cover".to_string(),
+                "cover" | "solid" => w.to_string(),
                 _ => format!("{w} {}", self.additive(2)),
             });
         }

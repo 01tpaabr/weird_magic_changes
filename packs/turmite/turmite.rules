@@ -70,6 +70,7 @@ sub repaint(n) {
 # standing on it says, or wears off back to blank (255).
 trait ink {
   cover
+  solid                  # a pixel of the picture; the ant is drawn on it
   cadence ANT_CADENCE
   sight 0
 

@@ -213,6 +213,7 @@ pub fn hand_assembled() -> Kinds {
             entry: seed_entry,
             color: 0x00C9_A86A,
             cover: false,
+            solid: false,
             parent: None,
         },
         KindDef {
@@ -234,6 +235,7 @@ pub fn hand_assembled() -> Kinds {
             entry: tree_entry,
             color: 0x003F_9E4D,
             cover: false,
+            solid: false,
             parent: None,
         },
     ];

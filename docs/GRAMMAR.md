@@ -43,7 +43,7 @@ SYMBOL   = "=>" | "==" | "!=" | "<=" | ">=" | "+=" | "-="
 
 ```
 kind trait sub const extends inherit state when
-glyph color cover tags cadence sight fuel bite place need max decay vital mem
+glyph color cover solid tags cadence sight fuel bite place need max decay vital mem
 if else while repeat for each choose let return
 and or not true false nearest sniff count within as only is free
 idle die become spawn with move drink eat hit graze take give next look signal mark
@@ -103,6 +103,7 @@ param     = IDENT [ ":" ( "target" | "pred" ) ]
 decl = "glyph" STRING
      | "color" STRING
      | "cover"
+     | "solid"
      | "tags" { TAG }
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
@@ -112,7 +113,7 @@ TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 
 - *`glyph`: a string of one printable ASCII character (`!` to `~`). `color`: `"#rrggbb"`,
   six hex digits. Neither in a trait.*
-- *`glyph`, `color`, `cover`, `cadence`, `sight`, `fuel`, `food` and `bite` are given at
+- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food` and `bite` are given at
   most once per body; `tags`, `need` and `mem` repeat, each name once (a mem may not repeat
   a need of the same body).*
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*

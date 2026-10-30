@@ -703,7 +703,7 @@ fn a_return_takes_a_value_only_on_its_own_line() {
 fn a_semicolon_may_end_a_rule_a_declaration_and_a_const() {
     let with = compile_ok(
         "const C = 3;\n\
-         kind a { glyph \"a\"; color \"#102030\"; cover; tags t u; cadence 4; sight 2;\n\
+         kind a { glyph \"a\"; color \"#102030\"; cover; solid; tags t u; cadence 4; sight 2;\n\
          fuel 99; food 1h; bite 2; need h max C decay 0 vital; mem m, n;\n\
          when m > 0 => idle;\n\
          when true => { m = 1; move north; }\n\
@@ -711,7 +711,7 @@ fn a_semicolon_may_end_a_rule_a_declaration_and_a_const() {
     );
     let without = compile_ok(
         "const C = 3\n\
-         kind a { glyph \"a\" color \"#102030\" cover tags t u cadence 4 sight 2\n\
+         kind a { glyph \"a\" color \"#102030\" cover solid tags t u cadence 4 sight 2\n\
          fuel 99 food 1h bite 2 need h max C decay 0 vital mem m, n\n\
          when m > 0 => idle\n\
          when true => { m = 1  move north }\n\
@@ -1150,6 +1150,26 @@ fn spawn_with_names_the_memory_it_sets() {
         let e = compile_err(text);
         assert!(e.contains(want), "{text}: {e}");
     }
+}
+
+/// `solid` is drawn, not simulated: it comes from a trait or the parent
+/// like `cover`, is in the kind table for the renderer, and changes the hash
+/// only of rules that use it.
+#[test]
+fn solid_is_inherited_and_only_drawn() {
+    let k = compile_ok(
+        "trait paint { solid }
+         kind ink extends paint { cover }
+         kind red extends ink { color \"#ff0000\" }
+         kind plain { }",
+    );
+    let solid: Vec<(&str, bool)> = k.defs.iter().map(|d| (d.name.as_str(), d.solid)).collect();
+    assert_eq!(solid, [("ink", true), ("red", true), ("plain", false)]);
+    assert_eq!(k.solids, [true, true, false]);
+    let without = compile_ok("kind plain { }");
+    let with = compile_ok("kind plain { solid }");
+    assert_ne!(with.hash, without.hash);
+    assert_eq!(without.hash, compile_ok("kind plain { }").hash);
 }
 
 #[test]
@@ -1702,6 +1722,7 @@ fn a_declaration_or_a_next_given_twice_is_an_error() {
         ("glyph", "glyph \"b\""),
         ("color", "color \"#000000\""),
         ("cover", "cover"),
+        ("solid", "solid"),
         ("cadence", "cadence 4"),
         ("sight", "sight 8"),
         ("fuel", "fuel 9"),

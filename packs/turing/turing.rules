@@ -95,6 +95,7 @@ sub written(m) {
 # row is open: the head stands under it, or a neighbour below has its copy.
 trait symbol {
   cover
+  solid                  # a pixel of the picture
   tags tape
   cadence TAPE_CADENCE
   sight 1
@@ -124,6 +125,7 @@ kind zero_e extends zero { glyph "."  color "#4a2c5a"  when is(south, tape) => b
 
 trait done {
   cover
+  solid
   tags tape
   cadence TAPE_STILL
 }

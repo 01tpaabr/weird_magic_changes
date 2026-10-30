@@ -450,6 +450,7 @@ struct Decls {
     glyph: Option<u8>,
     color: Option<u32>,
     cover: bool,
+    solid: bool,
     cadence: Option<(Expr, Pos)>,
     sight: Option<(Expr, Pos)>,
     fuel: Option<(Expr, Pos)>,
@@ -846,6 +847,7 @@ pub const KEYWORDS: &[&str] = &[
     "missed",
     "refused",
     "cover",
+    "solid",
     "graze",
     "state",
     "next",
@@ -878,9 +880,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 12] = [
-    "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "color", "place", "need",
-    "mem",
+const DECL_WORDS: [&str; 13] = [
+    "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
+    "place", "need", "mem",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -1243,6 +1245,7 @@ impl Parser<'_> {
                 ("glyph", d.glyph.is_some()),
                 ("color", d.color.is_some()),
                 ("cover", d.cover),
+                ("solid", d.solid),
                 ("cadence", d.cadence.is_some()),
                 ("sight", d.sight.is_some()),
                 ("fuel", d.fuel.is_some()),
@@ -1294,6 +1297,8 @@ impl Parser<'_> {
                 d.bite = Some((self.additive()?, p));
             } else if self.eat_kw("cover") {
                 d.cover = true;
+            } else if self.eat_kw("solid") {
+                d.solid = true;
             } else if self.eat_kw("color") {
                 if is_trait {
                     return Err(self.err_at(&p, not_in_trait("colour")));
@@ -2162,6 +2167,7 @@ struct Inst<'a> {
     glyph: Option<u8>,
     color: Option<u32>,
     cover: bool,
+    solid: bool,
     cadence_shift: Option<u8>,
     sight: Option<u8>,
     fuel: Option<u32>,
@@ -3063,6 +3069,7 @@ impl<'a> Gen<'a> {
         let food = self.pick(food, &parents, |i| i.food, "food values", item)?;
         let bite = self.pick(bite, &parents, |i| i.bite, "bites", item)?;
         let cover = d.cover || parents.iter().any(|&p| self.insts[p].cover);
+        let solid = d.solid || parents.iter().any(|&p| self.insts[p].solid);
 
         let mut tags: Vec<String> = Vec::new();
         for t in parents
@@ -3277,6 +3284,7 @@ impl<'a> Gen<'a> {
             glyph,
             color,
             cover,
+            solid,
             cadence_shift,
             sight,
             fuel,
@@ -3494,6 +3502,7 @@ impl<'a> Gen<'a> {
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
             cover: inst.cover,
+            solid: inst.solid,
             parent,
         })
     }

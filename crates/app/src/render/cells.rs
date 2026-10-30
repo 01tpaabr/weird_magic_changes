@@ -212,7 +212,7 @@ fn render_row<'c>(
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
                 for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
                     // Who stands here, on what grows here, in what scent.
-                    let s = style(g, f, looks.actor(o), looks.actor(cover));
+                    let s = style(g, f, looks.actor(o), looks.actor(cover), looks.soil);
                     let bg = if scented_span {
                         scented(s.bg, std::array::from_fn(|j| scent[j][k]))
                     } else {
@@ -287,6 +287,7 @@ mod tests {
                             ch.feature[i],
                             looks.actor(ch.occupant[i]),
                             looks.actor(ch.cover[i]),
+                            looks.soil,
                         );
                         crate::render::palette::Style {
                             bg: scented(s.bg, std::array::from_fn(|j| ch.scent[j][i])),

@@ -23,6 +23,7 @@ kind bud {
   glyph "*"
   color "#d6ff8a"
   cover
+  solid
   cadence GROW
   sight 1
   mem heading, seg, sleep, phase
@@ -63,6 +64,7 @@ sub blossom() {
 
 trait grown {
   cover
+  solid
   cadence WOOD_STILL
 }
 

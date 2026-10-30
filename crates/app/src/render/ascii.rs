@@ -16,7 +16,7 @@ pub fn render<'c>(
     frame.resize(view.width as usize, view.height as usize);
     let looks = super::palette::Looks {
         glyphs,
-        colors: &[],
+        ..super::palette::Looks::default()
     };
     render_cells(chunk, looks, view, 255, &mut frame);
     let mut out = String::with_capacity((frame.cols() + 1) * frame.rows());

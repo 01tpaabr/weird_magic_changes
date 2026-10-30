@@ -1469,6 +1469,7 @@ mod tests {
             entry,
             color: 0,
             cover: false,
+            solid: false,
             parent: None,
         }
     }

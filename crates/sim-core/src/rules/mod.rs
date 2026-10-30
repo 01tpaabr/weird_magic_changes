@@ -70,6 +70,9 @@ pub struct KindDef {
     /// Ground cover: lives in the cell's `cover` layer, never blocks, lies
     /// under whoever stands there; eaten with `graze`, not `eat`.
     pub cover: bool,
+    /// Drawn as a whole cell of its colour, no glyph (`solid`). Opaque to
+    /// the sim, like `color`.
+    pub solid: bool,
     /// The concrete kind this one `extends`, if any. Kinds are numbered in
     /// pre-order over this tree, so a kind's family (itself and every kind
     /// that extends it) is the id range `id..Kinds::family_end[id]`.
@@ -277,6 +280,8 @@ pub struct Kinds {
     pub glyphs: Vec<u8>,
     /// `defs[i].color`, for the renderer.
     pub colors: Vec<u32>,
+    /// `defs[i].solid`, for the renderer.
+    pub solids: Vec<bool>,
     /// `defs[i].tags`, for tag predicates in the VM's halo.
     pub tag_bits: Vec<u64>,
     /// One past the last kind of each kind's family (see
@@ -332,6 +337,7 @@ impl Kinds {
             }
         }
         let colors = defs.iter().map(|d| d.color).collect();
+        let solids = defs.iter().map(|d| d.solid).collect();
         let n = defs.len();
         let remaps = (0..n * n)
             .map(|i| Remap::between(&defs[i / n], &defs[i % n]))
@@ -341,6 +347,7 @@ impl Kinds {
             defs,
             glyphs,
             colors,
+            solids,
             tag_bits,
             family_end,
             code,
@@ -419,6 +426,9 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
         mix(d.tags);
         mix(u64::from(d.color) | 1 << 43);
         mix(u64::from(d.cover) | 1 << 44);
+        if d.solid {
+            mix(1 << 46);
+        }
         mix(u64::from(d.fuel) | u64::from(d.food as u32) << 32);
         mix(u64::from(d.entry) | u64::from(d.states) << 32);
         if let Some(p) = d.parent {

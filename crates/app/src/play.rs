@@ -63,7 +63,9 @@ use crate::menu::{self, Menu};
 use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
-use crate::render::palette::{Color, Looks, TEXT_BG, TEXT_FG, VOID_BG, brightness};
+use crate::render::palette::{
+    Color, Looks, NIGHT_SOIL, SOIL, TEXT_BG, TEXT_FG, VOID_BG, brightness,
+};
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the tileset is built for.
@@ -1242,13 +1244,12 @@ fn render_frame(
     } else {
         brightness(time::daylight(tick.0))
     };
-    render_cells(
-        |c| stage.chunk(c),
-        Looks::of(&kinds),
-        view,
-        light,
-        &mut frames.map,
-    );
+    // The gallery on a purple-black ground: its pictures stand out.
+    let looks = Looks {
+        soil: if on_menu { NIGHT_SOIL } else { SOIL },
+        ..Looks::of(&kinds)
+    };
+    render_cells(|c| stage.chunk(c), looks, view, light, &mut frames.map);
     if let Some(p) = inspector.at {
         let (dx, dy) = (
             i64::from(p.x) - i64::from(map.origin.x),

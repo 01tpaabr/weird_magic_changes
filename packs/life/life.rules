@@ -16,11 +16,12 @@ const CROWDED = 3                # more than this, a live cell dies
 trait cell {
   cadence 1
   sight 1
+  solid                          # drawn as a whole cell: white alive, dark dead
 }
 
 kind dead extends cell {
   glyph "."
-  color "#5a5a5a"
+  color "#26262e"
   when count alive within 1 == BIRTH => become alive
 }
 

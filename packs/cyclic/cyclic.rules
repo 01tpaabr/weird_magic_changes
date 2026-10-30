@@ -12,6 +12,7 @@ const HUE_CADENCE = 1        # ticks a generation
 
 trait hue {
   cover
+  solid                  # a pixel of the picture
   cadence HUE_CADENCE
   sight 1
 }

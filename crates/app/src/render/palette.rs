@@ -146,38 +146,76 @@ pub const VOID: Style = Style {
 /// Glyph drawn for a kind the table does not know (a save from a newer build).
 pub const UNKNOWN_ACTOR: u8 = b'?';
 
-/// `actor` is the glyph and colour of the kind standing here, `cover` of the
-/// ground cover under it, if any: look both up with [`Looks::actor`]. The
-/// cover tints the background and shows its glyph when nobody stands on it.
+/// The ground's colours: the background and the dots of bare soil.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Soil {
+    pub bg: Color,
+    pub fg: Color,
+}
+
+/// Light brown, as the game shows it.
+pub const SOIL: Soil = Soil {
+    bg: SOIL_BG,
+    fg: SOIL_FG,
+};
+
+/// A purple black, behind the menu's gallery: the pictures stand out.
+pub const NIGHT_SOIL: Soil = Soil {
+    bg: Color::rgb(0x14, 0x10, 0x1c),
+    fg: Color::rgb(0x26, 0x1f, 0x33),
+};
+
+/// `actor` is the glyph, colour and `solid` of the kind standing here,
+/// `cover` of the ground cover under it, if any: look both up with
+/// [`Looks::actor`]. The cover tints the background and shows its glyph when
+/// nobody stands on it; a solid kind fills its cell with its colour and
+/// shows no glyph (a solid cover is the background of whoever stands on it).
 pub fn style(
     ground: Ground,
     feature: Feature,
-    actor: Option<(u8, Color)>,
-    cover: Option<(u8, Color)>,
+    actor: Option<(u8, Color, bool)>,
+    cover: Option<(u8, Color, bool)>,
+    soil: Soil,
 ) -> Style {
     let bg = match ground {
-        Ground::Soil => SOIL_BG,
+        Ground::Soil => soil.bg,
         Ground::Water => WATER_BG,
     };
     let bg = match cover {
-        Some((_, c)) => bg.mix(c, COVER_TINT),
+        Some((_, c, true)) => c,
+        Some((_, c, false)) => bg.mix(c, COVER_TINT),
         None => bg,
     };
-    let (glyph, fg) = match (actor.or(cover), feature, ground) {
-        (Some(look), _, _) => look,
-        (None, Feature::Rock, _) => (b'#', ROCK_FG),
-        (None, Feature::None, Ground::Soil) => (b'.', SOIL_FG),
-        (None, Feature::None, Ground::Water) => (b'~', WATER_FG),
+    let (glyph, fg, bg) = match (actor.or(cover), feature, ground) {
+        (Some((_, c, true)), _, _) => (b' ', c, c),
+        (Some((g, c, false)), _, _) => (g, c, bg),
+        (None, Feature::Rock, _) => (b'#', ROCK_FG, bg),
+        (None, Feature::None, Ground::Soil) => (b'.', soil.fg, bg),
+        (None, Feature::None, Ground::Water) => (b'~', WATER_FG, bg),
     };
     Style { glyph, fg, bg }
 }
 
-/// How each kind is drawn: its glyph and `0xRRGGBB` colour, indexed by kind
-/// (the kind table's `glyphs` and `colors`).
-#[derive(Debug, Clone, Copy, Default)]
+/// How each kind is drawn: its glyph, `0xRRGGBB` colour and whether it is
+/// `solid`, indexed by kind (the kind table's `glyphs`, `colors` and
+/// `solids`), and the soil's colours.
+#[derive(Debug, Clone, Copy)]
 pub struct Looks<'a> {
     pub glyphs: &'a [u8],
     pub colors: &'a [u32],
+    pub solids: &'a [bool],
+    pub soil: Soil,
+}
+
+impl Default for Looks<'_> {
+    fn default() -> Self {
+        Self {
+            glyphs: &[],
+            colors: &[],
+            solids: &[],
+            soil: SOIL,
+        }
+    }
 }
 
 impl<'a> Looks<'a> {
@@ -185,19 +223,22 @@ impl<'a> Looks<'a> {
         Self {
             glyphs: &kinds.glyphs,
             colors: &kinds.colors,
+            solids: &kinds.solids,
+            soil: SOIL,
         }
     }
 
-    /// Glyph and colour of whoever stands on a cell: `None` for nobody;
-    /// [`UNKNOWN_ACTOR`] past the end of the table, [`ACTOR_FG`] without a
-    /// colour.
+    /// Glyph, colour and solidity of whoever stands on a cell: `None` for
+    /// nobody; [`UNKNOWN_ACTOR`] past the end of the table, [`ACTOR_FG`]
+    /// without a colour, not solid without the flag.
     #[inline]
-    pub fn actor(&self, occupant: sim_core::ActorId) -> Option<(u8, Color)> {
+    pub fn actor(&self, occupant: sim_core::ActorId) -> Option<(u8, Color, bool)> {
         occupant.unpack().map(|(kind, _)| {
             let k = usize::from(kind);
             let glyph = self.glyphs.get(k).copied().unwrap_or(UNKNOWN_ACTOR);
             let color = self.colors.get(k).map_or(ACTOR_FG, |&c| Color(c));
-            (glyph, color)
+            let solid = self.solids.get(k).copied().unwrap_or(false);
+            (glyph, color, solid)
         })
     }
 }
@@ -236,14 +277,32 @@ mod tests {
 
     #[test]
     fn ground_picks_background_and_the_kind_picks_the_glyph() {
-        assert_eq!(style(Ground::Water, Feature::Rock, None, None).bg, WATER_BG);
-        assert_eq!(style(Ground::Soil, Feature::Rock, None, None).bg, SOIL_BG);
+        assert_eq!(
+            style(Ground::Water, Feature::Rock, None, None, SOIL).bg,
+            WATER_BG
+        );
+        assert_eq!(
+            style(Ground::Soil, Feature::Rock, None, None, SOIL).bg,
+            SOIL_BG
+        );
         let red = Color::rgb(255, 0, 0);
-        let s = style(Ground::Water, Feature::None, Some((b'c', red)), None);
+        let s = style(
+            Ground::Water,
+            Feature::None,
+            Some((b'c', red, false)),
+            None,
+            SOIL,
+        );
         assert_eq!((s.glyph, s.fg, s.bg), (b'c', red, WATER_BG));
         // Ground cover: tints the background, shows only when nobody stands on it.
         let green = Color::rgb(0, 255, 0);
-        let s = style(Ground::Soil, Feature::None, None, Some((b'\'', green)));
+        let s = style(
+            Ground::Soil,
+            Feature::None,
+            None,
+            Some((b'\'', green, false)),
+            SOIL,
+        );
         assert_eq!(
             (s.glyph, s.fg, s.bg),
             (b'\'', green, SOIL_BG.mix(green, COVER_TINT))
@@ -251,8 +310,9 @@ mod tests {
         let s = style(
             Ground::Soil,
             Feature::None,
-            Some((b'c', red)),
-            Some((b'\'', green)),
+            Some((b'c', red, false)),
+            Some((b'\'', green, false)),
+            SOIL,
         );
         assert_eq!(
             (s.glyph, s.fg, s.bg),
@@ -270,23 +330,70 @@ mod tests {
         assert_ne!(scented(SOIL_BG, [0, 40, 0, 0]), SOIL_BG);
         assert_ne!(scented(SOIL_BG, [0, 0, 0, 40]), SOIL_BG);
         assert_eq!(
-            style(Ground::Soil, Feature::Rock, Some((b'c', red)), None).glyph,
+            style(
+                Ground::Soil,
+                Feature::Rock,
+                Some((b'c', red, false)),
+                None,
+                SOIL
+            )
+            .glyph,
             b'c'
         );
         let looks = Looks {
             glyphs: b",T",
             colors: &[0x00_11_22_33],
+            solids: &[true],
+            ..Looks::default()
         };
         use sim_core::ActorId;
         assert_eq!(looks.actor(ActorId::NONE), None);
         assert_eq!(
             looks.actor(ActorId::pack(0, 3)),
-            Some((b',', Color(0x112233)))
+            Some((b',', Color(0x112233), true))
         );
-        assert_eq!(looks.actor(ActorId::pack(1, 40)), Some((b'T', ACTOR_FG)));
+        assert_eq!(
+            looks.actor(ActorId::pack(1, 40)),
+            Some((b'T', ACTOR_FG, false))
+        );
         assert_eq!(
             looks.actor(ActorId::pack(2, 0)),
-            Some((UNKNOWN_ACTOR, ACTOR_FG))
+            Some((UNKNOWN_ACTOR, ACTOR_FG, false))
         );
+    }
+
+    /// A solid kind fills its cell, no glyph; a solid cover is the
+    /// background of whoever stands on it; the soil's colours are a choice.
+    #[test]
+    fn a_solid_kind_fills_its_cell() {
+        let (red, green) = (Color::rgb(255, 0, 0), Color::rgb(0, 255, 0));
+        let s = style(
+            Ground::Soil,
+            Feature::None,
+            Some((b'c', red, true)),
+            None,
+            SOIL,
+        );
+        assert_eq!((s.glyph, s.fg, s.bg), (b' ', red, red));
+        let s = style(
+            Ground::Soil,
+            Feature::None,
+            None,
+            Some((b'g', green, true)),
+            SOIL,
+        );
+        assert_eq!((s.glyph, s.bg), (b' ', green));
+        let s = style(
+            Ground::Soil,
+            Feature::None,
+            Some((b'c', red, false)),
+            Some((b'g', green, true)),
+            SOIL,
+        );
+        assert_eq!((s.glyph, s.fg, s.bg), (b'c', red, green));
+        let s = style(Ground::Soil, Feature::None, None, None, NIGHT_SOIL);
+        assert_eq!((s.glyph, s.fg, s.bg), (b'.', NIGHT_SOIL.fg, NIGHT_SOIL.bg));
+        let s = style(Ground::Water, Feature::None, None, None, NIGHT_SOIL);
+        assert_eq!(s.bg, WATER_BG, "only soil changes");
     }
 }

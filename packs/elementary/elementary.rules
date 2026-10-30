@@ -17,6 +17,7 @@ kind unset {
   glyph ","
   color "#30303a"
   cover
+  solid                    # a pixel of the picture
   cadence ROW_CADENCE
   sight 1
 
@@ -37,6 +38,7 @@ sub shine(band) {
 
 trait decided {
   cover
+  solid
   cadence ROW_STILL
 }
 
