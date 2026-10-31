@@ -1,0 +1,29 @@
+# The busy beaver on a bounded board starts over (packs/turing): its head
+# meets the board's left edge at step 1034 (beyond the first 64 x 64 cells a
+# test reads rock), leaves, and a wipe clears the picture; the origin above
+# its first cell starts a new head, which draws the same picture again.
+rules ../../packs/turing
+seed 1
+size 64 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start origin at (47, 0)
+start head at (47, 1)
+
+run 2000
+expect max steps of head == 975
+expect count one_b_done == 394
+expect count one == 53
+run 400                                # 2400: past the wall, the wipe has gone over it all
+expect count head == 0
+expect count one == 0
+expect count one_b_done == 0
+expect eventually count wipe > 100 from 2000 to 2400
+run 513                                # 2913: the origin's new head (it looks every 32 ticks)
+expect count head == 1
+expect max steps of head == 0
+run 2000                               # 4913: as at 2000, the same picture
+expect max steps of head == 975
+expect count one_b_done == 394
+expect count one == 53
+expect traps head == 0
+expect traps origin == 0

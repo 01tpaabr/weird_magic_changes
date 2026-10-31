@@ -26,12 +26,14 @@ trait row_cell {
   sight 1
 }
 
+# A cell still to decide (an unset one, or a spring about to pick): `pending`.
 kind unset extends row_cell {
   glyph ","
   color "#30303a"
+  tags pending
   cadence ROW_CADENCE
 
-  when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => idle
+  when is(at(x - 1, y - 1), pending) or is(north, pending) or is(at(x + 1, y - 1), pending) => idle
   when true => {
     let v = RULE
     repeat is(at(x - 1, y - 1), lit) * 4 + is(north, lit) * 2 + is(at(x + 1, y - 1), lit) { v = v / 2 }
@@ -47,11 +49,11 @@ sub shine(band) {
   else if b == 3 { become lit_3 } else if b == 4 { become lit_4 } else { become lit_5 }
 }
 
-# A decided cell: back to unset as soon as a parent is (it looks every tick,
-# so it never misses one).
+# A decided cell: back to unset as soon as a parent is pending (it looks
+# every tick, so it never misses one).
 trait decided extends row_cell {
   cadence 1
-  when is(at(x - 1, y - 1), unset) or is(north, unset) or is(at(x + 1, y - 1), unset) => become unset
+  when is(at(x - 1, y - 1), pending) or is(north, pending) or is(at(x + 1, y - 1), pending) => become unset
 }
 
 kind unlit extends decided { glyph "."  color "#14141c" }
@@ -68,8 +70,11 @@ trait source {
   mem odds, epoch
 }
 
-kind spring extends unset, source {
+kind spring extends row_cell, source {
   glyph "^"
+  color "#30303a"
+  tags pending
+  cadence ROW_CADENCE
   when true => {
     epoch += 1
     look = epoch % 6

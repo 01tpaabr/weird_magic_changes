@@ -658,7 +658,10 @@ in memory; the tape is ground cover that turns into what the head standing on it
 tick from the row above, so that no rule reads farther than a neighbour. A finished cell
 turns into a still twin with a very long `cadence`, which costs almost nothing.
 `scenarios/turing.scenario` draws its first 10 000 steps; `scenarios/tests/turing.scenario`
-checks a whole row against a plain simulation of the machine.
+checks a whole row against a plain simulation of the machine. On a board with walls it starts
+over: a head whose next step is into rock leaves, a wipe spreads from its cell over the whole
+picture, and an `origin` on the cell above where the head began starts a new one
+(`scenarios/tests/turing_restart.scenario`).
 
 Four more packs draw pictures, each with a scenario in `scenarios/` and a test in
 `scenarios/tests/` checked against a plain simulation. `packs/elementary` is any of

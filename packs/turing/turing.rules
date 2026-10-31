@@ -11,6 +11,11 @@
 # wave that runs out from under the head along the tape, one cell a tick each
 # way: the head takes two ticks a step, so the wave is always ahead of it.
 # Every read is of a neighbouring cell: no rule sees farther than one cell.
+#
+# On a board with walls the machine starts over: a head whose next step is
+# into rock leaves, and the cell under it starts a wipe that spreads over the
+# whole picture, cell to cell, and clears it; an `origin` on the cell above
+# where the head started then starts a new one there (scenarios/gallery).
 
 # The table: a state and the symbol read give WRITE * 100 + RIGHT * 10 + NEXT,
 # with RIGHT 1 for a move right, 0 for left, and NEXT the state, 1 (A) to 5
@@ -27,7 +32,10 @@ const E0 = 0            # E: halt 0LA (halts writing 0)
 const E1 = 1
 
 const TAPE_CADENCE = 1  # the head and the live tape think every tick
-const TAPE_STILL = 1073741824  # a finished cell: about once in 1500 game days
+const TAPE_STILL = 8    # a finished cell looks for a wipe next to it every 8 ticks
+const WIPE = 99         # the look of a head at a wall: the cell under it starts the wipe
+const WIPE_LIFE = 16    # ticks a wiped cell stays: twice TAPE_STILL, so every neighbour sees it
+const RESTART = 640     # ticks an origin waits, the cell below it bare, before a new head
 
 # The head: a standing actor on the cell it reads. A step is two thinks: the
 # first reads and writes (the cell under it turns into what its look says, or
@@ -38,9 +46,11 @@ kind head {
   color "#ffffff"
   cadence TAPE_CADENCE
   sight 1
-  mem st, way, go, down, waited, halted, steps
+  mem st, way, go, down, waited, halted, steps, leaving
 
   when halted == 1 => idle
+  when leaving == 1 => die                           # the cell under it started the wipe
+  when go != 0 and is(at(x + go, y + down), rock) => { leaving = 1  look = WIPE  idle }   # a wall
   when go != 0 => {                                  # the move of the step
     let to = go
     go = 0
@@ -100,6 +110,8 @@ trait symbol {
   cadence TAPE_CADENCE
   sight 1
 
+  when look_of(here) == WIPE and is(here, head) => become wipe
+  when count wipe within 1 > 0 => become wipe
   when look_of(here) > 0 and is(here, head) => written(look_of(here))
   when is(south, bare) and (is(south, head) or is(at(x - 1, y + 1), tape) or is(at(x + 1, y + 1), tape)) => {
     if is(here, one) { spawn one at south } else { spawn zero at south }
@@ -128,6 +140,36 @@ trait done {
   solid
   tags tape
   cadence TAPE_STILL
+  sight 1
+  when count wipe within 1 > 0 => become wipe
+}
+
+# A cell of the wipe: it lasts long enough for its neighbours to follow.
+kind wipe {
+  glyph "x"
+  color "#2c2238"
+  cover
+  solid
+  cadence TAPE_CADENCE
+  when age >= WIPE_LIFE => die
+}
+
+# Where a machine starts over: on the cell above its head's first. Once that
+# cell has been bare (wiped, its head gone) for RESTART ticks, a new head.
+kind origin {
+  glyph "o"
+  color "#3a3a48"
+  cover
+  solid
+  cadence 32
+  sight 1
+  mem wait
+
+  when is(south, bare) and not is(south, head) => {
+    wait += 1
+    if wait * 32 >= RESTART { wait = 0  spawn head at south } else { idle }
+  }
+  when true => wait = 0
 }
 
 kind one_done    extends done { glyph "#"  color "#e6e6e6" }
