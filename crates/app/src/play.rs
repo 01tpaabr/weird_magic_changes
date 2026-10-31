@@ -64,7 +64,7 @@ use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
 use crate::render::palette::{
-    Color, Looks, NIGHT_SOIL, SOIL, TEXT_BG, TEXT_FG, VOID_BG, brightness,
+    Color, GLYPH_MIN, Looks, NIGHT_SOIL, SOIL, TEXT_BG, TEXT_FG, VOID_BG, brightness,
 };
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
@@ -1318,8 +1318,10 @@ fn render_frame(
         brightness(time::daylight(tick.0))
     };
     // The gallery on a purple-black ground: its pictures stand out.
+    // On cells too small for a glyph, whoever stands is a square of colour.
     let looks = Looks {
         soil: if on_menu { NIGHT_SOIL } else { SOIL },
+        tiny: layout.cell < GLYPH_MIN,
         ..Looks::of(&kinds)
     };
     render_cells(|c| stage.chunk(c), looks, view, light, &mut frames.map);

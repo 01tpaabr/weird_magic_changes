@@ -205,7 +205,14 @@ pub struct Looks<'a> {
     pub colors: &'a [u32],
     pub solids: &'a [bool],
     pub soil: Soil,
+    /// Cells too small to read a glyph in: whoever stands on one is drawn
+    /// solid, a square of its colour ([`Looks::occupant`]).
+    pub tiny: bool,
 }
+
+/// The smallest cell, in physical pixels, a glyph is drawn in; below it
+/// standing kinds are drawn solid.
+pub const GLYPH_MIN: u32 = 8;
 
 impl Default for Looks<'_> {
     fn default() -> Self {
@@ -214,6 +221,7 @@ impl Default for Looks<'_> {
             colors: &[],
             solids: &[],
             soil: SOIL,
+            tiny: false,
         }
     }
 }
@@ -225,7 +233,16 @@ impl<'a> Looks<'a> {
             colors: &kinds.colors,
             solids: &kinds.solids,
             soil: SOIL,
+            tiny: false,
         }
+    }
+
+    /// [`actor`](Self::actor) for whoever stands on a cell: solid on
+    /// [`tiny`](Self::tiny) cells, whatever the kind says.
+    #[inline]
+    pub fn occupant(&self, occupant: sim_core::ActorId) -> Option<(u8, Color, bool)> {
+        self.actor(occupant)
+            .map(|(g, c, solid)| (g, c, solid || self.tiny))
     }
 
     /// Glyph, colour and solidity of whoever stands on a cell: `None` for
@@ -395,5 +412,24 @@ mod tests {
         assert_eq!((s.glyph, s.fg, s.bg), (b'.', NIGHT_SOIL.fg, NIGHT_SOIL.bg));
         let s = style(Ground::Water, Feature::None, None, None, NIGHT_SOIL);
         assert_eq!(s.bg, WATER_BG, "only soil changes");
+        // Tiny cells: whoever stands is solid; a cover keeps its own way.
+        let tiny = Looks {
+            glyphs: b"cg",
+            colors: &[0x00ff_0000, 0x0000_ff00],
+            solids: &[false, false],
+            tiny: true,
+            ..Looks::default()
+        };
+        use sim_core::ActorId;
+        assert_eq!(tiny.occupant(ActorId::pack(0, 1)), Some((b'c', red, true)));
+        assert_eq!(tiny.actor(ActorId::pack(1, 1)), Some((b'g', green, false)));
+        let normal = Looks {
+            tiny: false,
+            ..tiny
+        };
+        assert_eq!(
+            normal.occupant(ActorId::pack(0, 1)),
+            Some((b'c', red, false))
+        );
     }
 }
