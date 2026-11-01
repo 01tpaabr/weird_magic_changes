@@ -21,3 +21,7 @@ workspace = true
 [[bench]]
 name = "tick"
 harness = false
+
+[[bench]]
+name = "field_law"
+harness = false

@@ -55,7 +55,7 @@ rules/              *.rules files: the kinds (built into the binary; a pack: --r
 packs/              packs that stand alone (life/: Conway's Life, village/: a social world, turing/, elementary/, cyclic/, turmite/, lsystem/: pictures for the menu), named by a scenario's `rules` line
 scenarios/          *.scenario files: rules, seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
 tuning/             one folder per goal a world was tuned for (/world-tuning): goal.scenario, notes.md; runs/ is not committed
-docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), RULES.md (writing rules), PERF.md (baselines)
+docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), WORLD.md (fields, laws, terrain: design), RULES.md (writing rules), PERF.md (baselines)
 .claude/skills/     bevy-dev (auto-loaded each session), parallel-sim, world-tuning (on demand)
 ```
 
