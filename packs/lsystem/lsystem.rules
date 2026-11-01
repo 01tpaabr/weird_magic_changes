@@ -8,9 +8,11 @@
 # own (scenarios/lsystem.scenario). A branch turns 90 degrees now and then,
 # but never toward the ground where 45 will do.
 #
-# A bud's `seg` is DEPTH * 100 + cells left in its segment. A bud started with
+# A bud's `seg` is TRUNK * 10000 + DEPTH * 100 + cells left in its segment:
+# every branch knows its tree's trunk, and scales from it. A bud started with
 # `with (sleep = N)` waits N thinks before it sprouts, so a grove can grow in
-# turns.
+# turns; with `with (trunk = N)` (at most 99) its tree is that tall a trunk
+# and the rest in proportion, else TRUNK.
 #
 # A tree lives TREE_LIFE ticks, then its trunk's foot turns to a stump and it
 # withers from there: a cell withers when the cell it grew from (right behind
@@ -33,7 +35,7 @@ trait limb {
   cover
   solid
   sight 1
-  mem heading, seg, sleep, phase, root
+  mem heading, seg, sleep, phase, root, trunk
 }
 
 kind bud extends limb {
@@ -42,27 +44,33 @@ kind bud extends limb {
   cadence GROW
 
   when sleep > 0 => { sleep -= 1  idle }
-  when heading == 0 => { root = 1  heading = 1  seg = TRUNK }   # a planted bud: the trunk, north; falls through
+  when heading == 0 => {                                   # a planted bud: the trunk, north; falls through
+    root = 1
+    heading = 1
+    if trunk == 0 { trunk = TRUNK }
+    seg = trunk * 10000 + trunk
+  }
   when seg % 100 > 0 and phase == 0 => {                   # lays its segment: the next cell
     phase = 3
     spawn bud at dir(heading) with (heading = heading, seg = seg - 1)
   }
-  when seg / 100 >= DEPTH and phase == 0 => blossom()     # a last segment's end
-  when phase == 0 => { phase = 1  branch(heading, -1, seg / 100 + 1) }
-  when phase == 1 => { phase = 3  branch(heading, 1, seg / 100 + 1) }
-  when true => wood(seg / 100)
+  when (seg / 100) % 100 >= DEPTH and phase == 0 => blossom()   # a last segment's end
+  when phase == 0 => { phase = 1  branch(heading, -1, (seg / 100) % 100 + 1, seg / 10000) }
+  when phase == 1 => { phase = 3  branch(heading, 1, (seg / 100) % 100 + 1, seg / 10000) }
+  when true => wood((seg / 100) % 100)
 }
 
-# A branch off heading H to the side S (-1 left, 1 right), at depth D.
-sub branch(h, s, d) {
+# A branch off heading H to the side S (-1 left, 1 right), at depth D, of a
+# tree whose trunk is T.
+sub branch(h, s, d, t) {
   let turn = 1
   if chance(SPREAD) { turn = 2 }
   let to = (h - 1 + s * turn + 8) % 8 + 1
   if to >= 4 and to <= 6 { to = (h - 1 + s + 8) % 8 + 1 }   # not toward the ground, if 45 degrees will do
-  let len = TRUNK
+  let len = t
   repeat d { len = len * RATIO / 100 }
   len = max(1, len * (75 + rand(50)) / 100)
-  spawn bud at dir(to) with (heading = to, seg = d * 100 + len)
+  spawn bud at dir(to) with (heading = to, seg = t * 10000 + d * 100 + len)
 }
 
 sub wood(d) {

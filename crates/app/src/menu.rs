@@ -429,10 +429,7 @@ impl Menu {
             out.push(text_row("  weird magic changes", TITLE_FG, TEXT_BG));
         }
         out.push(text_row(
-            &format!(
-                "{:^cols$}",
-                "an engine and a language for deterministic worlds"
-            ),
+            &format!("{:^cols$}", "an engine and a language for emergent worlds"),
             DIM,
             TEXT_BG,
         ));

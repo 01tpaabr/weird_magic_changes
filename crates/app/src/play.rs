@@ -87,6 +87,10 @@ const HELP_HOME: &str = "wasd/arrows move (shift x4) | space pause | . step | [ 
 const MENU_COLS: u32 = 96;
 const MENU_ROWS: u32 = 26;
 const MENU_ALPHA: f32 = 0.8;
+/// The gallery's column split (`scenarios/gallery.scenario`: the rock line at
+/// this x between its left column of panels and its right one): the menu box
+/// ends there, so the right column stands clear of it.
+const GALLERY_SPLIT_X: i32 = 322;
 /// Ticks the gallery runs before it starts over: its busy beaver's first
 /// 10 000 steps or so, about 5 minutes at the menu's 8x.
 const GALLERY_TICKS: u64 = 20_000;
@@ -207,21 +211,21 @@ enum Open {
 /// The gallery's scenario and rules (`scenarios/gallery.scenario` under the
 /// working directory), else the built-in world: it is a background, never
 /// an error.
-fn gallery() -> (Scenario, Kinds) {
-    let read = || -> anyhow::Result<(Scenario, Kinds)> {
+fn gallery() -> (Scenario, Kinds, bool) {
+    let read = || -> anyhow::Result<(Scenario, Kinds, bool)> {
         let s = crate::read_scenario(menu::GALLERY)?;
         let packs: Vec<std::path::PathBuf> = s.packs.iter().map(Into::into).collect();
         let kinds = crate::compile(&packs)?;
         sim_core::scenario::Placement::resolve(&s.starts, &kinds, &s.terrain())
             .map_err(|e| anyhow::anyhow!("{e}"))?;
-        Ok((s, kinds))
+        Ok((s, kinds, true))
     };
     read().unwrap_or_else(|e| {
         warn!(
             "the gallery ({}): {e:#}; the built-in world instead",
             menu::GALLERY
         );
-        (Scenario::builtin(), Kinds::builtin())
+        (Scenario::builtin(), Kinds::builtin(), false)
     })
 }
 
@@ -238,7 +242,8 @@ fn switch(world: &mut World, open: Open) -> anyhow::Result<()> {
     }
     let (kinds, ready) = match &open {
         Open::Gallery => {
-            let (s, kinds) = gallery();
+            let (s, kinds, found) = gallery();
+            world.insert_resource(MenuEdge(found.then_some(GALLERY_SPLIT_X)));
             (kinds, Ready::Create(s, None))
         }
         Open::Load(dir) => {
@@ -411,6 +416,11 @@ pub enum Screen {
     Menu,
     Play,
 }
+
+/// The cell column the menu box's right edge sits on, when the world behind
+/// it has one (the gallery's split); else the box is centred.
+#[derive(Resource, Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MenuEdge(pub Option<i32>);
 
 /// Whether quitting a world goes back to the menu (`wmc` alone) or quits
 /// (`wmc play`).
@@ -605,6 +615,9 @@ pub struct Layout {
     /// Cell edge.
     pub cell: u32,
     pub map: MapLayout,
+    /// How far the map layer is stretched, across and down: 1 but on the
+    /// menu, where the gallery fills the window to its edges.
+    pub map_scale: (f32, f32),
     /// Height of the map area; the status rows take the rest.
     pub map_h: u32,
     pub status_cols: u32,
@@ -896,6 +909,7 @@ fn layout(
     selection: Res<Selection>,
     screen: Res<Screen>,
     config: Res<SimConfig>,
+    edge: Option<Res<MenuEdge>>,
     mut layout: ResMut<Layout>,
     mut glyphs: ResMut<Glyphs>,
     mut images: ResMut<Assets<Image>>,
@@ -949,13 +963,46 @@ fn layout(
         (STATUS_ROWS * cell).min(height)
     };
     let map_h = height - status_h;
-    let map = map_layout(&camera, cell as usize, width as usize, map_h as usize);
-    let status_cols = width.div_ceil(cell);
-    let (menu_cols, menu_rows) = if menu {
+    // The menu over the gallery: the gallery whole, stretched to the window's
+    // edges (its cells a little off square), not a fitted box in a margin.
+    let fill = menu && edge.as_ref().is_some_and(|e| e.0.is_some());
+    let (map, map_scale) = if fill {
+        let (w, h) = (config.initial_width.max(1), config.initial_height.max(1));
+        let map = MapLayout {
+            origin: Pos::new(0, 0),
+            shift_x: 0,
+            shift_y: 0,
+            cols: w as usize,
+            rows: h as usize,
+        };
+        // A window a few thousand pixels wide over a few hundred cells.
+        #[allow(clippy::cast_precision_loss)]
+        let s = (
+            width as f32 / (w * cell) as f32,
+            height as f32 / (h * cell) as f32,
+        );
+        (map, s)
+    } else {
         (
-            (width / text_w).saturating_sub(4).min(MENU_COLS),
-            (height / text_h).saturating_sub(2).min(MENU_ROWS),
+            map_layout(&camera, cell as usize, width as usize, map_h as usize),
+            (1.0, 1.0),
         )
+    };
+    let status_cols = width.div_ceil(cell);
+    // The menu box: centred, as wide as it can be while its right edge stays
+    // left of the gallery's split (the right column then stands clear).
+    let split_px = edge
+        .and_then(|e| e.0)
+        .filter(|_| fill)
+        .and_then(|x| u32::try_from(x).ok())
+        .map(|x| x * width / config.initial_width.max(1))
+        .filter(|&px| px > width / 2 + 8 * text_w);
+    let (menu_cols, menu_rows) = if menu {
+        let room = split_px.map_or_else(
+            || (width / text_w).saturating_sub(4).min(MENU_COLS),
+            |px| (2 * px - width) / text_w,
+        );
+        (room, (height / text_h).saturating_sub(2).min(MENU_ROWS))
     } else {
         (0, 0)
     };
@@ -977,6 +1024,7 @@ fn layout(
         scale,
         cell,
         map,
+        map_scale,
         map_h,
         status_cols,
         status_h,
@@ -1501,9 +1549,19 @@ fn upload_tiles(
     }
     let (w, h) = (layout.width as f32, layout.height as f32);
     let map = layout.map;
-    let map_at = grids
-        .map
-        .place(-(map.shift_x as f32), -(map.shift_y as f32), w, h);
+    // Stretched (the menu's gallery): the layer fills the window, centred on it.
+    let stretched = layout.map_scale != (1.0, 1.0);
+    let map_at = if stretched {
+        (
+            Vec3::new(0.0, 0.0, grids.map.z),
+            Vec3::new(0.0, 0.0, grids.map.z + 0.5),
+        )
+    } else {
+        grids
+            .map
+            .place(-(map.shift_x as f32), -(map.shift_y as f32), w, h)
+    };
+    let map_scale = Vec3::new(layout.map_scale.0, layout.map_scale.1, 1.0);
     let status_at = grids
         .status
         .place(0.0, (layout.height - layout.status_h) as f32, w, h);
@@ -1532,6 +1590,13 @@ fn upload_tiles(
         grid::upload(frame, &mut bg, &mut fg, alpha);
         bg_tf.translation = bg_at;
         fg_tf.translation = fg_at;
+        let scale = if layer.bg == grids.map.bg {
+            map_scale
+        } else {
+            Vec3::ONE
+        };
+        bg_tf.scale = scale;
+        fg_tf.scale = scale;
     }
 }
 

@@ -675,7 +675,8 @@ any turmite of up to 8 colours; each ant's rule is its memory, so a scenario sta
 with different rules (`start ant at (48, 48) with (turns = 12, colours = 4)`).
 `packs/lsystem` grows trees as the turtle reading of the L-system `X -> F[+X][-X]`, with
 dice in every segment and branch; an old tree withers from its stump (each cell when the one it
-grew from has) and grows again. `scenarios/glider_gun.scenario` is Gosper's glider gun in
+grew from has) and grows again. A planted bud `with (trunk = N)` grows a tree of that trunk,
+its branches in proportion. `scenarios/glider_gun.scenario` is Gosper's glider gun in
 `packs/life` with an eater that swallows its gliders, and
 `scenarios/fox_pen_showcase.scenario` a fox and a flock in a small walled pen. Every name is
 global, so packs meant to share a world keep their consts and traits apart
