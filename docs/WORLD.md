@@ -1,6 +1,6 @@
 # The world
 
-Status: **design, nothing built** (owner, 2026-11-01; ARCHITECTURE decisions 49-52). The cost
+Status: **design, nothing built** (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
 measurement in §8 is done; the build order is §10. Syntax below is a proposal: it lands in
 `GRAMMAR.md` and `RULES.md` with each step, and may change there.
 
@@ -102,6 +102,21 @@ Two kinds, because they are two things:
 | target | `here` or adjacent | `here` or adjacent |
 | settled | every delta to a cell summed in `i64`, clamped once: no order | key order when contested, like `take` and `give` |
 | like today | `mark` (combines with the action, doesn't end the think) | `take`, `give` (one action a think; `BLOCKED` if nothing moved) |
+
+**A write policy per field.** By default a field takes both. `conserved` allows only `harvest`
+and `drop` (and its own law), so no rule can make or destroy what the field holds: ore, sugar,
+money. `fixed` allows no writes from actors at all, only its law and its `init`: a height that
+only `dig` and `build` change is not `fixed`, a daylight or a climate is. The compiler refuses
+an `add` to a `conserved` field and any write to a `fixed` one, in any pack:
+
+```text
+field ore max 255 conserved { init noise scale 40 }   # mined, carried, dropped; never made
+field fox_scent max 255 { every 16 { fox_scent -= (fox_scent + 31) / 32 } }   # add freely
+field climate max 100 fixed { init noise scale 400 }
+```
+
+A simulation wants this as much as a game: it turns "nothing is created" from a convention the
+author keeps into a property the compiler checks and `sim::invariants` tests.
 
 The tick: actors think -> bites -> transfers (`take`, `give`, `harvest`, `drop`, key order) ->
 deltas -> laws due this tick (compute, commit). Each a phase, chained. Cross-chunk writes use
@@ -207,13 +222,16 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
 `sim::invariants`, a scenario test, a doc example), and `make fuzz` before it closes.
 
 1. **Fields**: declaration, storage, hash, store, ramp rendering; reads and field predicates in
-   searches; `add`, `harvest`, `drop`; scent re-expressed as fields. Invariant: with no laws,
-   a field's total plus its needs' total changes only by `add`.
+   searches; `add`, `harvest`, `drop`; the write policy (`conserved`, `fixed`); scent
+   re-expressed as fields. Invariant: a `conserved` field's total plus its needs' total
+   changes only by its law.
 2. **Laws**: the column compiler and interpreter, cadence, compute/commit phases, the neighbour
    halo, the edge rule (§11), the quiet-chunk skip. Life as a field law, with a PERF row.
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
 4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
 5. **Layers.**
+6. **Arenas and players** (§12), with namespaces, when the game work begins; private fields
+   last.
 
 ## 11. Unloaded chunks
 
@@ -226,11 +244,47 @@ At the edge of what is loaded, a law reads an unloaded neighbour as **its own ce
 declares one. A scenario line to keep a region simulated in play waits for a world that needs
 it.
 
-## 12. Open
+## 12. Arenas and players
+
+A programming game (players write creatures in the language, they meet in one world) needs to
+know who may shape the world. A world's packs get a role:
+
+- **The arena pack** (the game's designer) declares the fields, laws, materials, layers and
+  the scenario: the shared world and its physics.
+- **Player packs** declare kinds (and their subs, traits, consts) only. They read and write
+  the arena's fields within its write policy, but can't declare a field, a law, a material or
+  a layer, and can't redefine an arena name. The compiler refuses it, naming the line.
+
+So a player's code can neither change the rules of the world nor create a resource. This
+lands with **namespaces per pack** (§13): a player's names are its own (`red.ant`,
+`blue.ant`), the arena's are shared, and two players may both have an `ant`. A scenario names
+the arena and the players (`arena packs/ants`, `player red packs/red`); a plain world keeps
+today's behaviour, every pack equal.
+
+**Private fields.** A player pack may declare one kind of field after all: a `private` field,
+an array **per player**, readable and writable only by that player's kinds. Ants that lay a
+trail the other colony can't smell, a team's map of what it has explored. It costs a field's
+memory per player who declares one, and a law on it is the arena's laws' form (§3), run per
+player's array; an arena may cap how many a player declares (`private fields 2`).
+
+```text
+# packs/red/red.rules, a player pack in an arena
+field trail max 255 private { every 16 { trail -= (trail + 31) / 32 } }
+kind ant {
+  ...
+  when carrying > 0 => add trail here 40  move toward nest
+  when best trail within 4 as t => move toward t
+}
+```
+
+## 13. Open
 
 - Negative field values (a sea floor below 0), or an offset in the pack?
 - Laws reading actors (`count chicken within 1`: grass trampled where hens walk): the occupant
   array is a column too; add when a world needs it.
 - Does `light` become a field (shade under trees), with the clock's daylight its default?
 - A scenario's `terrain` and drawn `map` syntax for declared materials and fields.
-- Namespaces per pack, before two packs of different authors share a world.
+- Namespaces per pack, before two packs of different authors share a world: needed by §12,
+  and by any two packs that should not collide on a name.
+- A player's budget in an arena (ops a think, rows, private fields), so one player's code
+  can't slow the world for the others.
