@@ -1,0 +1,51 @@
+# pasture: far sight, laws that read actors, opaque hedges
+# (docs/RULES.md §3, §12). Sheep see grass 40 cells off and walk to it;
+# where a sheep stands the grass is trodden, a law that reads the actors
+# on each cell; grass grows back where none is. Wolves see 64 cells, a
+# whole chunk, but not through the hedges: the engine's rock, redeclared
+# opaque. A wolf that knows of a sheep it can't see keeps count.
+# scenarios/tests/pasture.scenario plays it.
+
+feature rock { blocks  opaque  glyph "%"  color "#3f6b2a" }    # hedges
+
+field level max 1 fixed                                       # flat: only the hedges hide
+field grass max 9 {
+  init 6
+  color "#5fae3a"
+  every 30min {
+    if is(here, sheep) { grass = max(grass - 2, 0) }           # trodden and grazed
+    else if count (is(here, sheep)) within 1 == 0 { grass = min(grass + 1, 9) }
+  }
+}
+field trod max 255 { every 1 { if is(here, sheep) { trod = min(trod + 1, 255) } } }
+
+kind sheep {
+  glyph "s"
+  color "#f4f4f4"
+  cadence 4
+  sight 40
+  fuel 4096
+  food 1d
+  need food max 2d vital
+  need health max 1 decay 0 vital
+
+  when food < 1d and grass(here) > 0 => { food = min(food + 4h, 2d)  idle }
+  when food < 1d and best grass on free within 40 as g => move toward g
+  when food > 40h and chance(1) and count sheep within 4 < 2 and nearest free within 1 as n => spawn sheep at n
+  when true => move random free
+}
+
+kind wolf {
+  glyph "W"
+  color "#a0a0a8"
+  cadence 2
+  sight 64
+  fuel 8192
+  need food max 2d vital
+  mem hidden
+
+  when food < 44h and nearest sheep within 1 as s => eat s
+  when nearest sheep within 64 as s and not sees(s) over level => { hidden += 1  move random free }   # there, behind a hedge
+  when food < 44h and nearest sheep within 64 as s => move toward s
+  when true => move random free
+}

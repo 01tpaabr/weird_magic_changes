@@ -1,0 +1,18 @@
+# The pasture pack (packs/pasture): sheep that see grass 40 cells off, a
+# law that tramples grass under them, wolves that see a whole chunk but not
+# through hedges (rock redeclared opaque).
+#
+#   make run ARGS="scenario scenarios/tests/pasture.scenario"
+rules ../../packs/pasture
+seed 3
+size 192 128
+terrain water_level 0 rock_on_soil 0.08 rock_on_water 0
+start sheep 1 / 150
+start wolf 1 / 3000
+run 1d
+expect eventually max trod >= 20 to 6h            # a law that reads the sheep on its cells
+expect died sheep of food == 0                    # far sight finds them grass
+expect eaten sheep by wolf > 20                   # wolves find them across the field, seen 70
+expect eventually max hidden of wolf > 0 to 1d    # a sheep in range, behind a hedge
+expect traps sheep == 0
+expect traps wolf == 0

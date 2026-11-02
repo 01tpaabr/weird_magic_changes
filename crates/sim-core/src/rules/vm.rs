@@ -913,7 +913,6 @@ struct Node {
     parent: u32,
     via: i32,
     g: i64,
-    steps: u32,
 }
 
 /// One search's working space, per thread, kept between thinks (no
@@ -988,16 +987,11 @@ impl SearchScratch {
     /// Reach `state` from node `parent` by `via`, for `g` in all.
     fn offer(&mut self, state: &[i32], parent: u32, via: i32, g: i64, h: i64) {
         let (slot, found) = self.find(state);
-        let steps = if parent == NO_NODE {
-            0
-        } else {
-            self.nodes[parent as usize].steps + 1
-        };
         let node = match found {
             Some(n) if self.nodes[n as usize].g <= g => return,
             Some(n) => {
                 let node = &mut self.nodes[n as usize];
-                (node.parent, node.via, node.g, node.steps) = (parent, via, g, steps);
+                (node.parent, node.via, node.g) = (parent, via, g);
                 n
             }
             None => {
@@ -1012,7 +1006,6 @@ impl SearchScratch {
                     parent,
                     via,
                     g,
-                    steps,
                 });
                 self.table[slot] = (self.generation, n);
                 n
@@ -1043,6 +1036,19 @@ impl SearchScratch {
         None
     }
 
+    /// The steps from the start to node `n`, along its parents. Counted,
+    /// not stored: a state reached again for less takes a new parent, and
+    /// what was reached from it before keeps the old count (a guess that
+    /// overestimates makes that happen; a fuzz-style find).
+    fn steps_to(&self, mut n: u32) -> usize {
+        let mut k = 0;
+        while self.nodes[n as usize].parent != NO_NODE {
+            k += 1;
+            n = self.nodes[n as usize].parent;
+        }
+        k
+    }
+
     /// The found plan: its first `via`, its cost, its steps.
     fn plan(&self) -> [i32; 3] {
         if self.goal == NO_NODE {
@@ -1056,7 +1062,8 @@ impl SearchScratch {
             n = self.nodes[n as usize].parent;
         }
         let cost = i32::try_from(goal.g).unwrap_or(i32::MAX);
-        [first, cost, i32::try_from(goal.steps).unwrap_or(i32::MAX)]
+        let steps = i32::try_from(self.steps_to(self.goal)).unwrap_or(i32::MAX);
+        [first, cost, steps]
     }
 
     /// The plan's `via`s, first first, into `out` (0 past its end).
@@ -1065,9 +1072,8 @@ impl SearchScratch {
         if self.goal == NO_NODE {
             return;
         }
-        let steps = self.nodes[self.goal as usize].steps as usize;
         let mut n = self.goal;
-        let mut k = steps;
+        let mut k = self.steps_to(n);
         while self.nodes[n as usize].parent != NO_NODE {
             k -= 1;
             if let Some(o) = out.get_mut(k) {
@@ -2167,6 +2173,30 @@ mod tests {
     use crate::stage::CHUNK_CELLS;
     use crate::time::TICKS_PER_DAY;
     use bytemuck::Zeroable;
+
+    /// A state reached again for less, after what it led to was offered,
+    /// takes its new parent: the plan's steps and its route follow the
+    /// parents as they are now (they were stored once, and went stale).
+    #[test]
+    fn a_plan_follows_its_parents_as_they_are() {
+        let mut s = SearchScratch::default();
+        s.begin(&[0], 0, 10);
+        assert_eq!(s.pop(), Some(0)); // the start
+        s.offer(&[1], 0, 11, 10, 0); // A, straight from the start
+        s.offer(&[2], 0, 12, 1, 100); // C, cheap but guessed far
+        assert_eq!(s.pop(), Some(1)); // A first
+        s.offer(&[3], 1, 13, 11, 0); // B from A: one step past A
+        s.offer(&[1], 2, 21, 2, 0); // A again, through C, for less
+        s.goal = 2 + 1; // B
+        assert_eq!(
+            s.plan(),
+            [12, 11, 3],
+            "start, C, A, B: three steps, C first"
+        );
+        let mut route = [9; 5];
+        s.path(&mut route);
+        assert_eq!(route, [12, 21, 13, 0, 0]);
+    }
 
     fn kind(needs: Vec<NeedDef>, entry: u32) -> KindDef {
         KindDef {

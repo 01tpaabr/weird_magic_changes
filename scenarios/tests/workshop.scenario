@@ -1,0 +1,17 @@
+# The workshop pack (packs/workshop): a search over memory. Carpenters plan
+# their next hut over what they carry; the plan's first step is what they
+# do: fetch wood, saw it, build. They start empty-handed, build huts, and
+# never saw wood they don't have or build without the planks.
+#
+#   make run ARGS="scenario scenarios/tests/workshop.scenario"
+rules ../../packs/workshop
+seed 2
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start carpenter 1 / 300
+run 1d
+expect eventually max huts of carpenter >= 1 to 1h    # seen at 4min: 8 chops, 4 saws, a build
+expect eventually sum huts of carpenter >= 1000       # seen 3541 in the day
+expect never max wrong of carpenter > 0               # the plan never saws or builds without the means
+expect mean avg sawn of carpenter >= 50 from 12h      # sawing, not only chopping
+expect traps carpenter == 0

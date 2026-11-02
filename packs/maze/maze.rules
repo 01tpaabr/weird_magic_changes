@@ -1,0 +1,42 @@
+# maze: a generic search over the cells (docs/RULES.md §12, Searches).
+# Runners in a maze of rock plan the way to an exit with a search whose
+# state is a position: `next` tries the four free neighbours, the goal is
+# an exit cell. The plan goes into a memory array (`into route`) and each
+# think takes its next step; a step that is blocked (another runner in the
+# way) or a route used up means planning again from where it stands.
+# Water is redeclared walkable: the exits. scenarios/tests/maze.scenario
+# plays it.
+
+ground water { walkable  glyph "E"  color "#e0c040" }   # the exits
+
+const NORTH = 1
+const EAST = 3
+const SOUTH = 5
+const WEST = 7
+
+kind runner {
+  glyph "r"
+  color "#f05050"
+  cadence 2
+  sight 32
+  fuel 32768
+  mem planned, k, route[24]
+
+  search to_exit {
+    state px, py = x, y
+    next {
+      if free(at(px, py - 1)) { try px, py - 1 via NORTH }
+      if free(at(px + 1, py)) { try px + 1, py via EAST }
+      if free(at(px, py + 1)) { try px, py + 1 via SOUTH }
+      if free(at(px - 1, py)) { try px - 1, py via WEST }
+    }
+    goal is(at(px, py), water)
+    limit 600
+  }
+
+  when is(here, water) => die                                   # out
+  when planned == 1 and blocked => { planned = 0  idle }        # someone in the way
+  when planned == 1 and k < 24 and route[k] > 0 => { k += 1  move dir(route[k - 1]) }
+  when to_exit() as p into route => { planned = 1  k = 1  move dir(p.via) }
+  when true => { planned = 0  move random free }
+}
