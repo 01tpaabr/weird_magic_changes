@@ -11,9 +11,11 @@
 //! `outside` value. A law computes every cell from the values all fields
 //! held before any law ran this tick, so the order of chunks never matters.
 
+use crate::actors::ChunkActors;
 use crate::rng::{hash_cell, splitmix64};
-use crate::rules::FieldDef;
-use crate::stage::{CHUNK_CELLS, CHUNK_SIZE, ChunkCells, ChunkCoord};
+use crate::rules::Kinds;
+use crate::rules::vm::Want;
+use crate::stage::{CHUNK_CELLS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature};
 
 /// Cells a side of a column: the chunk and a border of one.
 pub const SIDE: usize = CHUNK_SIZE as usize + 2;
@@ -91,6 +93,10 @@ pub enum LawOp {
     /// work it out alike, so what one gains the other loses. Its border is
     /// 0, as an aggregate's.
     Flow(u16, u16, i32),
+    /// `is(here, pred)`: 1 where the cell matches the predicate (a kind,
+    /// a tag, a material, `free`), as an actor's search sees it; where
+    /// nothing is loaded, rock with nobody.
+    Is(i32),
 }
 
 /// A field's law: its cadence and its program, whose column `result` is the
@@ -121,7 +127,10 @@ impl Law {
             let x = match *op {
                 LawOp::Field(_) => 0,
                 LawOp::Const(k) => k,
-                LawOp::Clock(_) | LawOp::Rand(..) | LawOp::Chance(..) => return false,
+                // Actors and dice aren't fields: no knowing.
+                LawOp::Clock(_) | LawOp::Rand(..) | LawOp::Chance(..) | LawOp::Is(_) => {
+                    return false;
+                }
                 LawOp::Bin(b, x, y) => bin(b, c(x), c(y)),
                 LawOp::Un(u, x) => un(u, c(x)),
                 LawOp::Clamp(x, l, h) => clamp(c(x), c(l), c(h)),
@@ -172,6 +181,7 @@ impl Law {
                 LawOp::Chance(p, d) => [9, u64::from(p), u64::from(d), 0],
                 LawOp::Agg(a, x) => [10, a as u64, u64::from(x), 0],
                 LawOp::Flow(w, l, k) => [11, u64::from(w), u64::from(l), u64::from(k as u32)],
+                LawOp::Is(p) => [12, u64::from(p as u32), 0, 0],
             }
         };
         [u64::from(self.every), u64::from(self.result)]
@@ -256,8 +266,10 @@ pub struct LawCtx<'a> {
     /// The chunk and its eight neighbours, in row order from the top-left
     /// (`None`: not loaded).
     pub chunks: [Option<&'a ChunkCells>; 9],
-    /// Every field, for its `outside`.
-    pub defs: &'a [FieldDef],
+    /// Their actors, alike.
+    pub actors: [Option<&'a ChunkActors>; 9],
+    /// The fields (for their `outside`), tags, families and materials.
+    pub kinds: &'a Kinds,
 }
 
 /// Run `law` over a chunk into `out` (the inner cells of the result,
@@ -281,7 +293,7 @@ pub fn run(
                 let f = usize::from(f);
                 let around: Around<'_> =
                     std::array::from_fn(|k| ctx.chunks[k].and_then(|c| c.fields.get(f)));
-                fill(dst, &around, ctx.defs[f].outside);
+                fill(dst, &around, ctx.kinds.fields[f].outside);
             }
             LawOp::Const(v) => dst.fill(v),
             LawOp::Clock(k) => dst.fill(ctx.clock[usize::from(k)]),
@@ -361,6 +373,26 @@ pub fn run(
                             }
                         }
                         dst[y * SIDE + xx] = acc;
+                    }
+                }
+            }
+            LawOp::Is(p) => {
+                let k = ctx.kinds;
+                let want = Want::of(p, &k.family_end);
+                let n = CHUNK_SIZE as usize;
+                for y in 0..SIDE {
+                    let (cy, ly) = side(y, n);
+                    for x in 0..SIDE {
+                        let (cx, lx) = side(x, n);
+                        let i = ly * n + lx;
+                        let hit = match (ctx.chunks[cy * 3 + cx], ctx.actors[cy * 3 + cx]) {
+                            (Some(cells), Some(rows)) => {
+                                want.test(cells, rows, i, &k.tag_bits, &k.materials.table)
+                            }
+                            // As a search sees it: rock, nobody.
+                            _ => want == Want::Feature(i32::from(Feature::Rock.0)),
+                        };
+                        dst[y * SIDE + x] = i32::from(hit);
                     }
                 }
             }

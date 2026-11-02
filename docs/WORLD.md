@@ -95,8 +95,9 @@ runs over arrays:
 - `rand(n)` and `chance(p)` per cell, counter-based like actors' dice
   (`hash(seed, stream, tick, x, y)`).
 
-No actions, searches beyond 1, loops, or reads of actors: what needs more is an actor, and the
-compiler says so. A law writes only its own cell; neighbours are read as they stood before the
+No actions, searches beyond 1 or loops: what needs more is an actor, and the compiler says so.
+A law reads actors only as `is(here, PRED)`, 1 where its cell holds a match (built 2026-11-02,
+decision 65), and its neighbours' through `count (is(here, PRED)) within 1`. A law writes only its own cell; neighbours are read as they stood before the
 law ran (**compute** every due chunk into a scratch, reading its own and its neighbours'
 arrays; then **commit**), so the order of chunks never matters. A chunk where the field is all
 0 and the law leaves 0 at 0 is skipped (scent's check today).
@@ -347,8 +348,8 @@ kind ant {
 ## 13. Open
 
 - Negative field values (a sea floor below 0), or an offset in the pack?
-- Laws reading actors (`count chicken within 1`: grass trampled where hens walk): the occupant
-  array is a column too; add when a world needs it.
+- Laws reading actors: built (decision 65), `is(here, PRED)` in a law, as a search sees the
+  cell; `count (is(here, hen)) within 1` for the square.
 - Does `light` become a field (shade under trees), with the clock's daylight its default?
 - A scenario's `terrain` and drawn `map` syntax for declared materials and fields.
 - Namespaces for two *arena* packs of different authors that should not collide on a name

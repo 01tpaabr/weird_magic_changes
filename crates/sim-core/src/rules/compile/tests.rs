@@ -2319,6 +2319,18 @@ fn law_errors_name_the_problem() {
             "expected `,`",
         ),
         (
+            "field f max 4 kind hen { glyph \"h\" when true => idle } field g max 4 { every 1 { g = is(north, hen) } }",
+            "a law reads actors on its own cell",
+        ),
+        (
+            "field f max 4 { every 1 { f = is(here, (f > 1)) } }",
+            "a field condition is a plain condition",
+        ),
+        (
+            "field f max 4 { every 1 { f = is(here, fox) } }",
+            "unknown kind, tag or material `fox`",
+        ),
+        (
             "field f max 4 kind k { glyph \"k\" when flow(f, f, 1) > 0 => idle }",
             "`flow` belongs in a field's law",
         ),

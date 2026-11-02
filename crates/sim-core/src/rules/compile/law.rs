@@ -311,6 +311,36 @@ impl L<'_, '_> {
                     }
                 }
             }
+            Expr::IsAt(t, p) => {
+                if !matches!(t, Target::Here) {
+                    return Err(self.err(
+                        &self.at,
+                        "a law reads actors on its own cell: `is(here, ...)`, and its neighbours through `count`",
+                    ));
+                }
+                let v = match p {
+                    Pred::Kind(name, only, at) => self.g.named_pred(name, *only, at)?,
+                    Pred::KindLook(name, look, only, at) => match self.g.kind_id(name) {
+                        Some(id) => pred::kind_look(id, *look) + if *only { pred::ONLY } else { 0 },
+                        None => {
+                            return Err(
+                                self.err(at, format!("`{name}:{look}`: `{name}` is not a kind"))
+                            );
+                        }
+                    },
+                    Pred::Ground(g) => pred::ground(g.0),
+                    Pred::Feature(f) => pred::feature(f.0),
+                    Pred::Free => pred::FREE,
+                    Pred::Bare => pred::BARE,
+                    Pred::Fields(_, _, at) => {
+                        return Err(self.err(
+                            at,
+                            "in a law a field condition is a plain condition: `is(here, ...)` takes a kind, a tag or a material",
+                        ));
+                    }
+                };
+                self.op(LawOp::Is(v), false)?
+            }
             Expr::Flow {
                 of,
                 level,

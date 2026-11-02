@@ -263,7 +263,8 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   ```
   *In a law, `count (` always starts this aggregate, never a field condition. The radius folds to 1. A law's block holds `let`, assignments to its own field and to its
   locals, and `if`/`else`; its expressions read fields, locals, constants, `hour`, `day`,
-  `light`, `rand`, `chance`, `min`, `max`, `abs`, `sign`, `clamp`, aggregates and flows, never
+  `light`, `rand`, `chance`, `min`, `max`, `abs`, `sign`, `clamp`, `is(here, pred)` (the
+  actors and materials on its own cell; no other target, no field condition), aggregates and flows, never
   one aggregate or flow inside another (through a local either). Inside an aggregate or a
   flow a field's name is its value before the law ran. `flow`'s rate folds to a number
   above 0. At most 128 steps.*

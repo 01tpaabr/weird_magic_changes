@@ -759,7 +759,16 @@ pub fn explain_slots(
         .filter_map(|k| {
             let c = ChunkCoord::new(cc.x + k % 3 - 1, cc.y + k / 3 - 1);
             let mine = cells_at(c)?;
-            run_due(kinds, seed, tick, c, around(c, cells_at), &mut layers);
+            let rows_at = |c: ChunkCoord| world.get::<ChunkActors>(stage.entity(c)?);
+            run_due(
+                kinds,
+                seed,
+                tick,
+                c,
+                around(c, cells_at),
+                around(c, rows_at),
+                &mut layers,
+            );
             if layers.is_empty() {
                 return None;
             }
@@ -2575,6 +2584,50 @@ mod tests {
             low.0 * high.1 > 2 * high.0 * low.1,
             "low ground holds more than twice the water a cell: {low:?} {high:?}"
         );
+    }
+
+    /// A law reads actors as a search does: `is(here, hen)` on its own
+    /// cell, `count (is(here, bird)) within 1` (a tag) round it, across a
+    /// chunk's border; where nothing is loaded, rock with nobody.
+    #[test]
+    fn a_law_reads_the_actors_on_its_cells() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field trod max 255 { every 1 { if is(here, hen) { trod = trod + 1 } } }
+             field near max 9 { every 1 { near = count (is(here, bird)) within 1 } }
+             field edge max 9 { every 1 { edge = count (is(here, rock)) within 1 } }
+             kind hen { glyph \"h\"  tags bird  cadence 1  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(23)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(63, 10),
+            0,
+            newborn(&kinds, 0, 0xB1, now)
+        ));
+        for _ in 0..3 {
+            step(&mut w);
+        }
+        assert_eq!(field(&w, 0, Pos::new(63, 10)), 3, "trodden every tick");
+        assert_eq!(field(&w, 0, Pos::new(64, 10)), 0, "not next to it");
+        assert_eq!(field(&w, 1, Pos::new(64, 11)), 1, "seen across the border");
+        assert_eq!(field(&w, 1, Pos::new(65, 10)), 0, "two cells off");
+        assert_eq!(
+            field(&w, 2, Pos::new(0, 0)),
+            5,
+            "the unloaded corner is rock"
+        );
+        assert_eq!(field(&w, 2, Pos::new(10, 10)), 0);
     }
 
     /// Inside an aggregate a field is read as it stood before the law ran,

@@ -562,7 +562,11 @@ field alive max 1 {
 A law sees one cell at a time: its own value, the other fields of the cell, constants,
 `hour`, `day` and `light`, `rand` and `chance` (the cell's own dice), and its neighbours
 through **aggregates** over the 3 x 3 square, the cell included: `sum F within 1`, `avg`,
-`min`, `max`, and `count (cond) within 1`, the cells where `cond` holds. It has `let`,
+`min`, `max`, and `count (cond) within 1`, the cells where `cond` holds. It reads the
+actors on its cell as a search sees them: `is(here, PRED)` is 1 where the cell matches a
+kind (its family, or `only` it, or `kind:look`), a tag, a material, `free` or `bare`, and
+`count (is(here, hen)) within 1` counts the cells round it that do (no other target: a law
+stays on its square; beyond the loaded world, rock with nobody). It has `let`,
 assignments to its own field and `if`/`else`; nothing that acts, searches, loops or calls,
 and it writes no other field (the compiler says so). Inside an aggregate a field is read as
 it stood before the law ran, and every law of a tick runs from the values the fields held
@@ -572,8 +576,20 @@ edge, so an even field stays even, or the field's `outside` value if it has one.
 column program: it runs over a whole chunk at once, as fast as hand-written code once it
 reads its neighbours (`docs/WORLD.md` §8), so a law is much cheaper than an actor in every
 cell. A law without dice or the clock that leaves 0 at 0 (a fade, a regrowth to a cap,
-Life) skips every chunk where the fields it reads are all 0: a trail that covers a few
+Life) skips every chunk where the fields it reads are all 0 (one that reads actors never
+does): a trail that covers a few
 chunks costs only there. `packs/gather` grows its sugar back with one.
+
+```rules
+field turf max 9 {
+  init 9
+  every 1h {
+    if is(here, hen) { turf = turf - 1 }                  # trodden where a hen stands
+    else if count (is(here, hen)) within 1 == 0 { turf = min(turf + 1, 9) }
+  }
+}
+kind hen { glyph "h"  when true => move random free }
+```
 
 **Flow.** `flow(w, level, rate)` is what flows into a cell from its four neighbours (north,
 east, south, west), net: each pair of neighbours moves `(level' - level) / rate` (rounded

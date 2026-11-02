@@ -3399,7 +3399,12 @@ impl<'a> Gen<'a> {
                 relief: f.relief,
             });
         }
-        // Laws last: a law reads any field, declared before it or after.
+        Ok(())
+    }
+
+    /// Every field's law, once the kinds are numbered: a law reads any
+    /// field, declared before it or after, and any kind (`is(here, hen)`).
+    fn resolve_laws(&mut self) -> Result<()> {
         for (i, f) in self.fields_ast.iter().enumerate() {
             if let Some((every, body, at)) = &f.law {
                 let law = self.law(i, every, body, at)?;
@@ -3655,6 +3660,7 @@ impl<'a> Gen<'a> {
             }
         }
         self.number_kinds();
+        self.resolve_laws()?;
         // The sub table: file subs, then each kind's member subs.
         let mut next_sub = self.subs.len();
         let mut sub_names: Vec<String> = self.subs.iter().map(|s| s.name.clone()).collect();
@@ -5228,6 +5234,33 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// A kind (its family, or `only` it), a tag or a material by name, as
+    /// a predicate value.
+    fn named_pred(&self, name: &str, only: bool, at: &Pos) -> Result<i32> {
+        Ok(if let Some(id) = self.kind_id(name) {
+            i32::from(id) + if only { pred::ONLY } else { 0 }
+        } else if self.item_named(name).is_some() {
+            return Err(self.err(
+                at,
+                format!("`{name}` is a trait: no actor is one; match a tag instead"),
+            ));
+        } else if let Some(bit) = self.tags.iter().position(|t| t == name) {
+            if only {
+                return Err(self.err(
+                    at,
+                    format!("`only` applies to a kind, not the tag `{name}`"),
+                ));
+            }
+            pred::TAG_BASE + i32::try_from(bit).expect("at most MAX_TAGS tags")
+        } else if let Some(g) = self.materials.ground(name).filter(|_| !only) {
+            pred::ground(g.0)
+        } else if let Some(f) = self.materials.feature(name).filter(|_| !only) {
+            pred::feature(f.0)
+        } else {
+            return Err(self.err(at, format!("unknown kind, tag or material `{name}`")));
+        })
+    }
+
     fn pred(&mut self, p: &Pred) -> Result<()> {
         let v = match p {
             Pred::Fields(terms, base, at) => {
@@ -5269,28 +5302,7 @@ impl<'a> Gen<'a> {
                     self.asm.load(slot);
                     return Ok(());
                 }
-                if let Some(id) = self.kind_id(name) {
-                    i32::from(id) + if *only { pred::ONLY } else { 0 }
-                } else if self.item_named(name).is_some() {
-                    return Err(self.err(
-                        at,
-                        format!("`{name}` is a trait: no actor is one; match a tag instead"),
-                    ));
-                } else if let Some(bit) = self.tags.iter().position(|t| t == name) {
-                    if *only {
-                        return Err(self.err(
-                            at,
-                            format!("`only` applies to a kind, not the tag `{name}`"),
-                        ));
-                    }
-                    pred::TAG_BASE + i32::try_from(bit).expect("at most MAX_TAGS tags")
-                } else if let Some(g) = self.materials.ground(name).filter(|_| !*only) {
-                    pred::ground(g.0)
-                } else if let Some(f) = self.materials.feature(name).filter(|_| !*only) {
-                    pred::feature(f.0)
-                } else {
-                    return Err(self.err(at, format!("unknown kind, tag or material `{name}`")));
-                }
+                self.named_pred(name, *only, at)?
             }
             Pred::KindLook(name, look, only, at) => match self.kind_id(name) {
                 Some(id) => pred::kind_look(id, *look) + if *only { pred::ONLY } else { 0 },

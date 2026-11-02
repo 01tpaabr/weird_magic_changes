@@ -1428,7 +1428,7 @@ impl<'a> G<'a> {
                 _ => format!("{}", self.n(30)),
             };
         }
-        match self.n(7) {
+        match self.n(8) {
             0 => {
                 let op = self.one(&["+", "-", "*", "/", "%"]);
                 let a = self.law_expr(d - 1, locals, agg);
@@ -1460,6 +1460,8 @@ impl<'a> G<'a> {
                 let l = self.law_expr(d - 1, &[], false);
                 format!("flow({w}, {l}, {})", 1 + self.n(12))
             }
+            // The actors on the cell, as a search sees them.
+            7 => format!("is(here, {})", self.pred()),
             _ => self.law_expr(0, locals, agg),
         }
     }

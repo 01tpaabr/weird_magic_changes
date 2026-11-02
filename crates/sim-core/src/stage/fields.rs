@@ -11,6 +11,7 @@ use std::cell::RefCell;
 use bevy_ecs::prelude::*;
 
 use super::{CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Stage};
+use crate::actors::ChunkActors;
 use crate::rules::Kinds;
 use crate::rules::law::{self, LawCtx};
 use crate::sim::{SimConfig, Tick};
@@ -31,14 +32,16 @@ thread_local! {
 
 /// Run every law due at `tick` in chunk `coord` into `out` (cleared first),
 /// from `chunks`: the chunk and its eight neighbours as they stand, in row
-/// order from the top-left. The one law runner: the tick and `wmc why`
-/// (which must see the fields the think will see) both call it.
+/// order from the top-left, and their actors (`is(here, ...)` reads them).
+/// The one law runner: the tick and `wmc why` (which must see the fields
+/// the think will see) both call it.
 pub fn run_due(
     kinds: &Kinds,
     seed: u64,
     tick: u64,
     coord: ChunkCoord,
     chunks: [Option<&ChunkCells>; 9],
+    actors: [Option<&ChunkActors>; 9],
     out: &mut Vec<(u8, [u16; CHUNK_CELLS])>,
 ) {
     out.clear();
@@ -69,7 +72,8 @@ pub fn run_due(
                 field: f,
                 clock,
                 chunks,
-                defs: &kinds.fields,
+                actors,
+                kinds,
             };
             out.push((f, [0; CHUNK_CELLS]));
             let layer = &mut out.last_mut().expect("just pushed").1;
@@ -101,10 +105,7 @@ fn still(l: &law::Law, kinds: &Kinds, chunks: &[Option<&ChunkCells>; 9]) -> bool
 
 /// The chunk at `c` and its eight neighbours, by `get`, in row order from
 /// the top-left.
-pub fn around<'a>(
-    c: ChunkCoord,
-    get: impl Fn(ChunkCoord) -> Option<&'a ChunkCells>,
-) -> [Option<&'a ChunkCells>; 9] {
+pub fn around<T>(c: ChunkCoord, get: impl Fn(ChunkCoord) -> Option<T>) -> [Option<T>; 9] {
     std::array::from_fn(|k| {
         let k = i32::try_from(k).expect("0..9");
         get(ChunkCoord::new(c.x + k % 3 - 1, c.y + k / 3 - 1))
@@ -119,15 +120,18 @@ pub fn law_compute(
     kinds: Res<Kinds>,
     stage: Res<Stage>,
     cells: Query<&ChunkCells>,
+    rows: Query<&ChunkActors>,
     mut own: Query<(&ChunkCoord, &mut LawScratch)>,
 ) {
-    let (tick, seed, kinds, stage, cells) = (tick.0, cfg.seed, &*kinds, &*stage, &cells);
+    let (tick, seed, kinds, stage) = (tick.0, cfg.seed, &*kinds, &*stage);
+    let (cells, rows) = (&cells, &rows);
     if !kinds.fields.iter().any(|f| f.law.is_some()) {
         return;
     }
     own.par_iter_mut().for_each(|(coord, mut scratch)| {
         let chunks = around(*coord, |c| cells.get(stage.entity(c)?).ok());
-        run_due(kinds, seed, tick, *coord, chunks, &mut scratch.out);
+        let actors = around(*coord, |c| rows.get(stage.entity(c)?).ok());
+        run_due(kinds, seed, tick, *coord, chunks, actors, &mut scratch.out);
     });
 }
 
