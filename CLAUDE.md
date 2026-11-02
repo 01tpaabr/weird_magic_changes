@@ -10,6 +10,11 @@ decision 39). The built-in kinds (chickens, foxes, bees) and `packs/*`
 are example and test content, not the goal. A new capability is general (a sense, action, layer or tool
 any pack can use), never a special case for one kind.
 
+**Everything is local, by design** (README "Purpose", ARCHITECTURE decision 68): actors and
+laws see and change only what is near them; nothing global but the clock. Never add a
+global query, broadcast or world-wide state readable from inside a world. More powerful
+actors means raising local limits (sight, memory, senses), not a global shortcut.
+
 ## Priorities, in order
 
 When two of these conflict, the higher one wins.

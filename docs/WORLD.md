@@ -21,6 +21,8 @@ The world should follow the same rule as the actors:
 
 What a world does over time then comes from local interactions (cells with cells, agents with
 cells, agents with agents), never from a fixed rule of the engine or a top-down process.
+This is a feature of the project, not a constraint to work around (decision 68): no design
+step adds anything global, and a world that needs more reach gets larger local limits.
 
 Three tiers of thing, chosen by how dense they are:
 

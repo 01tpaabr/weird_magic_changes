@@ -20,6 +20,17 @@ find where it falls short. They are not the product. When a piece of content nee
 something the engine lacks, the answer is a general capability any pack can use (a
 sense, an action, a layer, a tool), not a special case for that one kind.
 
+**Everything is local, and that is a feature.** An actor sees, reads and changes only what
+is near it; a field's law reads only its cell and its neighbours; nothing in a world is
+global but the clock. What a world does comes from local interactions, never from a
+top-down process: no global queries ("the nearest X anywhere", "how many X in the world"),
+no broadcast, no world-wide state an actor can read. This is what makes a world parallel,
+deterministic and endless, and it is the kind of world this engine is for. When actors need
+more power, the answer is a larger local reach (more sight, more memory, richer senses,
+fields that carry information across the world step by step), never a global shortcut.
+Scenario tests and tools (`expect count`, `wmc observe`) look at the whole world from
+outside; nothing inside it can.
+
 ## Status
 
 The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works today:
