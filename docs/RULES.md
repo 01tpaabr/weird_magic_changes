@@ -911,6 +911,28 @@ budget { fuel 256  rows 60  private 1 }
 Only the arena declares a budget; a player's pack that does is refused. `packs/colony` keeps
 each colony to 60 ants.
 
+**Namespaces.** Packs share one set of names, so two arena packs by different authors that
+both declare a `path` don't load together. A file that starts `namespace NAME` puts its
+top-level names (kinds, traits, subs, constants, fields, materials, layers) in NAME: inside
+the namespace's files they stay plain, and everywhere else, other packs and scenarios, they
+are `NAME.ITEM`. Tags stay global (they are how packs find each other's actors), and so do
+the words the language reads (`water`, `soil`, `rock`, `food`, `health`, ...): a namespace
+that redeclares `ground water` changes the world's water. A namespace can't be a player's
+name or any pack's item, and a player's pack declares none (its names are its own already).
+
+```text
+# packs/weather/weather.rules
+namespace weather
+layer sky { flies }
+field path max 255 { every 1 { if is(here, cloud) { path = min(path + 8, 255) } else { path = path - (path + 31) / 32 } } }
+kind cloud { glyph "@"  layer sky  when chance(70) => move east  when true => move random free }
+
+# scenarios/tests/weather.scenario: beside packs/gather, which has a `path` of its own
+rules ../../packs/gather ../../packs/weather
+start weather.cloud 1 / 600
+expect eventually max weather.path >= 100 to 2h
+```
+
 Scenarios, `expect` lines and the tools name a player's kinds as `red.ant`. A save keeps
 each pack's player (`red=/abs/path`). A world without players is as it always was.
 

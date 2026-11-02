@@ -59,6 +59,8 @@ everywhere with a pointer to scenarios.)
 
 ```
 IDENT = NAME that is not a reserved word
+      | NAME "." NAME    (a namespace's item, `weather.path`: one name, where the first NAME
+                          is a namespace and the second one of its items; made before parsing)
 ```
 
 **Contextual words** are ordinary IDENTs except in one position:
@@ -71,6 +73,9 @@ IDENT = NAME that is not a reserved word
 | `dx`, `dy` | a binding's offset, after `.` | any name |
 | `conserved`, `fixed`, `private`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
 | `ground`, `feature`, `layer` | start a material or a layer at the top of a file | any name |
+| `budget` | starts the arena's budget at the top of a file | any name |
+| `rows` (and `fuel`, `private`) | in a budget's block | any name |
+| `namespace` | the first word of a file | any name |
 | `reach`, `climb`, `layer` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
 | `relief` | in a `field` block | any name |
@@ -82,7 +87,7 @@ IDENT = NAME that is not a reserved word
 ## 2. Files and items
 
 ```
-file      = { item | sub | const | field | material | layer | budget } EOF
+file      = [ "namespace" NAME ] { item | sub | const | field | material | layer | budget } EOF
 budget    = "budget" "{" { ( "fuel" | "rows" | "private" ) additive } "}"     (each part once; an arena's only)
 layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"

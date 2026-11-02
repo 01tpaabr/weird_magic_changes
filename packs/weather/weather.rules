@@ -1,0 +1,28 @@
+# weather: a pack in a namespace (docs/RULES.md §15, Namespaces). It
+# begins `namespace weather`, so its names are its own: clouds drift east
+# in a layer of their own and leave a wet `path` behind them, while
+# packs/gather, loaded beside it, keeps its footsteps in a `path` of its
+# own. Inside this file the names are plain; any other pack, or a
+# scenario, calls them `weather.path` and `weather.cloud`. The rain is a
+# law that reads the actors over each cell. scenarios/tests/weather.scenario
+# plays both packs.
+namespace weather
+
+layer sky { flies }
+
+field path max 255 {
+  color "#7090c0"
+  every 1 {
+    if is(here, cloud) { path = min(path + 8, 255) }    # rain under a cloud
+    else { path = path - (path + 31) / 32 }             # and it dries
+  }
+}
+
+kind cloud {
+  glyph "@"
+  color "#d0d8e8"
+  layer sky
+  cadence 4
+  when chance(70) => move east
+  when true => move random free
+}

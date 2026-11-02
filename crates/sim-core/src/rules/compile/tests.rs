@@ -2857,3 +2857,115 @@ fn an_arenas_budget_bounds_its_players() {
     let plain = compile_ok("kind k { glyph \"k\"  when true => idle }");
     assert_eq!(plain.players, crate::rules::Players::default());
 }
+
+/// Two arena packs that both declare `rain` and `cloud`: one in a
+/// namespace keeps its own as `weather.rain`, plain inside its files; a
+/// third file names it `weather.rain`. A namespace's kinds are the arena's,
+/// not a player's. Tags and the engine's words stay global.
+#[test]
+fn a_namespace_keeps_an_arena_packs_names_apart() {
+    let weather = "namespace weather
+                   const WET = 3
+                   field rain max 9 { every 1 { rain = min(rain + 1, WET) } }
+                   ground water { walkable drink }
+                   layer high { flies }
+                   kind cloud { glyph \"c\"  tags sky  layer high  when rain(here) > 1 => idle  when true => move random free }";
+    let farm = "field rain max 5
+                kind cloud { glyph \"o\"  when true => idle }
+                kind farmer { glyph \"f\"
+                  when weather.rain(here) > weather.WET - 1 and rain(here) == 0 => idle
+                  when nearest weather.cloud within 4 as c => move toward c
+                  when nearest sky within 4 as c => move away c
+                  when true => move random free }";
+    let k = compile_owned(
+        &[("weather.rules", weather, None), ("farm.rules", farm, None)],
+        &[],
+    )
+    .unwrap();
+    let mut names: Vec<&str> = k.names().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["cloud", "farmer", "weather.cloud"]);
+    let fields: Vec<&str> = k.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(fields, ["weather.rain", "rain"]);
+    assert_eq!(k.layers[0].name, "weather.high");
+    assert!(
+        k.materials
+            .ground("water")
+            .is_some_and(|g| k.materials.grounds[usize::from(g.0)].solid),
+        "water redeclared, globally"
+    );
+    assert_eq!(
+        k.players,
+        crate::rules::Players::default(),
+        "a namespace is no player"
+    );
+
+    let err =
+        |files: &[(&str, &str, Option<&str>)]| compile_owned(files, &[]).unwrap_err().to_string();
+    for (files, want) in [
+        (
+            vec![("a.rules", "namespace", None)],
+            "expected a name after `namespace`",
+        ),
+        (
+            vec![("a.rules", "namespace kind", None)],
+            "`kind` can't name a namespace",
+        ),
+        (
+            vec![("a.rules", "namespace food", None)],
+            "`food` can't name a namespace",
+        ),
+        (
+            vec![(
+                "a.rules",
+                "kind k { glyph \"k\" when true => idle } namespace w",
+                None,
+            )],
+            "found `namespace`",
+        ),
+        (
+            vec![
+                (
+                    "a.rules",
+                    "namespace w  kind k { glyph \"k\" when true => idle }",
+                    None,
+                ),
+                ("b.rules", "const w = 1", None),
+            ],
+            "`w` is a namespace",
+        ),
+        (
+            vec![
+                ("a.rules", "namespace red  const A = 1", None),
+                (
+                    "r.rules",
+                    "kind k { glyph \"k\" when true => idle }",
+                    Some("red"),
+                ),
+            ],
+            "`red` is both a player and a namespace",
+        ),
+        (
+            vec![(
+                "r.rules",
+                "namespace q  kind k { glyph \"k\" when true => idle }",
+                Some("red"),
+            )],
+            "its pack declares no namespace",
+        ),
+        (
+            vec![
+                ("a.rules", "namespace w  field rain max 9", None),
+                (
+                    "b.rules",
+                    "kind k { glyph \"k\" when rain(here) > 0 => idle }",
+                    None,
+                ),
+            ],
+            "rain",
+        ),
+    ] {
+        let e = err(&files);
+        assert!(e.contains(want), "{files:?}\n  got: {e}");
+    }
+}

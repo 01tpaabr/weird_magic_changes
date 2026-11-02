@@ -178,9 +178,16 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
     for &(name, text, owner) in files {
         lexed.push((name, Lexer::new(name, text).lex()?, owner));
     }
+    let spaces = namespaces(&mut lexed, parse)?;
     let mut items = Items::default();
     for (name, tokens, _) in lexed.iter().filter(|(_, _, o)| o.is_none()) {
         parse(name, tokens.clone(), &mut items)?;
+    }
+    if let Some((n, at)) = top_names(&items).find(|(n, _)| spaces.iter().any(|(s, _)| s == *n)) {
+        return Err(pos_err(
+            at,
+            format!("`{n}` is a namespace: an item takes another name"),
+        ));
     }
     if let Some(f) = items.fields.iter().find(|f| f.private) {
         return Err(pos_err(
@@ -199,6 +206,15 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
             players.push(p);
         }
     }
+    if let Some(p) = players.iter().find(|p| spaces.iter().any(|(s, _)| s == *p)) {
+        return Err(CompileError {
+            file: "--rules".into(),
+            line: 0,
+            col: 0,
+            msg: format!("`{p}` is both a player and a namespace"),
+        });
+    }
+    let player_list: Vec<String> = players.iter().map(|p| p.to_string()).collect();
     for player in players {
         let mine = || lexed.iter().filter(move |(_, _, o)| *o == Some(player));
         let mut own = Items::default();
@@ -219,7 +235,131 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
         }
     }
     let pairs: Vec<(&str, &str)> = files.iter().map(|&(n, t, _)| (n, t)).collect();
-    Gen::new(&items, &pairs, consts).generate()
+    let mut g = Gen::new(&items, &pairs, consts);
+    g.player_list = player_list;
+    g.generate()
+}
+
+/// Every top-level name `items` declare, with where.
+fn top_names(items: &Items) -> impl Iterator<Item = (&str, &Pos)> {
+    items
+        .items
+        .iter()
+        .map(|i| (i.name.as_str(), &i.at))
+        .chain(items.subs.iter().map(|s| (s.name.as_str(), &s.at)))
+        .chain(items.consts.iter().map(|c| (c.name.as_str(), &c.at)))
+        .chain(items.fields.iter().map(|f| (f.name.as_str(), &f.at)))
+        .chain(items.materials.iter().map(|m| (m.name.as_str(), &m.at)))
+        .chain(items.layers.iter().map(|(l, at)| (l.name.as_str(), at)))
+}
+
+/// Namespaces (`docs/RULES.md` §15): an arena file that starts `namespace
+/// NAME` puts its top-level names in NAME, so two packs of different
+/// authors don't collide. Inside the namespace's files a name stays plain;
+/// every file names it `NAME.ITEM`. Done on tokens, before parsing: the
+/// namespace's names become `NAME.ITEM` in its own files, and `NAME . ITEM`
+/// becomes that one name everywhere. Tags and the words the language reads
+/// (`water`, `food`, ...) stay global. Returns each namespace and its names.
+fn namespaces(
+    lexed: &mut [(&str, Vec<Token>, Option<&str>)],
+    parse: impl Fn(&str, Vec<Token>, &mut Items) -> Result<()>,
+) -> Result<Vec<(String, Vec<String>)>> {
+    let mut spaces: Vec<(String, Vec<String>)> = Vec::new();
+    let mut space_of: Vec<Option<usize>> = Vec::with_capacity(lexed.len());
+    for (name, tokens, owner) in lexed.iter_mut() {
+        let Some(Token {
+            tok: Tok::Name(kw),
+            line,
+            col,
+        }) = tokens.first()
+        else {
+            space_of.push(None);
+            continue;
+        };
+        if kw != "namespace" {
+            space_of.push(None);
+            continue;
+        }
+        let at = Pos {
+            file: name.to_string(),
+            line: *line,
+            col: *col,
+        };
+        let Some(Token {
+            tok: Tok::Name(ns), ..
+        }) = tokens.get(1)
+        else {
+            return Err(pos_err(&at, "expected a name after `namespace`"));
+        };
+        if owner.is_some() {
+            return Err(pos_err(
+                &at,
+                "a player's names are its own already: its pack declares no namespace",
+            ));
+        }
+        if ns.contains('.') || is_reserved(ns) || NOT_PLAYER_NAMES.contains(&ns.as_str()) {
+            return Err(pos_err(&at, format!("`{ns}` can't name a namespace")));
+        }
+        let i = match spaces.iter().position(|(s, _)| s == ns) {
+            Some(i) => i,
+            None => {
+                spaces.push((ns.clone(), Vec::new()));
+                spaces.len() - 1
+            }
+        };
+        tokens.drain(..2);
+        space_of.push(Some(i));
+    }
+    if spaces.is_empty() {
+        return Ok(spaces);
+    }
+    for (i, (_, names)) in spaces.iter_mut().enumerate() {
+        let mut own = Items::default();
+        for ((name, tokens, _), s) in lexed.iter().zip(&space_of) {
+            if *s == Some(i) {
+                parse(name, tokens.clone(), &mut own)?;
+            }
+        }
+        for (n, _) in top_names(&own) {
+            let global = NOT_PLAYER_NAMES.contains(&n) || ["soil", "water", "rock"].contains(&n);
+            if !global && !names.iter().any(|m| m == n) {
+                names.push(n.to_string());
+            }
+        }
+    }
+    for ((_, tokens, _), s) in lexed.iter_mut().zip(&space_of) {
+        let mut out = Vec::with_capacity(tokens.len());
+        let mut k = 0;
+        while k < tokens.len() {
+            let t = &tokens[k];
+            if let (Tok::Name(a), Some(Tok::Sym(".")), Some(Tok::Name(b))) = (
+                &t.tok,
+                tokens.get(k + 1).map(|t| &t.tok),
+                tokens.get(k + 2).map(|t| &t.tok),
+            ) && spaces
+                .iter()
+                .any(|(sp, names)| sp == a && names.contains(b))
+            {
+                out.push(Token {
+                    tok: Tok::Name(format!("{a}.{b}")),
+                    ..t.clone()
+                });
+                k += 3;
+                continue;
+            }
+            let mut t = t.clone();
+            if let (Some(i), Tok::Name(n)) = (s, &t.tok) {
+                let (sp, names) = &spaces[*i];
+                if names.contains(n) {
+                    t.tok = Tok::Name(format!("{sp}.{n}"));
+                }
+            }
+            out.push(t);
+            k += 1;
+        }
+        *tokens = out;
+    }
+    Ok(spaces)
 }
 
 fn pos_err(at: &Pos, msg: impl Into<String>) -> CompileError {
@@ -313,9 +453,11 @@ fn player_names(player: &str, own: &Items, arena: &Items) -> Result<Vec<String>>
 
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
 /// files, in sorted file-name order; a directory with none is an error) or
-/// a single file; packs go in the order given, with one namespace across
-/// all of them (a name declared in two packs is an error naming both). A
-/// pack given twice loads once.
+/// a single file; packs go in the order given, with one set of names
+/// across all of them (a name declared in two packs is an error naming
+/// both), but for a file that starts `namespace NAME` and a player's pack
+/// (`NAME=PATH`): their names are `NAME.ITEM`. A pack given twice loads
+/// once.
 /// With more than one pack, a directory's file is named `pack/file.rules`
 /// in positions, `pack` being the directory's own name; two files that
 /// would share a name take parent directories until they don't. The
@@ -1397,6 +1539,14 @@ impl Parser<'_> {
     }
 
     fn file(&mut self, items: &mut Items) -> Result<()> {
+        // `namespace NAME` first: compile_owned has applied it to the
+        // tokens (and taken it out); parsed alone, it is skipped.
+        if self.is_kw("namespace")
+            && matches!(self.tokens.get(1).map(|t| &t.tok), Some(Tok::Name(_)))
+        {
+            self.bump();
+            self.bump();
+        }
         while *self.peek() != Tok::Eof {
             if self.is_kw("kind") || self.is_kw("trait") {
                 items.items.push(self.item()?);
@@ -3076,6 +3226,9 @@ struct Gen<'a> {
     fields_ast: &'a [FieldAst],
     /// The arena's `budget`, as written, and folded: fuel, rows, private.
     budget_ast: Option<&'a BudgetAst>,
+    /// The players' names: a kind `PLAYER.NAME` is theirs (a namespace's
+    /// `SPACE.NAME` is the arena's).
+    player_list: Vec<String>,
     budget: [Option<u32>; 3],
     field_defs: Vec<FieldDef>,
     /// The `ground` and `feature` declarations, and the materials they make
@@ -3207,6 +3360,7 @@ impl<'a> Gen<'a> {
             consts: &items.consts,
             fields_ast: &items.fields,
             budget_ast: items.budgets.first(),
+            player_list: Vec::new(),
             budget: [None; 3],
             field_defs: Vec::new(),
             materials_ast: &items.materials,
@@ -3522,7 +3676,11 @@ impl<'a> Gen<'a> {
             ..Players::default()
         };
         for d in defs.iter_mut() {
-            let Some((player, _)) = d.name.split_once('.') else {
+            let Some((player, _)) = d
+                .name
+                .split_once('.')
+                .filter(|(o, _)| self.player_list.iter().any(|p| p == o))
+            else {
                 p.of.push(Players::NONE);
                 continue;
             };

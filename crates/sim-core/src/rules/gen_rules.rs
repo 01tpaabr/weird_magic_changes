@@ -1748,6 +1748,9 @@ impl<'a> G<'a> {
 
     fn syntax_file(&mut self) -> String {
         let mut out = String::new();
+        if self.maybe(10) {
+            out += &format!("namespace {}\n", self.pool(&[]));
+        }
         for _ in 0..self.n(7) {
             match self.n(6) {
                 0 => out += &self.syntax_item(false),

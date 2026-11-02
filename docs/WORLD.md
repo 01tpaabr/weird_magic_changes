@@ -352,6 +352,5 @@ kind ant {
   cell; `count (is(here, hen)) within 1` for the square.
 - Does `light` become a field (shade under trees), with the clock's daylight its default?
 - A scenario's `terrain` and drawn `map` syntax for declared materials and fields.
-- Namespaces for two *arena* packs of different authors that should not collide on a name
-  (players have theirs, §12).
+- Namespaces for arena packs: built (decision 67), a file that starts `namespace weather`.
 - A player's budget: built (decision 66), `budget { fuel N  rows N  private N }` in the arena.

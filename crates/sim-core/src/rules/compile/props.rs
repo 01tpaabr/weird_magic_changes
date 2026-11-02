@@ -430,3 +430,27 @@ fn a_players_program_is_the_same_program() {
         Ok(())
     }));
 }
+
+/// A program in a namespace (`namespace zz` on top) is the same program:
+/// the same code and constants, every kind named `zz.NAME`, whatever it
+/// declares (fields, materials, layers, laws, a budget).
+#[test]
+fn a_namespaced_program_is_the_same_program() {
+    check(runner(CASES).run(&gen_rules::program(Mode::Valid), |p| {
+        let fail = |e: String| TestCaseError::fail(format!("{e}\n--- program ---\n{}", p.text));
+        let k = compile("g.rules", &p.text).map_err(|e| fail(e.to_string()))?;
+        let text = format!("namespace zz\n{}", p.text);
+        let spaced = compile("g.rules", &text).map_err(|e| fail(format!("in a namespace: {e}")))?;
+        if spaced.code != k.code || spaced.consts != k.consts {
+            return Err(fail("in a namespace, other code".into()));
+        }
+        let names: Vec<String> = k.names().map(|n| format!("zz.{n}")).collect();
+        if spaced.names().collect::<Vec<_>>() != names {
+            return Err(fail(format!(
+                "in a namespace, kinds {:?}",
+                spaced.names().collect::<Vec<_>>()
+            )));
+        }
+        Ok(())
+    }));
+}
