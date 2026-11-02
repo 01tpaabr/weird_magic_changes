@@ -47,7 +47,7 @@ pub fn run_due(
     out.clear();
     let due =
         |f: &crate::rules::FieldDef| f.law.as_ref().is_some_and(|l| law::law_due(tick, coord, l));
-    if !kinds.fields.iter().any(due) {
+    if !any_due(kinds, tick, coord) {
         return;
     }
     let at = Clock::at(tick);
@@ -80,6 +80,15 @@ pub fn run_due(
             law::run(l, &ctx, def.max, cols, layer);
         }
     });
+}
+
+/// Is any law due in chunk `coord` at `tick`? Most ticks none is (a law
+/// runs every N ticks): then nothing around the chunk is looked up.
+pub fn any_due(kinds: &Kinds, tick: u64, coord: ChunkCoord) -> bool {
+    kinds
+        .fields
+        .iter()
+        .any(|f| f.law.as_ref().is_some_and(|l| law::law_due(tick, coord, l)))
 }
 
 /// Is every field law `l` reads 0 all over the chunk, and over its
@@ -129,6 +138,10 @@ pub fn law_compute(
         return;
     }
     own.par_iter_mut().for_each(|(coord, mut scratch)| {
+        if !any_due(kinds, tick, *coord) {
+            scratch.out.clear();
+            return;
+        }
         let chunks = around(*coord, |c| cells.get(stage.entity(c)?).ok());
         let actors = around(*coord, |c| rows.get(stage.entity(c)?).ok());
         run_due(kinds, seed, tick, *coord, chunks, actors, &mut scratch.out);
