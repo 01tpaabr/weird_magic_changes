@@ -2485,6 +2485,61 @@ mod tests {
         }
     }
 
+    /// A field condition where a predicate goes: the nearest cell with
+    /// room, how many cells hold a strong trail, `is`, `for each` and `best
+    /// ... on`, with a plain predicate among the terms and a value computed
+    /// before the search.
+    #[test]
+    fn searches_take_field_conditions() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field sugar max 20 { init 20 }
+             field trail max 255
+             const ROOM = 20
+             kind ant { glyph \"a\"  cadence 1  sight 4
+               mem mode, rx, ry, strong, eastok, seen, bx, by
+               when mode == 0 and nearest (sugar < ROOM) within 4 as r => { mode = 1  rx = r.dx  ry = r.dy  idle }
+               when mode == 1 => {
+                 mode = 2
+                 strong = count (trail > 100) within 2
+                 eastok = is(east, (sugar <= 5 and free))
+                 for each (trail >= 50) within 2 as t { seen += 1 }
+                 idle
+               }
+               when mode == 2 and best trail on (sugar < ROOM - 10) within 3 as b => { mode = 3  bx = b.dx  by = b.dy  idle }
+               when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(18)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let at = |dx: i32, dy: i32| Pos::new(30 + dx, 30 + dy);
+        set_field(&mut w, 0, at(2, -1), 12); // room, two away
+        set_field(&mut w, 0, at(1, 0), 5); // room, and the nearest: east
+        set_field(&mut w, 1, at(-1, 0), 200);
+        set_field(&mut w, 1, at(0, 2), 150);
+        set_field(&mut w, 1, at(2, 2), 60);
+        set_field(&mut w, 1, at(1, 0), 90); // the best trail where sugar < 10
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            at(0, 0),
+            0,
+            newborn(&kinds, 0, 0xB1, now)
+        ));
+        for _ in 0..4 {
+            step(&mut w);
+        }
+        let a = rows(&mut w)[0].3;
+        assert_eq!(&a.mem[..8], &[3, 1, 0, 2, 1, 4, 1, 0], "{:?}", a.mem);
+    }
+
     /// Fields are saved by name and come back as they were; rules that drop
     /// one, lower another's max and add a third remap every chunk, loaded
     /// and saved: kept values clamped, the new field at its `init`.

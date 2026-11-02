@@ -2356,3 +2356,50 @@ fn a_law_that_leaves_zero_at_zero_is_quiet() {
         ]
     );
 }
+
+/// A field condition in a search says what is wrong with it.
+#[test]
+fn field_condition_errors_name_the_problem() {
+    let errs = [
+        (
+            "kind k { when nearest (free) within 3 as v => idle }",
+            "compares a field",
+        ),
+        (
+            "field f max 9 kind k { when nearest (f > 1 and free and bare) within 3 as v => idle }",
+            "one predicate at most",
+        ),
+        (
+            "field f max 9 kind k { when nearest (f > 1 and f > 2 and f > 3 and f > 4) within 3 as v => idle }",
+            "three fields at most",
+        ),
+        (
+            "field f max 9 kind k { when nearest (f > 1 and (f < 3)) within 3 as v => idle }",
+            "inside another",
+        ),
+        (
+            "kind k { when nearest (g > 1) within 3 as v => idle }",
+            "no field `g`",
+        ),
+        (
+            "field f max 9 kind k { when count (f > 1 and fox) within 3 > 0 => idle }",
+            "unknown kind or tag `fox`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+}
+
+/// Parentheses nested past the limit where a predicate goes are an error,
+/// never a stack overflow (a fuzz find).
+#[test]
+fn nested_field_conditions_are_an_error_not_an_overflow() {
+    let text = format!(
+        "kind k {{ when nearest {} free within 1 as v => idle }}",
+        "(".repeat(5000)
+    );
+    let e = compile_err(&text);
+    assert!(e.contains("nested too deep"), "{e}");
+}

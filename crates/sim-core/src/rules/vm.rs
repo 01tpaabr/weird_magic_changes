@@ -161,6 +161,13 @@ pub enum OpCode {
     /// `v ->`: add `v` to field `a` on the actor's cell (an effect, applied
     /// in Apply; several to one field add up)
     FieldAdd,
+    /// `base (fo v)*n -> pred`, `n = a >> 4`: a search's field condition
+    /// (`(sugar < 20 and free)`). Stores `base` (a predicate, or
+    /// [`pred::ANY`]) and each term, `fo = field << 8 | comparison`, in
+    /// locals `a & 15`.., and pushes the predicate that names them
+    /// ([`pred::fields`]): a cell matches if `base` does and every field
+    /// compares true
+    FieldPred,
 }
 
 impl OpCode {
@@ -182,6 +189,7 @@ impl OpCode {
             O::Count | O::Nearest | O::Dist | O::FreeAt => (2, 1),
             O::LookAt | O::SignalAt | O::FieldAt => (2, 1),
             O::Best => (3, 1),
+            O::FieldPred => (1 + 2 * (a >> 4), 1),
             O::DirOf => (1, 2),
             O::SpawnWith => (2, 0),
             O::Jmp | O::Next | O::EndRule | O::Halt => (0, 0),
@@ -442,6 +450,23 @@ pub mod pred {
     pub const ONLY: i32 = 0x0200_0000;
     /// Every cell (`best` without `on`).
     pub const ANY: i32 = i32::MIN;
+    /// From here up: a field condition, its terms in the think's locals.
+    pub const FIELDS: i32 = 0x4000_0000;
+    /// Comparisons of a field condition's terms, in this order.
+    pub const CMP: [super::OpCode; 6] = [
+        super::OpCode::Lt,
+        super::OpCode::Le,
+        super::OpCode::Eq,
+        super::OpCode::Ne,
+        super::OpCode::Ge,
+        super::OpCode::Gt,
+    ];
+
+    /// A field condition of `n` terms (1 to 3) at local `at` (absolute).
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)] // a local: below LOCALS
+    pub const fn fields(at: usize, n: u8) -> i32 {
+        FIELDS + ((at as i32) << 2) + n as i32
+    }
 
     /// `kind:look`: that kind, showing that look byte.
     pub const fn kind_look(kind: u16, look: u8) -> i32 {
@@ -472,6 +497,9 @@ pub enum Want {
     Bare,
     Ground(i32),
     Feature(i32),
+    /// A field condition: its terms at local `at`, `n` of them. Only the
+    /// machine can test it ([`Machine::cell_ok`]); a halo matches nothing.
+    Fields(u16, u8),
     /// A value no cell matches.
     Nothing,
 }
@@ -480,6 +508,11 @@ impl Want {
     /// Decode `pred` (see [`pred`]) with `family_end` (`Kinds::family_end`;
     /// empty: every kind is its own family).
     pub fn of(pred: i32, family_end: &[u16]) -> Want {
+        if pred >= pred::FIELDS {
+            let v = pred - pred::FIELDS;
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // a local and 0..4
+            return Want::Fields((v >> 2) as u16, (v & 3) as u8);
+        }
         if pred < 0 {
             return match pred {
                 pred::FREE => Want::Free,
@@ -561,7 +594,7 @@ impl Want {
             Want::Bare => cells.walkable(i) && cover.is_none(),
             Want::Ground(g) => cells.ground[i] as i32 == g,
             Want::Feature(f) => cells.feature[i] as i32 == f,
-            Want::Nothing => false,
+            Want::Fields(..) | Want::Nothing => false,
         }
     }
 }
@@ -799,6 +832,50 @@ impl Machine<'_> {
         }
     }
 
+    /// Does the cell at `(lx + dx, ly + dy)` hold what `want` wants? A field
+    /// condition reads its terms from the locals: a cell matches if it is
+    /// loaded, its base predicate matches and every field compares true.
+    #[inline]
+    fn cell_ok(&self, lx: i32, ly: i32, dx: i32, dy: i32, want: Want) -> bool {
+        match want {
+            Want::Fields(at, n) => self.fields_ok(lx, ly, dx, dy, at, n),
+            _ => self.ctx.halo.test(lx, ly, dx, dy, want),
+        }
+    }
+
+    /// [`Self::cell_ok`] for a field condition, out of the search loops'
+    /// way: most searches never take one.
+    #[inline(never)]
+    fn fields_ok(&self, lx: i32, ly: i32, dx: i32, dy: i32, at: u16, n: u8) -> bool {
+        let at = usize::from(at);
+        let Some(terms) = self.locals.get(at..at + 1 + 2 * usize::from(n)) else {
+            return false;
+        };
+        if self.ctx.halo.at(lx, ly, dx, dy).is_none() {
+            return false;
+        }
+        let base = terms[0];
+        // A field condition's base is never one itself (the compiler).
+        if base != pred::ANY
+            && (base >= pred::FIELDS || !self.ctx.halo.matches(lx, ly, dx, dy, base))
+        {
+            return false;
+        }
+        terms[1..].as_chunks::<2>().0.iter().all(|&[fo, v]| {
+            let (f, op) = (fo >> 8, fo & 0xFF);
+            let x = usize::try_from(f).map_or(0, |f| self.ctx.halo.field(lx, ly, dx, dy, f));
+            match op {
+                0 => x < v,
+                1 => x <= v,
+                2 => x == v,
+                3 => x != v,
+                4 => x >= v,
+                5 => x > v,
+                _ => false,
+            }
+        })
+    }
+
     /// Cells within Chebyshev `r` of self matching `pred`, self included.
     fn count(&mut self, pred: i32, r: i32) -> Result<i32, Trap> {
         let r = r.clamp(0, i32::from(self.ctx.kind.sight));
@@ -809,7 +886,7 @@ impl Machine<'_> {
         let mut n = 0;
         for dy in -r..=r {
             for dx in -r..=r {
-                n += i32::from(self.ctx.halo.test(lx, ly, dx, dy, want));
+                n += i32::from(self.cell_ok(lx, ly, dx, dy, want));
             }
         }
         Ok(n)
@@ -829,7 +906,7 @@ impl Machine<'_> {
             let start = self.draw_below(n);
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
-                if self.ctx.halo.test(lx, ly, dx, dy, want) {
+                if self.cell_ok(lx, ly, dx, dy, want) {
                     return Ok(Some((dx, dy)));
                 }
             }
@@ -870,7 +947,7 @@ impl Machine<'_> {
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
                 let v = self.ctx.halo.field(lx, ly, dx, dy, f);
-                if v > best.0 && want.is_none_or(|w| self.ctx.halo.test(lx, ly, dx, dy, w)) {
+                if v > best.0 && want.is_none_or(|w| self.cell_ok(lx, ly, dx, dy, w)) {
                     best = (v, dx, dy);
                 }
             }
@@ -905,7 +982,7 @@ impl Machine<'_> {
             while k < first + n {
                 let (dx, dy) = ring_cell(ring, k - first);
                 k += 1;
-                if self.ctx.halo.test(lx, ly, dx, dy, want) {
+                if self.cell_ok(lx, ly, dx, dy, want) {
                     self.locals[base] = dx;
                     self.locals[base + 1] = dy;
                     self.locals[base + 2] = k;
@@ -1221,7 +1298,8 @@ impl Machine<'_> {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                        self.push(i32::from(self.ctx.halo.matches(lx, ly, dx, dy, pred)))?;
+                        let want = self.ctx.halo.want(pred);
+                        self.push(i32::from(self.cell_ok(lx, ly, dx, dy, want)))?;
                     }
                     O::DirOf => {
                         let i = self.pop()?;
@@ -1311,6 +1389,20 @@ impl Machine<'_> {
                             }
                             None => self.push(0)?,
                         }
+                    }
+                    O::FieldPred => {
+                        let n = usize::from(op.a >> 4);
+                        let at = self.local(op.a & 15)?;
+                        if n == 0 || n > 3 || at + 2 * n >= LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        for k in (0..n).rev() {
+                            self.locals[at + 2 + 2 * k] = self.pop()?;
+                            self.locals[at + 1 + 2 * k] = self.pop()?;
+                        }
+                        self.locals[at] = self.pop()?;
+                        #[allow(clippy::cast_possible_truncation)] // 1 to 3
+                        self.push(pred::fields(at, n as u8))?;
                     }
                     O::FieldAdd => {
                         let v = self.pop()?;

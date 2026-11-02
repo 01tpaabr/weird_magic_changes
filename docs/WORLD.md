@@ -61,8 +61,10 @@ field fox_scent max 255 { every 16 { fox_scent -= (fox_scent + 31) / 32 } }   # 
 
 **Reads by actors** (inside `sight`, as every search): `sugar(t)`, and the best cell, `best
 sugar [on PRED] within 6 as s` (the largest value among the cells matching `PRED`, ties broken
-by the same random ring start `sniff` uses). Built. Predicates on a field in searches,
-`count (sugar >= 3) within 4`, wait for a world that needs them.
+by the same random ring start `nearest` uses), and **field conditions** wherever a search
+takes a predicate: `nearest (sugar < 20 and free) within 3 as c`, `count (trail > 100) within
+2`, `is(t, (height > 50))`, `for each`, `best ... on`. Built (2026-11-01, when `packs/gather`
+needed "the nearest cell with room").
 
 ## 3. Laws
 

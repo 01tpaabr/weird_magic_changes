@@ -705,6 +705,9 @@ enum Pred {
     Feature(Feature),
     Free,
     Bare,
+    /// `(F op v and ... [and pred])`: cells where each field compares true
+    /// (the value computed once, before the search), and the predicate holds.
+    Fields(Vec<(String, OpCode, Expr, Pos)>, Option<Box<Pred>>, Pos),
 }
 
 /// The words that are a predicate by themselves: the ground, a feature,
@@ -2013,6 +2016,11 @@ impl Parser<'_> {
 
     fn pred(&mut self) -> Result<Pred> {
         let at = self.pos();
+        if self.eat_sym("(") {
+            // Nested like any parenthesis: `((((...` is an error, not a stack
+            // overflow (a fuzz find).
+            return self.nested(|p| p.field_pred(at));
+        }
         let only = self.eat_kw("only");
         if let Tok::Name(word) = self.peek().clone()
             && let Some(p) = pred_word(&word)
@@ -2032,6 +2040,51 @@ impl Parser<'_> {
             return Ok(Pred::KindLook(name, look, only, at));
         }
         Ok(Pred::Kind(name, only, at))
+    }
+
+    /// After `(` where a predicate goes: field comparisons joined by `and`,
+    /// at most one plain predicate among them, then `)`.
+    fn field_pred(&mut self, at: Pos) -> Result<Pred> {
+        let (mut terms, mut base) = (Vec::new(), None);
+        loop {
+            let p = self.pos();
+            let field_term = matches!(self.peek(), Tok::Name(n) if !is_reserved(n))
+                && matches!(
+                    self.peek2(),
+                    Tok::Sym("<" | "<=" | "==" | "!=" | ">=" | ">")
+                );
+            if field_term {
+                let (f, _) = self.ident("field name")?;
+                let op = self.cmp_op().expect("checked above");
+                self.bump();
+                terms.push((f, op, self.additive()?, p));
+            } else {
+                if base.is_some() {
+                    return Err(self.err_at(&p, "a field condition holds one predicate at most"));
+                }
+                base = Some(Box::new(self.pred()?));
+            }
+            if !self.eat_kw("and") {
+                break;
+            }
+        }
+        self.expect_sym(")")?;
+        if terms.is_empty() {
+            return Err(self.err_at(
+                &at,
+                "a predicate in parentheses compares a field: `(sugar < 20)`",
+            ));
+        }
+        if terms.len() > 3 {
+            return Err(self.err_at(&at, "a field condition compares three fields at most"));
+        }
+        if matches!(base.as_deref(), Some(Pred::Fields(..))) {
+            return Err(self.err_at(
+                &at,
+                "a field condition inside another: join them with `and`",
+            ));
+        }
+        Ok(Pred::Fields(terms, base, at))
     }
 
     fn cmp_op(&self) -> Option<OpCode> {
@@ -4480,9 +4533,12 @@ impl<'a> Gen<'a> {
                 }
                 self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
+                // A field condition's slots serve the search alone.
+                let mark = self.next_local;
                 self.pred(pred)?;
                 self.expr(r)?;
                 self.asm.nearest(slot).jz(on_false);
+                self.next_local = mark;
                 self.locals.push(Local {
                     name: bind.clone(),
                     slot,
@@ -4507,6 +4563,7 @@ impl<'a> Gen<'a> {
                 }
                 self.hides(bind, &format!("binding `{bind}`"), at)?;
                 let slot = self.alloc_local(at, 2)?;
+                let mark = self.next_local;
                 let f = self.field(field, at)?.0;
                 self.push_int(i32::from(f))?;
                 match pred {
@@ -4515,6 +4572,7 @@ impl<'a> Gen<'a> {
                 }
                 self.expr(r)?;
                 self.asm.best(slot).jz(on_false);
+                self.next_local = mark;
                 self.locals.push(Local {
                     name: bind.clone(),
                     slot,
@@ -4544,6 +4602,26 @@ impl<'a> Gen<'a> {
 
     fn pred(&mut self, p: &Pred) -> Result<()> {
         let v = match p {
+            Pred::Fields(terms, base, at) => {
+                let n = u8::try_from(terms.len()).expect("at most 3 terms, parsed");
+                let slot = self.alloc_local(at, usize::from(1 + 2 * n))?;
+                match base {
+                    Some(b) => self.pred(b)?,
+                    None => self.push_int(pred::ANY)?,
+                }
+                for (f, op, value, fat) in terms {
+                    let (fi, _) = self.field(f, fat)?;
+                    let cmp = pred::CMP
+                        .iter()
+                        .position(|c| c == op)
+                        .expect("a comparison");
+                    let cmp = i32::try_from(cmp).expect("0..6");
+                    self.push_int(i32::from(fi) << 8 | cmp)?;
+                    self.expr(value)?;
+                }
+                self.asm.field_pred(slot, n);
+                return Ok(());
+            }
             Pred::Free => pred::FREE,
             Pred::Bare => pred::BARE,
             Pred::Ground(g) => pred::ground(*g as u8),
@@ -4722,9 +4800,11 @@ impl<'a> Gen<'a> {
                 self.asm.op(OpCode::Chance);
             }
             Expr::Count(p, r) => {
+                let mark = self.next_local;
                 self.pred(p)?;
                 self.expr(r)?;
                 self.asm.op(OpCode::Count);
+                self.next_local = mark;
             }
             Expr::Dist(t) => {
                 self.target(t)?;
@@ -4736,8 +4816,10 @@ impl<'a> Gen<'a> {
             }
             Expr::IsAt(t, p) => {
                 self.target(t)?;
+                let mark = self.next_local;
                 self.pred(p)?;
                 self.asm.op(OpCode::IsAt);
+                self.next_local = mark;
             }
             Expr::LookOf(t) => {
                 self.target(t)?;

@@ -359,6 +359,19 @@ A **predicate** says what a cell must hold:
 | `water`, `soil`, `rock` | the ground, the feature |
 | `free` | walkable, nobody standing |
 | `bare` | walkable, no ground cover |
+| `(F op v and ...)` | a **field condition**: each field of the cell compares true against its value (`(sugar < 20)`, `(trail > 100 and free)`); one plain predicate may join them; at most three fields. The values are worked out once, before the search, so `(sugar < ROOM - 1)` costs one sum, not one a cell. An unloaded cell never matches. It takes two local slots a field and one more while its search runs (`for each`: while the loop runs) |
+
+```rules
+field sugar max 20 { init 20 }
+field trail max 255
+kind ant {
+  glyph "a"
+  need sugar max 40 decay 0
+  when sugar > 30 and nearest (sugar < 20 and free) within 3 as c => move toward c   # room to drop it
+  when count (trail > 100) within 2 >= 3 => move random free                         # a crowded path
+  when true => idle
+}
+```
 
 ## 12. Expressions, subs and constants
 

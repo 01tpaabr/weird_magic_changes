@@ -163,6 +163,11 @@ impl Asm {
         self.emit(OpCode::Best, slot, 0)
     }
 
+    /// `base (fo v)*n -> pred`: a field condition in locals `slot..`.
+    pub fn field_pred(&mut self, slot: u8, n: u8) -> &mut Self {
+        self.emit(OpCode::FieldPred, slot | n << 4, 0)
+    }
+
     /// `v ->`: add to field `f` on the actor's cell.
     pub fn field_add(&mut self, f: u8) -> &mut Self {
         self.emit(OpCode::FieldAdd, f, 0)

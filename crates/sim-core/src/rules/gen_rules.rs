@@ -154,6 +154,9 @@ struct G<'a> {
     withs: Vec<(String, Vec<String>)>,
     /// The fields declared: a prefix of [`FIELDS`].
     fields: usize,
+    /// Writing a law's block (the syntax mode): there `count (` starts an
+    /// aggregate, so no field condition goes where a search's predicate does.
+    in_law: bool,
     // The scope of the code being written.
     owner: Option<usize>,
     locals: Vec<(String, Ty)>,
@@ -181,6 +184,7 @@ impl<'a> G<'a> {
             files: Vec::new(),
             withs: Vec::new(),
             fields: 0,
+            in_law: false,
             owner: None,
             locals: Vec::new(),
             slots: 0,
@@ -1012,7 +1016,7 @@ impl<'a> G<'a> {
                 format!("repeat {e} {b}")
             }
             9 if self.fits(5) => {
-                let p = self.pred();
+                let p = self.search_pred();
                 let r = self.additive(d - 1);
                 let v = self.fresh("v");
                 let m = self.mark();
@@ -1291,7 +1295,7 @@ impl<'a> G<'a> {
         match self.n(if d > 0 { 7 } else { 1 }) {
             1 => format!("not {}", self.not_cond(false, d - 1)),
             2 if bind => {
-                let p = self.pred();
+                let p = self.search_pred();
                 let r = self.additive(d - 1);
                 let v = self.fresh("v");
                 self.local(v.clone(), Ty::Target, 2);
@@ -1301,7 +1305,7 @@ impl<'a> G<'a> {
             5 if bind && (!self.strict || self.fields > 0) => {
                 let f = self.field_name();
                 let on = if self.maybe(50) {
-                    format!(" on {}", self.pred())
+                    format!(" on {}", self.search_pred())
                 } else {
                     String::new()
                 };
@@ -1466,7 +1470,7 @@ impl<'a> G<'a> {
         match self.n(13) {
             1 => format!("({})", self.expr(d - 1)),
             2 => {
-                let p = self.pred();
+                let p = self.search_pred();
                 format!("count {p} within {}", self.unary(d - 1))
             }
             3 => {
@@ -1479,7 +1483,7 @@ impl<'a> G<'a> {
             }
             5 => {
                 let t = self.target(d - 1);
-                format!("is({t}, {})", self.pred())
+                format!("is({t}, {})", self.search_pred())
             }
             7 => {
                 let (f, k) = self.one(&[
@@ -1582,6 +1586,28 @@ impl<'a> G<'a> {
         }
     }
 
+    /// A predicate where a search takes one: sometimes a field condition,
+    /// `(fa > 3)` or `(fb <= 7 and free)` (its three local slots counted).
+    fn search_pred(&mut self) -> String {
+        if self.in_law {
+            return self.pred();
+        }
+        if !self.strict && self.maybe(15) {
+            let (f, op) = (self.pool(&[]), self.op(&CMP));
+            return format!("({f}{op}{} and {})", self.n(30), self.pred());
+        }
+        if self.strict && self.fields > 0 && self.fits(3) && self.maybe(25) {
+            self.slots += 3;
+            let (f, op, v) = (self.field_name(), self.op(&CMP), self.n(30));
+            return if self.maybe(50) {
+                format!("({f}{op}{v})")
+            } else {
+                format!("({f}{op}{v} and {})", self.pred())
+            };
+        }
+        self.pred()
+    }
+
     fn pred(&mut self) -> String {
         if !self.strict {
             return match self.n(4) {
@@ -1632,7 +1658,9 @@ impl<'a> G<'a> {
                         1 => format!(" {{ init {} }}", self.additive(1)),
                         _ => {
                             let (scale, every) = (self.additive(1), self.additive(1));
+                            self.in_law = true;
                             let b = self.block(2, true);
+                            self.in_law = false;
                             format!(" {{ init noise scale {scale} outside 3 every {every} {b} }}")
                         }
                     };

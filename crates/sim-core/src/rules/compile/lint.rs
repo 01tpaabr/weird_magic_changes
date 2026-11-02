@@ -266,6 +266,15 @@ impl Seen<'_> {
                     .looks
                     .push((n.clone(), *only, *look, at.clone(), self.who.clone()));
             }
+            Pred::Fields(terms, base, _) => {
+                for (f, _, v, _) in terms {
+                    self.names.all.insert(f.clone());
+                    self.expr(v);
+                }
+                if let Some(b) = base {
+                    self.pred(b);
+                }
+            }
             Pred::Ground(_) | Pred::Feature(_) | Pred::Free | Pred::Bare => {}
         }
     }
@@ -680,6 +689,8 @@ impl<'a> Gen<'a> {
     /// (or only it), the kinds carrying a tag.
     fn matcher(&self, kinds: &Kinds, w: &Walk, p: &Pred) -> Option<Match> {
         let (name, only, look) = match p {
+            // What stands on a matching cell is what its predicate says.
+            Pred::Fields(_, Some(base), _) => return self.matcher(kinds, w, base),
             Pred::Kind(n, only, _) => (n, *only, None),
             Pred::KindLook(n, look, only, _) => (n, *only, Some(*look)),
             _ => return None,

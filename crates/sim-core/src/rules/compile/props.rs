@@ -162,8 +162,10 @@ fn generated_programs_use_fields() {
         "every ",
         "within 1)",
         "outside ",
+        " (fa",
+        " (fb",
     ];
-    let mut seen = [0usize; 11];
+    let mut seen = [0usize; 13];
     let mut h = 7u64;
     for i in 0..3000 {
         let choices: Vec<u32> = (0..1500)
