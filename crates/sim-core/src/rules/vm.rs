@@ -184,6 +184,32 @@ pub enum OpCode {
     MemAt,
     /// `x i ->`; `mem[a + i] = x` for `0 <= i < imm`, else nothing
     SetMemAt,
+    /// `h limit ->`: start a search (`search NAME { ... }`) from the state
+    /// in locals `a .. a + imm`, its guess `h`, expanding at most `limit`
+    /// states. A search already running traps.
+    SearchBegin,
+    /// `-> found`: take the open state with the least cost so far plus
+    /// guess (the first offered among equals) into locals `a .. a + imm`;
+    /// 0 when none is left or the limit is reached
+    SearchPop,
+    /// `s.. cost via ->`: the `imm` values of a `try`, held while its
+    /// guess is worked out
+    SearchTry,
+    /// Swap locals `a .. a + imm` with the held `try`: the guess reads the
+    /// tried state by the state's names
+    SearchSwap,
+    /// `h ->`: offer the held `try`, reached from the state being expanded
+    SearchPush,
+    /// The state being expanded is the goal: the search ends, found
+    SearchDone,
+    /// The search ends, not found
+    SearchFail,
+    /// Locals `a .. a + 3` = the found plan's first `via`, its cost, its
+    /// steps
+    SearchOut,
+    /// The found plan's `via`s, first first, into the memory array at `a`,
+    /// `imm` long (0 past the plan's end)
+    SearchInto,
 }
 
 impl OpCode {
@@ -198,6 +224,12 @@ impl OpCode {
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
             O::MemAt => (1, 1),
             O::SetMemAt => (2, 0),
+            O::SearchBegin => (2, 0),
+            O::SearchPop => (0, 1),
+            // `a` is the state's width here (the compiler passes it).
+            O::SearchTry => (a + 2, 0),
+            O::SearchPush => (1, 0),
+            O::SearchSwap | O::SearchDone | O::SearchFail | O::SearchOut | O::SearchInto => (0, 0),
             O::SetLook | O::SetSignal | O::FieldAdd => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
             O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
@@ -392,6 +424,8 @@ pub enum Trap {
     SecondAction,
     /// `add` to more than [`ADDS`] fields in one think.
     Adds,
+    /// A search started inside a running one, or a search op out of place.
+    Search,
 }
 
 /// Distinct fields one think may `add` to; one more traps.
@@ -858,6 +892,190 @@ struct Machine<'m> {
     acted: bool,
     ctx: Ctx<'m>,
     mind: &'m mut ActorMind,
+    /// A search is running (no other may start).
+    searching: bool,
+}
+
+/// A search's limits (`docs/RULES.md` §12, Searches): numbers in a state,
+/// states one may expand, states it may hold.
+pub const SEARCH_STATE: usize = 8;
+pub const SEARCH_LIMIT: u32 = 4096;
+pub const SEARCH_NODES: usize = 32768;
+/// The guess and limit when a search gives none.
+pub const SEARCH_DEFAULT_LIMIT: i32 = 256;
+
+const NO_NODE: u32 = u32::MAX;
+
+/// A state a search reached: how, and for how much.
+#[derive(Debug, Clone, Copy)]
+struct Node {
+    state: [i32; SEARCH_STATE],
+    parent: u32,
+    via: i32,
+    g: i64,
+    steps: u32,
+}
+
+/// One search's working space, per thread, kept between thinks (no
+/// allocation once grown). States are found again through `table`, an
+/// open-addressed index marked with the search's `generation`, so it is
+/// never cleared.
+#[derive(Default)]
+struct SearchScratch {
+    nodes: Vec<Node>,
+    /// `(f, order, node, g)`, least first.
+    open: std::collections::BinaryHeap<std::cmp::Reverse<(i64, u32, u32, i64)>>,
+    table: Vec<(u32, u32)>,
+    generation: u32,
+    width: usize,
+    limit: u32,
+    expanded: u32,
+    cap: usize,
+    order: u32,
+    cur: u32,
+    goal: u32,
+    held: ([i32; SEARCH_STATE], i32, i32),
+}
+
+thread_local! {
+    static SEARCH: std::cell::RefCell<SearchScratch> = std::cell::RefCell::default();
+}
+
+impl SearchScratch {
+    fn hash(state: &[i32]) -> u64 {
+        state
+            .iter()
+            .fold(0x5EA4C4u64, |h, &v| splitmix64(h ^ u64::from(v as u32)))
+    }
+
+    /// The node holding `state`, or the empty slot where it would go.
+    fn find(&self, state: &[i32]) -> (usize, Option<u32>) {
+        let mask = self.table.len() - 1;
+        #[allow(clippy::cast_possible_truncation)] // masked to the table
+        let mut i = Self::hash(state) as usize & mask;
+        loop {
+            let (mark, node) = self.table[i];
+            if mark != self.generation {
+                return (i, None);
+            }
+            if self.nodes[node as usize].state[..self.width] == *state {
+                return (i, Some(node));
+            }
+            i = (i + 1) & mask;
+        }
+    }
+
+    fn begin(&mut self, state: &[i32], h: i32, limit: u32) {
+        self.width = state.len();
+        self.limit = limit;
+        self.cap = (limit as usize * 8).clamp(64, SEARCH_NODES);
+        let want = (self.cap * 2).next_power_of_two();
+        if self.table.len() < want {
+            self.table = vec![(0, 0); want];
+            self.generation = 0;
+        }
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.table.fill((0, 0));
+            self.generation = 1;
+        }
+        self.nodes.clear();
+        self.open.clear();
+        (self.expanded, self.order, self.cur, self.goal) = (0, 0, NO_NODE, NO_NODE);
+        self.offer(state, NO_NODE, 0, 0, i64::from(h));
+    }
+
+    /// Reach `state` from node `parent` by `via`, for `g` in all.
+    fn offer(&mut self, state: &[i32], parent: u32, via: i32, g: i64, h: i64) {
+        let (slot, found) = self.find(state);
+        let steps = if parent == NO_NODE {
+            0
+        } else {
+            self.nodes[parent as usize].steps + 1
+        };
+        let node = match found {
+            Some(n) if self.nodes[n as usize].g <= g => return,
+            Some(n) => {
+                let node = &mut self.nodes[n as usize];
+                (node.parent, node.via, node.g, node.steps) = (parent, via, g, steps);
+                n
+            }
+            None => {
+                if self.nodes.len() == self.cap {
+                    return; // full: what it holds is what it searches
+                }
+                let mut s = [0; SEARCH_STATE];
+                s[..state.len()].copy_from_slice(state);
+                let n = u32::try_from(self.nodes.len()).expect("at most SEARCH_NODES");
+                self.nodes.push(Node {
+                    state: s,
+                    parent,
+                    via,
+                    g,
+                    steps,
+                });
+                self.table[slot] = (self.generation, n);
+                n
+            }
+        };
+        self.order += 1;
+        self.open.push(std::cmp::Reverse((
+            g.saturating_add(h),
+            self.order,
+            node,
+            g,
+        )));
+    }
+
+    /// The next state to expand: the least `g + h`, the first offered
+    /// among equals; a stale entry (reached since for less) is skipped.
+    fn pop(&mut self) -> Option<u32> {
+        if self.expanded >= self.limit {
+            return None;
+        }
+        while let Some(std::cmp::Reverse((_, _, n, g))) = self.open.pop() {
+            if self.nodes[n as usize].g == g {
+                self.expanded += 1;
+                self.cur = n;
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    /// The found plan: its first `via`, its cost, its steps.
+    fn plan(&self) -> [i32; 3] {
+        if self.goal == NO_NODE {
+            return [0; 3];
+        }
+        let goal = &self.nodes[self.goal as usize];
+        let mut n = self.goal;
+        let mut first = 0;
+        while self.nodes[n as usize].parent != NO_NODE {
+            first = self.nodes[n as usize].via;
+            n = self.nodes[n as usize].parent;
+        }
+        let cost = i32::try_from(goal.g).unwrap_or(i32::MAX);
+        [first, cost, i32::try_from(goal.steps).unwrap_or(i32::MAX)]
+    }
+
+    /// The plan's `via`s, first first, into `out` (0 past its end).
+    fn path(&self, out: &mut [i32]) {
+        out.fill(0);
+        if self.goal == NO_NODE {
+            return;
+        }
+        let steps = self.nodes[self.goal as usize].steps as usize;
+        let mut n = self.goal;
+        let mut k = steps;
+        while self.nodes[n as usize].parent != NO_NODE {
+            k -= 1;
+            if let Some(o) = out.get_mut(k) {
+                *o = self.nodes[n as usize].via;
+            }
+            n = self.nodes[n as usize].parent;
+        }
+    }
 }
 
 impl Machine<'_> {
@@ -1086,6 +1304,16 @@ impl Machine<'_> {
             i32::try_from(c).expect("between 0 and d")
         };
         (r(dx), r(dy))
+    }
+
+    /// The locals a search op names: from `op.a`, `op.imm` of them.
+    fn search_locals(&self, op: Op) -> Result<(usize, usize), Trap> {
+        let k = usize::try_from(op.imm).unwrap_or(0);
+        let base = self.local(op.a)?;
+        if k == 0 || k > SEARCH_STATE || base + k > self.base + FRAME_LOCALS {
+            return Err(Trap::Search);
+        }
+        Ok((base, k))
     }
 
     /// The slot of element `i` of the memory array at `op.a`, `op.imm`
@@ -1356,6 +1584,92 @@ impl Machine<'_> {
                         if let Some(at) = self.mem_at(op, i)? {
                             self.mind.mem[at] = v;
                         }
+                    }
+                    O::SearchBegin => {
+                        let limit = self.pop()?;
+                        let h = self.pop()?;
+                        if self.searching {
+                            return Err(Trap::Search);
+                        }
+                        let (base, k) = self.search_locals(op)?;
+                        let limit = u32::try_from(limit.clamp(0, SEARCH_LIMIT as i32))
+                            .expect("clamped to 0..=SEARCH_LIMIT");
+                        self.spend(1 + u32::try_from(k).expect("at most SEARCH_STATE"))?;
+                        let state = &self.locals[base..base + k];
+                        SEARCH.with_borrow_mut(|s| s.begin(state, h, limit));
+                        self.searching = true;
+                    }
+                    O::SearchPop => {
+                        if !self.searching {
+                            return Err(Trap::Search);
+                        }
+                        let (base, k) = self.search_locals(op)?;
+                        self.spend(1 + u32::try_from(k).expect("at most SEARCH_STATE"))?;
+                        let state =
+                            SEARCH.with_borrow_mut(|s| s.pop().map(|n| s.nodes[n as usize].state));
+                        let found = state.is_some();
+                        if let Some(state) = state {
+                            self.locals[base..base + k].copy_from_slice(&state[..k]);
+                        }
+                        self.push(i32::from(found))?;
+                    }
+                    O::SearchTry => {
+                        let k = usize::from(op.a);
+                        if k == 0 || k > SEARCH_STATE || !self.searching {
+                            return Err(Trap::Search);
+                        }
+                        let via = self.pop()?;
+                        let cost = self.pop()?;
+                        let mut state = [0; SEARCH_STATE];
+                        for v in state[..k].iter_mut().rev() {
+                            *v = self.pop()?;
+                        }
+                        SEARCH.with_borrow_mut(|s| s.held = (state, cost, via));
+                    }
+                    O::SearchSwap => {
+                        let (base, k) = self.search_locals(op)?;
+                        let locals = &mut self.locals[base..base + k];
+                        SEARCH.with_borrow_mut(|s| locals.swap_with_slice(&mut s.held.0[..k]));
+                    }
+                    O::SearchPush => {
+                        let h = self.pop()?;
+                        if !self.searching {
+                            return Err(Trap::Search);
+                        }
+                        self.spend(2)?;
+                        SEARCH.with_borrow_mut(|s| {
+                            let (state, cost, via) = s.held;
+                            let from = s.cur;
+                            let g = s.nodes[from as usize].g + i64::from(cost.max(0));
+                            s.offer(&state[..s.width], from, via, g, i64::from(h.max(0)));
+                        });
+                    }
+                    O::SearchDone => {
+                        if !self.searching {
+                            return Err(Trap::Search);
+                        }
+                        SEARCH.with_borrow_mut(|s| s.goal = s.cur);
+                        self.searching = false;
+                    }
+                    O::SearchFail => {
+                        SEARCH.with_borrow_mut(|s| s.goal = NO_NODE);
+                        self.searching = false;
+                    }
+                    O::SearchOut => {
+                        let base = self.local(op.a)?;
+                        if base + 3 > self.base + FRAME_LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        let plan = SEARCH.with_borrow(SearchScratch::plan);
+                        self.locals[base..base + 3].copy_from_slice(&plan);
+                    }
+                    O::SearchInto => {
+                        let (base, len) = (usize::from(op.a), usize::try_from(op.imm).unwrap_or(0));
+                        if base + len > MEM_SLOTS {
+                            return Err(Trap::BadMem);
+                        }
+                        let out = &mut self.mind.mem[base..base + len];
+                        SEARCH.with_borrow(|s| s.path(out));
                     }
                     O::Sense => {
                         let s = Sense::from_u8(op.a).ok_or(Trap::BadSense)?;
@@ -1790,6 +2104,7 @@ fn think_with<const TRACE: bool>(
         acted: false,
         ctx,
         mind,
+        searching: false,
     };
     if let Err(trap) = m.run::<TRACE>(&program.code, &program.consts, &program.subs, trace) {
         // Needs and mem written before the trap stay (RULES.md §13).

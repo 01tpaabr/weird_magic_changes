@@ -165,6 +165,22 @@ impl Seen<'_> {
                 self.expr(r);
                 self.stmts(body);
             }
+            Stmt::Search(se) => {
+                se.start.iter().for_each(|e| self.expr(e));
+                self.stmts(&se.next);
+                self.cond(&se.goal);
+                se.guess.iter().for_each(|e| self.expr(e));
+                if let Some((e, _)) = &se.limit {
+                    self.expr(e);
+                }
+            }
+            Stmt::Try {
+                values, cost, via, ..
+            } => values
+                .iter()
+                .chain(cost)
+                .chain(via)
+                .for_each(|e| self.expr(e)),
         }
     }
 
@@ -179,6 +195,14 @@ impl Seen<'_> {
                 self.names.all.insert(field.clone());
                 pred.iter().for_each(|p| self.pred(p));
                 self.expr(r);
+            }
+            Cond::Search {
+                name, args, into, ..
+            } => {
+                self.names.calls.insert(name.clone());
+                self.names.all.insert(name.clone());
+                self.names.all.extend(into.iter().cloned());
+                args.iter().for_each(|a| self.arg(a));
             }
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.cond(a);
@@ -983,6 +1007,24 @@ impl<'a> Gen<'a> {
                 self.walk_target(kinds, w, t, out)
             }
             Stmt::Idle(_) | Stmt::Die(_) | Stmt::Next(..) => {}
+            Stmt::Search(se) => {
+                for e in &se.start {
+                    self.walk_expr(kinds, w, e, out);
+                }
+                w.hidden.extend(se.state.iter().map(|(n, _)| n.clone()));
+                self.walk_stmts(kinds, w, &se.next, out);
+                self.walk_cond(kinds, w, &se.goal, out);
+                if let Some(e) = &se.guess {
+                    self.walk_expr(kinds, w, e, out);
+                }
+            }
+            Stmt::Try {
+                values, cost, via, ..
+            } => {
+                for e in values.iter().chain(cost).chain(via) {
+                    self.walk_expr(kinds, w, e, out);
+                }
+            }
         }
     }
 
@@ -1000,6 +1042,16 @@ impl<'a> Gen<'a> {
                 self.radius(w, r, at, out);
                 let m = pred.as_ref().and_then(|p| self.matcher(kinds, w, p));
                 w.binds.push((bind.clone(), m));
+            }
+            Cond::Search {
+                name,
+                args,
+                bind,
+                at,
+                ..
+            } => {
+                self.walk_call(kinds, w, name, args, at, out);
+                w.binds.push((bind.clone(), None));
             }
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.walk_cond(kinds, w, a, out);

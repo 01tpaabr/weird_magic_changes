@@ -76,6 +76,10 @@ IDENT = NAME that is not a reserved word
 | `budget` | starts the arena's budget at the top of a file | any name |
 | `rows` (and `fuel`, `private`) | in a budget's block | any name |
 | `namespace` | the first word of a file | any name |
+| `goal`, `guess`, `limit` (and `state`, `next`) | parts of a search's block | any name |
+| `cost`, `via` | after a `try`'s values | any name |
+| `via`, `cost`, `steps` | after a plan's name and `.` | any name |
+| `into` | after `as IDENT` binding a search's plan | any name |
 | `reach`, `climb`, `layer` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
 | `relief` | in a `field` block | any name |
@@ -87,7 +91,7 @@ IDENT = NAME that is not a reserved word
 ## 2. Files and items
 
 ```
-file      = [ "namespace" NAME ] { item | sub | const | field | material | layer | budget } EOF
+file      = [ "namespace" NAME ] { item | sub | search | const | field | material | layer | budget } EOF
 budget    = "budget" "{" { ( "fuel" | "rows" | "private" ) additive } "}"     (each part once; an arena's only)
 layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
@@ -101,12 +105,18 @@ kind      = "kind" IDENT [ extends ] body_
 trait     = "trait" IDENT [ "(" [ IDENT { "," IDENT } ] ")" ] [ extends ] body_
 extends   = "extends" parent { "," parent }
 parent    = IDENT [ "(" [ expr { "," expr } ] ")" ]
-body_     = "{" { decl [ ";" ] } { sub } rule_list { state } "}"
+body_     = "{" { decl [ ";" ] } { sub | search } rule_list { state } "}"
 state     = "state" IDENT "{" rule_list "}"
 rule_list = { rule | inherit }
 inherit   = "inherit" [ IDENT ]
 rule      = "when" cond "=>" ( block | stmt [ ";" ] )
 sub       = "sub" IDENT "(" [ param { "," param } ] ")" block
+search    = "search" IDENT [ "(" [ param { "," param } ] ")" ] "{" { search_part } "}"
+search_part = "state" IDENT { "," IDENT } "=" expr { "," expr }      (1 to 8 names, as many values)
+          | "next" block                                             (where `try` goes)
+          | "goal" cond
+          | "guess" expr
+          | "limit" additive                                         (each part once; state, next, goal required)
 param     = IDENT [ ":" ( "target" | "pred" ) ]
 ```
 
@@ -163,6 +173,7 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | "while" cond block
       | "repeat" expr block
       | "for" "each" pred "within" additive "as" IDENT block
+      | "try" expr { "," expr } [ "cost" expr ] [ "via" expr ]    (only in a search's `next`)
       | "choose" "{" arm { arm } "}"
       | "let" IDENT "=" expr
       | "return" [ expr ]
@@ -207,6 +218,7 @@ cond     = and_cond { "or" and_cond }
 and_cond = not_cond { "and" not_cond }
 not_cond = "not" not_cond
          | "nearest" pred "within" additive "as" IDENT
+         | IDENT args "as" IDENT [ "into" IDENT ]               (a search's plan: `.via`, `.cost`, `.steps`)
          | "best" IDENT [ "on" pred ] "within" additive "as" IDENT
          | "(" cond ")"                (when no binary operator follows the ")")
          | expr
@@ -239,7 +251,7 @@ primary  = INT | TIME
          | "is" "(" target "," pred ")"
          | ( "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" ) "(" expr { "," expr } ")"
          | IDENT args
-         | IDENT "." ( "dx" | "dy" )
+         | IDENT "." ( "dx" | "dy" | "via" | "cost" | "steps" )
          | IDENT "[" expr "]"                         (an element of a memory array; 0 past its ends)
          | IDENT
 sense    = "x" | "y" | "age" | "light" | "hour" | "day" | "kind" | "look" | "signal"

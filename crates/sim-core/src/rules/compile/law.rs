@@ -394,10 +394,11 @@ impl L<'_, '_> {
                 let agg = self.any_agg(&[x]);
                 self.op(LawOp::Un(Un::Not, x), agg)
             }
-            Cond::Nearest { at, .. } | Cond::Best { at, .. } => Err(self.err(
-                at,
-                "a law doesn't search: `nearest` and `best` are an actor's",
-            )),
+            Cond::Nearest { at, .. } | Cond::Best { at, .. } | Cond::Search { at, .. } => Err(self
+                .err(
+                    at,
+                    "a law doesn't search: `nearest`, `best` and searches are an actor's",
+                )),
         }
     }
 }

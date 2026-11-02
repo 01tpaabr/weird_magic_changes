@@ -27,6 +27,7 @@ use super::asm::{Asm, Label};
 use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
+use super::vm::{SEARCH_DEFAULT_LIMIT, SEARCH_STATE};
 use super::{
     DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, LayerDef, Level,
     MAX_LAYERS, MaterialDef, Materials, NeedDef, Players, Policy, RuleInfo, RuleShape, Term,
@@ -762,12 +763,15 @@ enum Ty {
     Int,
     Target,
     Pred,
+    /// A search's plan (`as plan`): `.via`, `.cost`, `.steps`.
+    Plan,
 }
 
 impl Ty {
     /// Stack values / locals it occupies.
     fn width(self) -> u8 {
         match self {
+            Ty::Plan => 3,
             Ty::Target => 2,
             Ty::Int | Ty::Pred => 1,
         }
@@ -938,9 +942,30 @@ struct SubAst {
     at: Pos,
     name: String,
     params: Vec<(String, Ty)>,
+    /// A search's body is its one [`Stmt::Search`].
     body: Vec<Stmt>,
-    /// Has a `return expr` somewhere: a function.
+    /// Has a `return expr` somewhere: a function. A search returns
+    /// whether it found its goal.
     returns: bool,
+}
+
+impl SubAst {
+    fn is_search(&self) -> bool {
+        matches!(self.body.as_slice(), [Stmt::Search(_)])
+    }
+}
+
+/// `search NAME(params) { state a, b = e, f  next { ... try ... }  goal
+/// cond  guess e  limit N }` (`docs/RULES.md` §12, Searches).
+#[derive(Debug, Clone)]
+struct SearchAst {
+    at: Pos,
+    state: Vec<(String, Pos)>,
+    start: Vec<Expr>,
+    next: Vec<Stmt>,
+    goal: Cond,
+    guess: Option<Expr>,
+    limit: Option<(Expr, Pos)>,
 }
 
 #[derive(Debug, Clone)]
@@ -971,6 +996,15 @@ enum Cond {
         pred: Option<Pred>,
         r: Expr,
         bind: String,
+        at: Pos,
+    },
+    /// `NAME(args) as plan [into route]`: a search that found its goal,
+    /// its plan bound.
+    Search {
+        name: String,
+        args: Vec<Arg>,
+        bind: String,
+        into: Option<String>,
         at: Pos,
     },
     And(Box<Cond>, Box<Cond>),
@@ -1010,6 +1044,16 @@ enum Stmt {
         name: String,
         at: Pos,
         value: Expr,
+    },
+    /// A search's whole body (see [`SearchAst`]).
+    Search(Box<SearchAst>),
+    /// `try a, b [cost c] [via v]`: in a search's `next`, one state it may
+    /// go to.
+    Try {
+        values: Vec<Expr>,
+        cost: Option<Expr>,
+        via: Option<Expr>,
+        at: Pos,
     },
     /// `route[i] = v`, `+=`, `-=`: an element of a memory array.
     SetAt {
@@ -1388,6 +1432,8 @@ pub const KEYWORDS: &[&str] = &[
     "rand",
     "chance",
     "flow",
+    "search",
+    "try",
     "dist",
     "is",
     "free",
@@ -1568,6 +1614,8 @@ impl Parser<'_> {
                 items.items.push(self.item()?);
             } else if self.is_kw("sub") {
                 items.subs.push(self.sub()?);
+            } else if self.is_kw("search") {
+                items.subs.push(self.search()?);
             } else if self.eat_kw("const") {
                 let (name, at) = self.ident("constant name")?;
                 self.expect_sym("=")?;
@@ -1832,6 +1880,132 @@ impl Parser<'_> {
     fn sub(&mut self) -> Result<SubAst> {
         self.expect_kw("sub")?;
         let (name, at) = self.ident("sub name")?;
+        let params = self.params()?;
+        let body = self.block()?;
+        let returns = returns_value(&body);
+        Ok(SubAst {
+            at,
+            name,
+            params,
+            body,
+            returns,
+        })
+    }
+
+    /// `search NAME[(params)] { state ... next { ... } goal ... [guess e]
+    /// [limit N] }`, each part once, `state`, `next` and `goal` required.
+    fn search(&mut self) -> Result<SubAst> {
+        self.expect_kw("search")?;
+        let (name, at) = self.ident("search name")?;
+        let params = if self.is_sym("(") {
+            self.params()?
+        } else {
+            Vec::new()
+        };
+        self.expect_sym("{")?;
+        let (mut state, mut start, mut next, mut goal, mut guess, mut limit) =
+            (Vec::new(), Vec::new(), None, None, None, None);
+        while !self.eat_sym("}") {
+            let p = self.pos();
+            let twice = |done: bool, what: &str| {
+                done.then(|| format!("`{what}` given twice in search `{name}`"))
+            };
+            if self.eat_kw("state") {
+                if let Some(e) = twice(!state.is_empty(), "state") {
+                    return Err(self.err_at(&p, e));
+                }
+                loop {
+                    let (n, nat) = self.ident("state name")?;
+                    if state.iter().any(|(m, _)| *m == n) {
+                        return Err(self.err_at(&nat, format!("`{n}` named twice in the state")));
+                    }
+                    state.push((n, nat));
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
+                self.expect_sym("=")?;
+                loop {
+                    start.push(self.expr()?);
+                    if !self.eat_sym(",") {
+                        break;
+                    }
+                }
+                if start.len() != state.len() {
+                    return Err(self.err_at(
+                        &p,
+                        format!(
+                            "{} state names, {} starting values",
+                            state.len(),
+                            start.len()
+                        ),
+                    ));
+                }
+                if state.len() > SEARCH_STATE {
+                    return Err(self.err_at(
+                        &p,
+                        format!("a search's state holds at most {SEARCH_STATE} numbers"),
+                    ));
+                }
+            } else if self.eat_kw("next") {
+                if let Some(e) = twice(next.is_some(), "next") {
+                    return Err(self.err_at(&p, e));
+                }
+                next = Some(self.block()?);
+            } else if self.eat_kw("goal") {
+                if let Some(e) = twice(goal.is_some(), "goal") {
+                    return Err(self.err_at(&p, e));
+                }
+                goal = Some(self.cond()?);
+            } else if self.eat_kw("guess") {
+                if let Some(e) = twice(guess.is_some(), "guess") {
+                    return Err(self.err_at(&p, e));
+                }
+                guess = Some(self.expr()?);
+            } else if self.eat_kw("limit") {
+                if let Some(e) = twice(limit.is_some(), "limit") {
+                    return Err(self.err_at(&p, e));
+                }
+                limit = Some((self.additive()?, p));
+            } else {
+                return Err(self.err(format!(
+                    "expected `state`, `next`, `goal`, `guess`, `limit` or `}}` in search `{name}`, found {}",
+                    self.describe()
+                )));
+            }
+        }
+        let (Some(next), Some(goal)) = (next, goal) else {
+            return Err(self.err_at(
+                &at,
+                format!("search `{name}` needs a `state`, a `next` and a `goal`"),
+            ));
+        };
+        if state.is_empty() {
+            return Err(self.err_at(
+                &at,
+                format!("search `{name}` needs a `state`, a `next` and a `goal`"),
+            ));
+        }
+        let s = SearchAst {
+            at: at.clone(),
+            state,
+            start,
+            next,
+            goal,
+            guess,
+            limit,
+        };
+        Ok(SubAst {
+            at,
+            name,
+            params,
+            body: vec![Stmt::Search(Box::new(s))],
+            returns: true,
+        })
+    }
+
+    /// `(name[: type], ...)`: a sub's or a search's parameters.
+    fn params(&mut self) -> Result<Vec<(String, Ty)>> {
         self.expect_sym("(")?;
         let mut params = Vec::new();
         if !self.is_sym(")") {
@@ -1861,15 +2035,7 @@ impl Parser<'_> {
             }
         }
         self.expect_sym(")")?;
-        let body = self.block()?;
-        let returns = returns_value(&body);
-        Ok(SubAst {
-            at,
-            name,
-            params,
-            body,
-            returns,
-        })
+        Ok(params)
     }
 
     fn item(&mut self) -> Result<ItemAst> {
@@ -1937,8 +2103,12 @@ impl Parser<'_> {
         // so a file reads top-down.
         let decls = self.decls(is_trait)?;
         let mut members: Vec<SubAst> = Vec::new();
-        while self.is_kw("sub") {
-            let sub = self.sub()?;
+        while self.is_kw("sub") || self.is_kw("search") {
+            let sub = if self.is_kw("sub") {
+                self.sub()?
+            } else {
+                self.search()?
+            };
             if members.iter().any(|m| m.name == sub.name) {
                 return Err(self.err_at(&sub.at, format!("sub `{}` declared twice", sub.name)));
             }
@@ -1972,8 +2142,8 @@ impl Parser<'_> {
         if !self.is_sym("}") {
             let what = if DECL_WORDS.iter().any(|w| self.is_kw(w)) {
                 "declarations come first, before subs and rules".to_string()
-            } else if self.is_kw("sub") {
-                "member subs come before the rules".to_string()
+            } else if self.is_kw("sub") || self.is_kw("search") {
+                "member subs and searches come before the rules".to_string()
             } else if !states.is_empty() && (self.is_kw("when") || self.is_kw("inherit")) {
                 "reflex rules (`when`, `inherit`) come before the states".to_string()
             } else if !states.is_empty() {
@@ -2041,7 +2211,7 @@ impl Parser<'_> {
                 // (`food` is not reserved but starts a declaration).
                 while let Tok::Name(n) = self.peek().clone() {
                     if DECL_WORDS.contains(&n.as_str())
-                        || ["when", "inherit", "state", "sub"].contains(&n.as_str())
+                        || ["when", "inherit", "state", "sub", "search"].contains(&n.as_str())
                     {
                         break;
                     }
@@ -2425,6 +2595,28 @@ impl Parser<'_> {
                 at,
             });
         }
+        if self.eat_kw("try") {
+            let mut values = vec![self.expr()?];
+            while self.eat_sym(",") {
+                values.push(self.expr()?);
+            }
+            let cost = if self.eat_kw("cost") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            let via = if self.eat_kw("via") {
+                Some(self.expr()?)
+            } else {
+                None
+            };
+            return Ok(Stmt::Try {
+                values,
+                cost,
+                via,
+                at,
+            });
+        }
         if self.eat_kw("for") {
             self.expect_kw("each")?;
             let pred = self.pred()?;
@@ -2668,7 +2860,27 @@ impl Parser<'_> {
                 },
             };
         }
-        Ok(Cond::Expr(self.expr()?))
+        let e = self.expr()?;
+        // `name(args) as plan [into route]`: a search's plan.
+        if self.is_kw("as")
+            && let Expr::Call { name, args, at } = e
+        {
+            self.bump();
+            let (bind, ..) = self.ident("binding name")?;
+            let into = if self.eat_kw("into") {
+                Some(self.ident("memory array name")?.0)
+            } else {
+                None
+            };
+            return Ok(Cond::Search {
+                name,
+                args,
+                bind,
+                into,
+                at,
+            });
+        }
+        Ok(Cond::Expr(e))
     }
 
     fn starts_binop(&self) -> bool {
@@ -3003,9 +3215,13 @@ impl Parser<'_> {
                             let field = match self.bump() {
                                 Tok::Name(f) if f == "dx" => 0,
                                 Tok::Name(f) if f == "dy" => 1,
+                                // A plan's, from 10 (Ty::Plan's slots).
+                                Tok::Name(f) if f == "via" => 10,
+                                Tok::Name(f) if f == "cost" => 11,
+                                Tok::Name(f) if f == "steps" => 12,
                                 _ => {
                                     return Err(
-                                        self.err_at(&at, format!("`{n}.` must be `.dx` or `.dy`"))
+                                        self.err_at(&at, format!("`{n}.` must be `.dx`, `.dy`, `.via`, `.cost` or `.steps`"))
                                     );
                                 }
                             };
@@ -3035,7 +3251,10 @@ fn returns_value(body: &[Stmt]) -> bool {
             returns_value(body)
         }
         Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
-        Stmt::Set { .. }
+        // Whether it found its goal.
+        Stmt::Search(_) => true,
+        Stmt::Try { .. }
+        | Stmt::Set { .. }
         | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
@@ -3073,6 +3292,8 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
                 spawn_withs(body, out)
             }
             Stmt::Choose(arms) => arms.iter().for_each(|(_, b)| spawn_withs(b, out)),
+            // A search never acts.
+            Stmt::Search(_) | Stmt::Try { .. } => {}
             Stmt::Spawn { .. }
             | Stmt::Set { .. }
             | Stmt::SetAt { .. }
@@ -3325,6 +3546,9 @@ struct Gen<'a> {
     acts_memo: RefCell<HashMap<(usize, Option<usize>, u32), bool>>,
     /// Compiling a `when` condition: a sub called here must not act.
     in_when: bool,
+    /// Compiling a search's `next`: its state's first local, width and
+    /// guess, for a `try`.
+    in_next: Option<(u8, u8, Option<Expr>)>,
 }
 
 /// Does this statement emit an action? Its position, if so.
@@ -3343,7 +3567,9 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Eat(_, at)
         | Stmt::Hit(_, at)
         | Stmt::Graze(_, at) => Some(at),
-        Stmt::Set { .. }
+        Stmt::Search(_)
+        | Stmt::Try { .. }
+        | Stmt::Set { .. }
         | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
@@ -3371,7 +3597,10 @@ fn may_return(s: &Stmt) -> bool {
         Stmt::While { body, .. } | Stmt::Repeat { body, .. } | Stmt::ForEach { body, .. } => {
             body.iter().any(may_return)
         }
-        Stmt::Set { .. }
+        // A search's `next` may not return (the compiler refuses it).
+        Stmt::Search(_)
+        | Stmt::Try { .. }
+        | Stmt::Set { .. }
         | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
@@ -3428,6 +3657,7 @@ impl<'a> Gen<'a> {
             ends_memo: RefCell::default(),
             acts_memo: RefCell::default(),
             in_when: false,
+            in_next: None,
             items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
@@ -5101,6 +5331,19 @@ impl<'a> Gen<'a> {
             Stmt::Call { name, args, .. } => {
                 self.args_act(args, depth) || self.call_acts(name, depth)
             }
+            Stmt::Search(se) => {
+                se.start.iter().any(|e| self.expr_acts(e, depth))
+                    || body(&se.next)
+                    || self.cond_acts(&se.goal, depth)
+                    || se.guess.as_ref().is_some_and(|e| self.expr_acts(e, depth))
+            }
+            Stmt::Try {
+                values, cost, via, ..
+            } => values
+                .iter()
+                .chain(cost)
+                .chain(via)
+                .any(|e| self.expr_acts(e, depth)),
             _ => false,
         }
     }
@@ -5114,6 +5357,9 @@ impl<'a> Gen<'a> {
                 self.cond_acts(a, depth) || self.cond_acts(b, depth)
             }
             Cond::Not(a) => self.cond_acts(a, depth),
+            Cond::Search { name, args, .. } => {
+                self.args_act(args, depth) || self.call_acts(name, depth)
+            }
         }
     }
 
@@ -5609,6 +5855,46 @@ impl<'a> Gen<'a> {
                     ty: Ty::Target,
                 });
             }
+            Cond::Search {
+                name,
+                args,
+                bind,
+                into,
+                at,
+            } => {
+                if !top {
+                    return Err(self.err(
+                        at,
+                        "`... as plan` must be a top-level conjunct (not under `or` or `not`)",
+                    ));
+                }
+                if self.local(bind).is_some() {
+                    return Err(self.err(at, format!("`{bind}` is already bound")));
+                }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
+                if !self.callee_is_search(name) {
+                    return Err(self.err(
+                        at,
+                        format!("`{name}` is not a search: `as` binds a search's plan"),
+                    ));
+                }
+                let array = match into {
+                    Some(a) => Some(self.mem_array(a, at)?),
+                    None => None,
+                };
+                let slot = self.alloc_local(at, 3)?;
+                self.call(name, args, at)?;
+                self.asm.jz(on_false);
+                self.asm.search(OpCode::SearchOut, slot, 0);
+                if let Some((b, len)) = array {
+                    self.asm.search(OpCode::SearchInto, b, len);
+                }
+                self.locals.push(Local {
+                    name: bind.clone(),
+                    slot,
+                    ty: Ty::Plan,
+                });
+            }
             Cond::And(a, b) => {
                 self.cond(a, on_false, top)?;
                 self.cond(b, on_false, top)?;
@@ -5827,6 +6113,14 @@ impl<'a> Gen<'a> {
                                 format!("`{n}` is a target: use `{n}.dx`, `{n}.dy` or `dist({n})`"),
                             ));
                         }
+                        Ty::Plan => {
+                            return Err(self.err(
+                                at,
+                                format!(
+                                    "`{n}` is a plan: use `{n}.via`, `{n}.cost` or `{n}.steps`"
+                                ),
+                            ));
+                        }
                         Ty::Pred => {
                             return Err(self.err(
                                 at,
@@ -5848,10 +6142,19 @@ impl<'a> Gen<'a> {
             }
             Expr::Field(n, field, at) => {
                 let l = self.local(n).ok_or_else(|| self.unknown_name(at, n))?;
-                if l.ty != Ty::Target {
-                    return Err(self.err(at, format!("`{n}` is not a target")));
-                }
-                let slot = l.slot + field;
+                let slot = match (l.ty, *field) {
+                    (Ty::Target, f @ 0..=1) => l.slot + f,
+                    (Ty::Plan, f @ 10..=12) => l.slot + f - 10,
+                    (Ty::Target, _) => {
+                        return Err(self.err(at, format!("`{n}` is a target: `.dx` or `.dy`")));
+                    }
+                    (Ty::Plan, _) => {
+                        return Err(
+                            self.err(at, format!("`{n}` is a plan: `.via`, `.cost` or `.steps`"))
+                        );
+                    }
+                    _ => return Err(self.err(at, format!("`{n}` is not a target or a plan"))),
+                };
                 self.asm.load(slot);
             }
             Expr::Bin(op, a, b) => {
@@ -5935,6 +6238,14 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// Is `name`, called from here, a search?
+    fn callee_is_search(&self, name: &str) -> bool {
+        if self.members_here.iter().any(|(n, _)| n == name) {
+            return self.callee(name).is_some_and(SubAst::is_search);
+        }
+        self.subs.iter().any(|s| s.name == name && s.is_search())
+    }
+
     /// Emit a call; returns whether the sub leaves a value on the stack.
     fn call(&mut self, name: &str, args: &[Arg], at: &Pos) -> Result<bool> {
         let (idx, sub): (u16, &'a SubAst) = if let Some(&(_, idx)) =
@@ -6006,6 +6317,7 @@ impl<'a> Gen<'a> {
                             match ty {
                                 Ty::Int => "an integer",
                                 Ty::Target => "a target",
+                                Ty::Plan => "a plan",
                                 Ty::Pred => {
                                     "a predicate (a kind, a tag, water, soil, rock, free or bare)"
                                 }
@@ -6075,6 +6387,65 @@ impl<'a> Gen<'a> {
                 format!("cannot assign to `{name}`: not a local, need or mem slot here"),
             ));
         }
+        Ok(())
+    }
+
+    /// A search's code, its sub's whole body: the state into locals, the
+    /// loop that takes the best open state, tests the goal and runs `next`.
+    /// Returns 1 when it reached the goal (the plan held for `SearchOut`),
+    /// else 0.
+    fn search(&mut self, se: &SearchAst) -> Result<()> {
+        let at = &se.at;
+        if self.stmt_acts(&Stmt::Search(Box::new(se.clone())), 0) {
+            return Err(self.err(
+                at,
+                "a search doesn't act, `next` or call what does: it plans",
+            ));
+        }
+        let k = u8::try_from(se.state.len()).expect("at most SEARCH_STATE, parsed");
+        // The starting values, all read before any is set.
+        for e in &se.start {
+            self.expr(e)?;
+        }
+        let base = self.alloc_local(at, usize::from(k))?;
+        for (i, (name, nat)) in se.state.iter().enumerate() {
+            if self.local(name).is_some() {
+                return Err(self.err(nat, format!("`{name}` is already bound")));
+            }
+            self.hides(name, &format!("state `{name}`"), nat)?;
+            self.locals.push(Local {
+                name: name.clone(),
+                slot: base + u8::try_from(i).expect("at most SEARCH_STATE"),
+                ty: Ty::Int,
+            });
+        }
+        for i in (0..k).rev() {
+            self.asm.store(base + i);
+        }
+        match &se.guess {
+            Some(g) => self.expr(g)?,
+            None => self.push_int(0)?,
+        }
+        // Any expression, worked out at the call; the VM holds it to 0 to
+        // SEARCH_LIMIT.
+        match &se.limit {
+            Some((e, _)) => self.expr(e)?,
+            None => self.push_int(SEARCH_DEFAULT_LIMIT)?,
+        }
+        self.asm.search(OpCode::SearchBegin, base, k);
+        let (top, expand, fail) = (self.asm.label(), self.asm.label(), self.asm.label());
+        self.asm.bind(top);
+        self.asm.search(OpCode::SearchPop, base, k).jz(fail);
+        self.cond(&se.goal, expand, false)?;
+        self.asm.search(OpCode::SearchDone, 0, 0).push(1).ret(true);
+        self.asm.bind(expand);
+        let outer = self.in_next.replace((base, k, se.guess.clone()));
+        let r = self.scoped(|g| g.stmts(&se.next));
+        self.in_next = outer;
+        r?;
+        self.asm.jmp(top);
+        self.asm.bind(fail);
+        self.asm.search(OpCode::SearchFail, 0, 0).push(0).ret(true);
         Ok(())
     }
 
@@ -6189,7 +6560,53 @@ impl<'a> Gen<'a> {
                     self.asm.op(OpCode::Pop);
                 }
             }
+            Stmt::Search(se) => self.search(se)?,
+            Stmt::Try {
+                values,
+                cost,
+                via,
+                at,
+            } => {
+                let Some((base, k, guess)) = self.in_next.clone() else {
+                    return Err(self.err(at, "`try` belongs in a search's `next`"));
+                };
+                if values.len() != usize::from(k) {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "this search's state holds {k} numbers; the `try` gives {}",
+                            values.len()
+                        ),
+                    ));
+                }
+                for v in values {
+                    self.expr(v)?;
+                }
+                match cost {
+                    Some(c) => self.expr(c)?,
+                    None => self.push_int(1)?,
+                }
+                match via {
+                    Some(v) => self.expr(v)?,
+                    None => self.push_int(0)?,
+                }
+                self.asm.search_try(k);
+                // The guess reads the state by its names: the tried
+                // values stand in them while it is worked out.
+                match &guess {
+                    Some(gu) => {
+                        self.asm.search(OpCode::SearchSwap, base, k);
+                        self.expr(gu)?;
+                        self.asm.search(OpCode::SearchSwap, base, k);
+                    }
+                    None => self.push_int(0)?,
+                }
+                self.asm.search(OpCode::SearchPush, 0, 0);
+            }
             Stmt::Return { value, at } => {
+                if self.in_next.is_some() {
+                    return Err(self.err(at, "a search's `next` doesn't `return`: it `try`s"));
+                }
                 let Some(sub) = self.sub else {
                     return Err(self.err(at, "`return` outside a sub"));
                 };

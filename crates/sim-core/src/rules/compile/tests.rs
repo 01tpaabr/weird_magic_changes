@@ -1574,7 +1574,7 @@ fn extends_errors_name_the_problem() {
         ),
         (
             "kind a { when 1 => idle  sub f() { } }",
-            "member subs come before the rules",
+            "member subs and searches come before the rules",
         ),
     ];
     for (text, want) in errs {
@@ -3022,4 +3022,81 @@ fn the_lint_sees_memory_arrays_whole() {
             .collect::<Vec<_>>(),
         ["mem `spare` of kind `k` is never used"]
     );
+}
+
+/// A search says what it can't do, and where.
+#[test]
+fn search_errors_name_the_problem() {
+    let ok = "search s { state a = 0  next { try a + 1 }  goal a > 2 }";
+    assert!(compile(
+        "t.rules",
+        &format!("{ok} kind k {{ glyph \"k\"  when s() as p and p.steps > 0 => idle  when true => idle }}")
+    )
+    .is_ok());
+    for (text, want) in [
+        (
+            "kind k { when true => { try 1  idle } }",
+            "`try` belongs in a search's `next`",
+        ),
+        (
+            "search s { state a, b = 0, 0  next { try a + 1 }  goal a > 2 }",
+            "this search's state holds 2 numbers; the `try` gives 1",
+        ),
+        (
+            "search s { state a = 0, 1  next { try a }  goal a > 2 }",
+            "1 state names, 2 starting values",
+        ),
+        (
+            "search s { state a, b, c, d, e, f, g, h, i = 0, 0, 0, 0, 0, 0, 0, 0, 0  next { try a }  goal a > 2 }",
+            "at most 8 numbers",
+        ),
+        (
+            "search s { state a = 0  goal a > 2 }",
+            "needs a `state`, a `next` and a `goal`",
+        ),
+        (
+            "search s { state a = 0  next { try a }  next { try a }  goal a > 2 }",
+            "`next` given twice",
+        ),
+        (
+            "search s { state a = 0  next { try a }  goal a > 2  speed 3 }",
+            "expected `state`, `next`",
+        ),
+        (
+            "search s { state a = 0  next { move north }  goal a > 2 }",
+            "a search doesn't act",
+        ),
+        (
+            "search s { state a = 0  next { return 1 }  goal a > 2 }",
+            "doesn't `return`: it `try`s",
+        ),
+        (
+            "sub t() { return 1 } kind k { when t() as p => idle }",
+            "`t` is not a search",
+        ),
+        (
+            "search s { state a = 0  next { try a + 1 }  goal a > 2 } kind k { when s() as p and p.dx > 0 => idle }",
+            "`p` is a plan: `.via`, `.cost` or `.steps`",
+        ),
+        (
+            "search s { state a = 0  next { try a + 1 }  goal a > 2 } kind k { when s() as p and p > 0 => idle }",
+            "`p` is a plan",
+        ),
+        (
+            "search s { state a = 0  next { try a + 1 }  goal a > 2 } kind k { when not s() as p => idle }",
+            "must be a top-level conjunct",
+        ),
+        (
+            "search s { state a = 0  next { try a + 1 }  goal a > 2 } kind k { mem m when s() as p into m => idle }",
+            "`m` is not a memory array",
+        ),
+        (
+            "field f max 9 { every 1 { if s() as p { f = 1 } } }",
+            "a law doesn't search",
+        ),
+        ("kind k { mem search }", "reserved"),
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
 }

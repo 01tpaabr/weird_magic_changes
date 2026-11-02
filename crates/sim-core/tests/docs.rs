@@ -449,6 +449,18 @@ fn the_limits_table_is_the_codes() {
             "steps in one law".into(),
             vec![n(sim_core::rules::law::MAX_LAW_OPS)],
         ),
+        (
+            "numbers in a search's state".into(),
+            vec![n(sim_core::rules::vm::SEARCH_STATE)],
+        ),
+        (
+            "states a search expands".into(),
+            vec![i64::from(sim_core::rules::vm::SEARCH_LIMIT)],
+        ),
+        (
+            "states a search holds".into(),
+            vec![n(sim_core::rules::vm::SEARCH_NODES)],
+        ),
         ("states per kind".into(), vec![n(MAX_STATES)]),
         ("sight".into(), vec![i64::from(MAX_SIGHT)]),
         ("fuel per think".into(), vec![i64::from(MAX_FUEL)]),

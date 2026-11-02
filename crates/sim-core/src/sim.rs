@@ -2751,6 +2751,139 @@ mod tests {
         assert_eq!(&m[8..], &[0; 24], "nothing written past the array");
     }
 
+    /// A search over memory plans (chop, saw, build) from where the actor
+    /// stands; a search over the cells finds the way round a wall to water
+    /// and writes it into a memory array; a short limit finds nothing; a
+    /// search started inside another traps.
+    #[test]
+    fn searches_plan_over_memory_and_over_cells() {
+        use crate::actors::life;
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "const CHOP = 1  const SAW = 2  const BUILD = 3
+             kind crafter { glyph \"c\"  cadence 1  fuel 32768
+               mem wood, planks, first, cost, steps, done, found_short
+               search craft(most) {
+                 state w, p, h = wood, planks, 0
+                 next {
+                   try w + 1, p, h cost 3 via CHOP
+                   if w >= 2 { try w - 2, p + 1, h cost 1 via SAW }
+                   if p >= 4 { try w, p - 4, h + 1 cost 2 via BUILD }
+                 }
+                 goal h >= 1
+                 guess 4 - min(p, 4)
+                 limit most
+               }
+               when done == 0 => { if craft(3) { found_short = 1 }  done = 1  idle }
+               when done == 1 and craft(2000) as plan => {
+                 done = 2  first = plan.via  cost = plan.cost  steps = plan.steps  idle
+               }
+               when true => idle }
+             kind walker { glyph \"w\"  cadence 1  sight 16  fuel 32768
+               mem done, via, cost, steps, route[16]
+               search to_water {
+                 state px, py = x, y
+                 next {
+                   if free(at(px, py - 1)) or is(at(px, py - 1), water) { try px, py - 1 via 1 }
+                   if free(at(px + 1, py)) or is(at(px + 1, py), water) { try px + 1, py via 3 }
+                   if free(at(px, py + 1)) or is(at(px, py + 1), water) { try px, py + 1 via 5 }
+                   if free(at(px - 1, py)) or is(at(px - 1, py), water) { try px - 1, py via 7 }
+                 }
+                 goal is(at(px, py), water)
+                 guess abs(px - 14) + abs(py - 10)
+                 limit 400
+               }
+               when done == 0 and to_water() as p into route => {
+                 done = 1  via = p.via  cost = p.cost  steps = p.steps  idle
+               }
+               when true => idle }
+             kind nester { glyph \"n\"  cadence 1  fuel 32768  mem done
+               search inner { state a = 0  next { try a + 1 }  goal a > 2 }
+               search outer { state b = 0  next { if inner() { try b + 1 } }  goal b > 2 }
+               when outer() => { done = 1  idle }
+               when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(26)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        // Water at (14, 10), and a rock wall x = 12, y 7 to 13, in the way.
+        let (cc, i) = Pos::new(14, 10).split();
+        stage::chunk_mut(&mut w, cc).unwrap().ground[i] = crate::stage::Ground::Water;
+        for y in 7..=13 {
+            let (cc, i) = Pos::new(12, y).split();
+            stage::chunk_mut(&mut w, cc).unwrap().feature[i] = Feature::Rock;
+        }
+        let id = |n: &str| kinds.by_name(n).unwrap().id;
+        let now = tick(&w);
+        let mut rich = newborn(&kinds, id("crafter"), 0xD2, now);
+        rich.mem[0] = 8; // eight wood already
+        for (p, k, mind) in [
+            (
+                Pos::new(30, 30),
+                "crafter",
+                newborn(&kinds, id("crafter"), 0xD1, now),
+            ),
+            (Pos::new(40, 30), "crafter", rich),
+            (
+                Pos::new(10, 10),
+                "walker",
+                newborn(&kinds, id("walker"), 0xD3, now),
+            ),
+            (
+                Pos::new(50, 50),
+                "nester",
+                newborn(&kinds, id("nester"), 0xD4, now),
+            ),
+        ] {
+            assert!(place_actor(&mut w, p, id(k), mind));
+        }
+        for _ in 0..4 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        let by = |uid: u64| &all.iter().find(|r| r.0 == uid).unwrap().3.mem;
+        // From nothing: 8 chops, 4 saws, a build; it starts by chopping.
+        assert_eq!(
+            &by(0xD1)[2..7],
+            &[1, 30, 13, 2, 0],
+            "chop first, 30 over 13 steps; limit 3 finds nothing"
+        );
+        // With 8 wood: saw first, 4 saws and a build.
+        assert_eq!(&by(0xD2)[2..6], &[2, 6, 5, 2], "saw first");
+        // Round the wall: 12 steps each way; the route leads to the water.
+        let m = by(0xD3);
+        assert_eq!(&m[..4], &[1, m[1], 12, 12], "found, 12 steps");
+        let (mut x, mut y) = (10, 10);
+        for &v in &m[4..16] {
+            match v {
+                1 => y -= 1,
+                3 => x += 1,
+                5 => y += 1,
+                7 => x -= 1,
+                _ => panic!("a step {v}"),
+            }
+            assert!(
+                !(x == 12 && (7..=13).contains(&y)),
+                "through the wall at ({x}, {y})"
+            );
+        }
+        assert_eq!((x, y), (14, 10), "the route ends at the water");
+        assert_eq!(m[1], m[4], "the plan's first step is the route's first");
+        // A search inside a search traps the think.
+        assert_eq!(by(0xD4)[0], 0, "never found");
+        let traps = w
+            .resource::<crate::actors::Tally>()
+            .get(id("nester"), life::TRAPS);
+        assert!(traps > 0, "it trapped");
+    }
+
     /// Inside an aggregate a field is read as it stood before the law ran,
     /// whatever the law assigned it first (a fuzz find: the new values of a
     /// neighbour in the next chunk are not known).

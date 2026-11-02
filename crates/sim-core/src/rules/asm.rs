@@ -151,6 +151,16 @@ impl Asm {
         self.emit(OpCode::Ret, u8::from(value), 0)
     }
 
+    /// A search op over the `k` state locals from `base` (see `OpCode::Search*`).
+    pub fn search(&mut self, code: OpCode, base: u8, k: u8) -> &mut Self {
+        self.emit(code, base, i16::from(k))
+    }
+
+    /// `s.. cost via ->`: a `try` of `k` values.
+    pub fn search_try(&mut self, k: u8) -> &mut Self {
+        self.emit(OpCode::SearchTry, k, 0)
+    }
+
     /// `pred r -> found`, binding `(dx, dy)` into locals `slot`, `slot + 1`.
     pub fn nearest(&mut self, slot: u8) -> &mut Self {
         self.emit(OpCode::Nearest, slot, 0)

@@ -399,6 +399,74 @@ index is worked out once, so `route[rand(8)] += 1` adds to the element it read. 
 array count toward the 32 a kind has; a save and a reload keep each element by name
 (`route[3]`), so a longer array keeps what the shorter one held.
 
+**Searches.** A `search` explores choices before acting: from a starting **state** (up to 8
+numbers), its `next` block offers the states one step away with `try`, each with a `cost`
+(default 1) and a `via` (a number naming the step: what to do); the search keeps the
+cheapest way to each state it reaches, expands the open state with the least cost so far
+plus its `guess`, and stops at the first that meets its `goal`. What a state *is* is the
+pack's: memory values to plan over, a position to find a way from, anything a rule can
+compute. A search is declared like a sub (in a file, or a member of a kind or trait, with
+parameters if it likes) and called in a condition:
+
+```rules
+const CHOP = 1
+const SAW = 2
+const BUILD = 3
+kind builder {
+  glyph "b"
+  fuel 8192
+  mem wood, planks
+  search plan_house {
+    state w, p, h = wood, planks, 0            # starts from what it holds
+    next {
+      try w + 1, p, h cost 3 via CHOP
+      if w >= 2 { try w - 2, p + 1, h cost 1 via SAW }
+      if p >= 4 { try w, p - 4, h + 1 cost 2 via BUILD }
+    }
+    goal h >= 1
+    guess 4 - min(p, 4)                        # optional: a hint of what is left
+    limit 500                                  # states it may expand
+  }
+  when plan_house() as plan and plan.via == CHOP => { wood += 1  idle }
+  when plan_house() as plan and plan.via == SAW => { wood -= 2  planks += 1  idle }
+  when true => idle
+}
+```
+
+`NAME(args) as plan` holds when the goal was reached: `plan.via` is the first step's `via`
+(what to do now), `plan.cost` the whole cost, `plan.steps` how many; `as plan into route`
+also writes every step's `via`, first first, into the memory array `route` (0 past the
+plan's end). A search used as a value (`if plan_house() { ... }`) is 1 when it found its
+goal. Inside the search, the state's names are its values: `next`, `goal` and `guess` read
+them and anything else a rule may (needs, memory, fields, senses, `free(at(px, py))`), so a
+way across the cells is the same thing with the position as the state:
+
+```text
+search to_water {
+  state px, py = x, y
+  next {
+    if free(at(px + 1, py)) { try px + 1, py via 3 }      # east
+    ...                                                   # and the other three
+  }
+  goal is(at(px, py), water)
+  guess abs(px - x) + abs(py - y)
+}
+when to_water() as p => move dir(p.via)
+```
+
+- **Exact or not.** With no `guess` (0) the plan is the cheapest; with a guess that never
+  overestimates what is left, still. A guess that does (`3 * dist`) finds a plan sooner, not
+  always the best: an impatient planner. Dice in a `cost` (`1 + rand(3)`) give each actor
+  its own way, the same on a replay.
+- **Bounded.** `limit` (any expression; default 256, at most 4096) caps the states it
+  expands; past it, or with nothing left to try, it found nothing (`as` doesn't hold). It
+  holds at most 32768 states. Each expanded state runs its code, which spends fuel as any
+  think does, plus a little per state: give a planner the `fuel` (up to 32768).
+- **Local.** A search reads only what a rule could, within `sight`; it doesn't act, `next`,
+  `return` or call what acts, and a search can't start inside another (the think traps).
+- **The same everywhere.** Ties go to the state offered first, so a plan is the same on any
+  number of threads.
+
 ```rules
 kind ant {
   glyph "a"
@@ -1175,6 +1243,9 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | declared layers per rule set | 8 (beside standing and cover) |
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |
+| numbers in a search's state | 8 |
+| states a search expands | 4096 (`limit`; 256 by default) |
+| states a search holds | 32768 |
 | states per kind | 64 |
 | sight | 64 |
 | fuel per think | 32768 |

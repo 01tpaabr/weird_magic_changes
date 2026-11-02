@@ -729,7 +729,17 @@ impl<'a> G<'a> {
             .chain(&files)
             .cloned()
             .collect();
-        s += &self.rule_list(oi, &calls, true);
+        // A member search, now and then, and a rule that plans with it.
+        let search = (self.strict && !o.is_trait && self.maybe(20)).then(|| self.search_text(&o));
+        if let Some((text, rule)) = search {
+            s += self.sep();
+            s += &text;
+            s += &self.rule_list(oi, &calls, true);
+            s += "\n";
+            s += &rule;
+        } else {
+            s += &self.rule_list(oi, &calls, true);
+        }
         let mut states: Vec<String> = o.extra_states.clone();
         states.extend(o.own_states.iter().cloned());
         for st in states {
@@ -954,6 +964,45 @@ impl<'a> G<'a> {
     }
 
     /// Rules and `inherit`s of owner `oi`: the reflexes, or a state's.
+    /// A member search of kind `o` over two numbers, from its memory or
+    /// where it stands, sometimes reading the cells; and a rule that calls
+    /// it, binding its plan (into an array if `o` has one).
+    fn search_text(&mut self, o: &Owner) -> (String, String) {
+        let n = &o.name;
+        let mut starts: Vec<String> = o.mems.iter().chain(&o.needs).cloned().collect();
+        starts.extend(["x".into(), "y".into(), format!("{}", self.n(20))]);
+        let (e1, e2) = (self.one(&starts), self.one(&starts));
+        let c1 = 1 + self.n(3);
+        let cost = self.one(&["1", "2", "1 + rand(3)", "qy % 3"]).to_string();
+        let world = if self.maybe(50) {
+            "\n    if free(at(qx, qy)) { try qx - 1, qy cost 2 via 3 }".to_string()
+        } else {
+            String::new()
+        };
+        let guess = match self.n(3) {
+            0 => String::new(),
+            1 => "\n  guess abs(qa - qx)".to_string(),
+            _ => "\n  guess 3 * abs(qa - qx)".to_string(),
+        };
+        let text = format!(
+            "search {n}q(qa) {{\n  state qx, qy = {e1}, {e2}\n  next {{\n    try qx + {c1}, qy cost {cost} via 1\n    if qy < qa {{ try qx, qy + 1 via 2 }}{world}\n  }}\n  goal qx >= qa or qx + qy > {}{guess}\n  limit {}\n}}",
+            self.n(60),
+            1 + self.n(64)
+        );
+        let lit = self.n(40);
+        let into = match o.arrays.first() {
+            Some((a, _)) if self.maybe(50) => format!(" into {a}"),
+            _ => String::new(),
+        };
+        let rule = match o.mems.first() {
+            Some(m) => format!(
+                "when {n}q({lit}) as qp{into} => {{ {m} = qp.via + qp.cost - qp.steps  idle }}"
+            ),
+            None => format!("when {n}q({lit}) => idle"),
+        };
+        (text, rule)
+    }
+
     fn rule_list(&mut self, oi: usize, calls: &[Sig], reflex: bool) -> String {
         let o = self.owners[oi].clone();
         let mut s = String::new();
