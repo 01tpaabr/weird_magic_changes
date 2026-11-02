@@ -25,7 +25,7 @@ TIME     = digit { digit } unit                            unit = "min" | "h" | 
 STRING   = '"' { any byte but '"' and LF } '"'             (no escapes)
 SYMBOL   = "=>" | "==" | "!=" | "<=" | ">=" | "+=" | "-="
          | "{" | "}" | "(" | ")" | "," | ":" | "=" | "<" | ">"
-         | "+" | "-" | "*" | "/" | "%" | ";" | "."
+         | "+" | "-" | "*" | "/" | "%" | ";" | "." | "[" | "]"
 ```
 
 - **Longest match.** A two-character symbol wins over its first character: `<=` is one
@@ -139,7 +139,7 @@ decl = "glyph" STRING
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
      | "reach" additive | "climb" additive "on" IDENT | "layer" IDENT
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
-     | "mem" IDENT { "," IDENT }
+     | "mem" mem_slot { "," mem_slot }        mem_slot = IDENT [ "[" INT "]" ]   (an array: INT slots, 1 to 32)
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 ```
 
@@ -179,6 +179,7 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | "next" IDENT
       | IDENT args
       | IDENT ( "=" | "+=" | "-=" ) expr
+      | IDENT "[" expr "]" ( "=" | "+=" | "-=" ) expr        (an element of a memory array)
 arm   = expr ":" ( block | stmt ) [ ";" ]
 ```
 
@@ -239,6 +240,7 @@ primary  = INT | TIME
          | ( "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" ) "(" expr { "," expr } ")"
          | IDENT args
          | IDENT "." ( "dx" | "dy" )
+         | IDENT "[" expr "]"                         (an element of a memory array; 0 past its ends)
          | IDENT
 sense    = "x" | "y" | "age" | "light" | "hour" | "day" | "kind" | "look" | "signal"
          | "state" | "hurt" | "hurt_dir" | "result" | "taken" | "trapped"

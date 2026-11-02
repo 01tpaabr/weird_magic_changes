@@ -77,6 +77,13 @@ impl Seen<'_> {
                 self.names.all.insert(name.clone());
                 self.expr(value);
             }
+            Stmt::SetAt {
+                name, index, value, ..
+            } => {
+                self.names.all.insert(name.clone());
+                self.expr(index);
+                self.expr(value);
+            }
             Stmt::Let { value, .. } => self.expr(value),
             Stmt::If { cond, then, els } => {
                 self.cond(cond);
@@ -192,6 +199,10 @@ impl Seen<'_> {
                 self.expr(b);
             }
             Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) => self.expr(a),
+            Expr::Index(n, i, _) => {
+                self.names.all.insert(n.clone());
+                self.expr(i);
+            }
             Expr::Count(p, r) => {
                 self.pred(p);
                 self.expr(r);
@@ -563,10 +574,15 @@ impl<'a> Gen<'a> {
         for (i, it) in items.iter().enumerate() {
             let owner = if it.is_trait { "trait" } else { "kind" };
             for (m, at) in &it.decls.mems {
-                if !names.all.contains(m) {
+                // An array once, by its own name.
+                let shown = array_of(m).unwrap_or(m);
+                if shown != m && !m.ends_with("[0]") {
+                    continue;
+                }
+                if !names.all.contains(shown) {
                     out.warn(
                         at,
-                        format!("mem `{m}` of {owner} `{}` is never used", it.name),
+                        format!("mem `{shown}` of {owner} `{}` is never used", it.name),
                     );
                 }
             }
@@ -891,6 +907,10 @@ impl<'a> Gen<'a> {
             | Stmt::Signal(value)
             | Stmt::Add(_, value, _)
             | Stmt::Harvest { amount: value, .. } => self.walk_expr(kinds, w, value, out),
+            Stmt::SetAt { index, value, .. } => {
+                self.walk_expr(kinds, w, index, out);
+                self.walk_expr(kinds, w, value, out);
+            }
             Stmt::If { cond, then, els } => {
                 let mark = w.binds.len();
                 self.walk_cond(kinds, w, cond, out);
@@ -1003,7 +1023,9 @@ impl<'a> Gen<'a> {
                 self.walk_expr(kinds, w, a, out);
                 self.walk_expr(kinds, w, b, out);
             }
-            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) => self.walk_expr(kinds, w, a, out),
+            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Index(_, a, _) => {
+                self.walk_expr(kinds, w, a, out)
+            }
             Expr::Fn(_, args) => {
                 for a in args {
                     self.walk_expr(kinds, w, a, out);

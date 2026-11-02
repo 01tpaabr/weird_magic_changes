@@ -2969,3 +2969,57 @@ fn a_namespace_keeps_an_arena_packs_names_apart() {
         assert!(e.contains(want), "{files:?}\n  got: {e}");
     }
 }
+
+/// `mem route[N]`: N slots named `route[0]` .. in a row; `route[i]` reads
+/// and writes one, with any expression for i; what is past the ends reads
+/// 0 and takes no write. Mistakes say so.
+#[test]
+fn memory_arrays_are_slots_in_a_row() {
+    let k = compile_ok(
+        "kind k { glyph \"k\"  mem a, route[3], b  when true => { route[a] = 5  b = route[2]  idle } }",
+    );
+    let d = k.by_name("k").unwrap();
+    assert_eq!(d.mems, ["a", "route[0]", "route[1]", "route[2]", "b"]);
+    for (text, want) in [
+        ("kind k { mem r[0] }", "`r[N]`: N is a number, 1 to 32"),
+        ("kind k { mem r[33] }", "`r[N]`: N is a number, 1 to 32"),
+        ("kind k { mem r[2], r }", "`r` declared twice"),
+        ("kind k { mem r[30], a, b, c }", "at most 32"),
+        (
+            "kind k { mem a  when true => { a[1] = 2  idle } }",
+            "`a` is not a memory array",
+        ),
+        (
+            "kind k { mem r[2]  when r > 0 => idle }",
+            "unknown name `r`",
+        ),
+        (
+            "kind k { mem r[2]  when true => { r[0] *= 2  idle } }",
+            "expected `=`, `+=` or `-=` after `r[...]`",
+        ),
+        (
+            "field f max 9 { every 1 { f = r[0] } }",
+            "a law reads fields",
+        ),
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+}
+
+/// The lint names an unused memory array once, and an array read by index
+/// is used.
+#[test]
+fn the_lint_sees_memory_arrays_whole() {
+    let k = compile_ok(
+        "kind k { glyph \"k\"  mem spare[3], used[2]  when used[0] > 0 => idle  when true => idle }",
+    );
+    let msgs: Vec<&str> = k.debug.diagnostics.iter().map(|d| d.msg.as_str()).collect();
+    assert_eq!(
+        msgs.iter()
+            .filter(|m| m.contains("never used"))
+            .copied()
+            .collect::<Vec<_>>(),
+        ["mem `spare` of kind `k` is never used"]
+    );
+}

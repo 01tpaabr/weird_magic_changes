@@ -2709,6 +2709,48 @@ mod tests {
         );
     }
 
+    /// Memory arrays in a world: a ring of the last four x positions,
+    /// written at a computed index; a read past the end is 0 and a write
+    /// there changes nothing; `+=` at a random index reads and writes the
+    /// same element.
+    #[test]
+    fn a_memory_array_keeps_what_it_is_given() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind k { glyph \"k\"  cadence 1  mem n, ring[4], past, dice[2]
+               when n < 6 => { ring[n % 4] = n * 10  n += 1  idle }
+               when n == 6 => { past = ring[4] + ring[-1]  ring[9] = 7  n = 7  idle }
+               when n < 20 => { dice[rand(2)] += 1  n += 1  idle }
+               when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(25)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(5, 5),
+            0,
+            newborn(&kinds, 0, 0xC1, now)
+        ));
+        for _ in 0..30 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        let m = &all[0].3.mem;
+        assert_eq!(&m[1..5], &[40, 50, 20, 30], "the last four, round the ring");
+        assert_eq!(m[5], 0, "past the ends reads 0");
+        assert_eq!(m[6] + m[7], 13, "each += landed on the element it read");
+        assert_eq!(&m[8..], &[0; 24], "nothing written past the array");
+    }
+
     /// Inside an aggregate a field is read as it stood before the law ran,
     /// whatever the law assigned it first (a fuzz find: the new values of a
     /// neighbour in the next chunk are not known).

@@ -179,6 +179,11 @@ pub enum OpCode {
     /// ([`pred::fields`]): a cell matches if `base` does and every field
     /// compares true
     FieldPred,
+    /// `i -> mem[a + i]` for `0 <= i < imm` (a memory array, `route[i]`),
+    /// else 0
+    MemAt,
+    /// `x i ->`; `mem[a + i] = x` for `0 <= i < imm`, else nothing
+    SetMemAt,
 }
 
 impl OpCode {
@@ -191,6 +196,8 @@ impl OpCode {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
             O::RandomFree => (0, 1),
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
+            O::MemAt => (1, 1),
+            O::SetMemAt => (2, 0),
             O::SetLook | O::SetSignal | O::FieldAdd => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
             O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
@@ -1081,6 +1088,19 @@ impl Machine<'_> {
         (r(dx), r(dy))
     }
 
+    /// The slot of element `i` of the memory array at `op.a`, `op.imm`
+    /// long: `None` past its ends (a read gives 0, a write does nothing).
+    fn mem_at(&self, op: Op, i: i32) -> Result<Option<usize>, Trap> {
+        let (base, len) = (usize::from(op.a), usize::try_from(op.imm).unwrap_or(0));
+        if base + len > MEM_SLOTS {
+            return Err(Trap::BadMem);
+        }
+        Ok(usize::try_from(i)
+            .ok()
+            .filter(|&i| i < len)
+            .map(|i| base + i))
+    }
+
     /// [`OpCode::Along`].
     fn along(&mut self, a: u8, dx: i32, dy: i32) -> Result<i32, Trap> {
         let (f, op) = (usize::from(a & 63), a >> 6);
@@ -1324,6 +1344,18 @@ impl Machine<'_> {
                             return Err(Trap::BadMem);
                         }
                         self.mind.mem[i] = self.pop()?;
+                    }
+                    O::MemAt => {
+                        let i = self.pop()?;
+                        let v = self.mem_at(op, i)?.map_or(0, |at| self.mind.mem[at]);
+                        self.push(v)?;
+                    }
+                    O::SetMemAt => {
+                        let i = self.pop()?;
+                        let v = self.pop()?;
+                        if let Some(at) = self.mem_at(op, i)? {
+                            self.mind.mem[at] = v;
+                        }
                     }
                     O::Sense => {
                         let s = Sense::from_u8(op.a).ok_or(Trap::BadSense)?;

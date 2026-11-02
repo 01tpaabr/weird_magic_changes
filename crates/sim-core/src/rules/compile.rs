@@ -240,6 +240,11 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
     g.generate()
 }
 
+/// The array an element slot's name belongs to: `route` for `route[3]`.
+fn array_of(slot: &str) -> Option<&str> {
+    slot.strip_suffix(']')?.split_once('[').map(|(n, _)| n)
+}
+
 /// Every top-level name `items` declare, with where.
 fn top_names(items: &Items) -> impl Iterator<Item = (&str, &Pos)> {
     items
@@ -584,9 +589,9 @@ struct Token {
     col: u32,
 }
 
-const SYMS: [&str; 23] = [
+const SYMS: [&str; 25] = [
     "=>", "==", "!=", "<=", ">=", "+=", "-=", "{", "}", "(", ")", ",", ":", "=", "<", ">", "+",
-    "-", "*", "/", "%", ";", ".",
+    "-", "*", "/", "%", ";", ".", "[", "]",
 ];
 
 struct Lexer<'a> {
@@ -1006,6 +1011,14 @@ enum Stmt {
         at: Pos,
         value: Expr,
     },
+    /// `route[i] = v`, `+=`, `-=`: an element of a memory array.
+    SetAt {
+        name: String,
+        at: Pos,
+        index: Expr,
+        op: Option<OpCode>,
+        value: Expr,
+    },
     Assign {
         name: String,
         at: Pos,
@@ -1180,6 +1193,8 @@ enum Expr {
         r: Box<Expr>,
         at: Pos,
     },
+    /// `route[i]`: an element of a memory array (0 past its ends).
+    Index(String, Box<Expr>, Pos),
     /// In a field's law only: `flow(w, level, rate)`, what flows in from
     /// the four neighbours.
     Flow {
@@ -2111,12 +2126,36 @@ impl Parser<'_> {
             } else if self.eat_kw("mem") {
                 loop {
                     let (name, at) = self.ident("memory slot name")?;
-                    if d.mems.iter().any(|(m, _)| *m == name)
-                        || d.needs.iter().any(|n| n.name == name)
-                    {
+                    let taken = |n: &str| {
+                        d.mems.iter().any(|(m, _)| m == n || array_of(m) == Some(n))
+                            || d.needs.iter().any(|x| x.name == n)
+                    };
+                    if taken(&name) {
                         return Err(self.err_at(&at, format!("`{name}` declared twice")));
                     }
-                    d.mems.push((name, at));
+                    // `mem route[8]`: eight slots, `route[0]` to `route[7]`.
+                    if self.eat_sym("[") {
+                        let len = match self.bump() {
+                            Tok::Int(n)
+                                if usize::try_from(n)
+                                    .is_ok_and(|n| (1..=MEM_SLOTS).contains(&n)) =>
+                            {
+                                n
+                            }
+                            _ => {
+                                return Err(self.err_at(
+                                    &at,
+                                    format!("`{name}[N]`: N is a number, 1 to {MEM_SLOTS}"),
+                                ));
+                            }
+                        };
+                        self.expect_sym("]")?;
+                        for k in 0..len {
+                            d.mems.push((format!("{name}[{k}]"), at.clone()));
+                        }
+                    } else {
+                        d.mems.push((name, at));
+                    }
                     if !self.eat_sym(",") {
                         break;
                     }
@@ -2407,6 +2446,30 @@ impl Parser<'_> {
         if self.is_sym("(") {
             let args = self.args()?;
             return Ok(Stmt::Call { name, args, at });
+        }
+        if self.eat_sym("[") {
+            let index = self.expr()?;
+            self.expect_sym("]")?;
+            let op = if self.eat_sym("=") {
+                None
+            } else if self.eat_sym("+=") {
+                Some(OpCode::Add)
+            } else if self.eat_sym("-=") {
+                Some(OpCode::Sub)
+            } else {
+                return Err(self.err(format!(
+                    "expected `=`, `+=` or `-=` after `{name}[...]`, found {}",
+                    self.describe()
+                )));
+            };
+            let value = self.expr()?;
+            return Ok(Stmt::SetAt {
+                name,
+                at,
+                index,
+                op,
+                value,
+            });
         }
         if self.eat_sym("=") {
             let value = self.expr()?;
@@ -2931,6 +2994,11 @@ impl Parser<'_> {
                             let args = self.args()?;
                             return Ok(Expr::Call { name: n, args, at });
                         }
+                        if self.eat_sym("[") {
+                            let i = self.nested(Self::expr)?;
+                            self.expect_sym("]")?;
+                            return Ok(Expr::Index(n, Box::new(i), at));
+                        }
                         if self.eat_sym(".") {
                             let field = match self.bump() {
                                 Tok::Name(f) if f == "dx" => 0,
@@ -2968,6 +3036,7 @@ fn returns_value(body: &[Stmt]) -> bool {
         }
         Stmt::Choose(arms) => arms.iter().any(|(_, b)| returns_value(b)),
         Stmt::Set { .. }
+        | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
         | Stmt::Call { .. }
@@ -3006,6 +3075,7 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             Stmt::Choose(arms) => arms.iter().for_each(|(_, b)| spawn_withs(b, out)),
             Stmt::Spawn { .. }
             | Stmt::Set { .. }
+            | Stmt::SetAt { .. }
             | Stmt::Assign { .. }
             | Stmt::Let { .. }
             | Stmt::Call { .. }
@@ -3274,6 +3344,7 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Hit(_, at)
         | Stmt::Graze(_, at) => Some(at),
         Stmt::Set { .. }
+        | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
         | Stmt::If { .. }
@@ -3301,6 +3372,7 @@ fn may_return(s: &Stmt) -> bool {
             body.iter().any(may_return)
         }
         Stmt::Set { .. }
+        | Stmt::SetAt { .. }
         | Stmt::Assign { .. }
         | Stmt::Let { .. }
         | Stmt::Call { .. }
@@ -5014,6 +5086,9 @@ impl<'a> Gen<'a> {
             Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
                 self.expr_acts(value, depth)
             }
+            Stmt::SetAt { index, value, .. } => {
+                self.expr_acts(index, depth) || self.expr_acts(value, depth)
+            }
             Stmt::Look(e) | Stmt::Signal(e) | Stmt::Add(_, e, _) => self.expr_acts(e, depth),
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
             Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
@@ -5044,9 +5119,11 @@ impl<'a> Gen<'a> {
 
     fn expr_acts(&self, e: &Expr, depth: u32) -> bool {
         match e {
-            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Count(_, a) => {
-                self.expr_acts(a, depth)
-            }
+            Expr::Neg(a)
+            | Expr::Rand(a)
+            | Expr::Chance(a)
+            | Expr::Count(_, a)
+            | Expr::Index(_, a, _) => self.expr_acts(a, depth),
             // Only in a law, which never acts.
             Expr::Agg { .. } | Expr::Flow { .. } => false,
             Expr::Along { target, .. } => self.target_acts(target, depth),
@@ -5391,6 +5468,21 @@ impl<'a> Gen<'a> {
             .map(|i| u8::try_from(i).expect("at most NEED_SLOTS needs"))
     }
 
+    /// Memory array `n` (`mem n[N]`): its first slot and its length.
+    fn mem_array(&self, n: &str, at: &Pos) -> Result<(u8, u8)> {
+        let base = self.mem_slot(&format!("{n}[0]")).ok_or_else(|| {
+            self.err(
+                at,
+                format!("`{n}` is not a memory array of this kind (`mem {n}[N]`)"),
+            )
+        })?;
+        let mut len = 1u8;
+        while self.mem_slot(&format!("{n}[{len}]")) == Some(base + len) {
+            len += 1;
+        }
+        Ok((base, len))
+    }
+
     fn mem_slot(&self, n: &str) -> Option<u8> {
         let (cur, owner) = (self.cur?, self.owner?);
         if !self.insts[owner].mems.iter().any(|m| m == n) {
@@ -5685,6 +5777,11 @@ impl<'a> Gen<'a> {
         match e {
             Expr::Agg { at, .. } => {
                 return Err(self.err(at, "an aggregate belongs in a field's law"));
+            }
+            Expr::Index(name, i, at) => {
+                let (base, len) = self.mem_array(name, at)?;
+                self.expr(i)?;
+                self.asm.mem_at(base, len);
             }
             Expr::Flow { at, .. } => {
                 return Err(self.err(at, "`flow` belongs in a field's law"));
@@ -5995,6 +6092,31 @@ impl<'a> Gen<'a> {
             Stmt::Set { name, at, value } => {
                 self.expr(value)?;
                 self.store(name, at)?;
+            }
+            Stmt::SetAt {
+                name,
+                at,
+                index,
+                op,
+                value,
+            } => {
+                let (base, len) = self.mem_array(name, at)?;
+                // The index once, into a local: `route[rand(8)] += 1` adds
+                // to the element it read.
+                self.scoped(|g| {
+                    g.expr(index)?;
+                    let i = g.alloc_local(at, 1)?;
+                    g.asm.store(i);
+                    if let Some(op) = op {
+                        g.asm.load(i).mem_at(base, len);
+                        g.expr(value)?;
+                        g.asm.op(*op);
+                    } else {
+                        g.expr(value)?;
+                    }
+                    g.asm.load(i).set_mem_at(base, len);
+                    Ok(())
+                })?;
             }
             Stmt::Assign {
                 name,

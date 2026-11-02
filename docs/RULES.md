@@ -99,7 +99,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `reach N` | 1 | how far `eat`, `hit` and `graze` land: a target up to N cells away, 1 to 16. The rules check what is in the way (`sees`) |
 | `climb N on F` | none | `move` takes no step that rises more than N in field F (a height): it slides past one, as past a taken cell, and is `BLOCKED` if every way is too steep |
 | `need NAME max M [decay 0\|1] [vital]` | `decay 1` | a counter, at most 4 per kind; `decay 1` loses one per tick (ticks until empty), `decay 0` never decays (points). `decay` is a switch, not a rate: any other number is an error |
-| `mem a, b, ...` | | memory slots, at most 32 per kind, all 0 at birth |
+| `mem a, b, ...` | | memory slots, at most 32 per kind, all 0 at birth; `mem route[8]` is an array of 8 of them, `route[i]` (below) |
 
 **Needs.** A need is an integer from 0 to its max. By default it is *ticks until empty*: it
 loses one per tick, and a value like `water < 30min` reads naturally; `decay 1` says so
@@ -392,6 +392,21 @@ and `while` only (§4). So `let both = x > 0 and y > 0` is an error; write
 (p percent), `pack(a, b)` / `hi(v)` / `lo(v)` (two signed bytes in one value, for signals).
 Randomness is drawn per actor per tick from the world seed, so a replay draws the same.
 
+**Memory arrays.** `mem route[8]` declares eight memory slots in a row, all named `route`:
+`route[i]` reads one and `route[i] = v` (or `+=`, `-=`) writes one, for any expression `i`
+from 0 to 7. Past the ends a read is 0 and a write changes nothing, as `x / 0` is 0. The
+index is worked out once, so `route[rand(8)] += 1` adds to the element it read. Slots of an
+array count toward the 32 a kind has; a save and a reload keep each element by name
+(`route[3]`), so a longer array keeps what the shorter one held.
+
+```rules
+kind ant {
+  glyph "a"
+  mem n, trail_x[4], trail_y[4]          # the last four places, round a ring
+  when true => { trail_x[n % 4] = x  trail_y[n % 4] = y  n += 1  move random free }
+}
+```
+
 ```rules
 const LOAD = 30min                  # folded at compile time; visible everywhere
 
@@ -660,7 +675,7 @@ start hive at (77, 103)                        # exactly there
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
 | `start K N / D in (X0, Y0) to (X1, Y1)` | | this share of the walkable cells in that region, both corners included: X0 to X1 across, Y0 to Y1 down |
-| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`) |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |

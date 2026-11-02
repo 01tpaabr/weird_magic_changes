@@ -922,7 +922,14 @@ fn with_list(text: &str) -> Result<Vec<(String, i32)>, String> {
     for part in inner.split(',') {
         let (name, v) = part.split_once('=').ok_or(FORM)?;
         let (name, v) = (name.trim(), v.trim());
-        if !is_name(name) {
+        // `route[2]`: an element of a memory array.
+        let element = name
+            .strip_suffix(']')
+            .and_then(|n| n.split_once('['))
+            .is_some_and(|(a, i)| {
+                is_name(a) && !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())
+            });
+        if !is_name(name) && !element {
             return Err(format!("`{name}` is not a need or memory name"));
         }
         let v = value(v)

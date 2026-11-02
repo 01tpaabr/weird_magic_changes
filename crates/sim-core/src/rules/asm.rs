@@ -116,6 +116,15 @@ impl Asm {
         self.emit(OpCode::SetMem, i, 0)
     }
 
+    /// Element `i` (on the stack) of the memory array at slot `base`.
+    pub fn mem_at(&mut self, base: u8, len: u8) -> &mut Self {
+        self.emit(OpCode::MemAt, base, i16::from(len))
+    }
+
+    pub fn set_mem_at(&mut self, base: u8, len: u8) -> &mut Self {
+        self.emit(OpCode::SetMemAt, base, i16::from(len))
+    }
+
     pub fn sense(&mut self, s: Sense) -> &mut Self {
         self.emit(OpCode::Sense, s as u8, 0)
     }

@@ -127,6 +127,9 @@ struct Owner {
     /// Declared here.
     own_needs: Vec<String>,
     own_mems: Vec<String>,
+    /// Memory arrays, `mem NAME[LEN]`: merged (from a kind parent) and its own.
+    arrays: Vec<(String, usize)>,
+    own_arrays: Vec<(String, usize)>,
     own_states: Vec<String>,
     tags: Vec<String>,
     /// Member subs: its own, and the ones its ancestors define.
@@ -325,6 +328,18 @@ impl<'a> G<'a> {
             .collect();
         if let Some(o) = self.cur() {
             v.extend(o.needs.iter().chain(&o.mems).map(|n| (n.clone(), true)));
+            // An array's ends, past them, and a computed index.
+            for (a, len) in &o.arrays {
+                for i in [
+                    "0".to_string(),
+                    format!("{}", len - 1),
+                    format!("{len}"),
+                    format!("x % {len}"),
+                    format!("rand({}) - 1", len + 2),
+                ] {
+                    v.push((format!("{a}[{i}]"), true));
+                }
+            }
             v.extend(o.params.iter().map(|n| (n.clone(), false)));
         }
         v.extend(self.consts.iter().map(|n| (n.clone(), false)));
@@ -469,6 +484,7 @@ impl<'a> G<'a> {
                 o.reached = p.reached.clone();
                 o.needs = p.needs.clone();
                 o.mems = p.mems.clone();
+                o.arrays = p.arrays.clone();
                 o.states = p.states.clone();
                 o.inherited = (p.inherited.iter().chain(&p.subs).chain(&p.overrides))
                     .cloned()
@@ -516,10 +532,17 @@ impl<'a> G<'a> {
                 }
                 o.own_needs.push(name);
             }
-            for j in 0..self.n(9).min(MEM_SLOTS - o.mems.len()) {
+            let used = |o: &Owner| o.mems.len() + o.arrays.iter().map(|a| a.1).sum::<usize>();
+            for j in 0..self.n(9).min(MEM_SLOTS - used(&o)) {
                 o.own_mems.push(format!("k{i}m{j}"));
             }
             o.mems.extend(o.own_mems.iter().cloned());
+            let room = MEM_SLOTS - used(&o);
+            if room > 0 && self.maybe(25) {
+                let a = (format!("k{i}a"), 1 + self.n(room.min(8)));
+                o.own_arrays.push(a.clone());
+                o.arrays.push(a);
+            }
             o.extra_states = self.subset(&o.states, 30);
             o.own_states = (0..self.n(3)).map(|j| format!("k{i}st{j}")).collect();
             o.states.extend(o.own_states.iter().cloned());
@@ -786,6 +809,9 @@ impl<'a> G<'a> {
             let k = 1 + self.n(mems.len());
             let line: Vec<String> = mems.drain(..k).collect();
             d.push(format!("mem {}", line.join(", ")));
+        }
+        for (a, len) in &o.own_arrays {
+            d.push(format!("mem {a}[{len}]"));
         }
         d
     }
