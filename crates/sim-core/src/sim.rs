@@ -327,10 +327,23 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
             missing.join(", ")
         )));
     }
-    let remap = if SavedKind::table(kinds) == m.kinds && reload::field_names(kinds) == m.fields {
+    let remap = if SavedKind::table(kinds) == m.kinds
+        && reload::field_names(kinds) == m.fields
+        && reload::ground_names(kinds) == m.grounds
+        && reload::feature_names(kinds) == m.features
+    {
         None
     } else {
-        Some(Plan::between(&m.kinds, &m.fields, kinds, m.seed).map_err(bad)?)
+        Some(
+            Plan::between(
+                &m.kinds,
+                &m.fields,
+                (&m.grounds, &m.features),
+                kinds,
+                m.seed,
+            )
+            .map_err(bad)?,
+        )
     };
     let terrain = Terrain {
         seed: m.seed,
@@ -402,6 +415,8 @@ pub fn meta(world: &World) -> WorldMeta {
         map: c.map.clone(),
         kinds: SavedKind::table(kinds),
         fields: reload::field_names(kinds),
+        grounds: reload::ground_names(kinds),
+        features: reload::feature_names(kinds),
         packs: kinds.debug.packs.clone(),
         rules_hash: kinds.hash,
     }
@@ -561,6 +576,13 @@ fn load_chunks(
     let nfields = remap
         .as_ref()
         .map_or(world.resource::<Kinds>().fields.len(), Plan::old_fields);
+    let (ngrounds, nfeatures) = remap.as_ref().map_or_else(
+        || {
+            let m = &world.resource::<Kinds>().materials;
+            (m.grounds.len(), m.features.len())
+        },
+        Plan::old_materials,
+    );
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
     let mut bad = Vec::new();
@@ -571,6 +593,21 @@ fn load_chunks(
                 d.data
                     .validate(nkinds)
                     .map_err(|e| format!("{}: {e}", s.chunk_path(c).display()))?;
+                let cells = &d.data.cells;
+                if let Some(g) = cells.ground.iter().find(|g| usize::from(g.0) >= ngrounds) {
+                    return Err(format!(
+                        "{}: ground {} past the save's {ngrounds} grounds",
+                        s.chunk_path(c).display(),
+                        g.0
+                    ));
+                }
+                if let Some(f) = cells.feature.iter().find(|f| usize::from(f.0) > nfeatures) {
+                    return Err(format!(
+                        "{}: feature {} past the save's {nfeatures} features",
+                        s.chunk_path(c).display(),
+                        f.0
+                    ));
+                }
                 if d.data.cells.fields.len() != nfields {
                     return Err(format!(
                         "{}: {} field layers, the save's rules declare {nfields}",
@@ -767,7 +804,10 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
     };
-    let cover = world.resource::<Kinds>().def(kind).cover;
+    let (cover, table) = {
+        let kinds = world.resource::<Kinds>();
+        (kinds.def(kind).cover, kinds.materials.table)
+    };
     let mut q = world.query::<(
         &mut ChunkCells,
         &mut ChunkActors,
@@ -777,7 +817,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
         return false;
     };
-    if !cells.walkable(i) || !cells.layer(cover)[i].is_none() {
+    if !cells.walkable(i, &table) || !cells.layer(cover)[i].is_none() {
         return false;
     }
     let mut actors = ActorsMut {
@@ -847,7 +887,7 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
                     def.name, mind.uid, at.x, at.y
                 ))
             };
-            if !cells.walkable(usize::from(r.cell)) {
+            if !cells.walkable(usize::from(r.cell), &kinds.materials.table) {
                 return bad("on a cell that is not walkable".into());
             }
             if r.flags & !(flags::WAKE | flags::COVER) != 0 {
@@ -2538,6 +2578,76 @@ mod tests {
         }
         let a = rows(&mut w)[0].3;
         assert_eq!(&a.mem[..8], &[3, 1, 0, 2, 1, 4, 1, 0], "{:?}", a.mem);
+    }
+
+    /// A pack's materials: water redeclared walkable takes walkers; a
+    /// declared ground is saved by name and comes back in its place under
+    /// rules that number it otherwise.
+    #[test]
+    fn declared_materials_walk_and_remap_by_name() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let a = compile(
+            "a.rules",
+            "ground water { walkable  drink }
+             ground mud { walkable }
+             kind wader { glyph \"w\"  cadence 1  when true => move east }",
+        )
+        .unwrap();
+        let b = compile(
+            "b.rules",
+            "ground clay { walkable }
+             ground mud { walkable }
+             kind wader { glyph \"w\"  cadence 1  when true => move east }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(19)
+        };
+        let mut w = new_world_with(&cfg, a.clone()).unwrap();
+        flatten(&mut w);
+        let set = |w: &mut World, p: Pos, g: Ground| {
+            let (c, i) = p.split();
+            stage::chunk_mut(w, c).unwrap().ground[i] = g;
+        };
+        set(&mut w, Pos::new(11, 10), Ground::Water);
+        set(&mut w, Pos::new(12, 10), Ground(2)); // mud
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(10, 10),
+            0,
+            newborn(&a, 0, 0xC1, now)
+        ));
+        for _ in 0..2 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        assert_eq!(
+            rows(&mut w)[0].2,
+            Pos::new(12, 10),
+            "through the water onto the mud"
+        );
+        let store = tmp_store("materials");
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, b).unwrap().unwrap();
+        ensure_loaded(
+            &mut back,
+            Pos::new(10, 10),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap();
+        check_invariants(&mut back);
+        let at = |w: &World, p: Pos| {
+            let (c, i) = p.split();
+            stage::chunk(w, c).unwrap().ground[i]
+        };
+        assert_eq!(at(&back, Pos::new(12, 10)), Ground(3), "mud, renumbered");
+        assert_eq!(at(&back, Pos::new(11, 10)), Ground::Water);
+        std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
     /// Fields are saved by name and come back as they were; rules that drop

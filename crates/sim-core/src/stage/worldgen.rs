@@ -121,7 +121,7 @@ pub fn generate_chunk(
         let p = coord.cell(i);
         let here = match explicit.next_if(|e| usize::from(e.cell) == i) {
             Some(e) => Some(e.placed),
-            None if out.cells.walkable(i) => {
+            None if out.cells.walkable(i, &placement.table) => {
                 placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
             }
             None => None,
@@ -220,9 +220,10 @@ pub fn gen_cell(seed: u64, p: &GenParams, x: i32, y: i32) -> (Ground, Feature) {
     } else {
         Ground::Soil
     };
-    let rock_p = match ground {
-        Ground::Soil => p.rock_on_soil,
-        Ground::Water => p.rock_on_water,
+    let rock_p = if ground == Ground::Water {
+        p.rock_on_water
+    } else {
+        p.rock_on_soil
     };
     let feature = if unit_f32(hash_cell(seed, STREAM_ROCK, x, y)) < rock_p {
         Feature::Rock
@@ -352,7 +353,7 @@ mod tests {
                 gen_cell(7, &p, x, y),
                 "{x},{y}"
             );
-            let want = if cells.walkable(i) {
+            let want = if cells.walkable(i, &crate::stage::MaterialTable::DEFAULT) {
                 pl.placed(placement_hash(7, x, y), x, y).map(|p| p.kind)
             } else {
                 None
@@ -416,7 +417,9 @@ mod tests {
         let empty = (0..CHUNK_CELLS)
             .rev()
             .find(|&i| {
-                shares_only.cells.walkable(i)
+                shares_only
+                    .cells
+                    .walkable(i, &crate::stage::MaterialTable::DEFAULT)
                     && shares_only.cells.occupant[i].is_none()
                     && shares_only.cells.cover[i].is_none()
             })

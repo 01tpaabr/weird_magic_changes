@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, Looks, VOID, fielded, style};
+use super::palette::{Color, Looks, VOID, feature_look, fielded, ground_look, style_of};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -208,7 +208,12 @@ fn render_row<'c>(
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
                 for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
                     // Who stands here, on what grows here, in which fields.
-                    let s = style(g, f, looks.occupant(o), looks.actor(cover), looks.soil);
+                    let s = style_of(
+                        ground_look(g, looks.soil, looks.materials),
+                        feature_look(f, looks.materials),
+                        looks.occupant(o),
+                        looks.actor(cover),
+                    );
                     let bg = fielded(s.bg, looks.fields, &c.fields, local + k);
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
@@ -229,6 +234,7 @@ fn render_row<'c>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::palette::style;
     use bevy::ecs::world::World;
     use sim_core::{Kinds, Scenario, StageCells, sim, stage};
 

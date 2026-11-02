@@ -4,7 +4,7 @@
 //! (`Kinds::glyphs`, `Kinds::colors`: declared in its rules file, carried
 //! by the sim, never read by it).
 
-use sim_core::rules::FieldDef;
+use sim_core::rules::{FieldDef, Materials};
 use sim_core::{Feature, Ground};
 
 /// Packed `0x00RRGGBB` sRGB, one `u32` per cell: 4 bytes in the frame
@@ -167,11 +167,31 @@ pub const NIGHT_SOIL: Soil = Soil {
     fg: Color::rgb(0x26, 0x1f, 0x33),
 };
 
+/// A ground's background, and the glyph and colour of a bare cell of it:
+/// the palette's soil (or `soil`, the menu's) and water for the engine's two
+/// unless the rules give a colour; a declared ground in its own colour.
+pub fn ground_look(g: Ground, soil: Soil, m: &Materials) -> (Color, u8, Color) {
+    let def = m.grounds.get(usize::from(g.0));
+    let glyph = def.map_or(b'.', |d| d.glyph);
+    match (def.and_then(|d| d.color), g) {
+        (Some(c), _) => (Color(c), glyph, Color(c).mix(TEXT_FG, 0x50)),
+        (None, Ground::Water) => (WATER_BG, glyph, WATER_FG),
+        (None, _) => (soil.bg, glyph, soil.fg),
+    }
+}
+
+/// A feature's glyph and colour; `None` for no feature.
+pub fn feature_look(f: Feature, m: &Materials) -> Option<(u8, Color)> {
+    let def = m.features.get(usize::from(f.0).checked_sub(1)?)?;
+    Some((def.glyph, def.color.map_or(ROCK_FG, Color)))
+}
+
 /// `actor` is the glyph, colour and `solid` of the kind standing here,
 /// `cover` of the ground cover under it, if any: look both up with
 /// [`Looks::actor`]. The cover tints the background and shows its glyph when
 /// nobody stands on it; a solid kind fills its cell with its colour and
 /// shows no glyph (a solid cover is the background of whoever stands on it).
+/// With the engine's three materials as they come.
 pub fn style(
     ground: Ground,
     feature: Feature,
@@ -179,21 +199,36 @@ pub fn style(
     cover: Option<(u8, Color, bool)>,
     soil: Soil,
 ) -> Style {
-    let bg = match ground {
-        Ground::Soil => soil.bg,
-        Ground::Water => WATER_BG,
-    };
+    let m = &*DEFAULT_MATERIALS;
+    style_of(
+        ground_look(ground, soil, m),
+        feature_look(feature, m),
+        actor,
+        cover,
+    )
+}
+
+static DEFAULT_MATERIALS: std::sync::LazyLock<Materials> =
+    std::sync::LazyLock::new(Materials::default);
+
+/// [`style`] from a ground's and a feature's looks ([`ground_look`],
+/// [`feature_look`]).
+pub fn style_of(
+    (ground_bg, glyph, ground_fg): (Color, u8, Color),
+    feature: Option<(u8, Color)>,
+    actor: Option<(u8, Color, bool)>,
+    cover: Option<(u8, Color, bool)>,
+) -> Style {
     let bg = match cover {
         Some((_, c, true)) => c,
-        Some((_, c, false)) => bg.mix(c, COVER_TINT),
-        None => bg,
+        Some((_, c, false)) => ground_bg.mix(c, COVER_TINT),
+        None => ground_bg,
     };
-    let (glyph, fg, bg) = match (actor.or(cover), feature, ground) {
-        (Some((_, c, true)), _, _) => (b' ', c, c),
-        (Some((g, c, false)), _, _) => (g, c, bg),
-        (None, Feature::Rock, _) => (b'#', ROCK_FG, bg),
-        (None, Feature::None, Ground::Soil) => (b'.', soil.fg, bg),
-        (None, Feature::None, Ground::Water) => (b'~', WATER_FG, bg),
+    let (glyph, fg, bg) = match (actor.or(cover), feature) {
+        (Some((_, c, true)), _) => (b' ', c, c),
+        (Some((g, c, false)), _) => (g, c, bg),
+        (None, Some((g, c))) => (g, c, bg),
+        (None, None) => (glyph, ground_fg, bg),
     };
     Style { glyph, fg, bg }
 }
@@ -212,6 +247,8 @@ pub struct Looks<'a> {
     pub tiny: bool,
     /// The rules' fields: those with a colour tint the cells they fill.
     pub fields: &'a [FieldDef],
+    /// The rules' grounds and features.
+    pub materials: &'a Materials,
 }
 
 /// The smallest cell, in physical pixels, a glyph is drawn in; below it
@@ -227,6 +264,7 @@ impl Default for Looks<'_> {
             soil: SOIL,
             tiny: false,
             fields: &[],
+            materials: &DEFAULT_MATERIALS,
         }
     }
 }
@@ -240,6 +278,7 @@ impl<'a> Looks<'a> {
             soil: SOIL,
             tiny: false,
             fields: &kinds.fields,
+            materials: &kinds.materials,
         }
     }
 

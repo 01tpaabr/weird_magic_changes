@@ -39,7 +39,8 @@ use std::fmt;
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
 use crate::stage::{
-    CHUNK_CELLS, CHUNK_SIZE, ChunkCoord, Feature, Ground, Pos, WORLD_EXTENT, cell_u16,
+    CHUNK_CELLS, CHUNK_SIZE, ChunkCoord, Feature, Ground, MaterialTable, Pos, WORLD_EXTENT,
+    cell_u16,
 };
 
 mod checks;
@@ -1588,7 +1589,7 @@ pub struct DrawnMap {
 impl DrawnMap {
     /// A cell as a map byte.
     pub const fn encode(g: Ground, f: Feature) -> u8 {
-        g as u8 | (f as u8) << 4
+        g.0 | f.0 << 4
     }
 
     /// A map byte as a cell; `None` for a byte no cell encodes to.
@@ -1715,6 +1716,8 @@ pub struct Placement {
     bounds: Vec<(u32, Option<Placed>)>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
+    /// The rules' materials: which cells are walkable.
+    pub table: MaterialTable,
 }
 
 impl Placement {
@@ -1791,11 +1794,18 @@ impl Placement {
                     in_world(*x, *y).map_err(|m| err(format!("`{kind}` at {m}")))?;
                     // Not quoted as a `start` line: a map may have drawn it.
                     let (g, f) = terrain.cell(*x, *y);
-                    if f.blocks() {
-                        return Err(err(format!("`{kind}` at ({x}, {y}) is on rock")));
+                    let m = &kinds.materials;
+                    if m.table.blocks(f) {
+                        let name = m.features.get(usize::from(f.0).wrapping_sub(1));
+                        let name = name.map_or("?", |d| d.name.as_str());
+                        return Err(err(format!("`{kind}` at ({x}, {y}) is on {name}")));
                     }
-                    if !g.walkable() {
-                        return Err(err(format!("`{kind}` at ({x}, {y}) is on water")));
+                    if !m.table.walkable(g, Feature::None) {
+                        let name = m
+                            .grounds
+                            .get(usize::from(g.0))
+                            .map_or("?", |d| d.name.as_str());
+                        return Err(err(format!("`{kind}` at ({x}, {y}) is on {name}")));
                     }
                     let (mut needs, mut mems) = (Vec::new(), Vec::new());
                     for (name, v) in with {
@@ -1905,6 +1915,7 @@ impl Placement {
             shares,
             bounds,
             explicit,
+            table: kinds.materials.table,
         })
     }
 

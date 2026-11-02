@@ -126,7 +126,7 @@ pub fn hand_assembled() -> Kinds {
 
     // ---- seed ---------------------------------------------------------------
     let seed_entry = a.here();
-    let water = pred::ground(Ground::Water as u8);
+    let water = pred::ground(Ground::Water.0);
     // when count water within 2 > 0 => water = min(water + 6h, 1d)
     let next = a.label();
     a.push(water)

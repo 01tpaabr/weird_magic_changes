@@ -70,13 +70,17 @@ IDENT = NAME that is not a reserved word
 | `target`, `pred` | a sub parameter's type, after `:` | any name |
 | `dx`, `dy` | a binding's offset, after `.` | any name |
 | `conserved`, `fixed`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
+| `ground`, `feature` | start a material at the top of a file | any name |
+| `walkable`, `blocks` | in a material's block | any name |
 | `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
 
 ## 2. Files and items
 
 ```
-file      = { item | sub | const | field } EOF
+file      = { item | sub | const | field | material } EOF
+material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
+          | "feature" IDENT "{" { "blocks" | "glyph" STRING | "color" STRING } "}"
 const     = "const" IDENT "=" expr [ ";" ]
 field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "{" { field_part } "}" ]
 field_part = "init" ( "noise" "scale" additive | additive ) | "color" STRING

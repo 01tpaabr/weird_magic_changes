@@ -28,11 +28,11 @@ use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
 use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, Level, NeedDef,
-    Policy, RuleInfo, RuleShape, Term,
+    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, Level, MaterialDef,
+    Materials, NeedDef, Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
-use crate::stage::{Feature, Ground};
+use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS};
 use crate::time::{days, hours, minutes};
 
 mod law;
@@ -490,6 +490,22 @@ struct Items {
     subs: Vec<SubAst>,
     consts: Vec<ConstAst>,
     fields: Vec<FieldAst>,
+    materials: Vec<MaterialAst>,
+}
+
+/// `ground NAME { walkable  drink  glyph "c"  color "#rrggbb" }` or
+/// `feature NAME { blocks  glyph "c"  color "#rrggbb" }` (`docs/WORLD.md`
+/// §5): a new material, or the engine's soil, water or rock redeclared.
+#[derive(Debug, Clone)]
+struct MaterialAst {
+    at: Pos,
+    ground: bool,
+    name: String,
+    /// A ground: `walkable`. A feature: `blocks`.
+    solid: bool,
+    drink: bool,
+    glyph: Option<u8>,
+    color: Option<u32>,
 }
 
 /// `field NAME max M [conserved|fixed] { init V | init noise scale S; color "#rrggbb" }`:
@@ -1117,14 +1133,77 @@ impl Parser<'_> {
                 items.consts.push(ConstAst { at, name, value });
             } else if self.eat_kw("field") {
                 items.fields.push(self.field()?);
+            } else if self.is_kw("ground") || self.is_kw("feature") {
+                items.materials.push(self.material()?);
             } else {
                 return Err(self.err(format!(
-                    "expected `kind`, `trait`, `sub`, `const` or `field`, found {}",
+                    "expected `kind`, `trait`, `sub`, `const`, `field`, `ground` or `feature`, found {}",
                     self.describe()
                 )));
             }
         }
         Ok(())
+    }
+
+    /// `ground NAME { ... }` or `feature NAME { ... }`.
+    fn material(&mut self) -> Result<MaterialAst> {
+        let ground = self.is_kw("ground");
+        self.bump();
+        let (name, at) = self.ident(if ground {
+            "ground name"
+        } else {
+            "feature name"
+        })?;
+        let mut m = MaterialAst {
+            at,
+            ground,
+            name,
+            solid: false,
+            drink: false,
+            glyph: None,
+            color: None,
+        };
+        self.expect_sym("{")?;
+        while !self.eat_sym("}") {
+            let p = self.pos();
+            let word = if ground { "walkable" } else { "blocks" };
+            if self.eat_kw(word) {
+                m.solid = true;
+            } else if ground && self.eat_kw("drink") {
+                m.drink = true;
+            } else if self.eat_kw("glyph") {
+                m.glyph = Some(match self.bump() {
+                    Tok::Str(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_graphic() => {
+                        s.as_bytes()[0]
+                    }
+                    _ => return Err(self.err_at(&p, "glyph takes one printable character")),
+                });
+            } else if self.eat_kw("color") {
+                let c = match self.bump() {
+                    Tok::Str(s)
+                        if s.len() == 7
+                            && s.starts_with('#')
+                            && s[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+                    {
+                        u32::from_str_radix(&s[1..], 16).ok()
+                    }
+                    _ => None,
+                };
+                m.color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
+            } else {
+                let more = if ground {
+                    "`walkable`, `drink`"
+                } else {
+                    "`blocks`"
+                };
+                return Err(self.err(format!(
+                    "expected {more}, `glyph`, `color` or `}}` in a {}, found {}",
+                    if ground { "ground" } else { "feature" },
+                    self.describe()
+                )));
+            }
+        }
+        Ok(m)
     }
 
     /// After `field`: its name, `max`, a policy word and an optional block
@@ -2566,6 +2645,10 @@ struct Gen<'a> {
     /// The `field` declarations, and what they resolve to (same order).
     fields_ast: &'a [FieldAst],
     field_defs: Vec<FieldDef>,
+    /// The `ground` and `feature` declarations, and the materials they make
+    /// with the engine's three.
+    materials_ast: &'a [MaterialAst],
+    materials: Materials,
     /// Per kind named by a `spawn ... with`: the memory slots those spawns
     /// set, in first-appearance order (at most two), each with where it
     /// was first named. They take the kind's first slots, which is where
@@ -2685,6 +2768,8 @@ impl<'a> Gen<'a> {
             consts: &items.consts,
             fields_ast: &items.fields,
             field_defs: Vec::new(),
+            materials_ast: &items.materials,
+            materials: Materials::default(),
             const_vals: Vec::new(),
             insts: Vec::new(),
             kind_insts: Vec::new(),
@@ -2758,6 +2843,73 @@ impl<'a> Gen<'a> {
             .map(|(n, _)| n.clone())
             .zip(inst.args.iter().copied())
             .collect()
+    }
+
+    /// Grounds and features: the engine's soil, water and rock first, each
+    /// redeclared in place (its properties as written), then the new ones in
+    /// declaration order. Names are global: never a kind's, a trait's, a
+    /// sub's, a tag's, a constant's or another material's.
+    fn resolve_materials(&mut self) -> Result<()> {
+        let mut m = Materials::default();
+        for (i, a) in self.materials_ast.iter().enumerate() {
+            let taken = if let Some(o) = self.materials_ast[..i].iter().find(|o| o.name == a.name) {
+                Some(format!(
+                    "`{}` declared twice (first at {}:{})",
+                    a.name, o.at.file, o.at.line
+                ))
+            } else if let Some(o) = self.item_named(&a.name) {
+                let what = if self.items[o].is_trait {
+                    "trait"
+                } else {
+                    "kind"
+                };
+                Some(format!("`{}` is already a {what}", a.name))
+            } else if self.subs.iter().any(|s| s.name == a.name) {
+                Some(format!("`{}` is already a sub", a.name))
+            } else if self.tags.contains(&a.name) {
+                Some(format!("`{}` is already a tag", a.name))
+            } else if self.consts.iter().any(|c| c.name == a.name) {
+                Some(format!("`{}` is already a const", a.name))
+            } else if (a.ground && m.feature(&a.name).is_some())
+                || (!a.ground && m.ground(&a.name).is_some())
+            {
+                Some(format!(
+                    "`{}` is a ground and a feature: one name, one material",
+                    a.name
+                ))
+            } else {
+                None
+            };
+            if let Some(msg) = taken {
+                return Err(self.err(&a.at, msg));
+            }
+            let def = MaterialDef {
+                name: a.name.clone(),
+                glyph: a.glyph.unwrap_or(if a.ground { b'.' } else { b'#' }),
+                color: a.color,
+                solid: a.solid,
+                drink: a.drink,
+            };
+            let (list, most) = if a.ground {
+                (&mut m.grounds, MAX_GROUNDS)
+            } else {
+                (&mut m.features, MAX_FEATURES)
+            };
+            match list.iter().position(|d| d.name == a.name) {
+                Some(j) => list[j] = def,
+                None if list.len() == most => {
+                    let what = if a.ground { "grounds" } else { "features" };
+                    return Err(self.err(
+                        &a.at,
+                        format!("at most {most} {what} in a rule set, the engine's own among them"),
+                    ));
+                }
+                None => list.push(def),
+            }
+        }
+        m.table = Materials::table_of(&m.grounds, &m.features);
+        self.materials = m;
+        Ok(())
     }
 
     /// Fields: global names (never a kind's, a trait's, a sub's, a tag's or
@@ -3073,6 +3225,7 @@ impl<'a> Gen<'a> {
                 ),
             });
         }
+        self.resolve_materials()?;
         self.resolve_fields()?;
         for it in items {
             for (pn, pat) in &it.params {
@@ -3164,7 +3317,8 @@ impl<'a> Gen<'a> {
             })
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
-            .with_fields(std::mem::take(&mut self.field_defs));
+            .with_fields(std::mem::take(&mut self.field_defs))
+            .with_materials(std::mem::take(&mut self.materials));
         self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
@@ -4624,8 +4778,8 @@ impl<'a> Gen<'a> {
             }
             Pred::Free => pred::FREE,
             Pred::Bare => pred::BARE,
-            Pred::Ground(g) => pred::ground(*g as u8),
-            Pred::Feature(f) => pred::feature(*f as u8),
+            Pred::Ground(g) => pred::ground(g.0),
+            Pred::Feature(f) => pred::feature(f.0),
             Pred::Kind(name, only, at) => {
                 if let Some(l) = self.local(name) {
                     if l.ty != Ty::Pred {
@@ -4656,8 +4810,12 @@ impl<'a> Gen<'a> {
                         ));
                     }
                     pred::TAG_BASE + i32::try_from(bit).expect("at most MAX_TAGS tags")
+                } else if let Some(g) = self.materials.ground(name).filter(|_| !*only) {
+                    pred::ground(g.0)
+                } else if let Some(f) = self.materials.feature(name).filter(|_| !*only) {
+                    pred::feature(f.0)
                 } else {
-                    return Err(self.err(at, format!("unknown kind or tag `{name}`")));
+                    return Err(self.err(at, format!("unknown kind, tag or material `{name}`")));
                 }
             }
             Pred::KindLook(name, look, only, at) => match self.kind_id(name) {

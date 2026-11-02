@@ -31,6 +31,7 @@ fn run_think_in(
         chunks,
         tags: &k.tag_bits,
         family_end: &k.family_end,
+        materials: &k.materials.table,
     };
     let ctx = Ctx {
         halo: &halo,
@@ -2383,7 +2384,7 @@ fn field_condition_errors_name_the_problem() {
         ),
         (
             "field f max 9 kind k { when count (f > 1 and fox) within 3 > 0 => idle }",
-            "unknown kind or tag `fox`",
+            "unknown kind, tag or material `fox`",
         ),
     ];
     for (text, want) in errs {
@@ -2402,4 +2403,69 @@ fn nested_field_conditions_are_an_error_not_an_overflow() {
     );
     let e = compile_err(&text);
     assert!(e.contains("nested too deep"), "{e}");
+}
+
+/// Packs declare grounds and features after the engine's three, may
+/// redeclare those in place, and name them in predicates; the names clash
+/// with nothing else.
+#[test]
+fn materials_are_declared_redeclared_and_named() {
+    let k = compile(
+        "t.rules",
+        "ground mud { walkable  glyph \",\"  color \"#6b4f2a\" }
+         ground water { walkable  drink }
+         feature wall { blocks  glyph \"=\" }
+         kind k { when nearest mud within 3 as v => move toward v
+                  when count wall within 1 > 0 or is(here, water) => idle }",
+    )
+    .unwrap();
+    let names =
+        |v: &[crate::rules::MaterialDef]| v.iter().map(|d| d.name.clone()).collect::<Vec<_>>();
+    assert_eq!(names(&k.materials.grounds), ["soil", "water", "mud"]);
+    assert_eq!(names(&k.materials.features), ["rock", "wall"]);
+    let t = k.materials.table;
+    assert!(
+        t.walk[1] && t.drink[1],
+        "water redeclared: walkable, still drinkable"
+    );
+    assert!(t.walk[2] && !t.drink[2] && t.blocks[2]);
+    assert_eq!(k.materials.ground("mud").map(|g| g.0), Some(2));
+    assert_ne!(
+        k.hash,
+        compile("t.rules", "kind k { when true => idle }")
+            .unwrap()
+            .hash
+    );
+    let errs = [
+        ("ground mud { } ground mud { }", "declared twice"),
+        ("ground mud { } feature mud { }", "declared twice"),
+        ("feature soil { }", "a ground and a feature"),
+        ("kind mud { } ground mud { }", "already a kind"),
+        ("const mud = 1  ground mud { }", "already a const"),
+        (
+            "ground mud { blocks }",
+            "expected `walkable`, `drink`, `glyph`, `color` or `}` in a ground",
+        ),
+        (
+            "feature wall { drink }",
+            "expected `blocks`, `glyph`, `color` or `}` in a feature",
+        ),
+        ("ground mud { glyph \"ab\" }", "one printable character"),
+        (
+            "kind k { when nearest only rock within 1 as v => idle }",
+            "`only` applies to a kind",
+        ),
+        (
+            "kind k { when nearest mud within 1 as v => idle }",
+            "unknown kind, tag or material `mud`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    let many: String = (0..15)
+        .map(|i| format!("ground g{i} {{ walkable }} "))
+        .collect();
+    assert!(compile_err(&many).contains("at most 16 grounds"));
 }

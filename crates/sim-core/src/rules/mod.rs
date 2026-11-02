@@ -19,6 +19,7 @@ use bevy_ecs::prelude::*;
 
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
+use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS, MaterialTable};
 use vm::Op;
 
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
@@ -76,6 +77,83 @@ pub struct FieldDef {
     pub outside: Option<u16>,
     /// Its law, if it has one.
     pub law: Option<law::Law>,
+}
+
+/// A ground or a feature, as the rules declare it (`ground NAME { ... }`,
+/// `feature NAME { ... }`, `docs/WORLD.md` §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaterialDef {
+    pub name: String,
+    /// What the renderer draws on a bare cell of it.
+    pub glyph: u8,
+    /// `0xRRGGBB`; `None`: the palette's own (the built-in three).
+    pub color: Option<u32>,
+    /// A ground: walkable. A feature: blocks.
+    pub solid: bool,
+    /// A ground: `drink` refills `water` from it.
+    pub drink: bool,
+}
+
+/// Every ground and feature of a rule set, the engine's three first (soil
+/// and water, ground 0 and 1; rock, feature 1), and the table the sim reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Materials {
+    pub grounds: Vec<MaterialDef>,
+    /// `features[i]` is `Feature(i + 1)`: 0 is none.
+    pub features: Vec<MaterialDef>,
+    pub table: MaterialTable,
+}
+
+impl Default for Materials {
+    fn default() -> Self {
+        let m = |name: &str, glyph: u8, solid: bool, drink: bool| MaterialDef {
+            name: name.into(),
+            glyph,
+            color: None,
+            solid,
+            drink,
+        };
+        Self {
+            grounds: vec![m("soil", b'.', true, false), m("water", b'~', false, true)],
+            features: vec![m("rock", b'#', true, false)],
+            table: MaterialTable::DEFAULT,
+        }
+    }
+}
+
+impl Materials {
+    /// The table the sim reads, from the definitions.
+    pub fn table_of(grounds: &[MaterialDef], features: &[MaterialDef]) -> MaterialTable {
+        let mut t = MaterialTable {
+            walk: [false; 256],
+            drink: [false; 256],
+            blocks: [true; 256],
+        };
+        t.blocks[0] = false;
+        for (i, g) in grounds.iter().enumerate().take(MAX_GROUNDS) {
+            (t.walk[i], t.drink[i]) = (g.solid, g.drink);
+        }
+        for (i, f) in features.iter().enumerate().take(MAX_FEATURES) {
+            t.blocks[i + 1] = f.solid;
+        }
+        t
+    }
+
+    /// The ground named `name`.
+    pub fn ground(&self, name: &str) -> Option<Ground> {
+        let i = self.grounds.iter().position(|g| g.name == name)?;
+        Some(Ground(
+            u8::try_from(i).expect("at most MAX_GROUNDS grounds"),
+        ))
+    }
+
+    /// The feature named `name`.
+    pub fn feature(&self, name: &str) -> Option<Feature> {
+        let i = self.features.iter().position(|f| f.name == name)?;
+        Some(Feature(
+            u8::try_from(i + 1).expect("at most MAX_FEATURES features"),
+        ))
+    }
 }
 
 /// One kind's properties and where its program starts.
@@ -335,6 +413,8 @@ pub struct Kinds {
     /// The fields, in declaration order: `ChunkCells::fields[i]` is
     /// `fields[i]`'s layer.
     pub fields: Vec<FieldDef>,
+    /// Grounds and features: what a cell's `ground` and `feature` index.
+    pub materials: Materials,
     /// Source positions and names, for `wmc why`.
     pub debug: DebugInfo,
     /// Hash of everything above: the rules as an input to the checksum.
@@ -396,6 +476,7 @@ impl Kinds {
             consts,
             subs,
             fields: Vec::new(),
+            materials: Materials::default(),
             debug: DebugInfo::default(),
             hash,
             remaps,
@@ -436,6 +517,36 @@ impl Kinds {
             self.hash = splitmix64(h);
         }
         self.fields = fields;
+        self
+    }
+
+    /// The same rules with these materials (folded into the hash when they
+    /// are not the engine's three as they come).
+    pub fn with_materials(mut self, materials: Materials) -> Self {
+        if materials != Materials::default() {
+            let mut h = self.hash ^ 0x7E44A1;
+            for (k, m) in materials
+                .grounds
+                .iter()
+                .chain(&materials.features)
+                .enumerate()
+            {
+                h = splitmix64(h ^ k as u64);
+                for b in m.name.bytes() {
+                    h = splitmix64(h ^ u64::from(b));
+                }
+                for v in [
+                    u64::from(m.glyph),
+                    m.color.map_or(u64::MAX, u64::from),
+                    u64::from(m.solid),
+                    u64::from(m.drink),
+                ] {
+                    h = splitmix64(h ^ v);
+                }
+            }
+            self.hash = splitmix64(h ^ materials.grounds.len() as u64);
+        }
+        self.materials = materials;
         self
     }
 

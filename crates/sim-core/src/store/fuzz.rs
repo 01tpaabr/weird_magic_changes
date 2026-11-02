@@ -60,7 +60,7 @@ const FIELDS: [&str; 2] = [
 const STARTS_AT: usize = 12 + 3 * 8 + 2 * 4 + 4 * 4 + 4;
 
 static BUILTIN: LazyLock<Kinds> = LazyLock::new(|| {
-    let fields = FIELDS.join("\n");
+    let fields = FIELDS.join("\n") + "\nground mud { walkable }";
     let mut files = crate::rules::builtin::FILES.to_vec();
     files.push(("fields.rules", &fields));
     crate::rules::compile_files(&files).expect("the built-in rules and two fields compile")
@@ -70,7 +70,8 @@ static BUILTIN: LazyLock<Kinds> = LazyLock::new(|| {
 /// too: the same kinds and fields, numbered otherwise, so a save opens
 /// through a remap.
 static REVERSED: LazyLock<Kinds> = LazyLock::new(|| {
-    let fields = FIELDS.iter().rev().copied().collect::<Vec<_>>().join("\n");
+    let fields = FIELDS.iter().rev().copied().collect::<Vec<_>>().join("\n")
+        + "\nground clay { walkable }\nground mud { walkable }\nfeature wall { blocks }";
     let mut files = crate::rules::builtin::FILES.to_vec();
     files.reverse();
     files.push(("fields.rules", &fields));
@@ -738,6 +739,23 @@ fn a_bad_world_header_never_panics() {
                 ..meta.clone()
             },
             false,
+        ),
+        (
+            "grounds and features renamed and gone",
+            WorldMeta {
+                grounds: vec!["water".into(), "clay".into()],
+                features: Vec::new(),
+                ..meta.clone()
+            },
+            false,
+        ),
+        (
+            "too many grounds",
+            WorldMeta {
+                grounds: vec!["g".into(); crate::stage::MAX_GROUNDS + 1],
+                ..meta.clone()
+            },
+            true,
         ),
         (
             "too many fields",

@@ -154,6 +154,8 @@ struct G<'a> {
     withs: Vec<(String, Vec<String>)>,
     /// The fields declared: a prefix of [`FIELDS`].
     fields: usize,
+    /// A ground `gmud` and a feature `gwall` are declared.
+    materials: bool,
     /// Writing a law's block (the syntax mode): there `count (` starts an
     /// aggregate, so no field condition goes where a search's predicate does.
     in_law: bool,
@@ -184,6 +186,7 @@ impl<'a> G<'a> {
             files: Vec::new(),
             withs: Vec::new(),
             fields: 0,
+            materials: false,
             in_law: false,
             owner: None,
             locals: Vec::new(),
@@ -404,6 +407,7 @@ impl<'a> G<'a> {
 
     fn plan(&mut self) {
         self.fields = self.n(FIELDS.len() + 1);
+        self.materials = self.maybe(40);
         let consts = self.n(4);
         self.consts = (0..consts).map(|i| format!("C{i}")).collect();
         let tag_pool: Vec<String> = (0..self.n(5)).map(|i| format!("tg{i}")).collect();
@@ -550,6 +554,17 @@ impl<'a> G<'a> {
 
     fn emit(&mut self) -> String {
         let mut out = String::new();
+        if self.materials {
+            let sep = self.sep();
+            let water = if self.maybe(50) {
+                "ground water { walkable drink }"
+            } else {
+                ""
+            };
+            out += &format!(
+                "ground gmud {{ walkable glyph \",\" }}{sep}feature gwall {{ blocks color \"#999999\" }}{sep}{water}\n"
+            );
+        }
         for &(name, policy) in &FIELDS[..self.fields] {
             let max = 1 + self.n(300);
             let mut parts = Vec::new();
@@ -1016,8 +1031,12 @@ impl<'a> G<'a> {
                 format!("repeat {e} {b}")
             }
             9 if self.fits(5) => {
+                // The loop's five slots are taken before its predicate and
+                // radius are compiled: count them while those are written.
+                self.slots += 5;
                 let p = self.search_pred();
                 let r = self.additive(d - 1);
+                self.slots -= 5;
                 let v = self.fresh("v");
                 let m = self.mark();
                 self.local(v.clone(), Ty::Target, 5);
@@ -1609,6 +1628,9 @@ impl<'a> G<'a> {
     }
 
     fn pred(&mut self) -> String {
+        if self.strict && self.materials && self.maybe(15) {
+            return self.one(&["gmud", "gwall"]).to_string();
+        }
         if !self.strict {
             return match self.n(4) {
                 0 => self.one(&PRED_WORDS).into(),
@@ -1646,10 +1668,19 @@ impl<'a> G<'a> {
     fn syntax_file(&mut self) -> String {
         let mut out = String::new();
         for _ in 0..self.n(7) {
-            match self.n(5) {
+            match self.n(6) {
                 0 => out += &self.syntax_item(false),
                 1 => out += &self.syntax_item(true),
                 2 => out += &self.syntax_sub(),
+                4 => {
+                    let w = self.one(&["ground", "feature"]);
+                    let word = if w == "ground" {
+                        "walkable drink"
+                    } else {
+                        "blocks"
+                    };
+                    out += &format!("{w} {} {{ {word} glyph \"x\" }}", self.pool(&[]));
+                }
                 3 => {
                     let (name, max) = (self.pool(&[]), self.additive(2));
                     let policy = self.one(&["", " conserved", " fixed"]);

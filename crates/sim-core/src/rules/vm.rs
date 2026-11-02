@@ -17,7 +17,9 @@
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
-use crate::stage::{ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos};
+use crate::stage::{
+    ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, MaterialTable, Pos,
+};
 use crate::time::{Clock, daylight, stamp};
 
 use super::{KindDef, Kinds};
@@ -561,7 +563,14 @@ impl Want {
     /// Does local cell `i` hold what this wants? `actors` are the chunk's
     /// public rows (for looks), `tags` the tag bitset per kind.
     #[inline]
-    pub fn test(self, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: &[u64]) -> bool {
+    pub fn test(
+        self,
+        cells: &ChunkCells,
+        actors: &ChunkActors,
+        i: usize,
+        tags: &[u64],
+        m: &MaterialTable,
+    ) -> bool {
         // A kind or a tag matches whoever stands on the cell or covers it.
         let (occupant, cover) = (cells.occupant[i], cells.cover[i]);
         match self {
@@ -590,10 +599,10 @@ impl Want {
                 };
                 hit(occupant) || hit(cover)
             }
-            Want::Free => cells.walkable(i) && occupant.is_none(),
-            Want::Bare => cells.walkable(i) && cover.is_none(),
-            Want::Ground(g) => cells.ground[i] as i32 == g,
-            Want::Feature(f) => cells.feature[i] as i32 == f,
+            Want::Free => cells.walkable(i, m) && occupant.is_none(),
+            Want::Bare => cells.walkable(i, m) && cover.is_none(),
+            Want::Ground(g) => i32::from(cells.ground[i].0) == g,
+            Want::Feature(f) => i32::from(cells.feature[i].0) == f,
             Want::Fields(..) | Want::Nothing => false,
         }
     }
@@ -610,6 +619,8 @@ pub struct Halo<'a> {
     pub tags: &'a [u64],
     /// `Kinds::family_end`; empty: every kind is its own family.
     pub family_end: &'a [u16],
+    /// What walks, drinks and blocks (`Kinds::materials`).
+    pub materials: &'a MaterialTable,
 }
 
 impl<'a> Halo<'a> {
@@ -629,6 +640,7 @@ impl<'a> Halo<'a> {
         Halo {
             chunks,
             tags: &kinds.tag_bits,
+            materials: &kinds.materials.table,
             family_end: &kinds.family_end,
         }
     }
@@ -672,9 +684,9 @@ impl<'a> Halo<'a> {
     #[inline]
     pub fn test(&self, lx: i32, ly: i32, dx: i32, dy: i32, want: Want) -> bool {
         match self.at(lx, ly, dx, dy) {
-            Some((cells, actors, i)) => want.test(cells, actors, i, self.tags),
+            Some((cells, actors, i)) => want.test(cells, actors, i, self.tags, self.materials),
             // Unloaded: rock, nobody.
-            None => want == Want::Feature(Feature::Rock as i32),
+            None => want == Want::Feature(i32::from(Feature::Rock.0)),
         }
     }
 
@@ -1597,10 +1609,6 @@ pub fn offset_cell(cell: usize, dx: i8, dy: i8) -> ((i32, i32), usize) {
     ((x >> CHUNK_BITS, y >> CHUNK_BITS), local)
 }
 
-// Ground/Feature discriminants are what `pred::ground`/`pred::feature` take.
-const _: () = assert!(Ground::Soil as u8 == 0 && Ground::Water as u8 == 1);
-const _: () = assert!(Feature::None as u8 == 0 && Feature::Rock as u8 == 1);
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1645,7 +1653,7 @@ mod tests {
     /// the actor stands at (11, 10).
     fn stage() -> (ChunkCells, ChunkActors) {
         let mut cells = ChunkCells::default();
-        cells.ground[10 * 64 + 10] = Ground::Water;
+        cells.ground[10 * 64 + 10] = crate::stage::Ground::Water;
         cells.feature[10 * 64 + 12] = Feature::Rock;
         cells.occupant[10 * 64 + 11] = ActorId::pack(0, 0);
         cells.occupant[12 * 64 + 11] = ActorId::pack(3, 0);
@@ -1704,6 +1712,7 @@ mod tests {
             ],
             tags: &[],
             family_end: &[],
+            materials: &MaterialTable::DEFAULT,
         };
         let ctx = Ctx {
             halo: &halo,
@@ -1824,6 +1833,7 @@ mod tests {
             chunks: [None; 9],
             tags: &[],
             family_end: &[],
+            materials: &MaterialTable::DEFAULT,
         };
         halo.chunks[4] = Some((&cells, &actors));
         let traced = |a: Asm| {
@@ -2193,6 +2203,7 @@ mod tests {
             chunks: [None; 9],
             tags: &[],
             family_end: &[],
+            materials: &MaterialTable::DEFAULT,
         };
         halo.chunks[4] = Some((&cells, &actors));
         halo.chunks[5] = Some((&cells, &actors)); // east neighbour
@@ -2239,7 +2250,9 @@ mod tests {
             kind: 3,
             ..ActorPub::zeroed()
         });
-        let m = |p: i32, i: usize| Want::of(p, &family_end).test(&cells, &actors, i, &[]);
+        let m = |p: i32, i: usize| {
+            Want::of(p, &family_end).test(&cells, &actors, i, &[], &MaterialTable::DEFAULT)
+        };
         assert!(
             m(0, 5) && m(1, 5) && m(2, 5),
             "a hen is an animal, a bird, a hen"
@@ -2251,7 +2264,7 @@ mod tests {
         assert!(m(pred::kind_look(2, 7) + pred::ONLY, 5));
         assert!(m(3, 9) && m(pred::ONLY + 3, 9) && !m(0, 9));
         // No family table: every kind is its own family.
-        assert!(!Want::of(0, &[]).test(&cells, &actors, 5, &[]));
-        assert!(Want::of(2, &[]).test(&cells, &actors, 5, &[]));
+        assert!(!Want::of(0, &[]).test(&cells, &actors, 5, &[], &MaterialTable::DEFAULT));
+        assert!(Want::of(2, &[]).test(&cells, &actors, 5, &[], &MaterialTable::DEFAULT));
     }
 }

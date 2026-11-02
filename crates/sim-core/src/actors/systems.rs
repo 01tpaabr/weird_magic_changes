@@ -36,13 +36,11 @@ use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, flags, slot_u16,
 };
 use crate::rng::{hash_cell, splitmix64};
-use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
+use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
 use crate::rules::{Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
-use crate::stage::{
-    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, Stage, cell_u16,
-};
+use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Pos, Stage, cell_u16};
 use crate::time::stamp;
 
 /// One actor's decision this tick, waiting for the resolve phases.
@@ -516,10 +514,13 @@ fn think_one<const TRACE: bool>(
             (intent.dx, intent.dy) = step;
         }
         Action::Drink => {
-            // Adjacent water (or underfoot, which a standing actor never is).
+            // An adjacent ground to drink from (or underfoot, which a
+            // standing actor seldom is: a drinkable ground is seldom walkable).
             let (dx, dy) = (i32::from(out.dx), i32::from(out.dy));
-            let water = pred::ground(Ground::Water as u8);
-            let valid = dx.abs() <= 1 && dy.abs() <= 1 && halo.matches(lx, ly, dx, dy, water);
+            let drinkable = halo
+                .at(lx, ly, dx, dy)
+                .is_some_and(|(c, _, i)| halo.materials.drinkable(c.ground[i]));
+            let valid = dx.abs() <= 1 && dy.abs() <= 1 && drinkable;
             intent.kind = u16::from(valid);
         }
         _ => {}
@@ -1006,7 +1007,7 @@ pub fn apply(
                     continue; // REFUSED below: a rooted row claims nothing
                 }
                 if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
-                    && cells.walkable(cell)
+                    && cells.walkable(cell, &kinds.materials.table)
                     && cells.occupant[cell].is_none()
                 {
                     scratch.claim(cell, it.key);
@@ -1109,7 +1110,7 @@ pub fn apply(
                     Action::Spawn if is_cover(kinds, it.kind) => {
                         Some(match target_of(*coord, from, it.dx, it.dy) {
                             Where::Here(cell)
-                                if actors.cells.walkable(cell)
+                                if actors.cells.walkable(cell, &kinds.materials.table)
                                     && actors.cells.cover[cell].is_none() =>
                             {
                                 let child = spawn_mind(
@@ -1402,7 +1403,7 @@ pub fn migrate(
         };
         let (dst_cells, dst_pubs, dst_minds, dst_scratch, dst_meta) = &mut dst;
         let cover = matches!(fx.what, EffectKind::Spawn { kind, .. } if is_cover(&kinds, kind));
-        let ok = dst_cells.walkable(cell)
+        let ok = dst_cells.walkable(cell, &kinds.materials.table)
             && if cover {
                 dst_cells.cover[cell].is_none()
             } else {
@@ -1535,6 +1536,7 @@ mod tests {
             chunks,
             tags: &[],
             family_end: &[],
+            materials: &crate::stage::MaterialTable::DEFAULT,
         }
     }
 
@@ -1659,7 +1661,7 @@ mod tests {
             (1, -1),
             "then counter-clockwise"
         );
-        cells.ground[9 * 64 + 11] = Ground::Water;
+        cells.ground[9 * 64 + 11] = crate::stage::Ground::Water;
         let halo = halo_one(&cells, &actors);
         assert_eq!(
             step_toward(&halo, 10, 10, 5, 0),

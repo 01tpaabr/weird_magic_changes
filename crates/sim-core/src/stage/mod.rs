@@ -41,7 +41,7 @@ use std::collections::HashMap;
 
 use bevy_ecs::prelude::*;
 use bevy_ecs::system::SystemParam;
-use bytemuck::{CheckedBitPattern, NoUninit, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 
 use crate::actors::{self, ChunkActors, ChunkMinds, Intents, Outbox, Scratch};
 use crate::par::par_map;
@@ -85,43 +85,104 @@ pub const WORLD_EXTENT: i32 = 1_000_000_000;
 pub const CHUNK_EXTENT: i32 = WORLD_EXTENT / CHUNK_SIZE;
 const _: () = assert!(WORLD_EXTENT % CHUNK_SIZE == 0 && WORLD_EXTENT <= 1 << 30);
 
-/// What a cell fundamentally is. Exactly one per cell.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit, CheckedBitPattern)]
-pub enum Ground {
-    #[default]
-    Soil = 0,
-    Water = 1,
+/// What a cell fundamentally is, exactly one per cell: an index into the
+/// rules' grounds (`Kinds::materials`). The first two are the engine's
+/// generator's: soil and water; a pack may redeclare them and declare more
+/// (`docs/WORLD.md` §5).
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
+pub struct Ground(pub u8);
+
+#[allow(non_upper_case_globals)] // the built-in grounds, named as the rules name them
+impl Ground {
+    pub const Soil: Ground = Ground(0);
+    pub const Water: Ground = Ground(1);
 }
 
-impl Ground {
-    /// Can an unaided actor stand on this ground?
+/// Something resting on the ground that is not an actor, at most one per
+/// cell: 0 for none, else one past an index into the rules' features. The
+/// first is the generator's rock.
+#[repr(transparent)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Pod, Zeroable)]
+pub struct Feature(pub u8);
+
+#[allow(non_upper_case_globals)] // the built-in feature, named as the rules name it
+impl Feature {
+    pub const None: Feature = Feature(0);
+    pub const Rock: Feature = Feature(1);
+}
+
+/// Grounds and features a rule set may declare, the built-in ones included:
+/// a drawn map's byte holds one of each in four bits.
+pub const MAX_GROUNDS: usize = 16;
+pub const MAX_FEATURES: usize = 15;
+
+/// What the sim asks of a cell's ground and feature, by index: built from
+/// the rules' materials, read in every search and move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MaterialTable {
+    /// An unaided actor can stand on this ground. A whole byte's worth, so
+    /// indexing by a cell's byte needs no bounds check (measured: `.get()`
+    /// cost 4% of a tick); past the rules' grounds, false.
+    pub walk: [bool; 256],
+    /// `drink` refills `water` from this ground.
+    pub drink: [bool; 256],
+    /// This feature stops an actor from entering (index: `Feature`, 0
+    /// none); past the rules' features, true.
+    pub blocks: [bool; 256],
+}
+
+impl MaterialTable {
+    /// Soil walkable, water to drink, rock in the way: the engine's three
+    /// as they were before packs could declare materials.
+    pub const DEFAULT: MaterialTable = {
+        let mut t = MaterialTable {
+            walk: [false; 256],
+            drink: [false; 256],
+            blocks: [true; 256],
+        };
+        t.walk[0] = true;
+        t.drink[1] = true;
+        t.blocks[0] = false;
+        t
+    };
+
+    /// Can an unaided actor stand on a cell of this ground and feature?
+    /// Unknown indices are neither walkable nor drinkable.
     #[inline]
-    pub fn walkable(self) -> bool {
-        match self {
-            Ground::Soil => true,
-            Ground::Water => false,
-        }
+    pub fn walkable(&self, g: Ground, f: Feature) -> bool {
+        self.walk[usize::from(g.0)] && !self.blocks[usize::from(f.0)]
+    }
+
+    #[inline]
+    pub fn drinkable(&self, g: Ground) -> bool {
+        self.drink[usize::from(g.0)]
+    }
+
+    #[inline]
+    pub fn blocks(&self, f: Feature) -> bool {
+        self.blocks[usize::from(f.0)]
     }
 }
 
-/// Something resting on the ground that is not an actor. At most one per cell.
-#[repr(u8)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, NoUninit, CheckedBitPattern)]
-pub enum Feature {
-    #[default]
-    None = 0,
-    Rock = 1,
+/// The engine's three, for tests that build cells by hand.
+#[cfg(test)]
+impl Ground {
+    pub fn walkable(self) -> bool {
+        MaterialTable::DEFAULT.walkable(self, Feature::None)
+    }
 }
 
+#[cfg(test)]
 impl Feature {
-    /// Does this feature stop an actor from entering the cell?
-    #[inline]
     pub fn blocks(self) -> bool {
-        match self {
-            Feature::None => false,
-            Feature::Rock => true,
-        }
+        MaterialTable::DEFAULT.blocks(self)
+    }
+}
+
+impl Default for MaterialTable {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -299,10 +360,11 @@ impl Default for ChunkCells {
 }
 
 impl ChunkCells {
-    /// Terrain permits standing on local cell `i` (ignores occupants).
+    /// Terrain permits standing on local cell `i` (ignores occupants),
+    /// by the rules' materials `m`.
     #[inline]
-    pub fn walkable(&self, i: usize) -> bool {
-        self.ground[i].walkable() && !self.feature[i].blocks()
+    pub fn walkable(&self, i: usize, m: &MaterialTable) -> bool {
+        m.walkable(self.ground[i], self.feature[i])
     }
 
     /// The occupant layer, or the cover layer.
@@ -693,7 +755,8 @@ mod tests {
         let at = |w: &mut World, p: Pos| {
             let (cc, i) = p.split();
             w.run_system_once(move |s: StageCells| {
-                s.chunk(cc).map(|c| (c.walkable(i), c.occupant[i]))
+                s.chunk(cc)
+                    .map(|c| (c.walkable(i, &MaterialTable::DEFAULT), c.occupant[i]))
             })
             .unwrap()
         };

@@ -5,7 +5,7 @@
 //! ```text
 //! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
 //!                              gen params, starts, drawn map, kinds (names, cover, slot
-//!                              names), fields, packs, rules hash
+//!                              names), fields, grounds and features, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
 //!                              as raw bytes (ground, feature, occupant, cover),
 //!                              then f and f field layers (u16 each), then n, n public actor
@@ -42,11 +42,12 @@ use crate::rules::compile::MAX_FIELDS;
 use crate::scenario::{DrawnMap, Region, Start, in_world};
 use crate::stage::worldgen::GenParams;
 use crate::stage::{
-    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, WORLD_EXTENT,
+    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, MAX_FEATURES,
+    MAX_GROUNDS, WORLD_EXTENT,
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 11;
+pub const FORMAT_VERSION: u32 = 12;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -68,6 +69,9 @@ pub struct WorldMeta {
     pub kinds: Vec<SavedKind>,
     /// Field names of those rules, in layer order.
     pub fields: Vec<String>,
+    /// Ground and feature names of those rules, by index (features from 1).
+    pub grounds: Vec<String>,
+    pub features: Vec<String>,
     /// The rule packs the world is played with, as given (step 8c).
     pub packs: Vec<String>,
     /// `Kinds::hash` of the rules the save was last played with. Recorded,
@@ -317,6 +321,15 @@ impl Store {
             kinds.push(k);
         }
         let fields = r.strs()?;
+        let grounds = r.strs()?;
+        let features = r.strs()?;
+        if grounds.len() > MAX_GROUNDS || features.len() > MAX_FEATURES {
+            return Err(bad(format!(
+                "{} grounds and {} features, this build holds {MAX_GROUNDS} and {MAX_FEATURES}",
+                grounds.len(),
+                features.len()
+            )));
+        }
         if fields.len() > MAX_FIELDS {
             return Err(bad(format!(
                 "{} fields, this build holds {MAX_FIELDS}",
@@ -336,6 +349,8 @@ impl Store {
             map,
             kinds,
             fields,
+            grounds,
+            features,
             packs,
             rules_hash,
         }))
@@ -417,6 +432,8 @@ impl Store {
             w.strs(&k.states);
         }
         w.strs(&m.fields);
+        w.strs(&m.grounds);
+        w.strs(&m.features);
         w.strs(&m.packs);
         w.u64(m.rules_hash);
         write_atomic(&self.meta_path(), &w.buf)
@@ -450,12 +467,20 @@ impl Store {
         let feature = r.bytes(CHUNK_CELLS)?;
         let occupant = r.bytes(CHUNK_CELLS * 4)?;
         let cover = r.bytes(CHUNK_CELLS * 4)?;
-        cells.ground.copy_from_slice(
-            bytemuck::checked::try_cast_slice(ground).map_err(|e| bad(e.to_string()))?,
-        );
-        cells.feature.copy_from_slice(
-            bytemuck::checked::try_cast_slice(feature).map_err(|e| bad(e.to_string()))?,
-        );
+        // An index past what any rule set holds is no cell; one past what
+        // the save's rules declare is caught on load (`sim::load_chunks`).
+        if let Some(g) = ground.iter().find(|&&g| usize::from(g) >= MAX_GROUNDS) {
+            return Err(bad(format!(
+                "ground {g}: a world holds {MAX_GROUNDS} at most"
+            )));
+        }
+        if let Some(f) = feature.iter().find(|&&f| usize::from(f) > MAX_FEATURES) {
+            return Err(bad(format!(
+                "feature {f}: a world holds {MAX_FEATURES} at most"
+            )));
+        }
+        cells.ground.copy_from_slice(bytemuck::cast_slice(ground));
+        cells.feature.copy_from_slice(bytemuck::cast_slice(feature));
         // Occupant ids are u32 LE; on LE targets this is a memcpy.
         for (o, b) in cells.occupant.iter_mut().zip(occupant.as_chunks::<4>().0) {
             o.0 = u32::from_le_bytes(*b);
@@ -795,6 +820,8 @@ mod tests {
                 },
             ],
             fields: names(&["sugar", "höhe"]),
+            grounds: names(&["soil", "water", "mud"]),
+            features: names(&["rock", "wall"]),
             packs: names(&["/rules/base", "rules/mod"]),
             rules_hash: 0xABCD,
         };
@@ -1098,6 +1125,8 @@ mod tests {
             map: None,
             kinds: Vec::new(),
             fields: Vec::new(),
+            grounds: Vec::new(),
+            features: Vec::new(),
             packs: Vec::new(),
             rules_hash: 0,
         };

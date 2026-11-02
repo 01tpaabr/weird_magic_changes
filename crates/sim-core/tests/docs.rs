@@ -103,7 +103,9 @@ fn marked_error(b: &Block) -> (u32, String) {
 
 /// Items start at column 0 with one of these words; an item runs until the
 /// next one (or the end of the file).
-const ITEM_WORDS: [&str; 5] = ["kind", "trait", "sub", "const", "field"];
+const ITEM_WORDS: [&str; 7] = [
+    "kind", "trait", "sub", "const", "field", "ground", "feature",
+];
 
 /// The item a line at column 0 starts, by name.
 fn item_name(line: &str) -> Option<&str> {
@@ -428,6 +430,13 @@ fn the_limits_table_is_the_codes() {
         ),
         ("tags per rule set".into(), vec![n(MAX_TAGS)]),
         ("fields per rule set".into(), vec![n(MAX_FIELDS)]),
+        (
+            "grounds, features per rule set".into(),
+            vec![
+                n(sim_core::stage::MAX_GROUNDS),
+                n(sim_core::stage::MAX_FEATURES),
+            ],
+        ),
         (
             "fields one think adds to".into(),
             vec![n(sim_core::rules::vm::ADDS)],

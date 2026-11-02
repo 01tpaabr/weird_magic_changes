@@ -453,7 +453,9 @@ mod tests {
                 let (cc, i) = p.split();
                 let e = w.resource::<Stage>().entity(cc).unwrap();
                 let c = w.get::<ChunkCells>(e).unwrap();
-                c.walkable(i) && c.occupant[i].is_none() && c.cover[i].is_none()
+                c.walkable(i, &sim_core::stage::MaterialTable::DEFAULT)
+                    && c.occupant[i].is_none()
+                    && c.cover[i].is_none()
             })
             .expect("an empty walkable cell")
     }

@@ -76,6 +76,10 @@ pub struct Plan {
     fields: Vec<(Option<usize>, FieldDef)>,
     /// Field layers a chunk written under the old rules holds.
     old_fields: usize,
+    /// Per old ground, the new one of its name (else the first); per old
+    /// feature (0 none), the new one (else none).
+    grounds: Vec<u8>,
+    features: Vec<u8>,
     /// The world's seed: a new field's `init` noise.
     seed: u64,
 }
@@ -93,6 +97,7 @@ impl Plan {
     pub fn between(
         old: &[SavedKind],
         old_fields: &[String],
+        (old_grounds, old_features): (&[String], &[String]),
         new: &Kinds,
         seed: u64,
     ) -> Result<Plan, String> {
@@ -148,6 +153,17 @@ impl Plan {
             kinds,
             fields,
             old_fields: old_fields.len(),
+            grounds: old_grounds
+                .iter()
+                .map(|g| new.materials.ground(g).map_or(0, |g| g.0))
+                .collect(),
+            features: std::iter::once(0)
+                .chain(
+                    old_features
+                        .iter()
+                        .map(|f| new.materials.feature(f).map_or(0, |f| f.0)),
+                )
+                .collect(),
             seed,
         })
     }
@@ -156,6 +172,11 @@ impl Plan {
     /// before they are remapped.
     pub fn old_kinds(&self) -> usize {
         self.kinds.len()
+    }
+
+    /// The old rules' ground and feature counts: saved chunks index them.
+    pub fn old_materials(&self) -> (usize, usize) {
+        (self.grounds.len(), self.features.len() - 1)
     }
 
     /// How many field layers the old rules had: saved chunks hold that many.
@@ -214,6 +235,20 @@ impl Plan {
         if dead {
             actors.compact();
         }
+        let same = |m: &[u8]| m.iter().enumerate().all(|(i, &v)| usize::from(v) == i);
+        let mut terrain = false;
+        if !same(&self.grounds) {
+            for g in &mut cells.ground {
+                g.0 = self.grounds.get(usize::from(g.0)).copied().unwrap_or(0);
+            }
+            terrain = true;
+        }
+        if !same(&self.features) {
+            for f in &mut cells.feature {
+                f.0 = self.features.get(usize::from(f.0)).copied().unwrap_or(0);
+            }
+            terrain = true;
+        }
         let old = std::mem::take(&mut cells.fields);
         for (src, def) in &self.fields {
             let layer = match src.and_then(|i| old.get(i)) {
@@ -222,8 +257,28 @@ impl Plan {
             };
             cells.fields.push(layer);
         }
-        changed | (cells.fields != old)
+        changed | terrain | (cells.fields != old)
     }
+}
+
+/// The rules' ground names, by index: what a save keeps of them.
+pub fn ground_names(kinds: &Kinds) -> Vec<String> {
+    kinds
+        .materials
+        .grounds
+        .iter()
+        .map(|g| g.name.clone())
+        .collect()
+}
+
+/// The rules' feature names, from feature 1.
+pub fn feature_names(kinds: &Kinds) -> Vec<String> {
+    kinds
+        .materials
+        .features
+        .iter()
+        .map(|f| f.name.clone())
+        .collect()
 }
 
 /// The rules' field names, in layer order: what a save keeps of them.
@@ -305,7 +360,13 @@ pub fn reload_rules(
     }
     let old = world.resource::<Kinds>().clone();
     let seed = world.resource::<SimConfig>().seed;
-    let plan = Plan::between(&SavedKind::table(&old), &field_names(&old), &new, seed)?;
+    let plan = Plan::between(
+        &SavedKind::table(&old),
+        &field_names(&old),
+        (&ground_names(&old), &feature_names(&old)),
+        &new,
+        seed,
+    )?;
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);

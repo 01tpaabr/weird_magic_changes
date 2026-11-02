@@ -104,7 +104,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
   `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
   a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
-- **Save**: chunk file v11 = cell layers (`occupant`, `cover`, the field layers), `n`, `ActorPub[n]`,
+- **Save**: chunk file v12 = cell layers (`occupant`, `cover`, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'

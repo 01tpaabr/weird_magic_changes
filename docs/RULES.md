@@ -409,6 +409,42 @@ declared after it fold with the new value. A name the rules don't declare is an 
 lists the ones they do. That makes constants the knobs of a pack: put a number you may want
 to tune in a `const`, and `wmc lab --set NAME=a,b,c` tries several (§17).
 
+### Grounds and features
+
+A cell has one **ground** (under foot) and at most one **feature** (on it). The engine
+generates three: the grounds `soil` (walkable) and `water` (to drink, not walkable) and the
+feature `rock` (in the way). A pack declares more beside its kinds, and may redeclare these
+three: a redeclaration gives the material its properties as written.
+
+```rules
+ground mud { walkable  glyph ","  color "#6b4f2a" }
+ground water { walkable  drink }           # shallow: walked through, and drunk
+feature wall { blocks  glyph "="  color "#9a9a9a" }
+
+kind wader {
+  glyph "w"
+  when nearest mud within 4 as m => move toward m
+  when count wall within 1 > 0 => idle
+  when true => move random free
+}
+```
+
+| part | default | meaning |
+|---|---|---|
+| `walkable` (a ground) | not | an actor can stand on it |
+| `drink` (a ground) | not | `drink t` at an adjacent cell of it refills the need named `water` |
+| `blocks` (a feature) | not | nobody enters a cell holding it |
+| `glyph "c"` | `.` a ground, `#` a feature | drawn on a bare cell of it |
+| `color "#rrggbb"` | the palette's (the three) | a ground's background, a feature's glyph |
+
+A material's name is a predicate (`nearest mud within 4`, `is(here, water)`, `count wall
+within 1`), global like a kind's: never a kind's, a trait's, a sub's, a tag's, a constant's
+or another material's. A world holds at most 16 grounds and 15 features, the engine's
+among them. The terrain generator lays only the three; a drawn map's legend names them
+(§14). A save keeps materials by name: reopened under rules that number them otherwise,
+every cell keeps its material; one the rules no longer declare becomes the first ground,
+or no feature.
+
 ### Fields
 
 A **field** is a number in every cell of the world, declared by a pack beside its kinds:
@@ -959,6 +995,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | needs, mem slots per kind | 4, 12 |
 | tags per rule set | 64 |
 | fields per rule set | 64 |
+| grounds, features per rule set | 16, 15 (the engine's three among them) |
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |
 | states per kind | 64 |
