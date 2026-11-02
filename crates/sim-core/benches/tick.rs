@@ -71,11 +71,41 @@ fn bench_step(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_laws(c: &mut Criterion) {
+    // Conway's Life as a field law on 10x10 chunks: one generation a tick,
+    // every cell through the column program (`docs/WORLD.md` §8 has Life
+    // as one actor a cell on the same board).
+    let kinds = sim_core::rules::compile(
+        "life.rules",
+        "field alive max 1 {
+           init noise scale 1
+           every 1 {
+             let n = sum alive within 1
+             if n == 3 { alive = 1 } else if n != 4 { alive = 0 }
+           }
+         }
+         kind nobody { glyph \"n\"  when true => idle }",
+    )
+    .expect("the bench's law compiles");
+    let board = Scenario {
+        seed: 7,
+        width: 640,
+        height: 640,
+        ..Scenario::default()
+    };
+    let mut w = sim::new_world_with(&board, kinds).unwrap();
+    let mut g = c.benchmark_group("laws");
+    g.throughput(Throughput::Elements(100 * 4096));
+    g.bench_function("life 10x10 chunks", |b| b.iter(|| sim::step(&mut w)));
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_generate,
     bench_checksum,
     bench_stream,
-    bench_step
+    bench_step,
+    bench_laws
 );
 criterion_main!(benches);

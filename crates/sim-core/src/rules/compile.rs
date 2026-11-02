@@ -35,6 +35,7 @@ use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
 use crate::time::{days, hours, minutes};
 
+mod law;
 mod lint;
 
 /// A compile error with its position.
@@ -99,6 +100,7 @@ pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result
             deepest: 0,
             top: None,
             conjuncts: Vec::new(),
+            law: false,
         };
         p.file(&mut items)?;
     }
@@ -502,6 +504,10 @@ struct FieldAst {
     /// `init V`, or `init noise scale S` (`true`); none: 0.
     init: Option<(bool, Expr, Pos)>,
     color: Option<u32>,
+    /// `outside V`: what its law reads where nothing is loaded.
+    outside: Option<(Expr, Pos)>,
+    /// `every N { body }`: its law.
+    law: Option<(Expr, Vec<Stmt>, Pos)>,
 }
 
 /// `const NAME = expr`: a file-scope integer, folded at compile time.
@@ -751,6 +757,29 @@ enum Expr {
         args: Vec<Arg>,
         at: Pos,
     },
+    /// In a field's law only: `sum|avg|min|max F within r` over the 3 x 3
+    /// square, or `count (cond) within r` (the cells where it holds).
+    Agg {
+        op: AggOp,
+        of: Box<AggOf>,
+        r: Box<Expr>,
+        at: Pos,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AggOp {
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Count,
+}
+
+#[derive(Debug, Clone)]
+enum AggOf {
+    Field(String, Pos),
+    Cond(Box<Cond>),
 }
 
 // ---- parser ---------------------------------------------------------------------------
@@ -767,6 +796,8 @@ struct Parser<'a> {
     /// the first token of each term of the top-level `and`.
     top: Option<u32>,
     conjuncts: Vec<usize>,
+    /// Parsing a field's law: aggregates over the 3 x 3 square parse.
+    law: bool,
 }
 
 /// How deep one tree may be: a nesting and an operator in a chain are one
@@ -1120,10 +1151,28 @@ impl Parser<'_> {
         } else {
             Policy::Free
         };
-        let (mut init, mut color) = (None, None);
+        let (mut init, mut color, mut outside, mut law) = (None, None, None, None);
         if self.eat_sym("{") {
             while !self.eat_sym("}") {
                 let p = self.pos();
+                if self.eat_kw("outside") {
+                    if outside.is_some() {
+                        return Err(self.err_at(&p, "`outside` declared twice"));
+                    }
+                    outside = Some((self.additive()?, p));
+                    continue;
+                }
+                if self.eat_kw("every") {
+                    if law.is_some() {
+                        return Err(self.err_at(&p, "a field has one law: `every` given twice"));
+                    }
+                    let every = self.additive()?;
+                    self.law = true;
+                    let body = self.block();
+                    self.law = false;
+                    law = Some((every, body?, p));
+                    continue;
+                }
                 if self.eat_kw("init") {
                     if init.is_some() {
                         return Err(self.err_at(&p, "`init` declared twice"));
@@ -1150,7 +1199,7 @@ impl Parser<'_> {
                     color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
                 } else {
                     return Err(self.err(format!(
-                        "expected `init`, `color` or `}}` in a field, found {}",
+                        "expected `init`, `color`, `outside`, `every` or `}}` in a field, found {}",
                         self.describe()
                     )));
                 }
@@ -1163,6 +1212,44 @@ impl Parser<'_> {
             policy,
             init,
             color,
+            outside,
+            law,
+        })
+    }
+
+    /// Does name `n`, just taken, start an aggregate here? `sum` and `avg`
+    /// before a name, `min` and `max` before a name (not a call), `count`
+    /// before `(`.
+    fn agg_start(&self, n: &str) -> Option<AggOp> {
+        let name_next = matches!(self.peek(), Tok::Name(_));
+        match n {
+            "sum" if name_next => Some(AggOp::Sum),
+            "avg" if name_next => Some(AggOp::Avg),
+            "min" if name_next => Some(AggOp::Min),
+            "max" if name_next => Some(AggOp::Max),
+            "count" if self.is_sym("(") => Some(AggOp::Count),
+            _ => None,
+        }
+    }
+
+    /// The rest of an aggregate: its field or `(cond)`, `within`, a radius.
+    fn agg(&mut self, op: AggOp, at: Pos) -> Result<Expr> {
+        let of = if op == AggOp::Count {
+            self.expect_sym("(")?;
+            let c = self.nested(Self::cond)?;
+            self.expect_sym(")")?;
+            AggOf::Cond(Box::new(c))
+        } else {
+            let (f, p) = self.ident("field name")?;
+            AggOf::Field(f, p)
+        };
+        self.expect_kw("within")?;
+        let r = self.unary()?;
+        Ok(Expr::Agg {
+            op,
+            of: Box::new(of),
+            r: Box::new(r),
+            at,
         })
     }
 
@@ -2065,6 +2152,11 @@ impl Parser<'_> {
                 Ok(e)
             }
             Tok::Name(n) => {
+                if self.law
+                    && let Some(op) = self.agg_start(&n)
+                {
+                    return self.agg(op, at);
+                }
                 if let Some(s) = sense_named(&n) {
                     return Ok(Expr::Sense(s));
                 }
@@ -2720,13 +2812,32 @@ impl<'a> Gen<'a> {
                         )?)
                     }
                 };
+            let outside =
+                match &f.outside {
+                    None => None,
+                    Some((e, at)) => {
+                        let v = self.fold(e, at)?;
+                        Some(u16::try_from(v).ok().filter(|&v| v <= max).ok_or_else(|| {
+                            self.err(at, format!("outside {v} is not in 0..={max}"))
+                        })?)
+                    }
+                };
             self.field_defs.push(FieldDef {
                 name: f.name.clone(),
                 max,
                 policy: f.policy,
                 init,
                 color: f.color,
+                outside,
+                law: None,
             });
+        }
+        // Laws last: a law reads any field, declared before it or after.
+        for (i, f) in self.fields_ast.iter().enumerate() {
+            if let Some((every, body, at)) = &f.law {
+                let law = self.law(i, every, body, at)?;
+                self.field_defs[i].law = Some(law);
+            }
         }
         Ok(())
     }
@@ -3999,6 +4110,8 @@ impl<'a> Gen<'a> {
             Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Count(_, a) => {
                 self.expr_acts(a, depth)
             }
+            // Only in a law, which never acts.
+            Expr::Agg { .. } => false,
             Expr::Bin(_, a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
             Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
             Expr::Dist(t)
@@ -4636,6 +4749,9 @@ impl<'a> Gen<'a> {
 
     fn expr(&mut self, e: &Expr) -> Result<()> {
         match e {
+            Expr::Agg { at, .. } => {
+                return Err(self.err(at, "an aggregate belongs in a field's law"));
+            }
             Expr::Int(v) => self.push_int(*v)?,
             Expr::Sense(s) => {
                 self.asm.sense(*s);

@@ -1,7 +1,7 @@
 # The world
 
-Status: **step 1, fields, is built** (2026-11-01: §2, §4, `RULES.md` §12 "Fields", decision
-54); laws and the rest are design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
+Status: **steps 1 and 2, fields and their laws, are built** (2026-11-01: §2-§4, `RULES.md`
+§12 "Fields", decisions 54 and 55; scent is not a field yet); the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
 measurement in §8 is done; the build order is §10. Syntax below is a proposal until its step
 lands in `GRAMMAR.md` and `RULES.md`, and may change there.
 
@@ -65,6 +65,13 @@ by the same random ring start `sniff` uses). Built. Predicates on a field in sea
 `count (sugar >= 3) within 4`, wait for a world that needs them.
 
 ## 3. Laws
+
+Built 2026-11-01 (decision 55), as below, with these settled in the building: `every N` takes
+any number of ticks (`every 1h`), not only powers of two; an aggregate's square includes the
+cell itself, as `count ... within` does for actors; inside an aggregate a field is read as it
+stood before the law ran, whatever the law assigned it first (the fuzzer found that a
+neighbour's new value isn't known across a chunk's border); the quiet-chunk skip waits for a
+measurement that asks for it.
 
 A law is a block on a field, run in every cell of a chunk at the field's cadence (`every N`,
 a power of two of ticks, staggered by the chunk coordinate like scent today). It is written in
@@ -210,7 +217,11 @@ fast`): **53.7 ms/tick** on 1 thread, 15.1 ms on 8. So:
   and 8x native on pure arithmetic (each op writes a 16 KB column; fusing ops can close it);
 - a Life law per chunk is ~44x cheaper than Life as actors.
 
-Hence laws compile to column programs (§3). The neighbour sum in the bench clamps every read;
+Hence laws compile to column programs (§3). Built, in the engine (`benches/tick.rs`,
+`laws/life 10x10 chunks`, the same 100 chunks, a step of the whole tick): **2.45 ms** a
+generation on 1 thread, **0.78 ms** on 8, against 53.7 and 15.1 ms as actors: about 20
+times cheaper. The bench's 1.23 ms is the program alone; the engine's law also fills the
+border from the neighbours and runs the `if` as compares and selects. The neighbour sum in the bench clamps every read;
 an interior fast path or separable sums will speed native and per chunk alike.
 
 ## 9. Showcases that test it
@@ -235,9 +246,9 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
    and `best F [on PRED]`; `add`, `harvest`, `drop` on the actor's own cell; the write policy
    (`conserved`, `fixed`); `packs/gather` and its scenario test. Tested: a `conserved`
    field's total plus its needs' total stays put under `harvest` and `drop`.
-2. **Laws**: the column compiler and interpreter, cadence, compute/commit phases, the neighbour
-   halo, the edge rule (§11), the quiet-chunk skip; scent re-expressed as fields. Life as a
-   field law, with a PERF row.
+2. **Laws** (built, 2026-11-01): the column compiler and interpreter, cadence, compute/commit
+   phases, the neighbour halo, the edge rule (§11); `packs/gather` grows its sugar back; Life
+   as a field law, with a PERF row. Left: scent re-expressed as fields, the quiet-chunk skip.
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
 4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
 5. **Layers.**

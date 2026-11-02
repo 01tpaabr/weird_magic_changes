@@ -384,6 +384,8 @@ mod tests {
             policy: sim_core::rules::Policy::Free,
             init: sim_core::rules::FieldInit::Value(0),
             color,
+            outside: None,
+            law: None,
         };
         let defs = [def(Some(0x00ff_0000)), def(None)];
         let mut layers = vec![[0u16; sim_core::CHUNK_CELLS]; 2];

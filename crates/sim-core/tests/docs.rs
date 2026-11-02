@@ -445,6 +445,10 @@ fn the_limits_table_is_the_codes() {
             "fields one think adds to".into(),
             vec![n(sim_core::rules::vm::ADDS)],
         ),
+        (
+            "steps in one law".into(),
+            vec![n(sim_core::rules::law::MAX_LAW_OPS)],
+        ),
         ("states per kind".into(), vec![n(MAX_STATES)]),
         ("sight".into(), vec![i64::from(MAX_SIGHT)]),
         ("fuel per think".into(), vec![i64::from(MAX_FUEL)]),

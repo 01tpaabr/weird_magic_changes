@@ -223,6 +223,15 @@ impl Seen<'_> {
                 self.names.all.insert(name.clone());
                 args.iter().for_each(|a| self.arg(a));
             }
+            Expr::Agg { of, r, .. } => {
+                match &**of {
+                    AggOf::Field(f, _) => {
+                        self.names.all.insert(f.clone());
+                    }
+                    AggOf::Cond(c) => self.cond(c),
+                }
+                self.expr(r);
+            }
         }
     }
 
@@ -1006,7 +1015,8 @@ impl<'a> Gen<'a> {
                     self.walk_target(kinds, w, t, out);
                 }
             }
-            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) => {}
+            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Agg { .. } => {
+            }
         }
     }
 

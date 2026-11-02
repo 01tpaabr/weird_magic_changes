@@ -1,18 +1,22 @@
 # gather: fields, a number in every cell (docs/RULES.md §12, Fields). Sugar
-# lies on the ground in patches; gatherers walk to the richest free cell they
-# see, harvest it into what they carry, eat from that, and with a full load
-# walk home and drop it round the cell they were born on, leaving a path of
-# footsteps. Sugar is `conserved`: nothing in the rules adds to the ground, so
-# what lies there only moves, from the patches to the piles and the
-# gatherers' bellies. Fields have no laws yet: nothing grows back, and the
-# path never fades. scenarios/tests/gather.scenario plays it.
+# lies on the ground in patches and grows back, an hour a unit, up to what
+# each cell can hold; gatherers walk to the richest free cell they see,
+# harvest it into what they carry, eat from that, and with a full load walk
+# home and drop it round the cell they were born on, leaving a path of
+# footsteps. Sugar is `conserved`: no rule adds to the ground, so besides
+# its law what lies there only moves, from the patches to the piles and the
+# gatherers' bellies. The path never fades. scenarios/tests/gather.scenario
+# plays it.
 
 const LOAD = 20                  # what a gatherer carries home
 const HOME = 3                   # how near home it drops its load
 
+field room max 20 fixed { init noise scale 10 }   # what a cell holds, grown back
+
 field sugar max 20 conserved {
-  init noise scale 10
+  init 20                        # cut to `room` within the first hour
   color "#d9a520"
+  every 1h { sugar = min(sugar + 1, room) }
 }
 field path max 255 { color "#5a78c8" }
 

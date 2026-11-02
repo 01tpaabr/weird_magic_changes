@@ -426,13 +426,14 @@ kind gatherer {
 | `conserved` / `fixed` | neither | who may write it: `conserved` takes no `add`, so what it holds only moves (`harvest`, `drop`); `fixed` takes no writes from actors at all. The compiler refuses the rest |
 | `init V`, `init noise scale S` | `init 0` | where its cells start when a chunk is made: V everywhere, or value noise S cells across mapped onto 0 to M (most cells near the middle), from the seed |
 | `color "#rrggbb"` | not drawn | tints each cell toward the colour, by its value against the max |
+| `every N { ... }` | no law | its law: run in every cell every N ticks (below) |
+| `outside V` | the chunk's edge | what its law reads beyond the loaded world |
 
 Actors read a field with `F(t)` and `best` (§10), and change it on their own cell only:
 `add` (§9), `harvest` and `drop` (§8). A field's name is global, like a kind's: never a
 kind's, a trait's, a sub's, a tag's or a constant's, but a need may share it, and that is
 the need `harvest` and `drop` move into and out of. A sub can't `harvest` or `drop`: needs
-belong to kinds. Fields have no laws yet (`docs/WORLD.md` §3): a cell changes only when an
-actor changes it.
+belong to kinds.
 
 ```rules error
 field ore max 9 conserved
@@ -445,6 +446,38 @@ kind miner {
 
 A save keeps every field by name. Reopened or reloaded (`r`) under rules that add a field,
 its cells start at its `init`; a field the rules drop is gone; a lower max clamps.
+
+**Laws.** A field's law is how it changes by itself: a block run in every cell of the
+world, every N ticks (in each chunk at its own moment, staggered like actors' thinks).
+
+```rules
+field room max 20 fixed { init noise scale 10 }
+field sugar max 20 conserved {
+  init 20
+  every 1h { sugar = min(sugar + 1, room) }               # grows back to what the cell holds
+}
+field heat max 255 { every 16 { heat = avg heat within 1 } }   # spreads out
+field alive max 1 {
+  every 1 {                                               # Conway's Life, one generation a tick
+    let n = sum alive within 1                            # the cell itself counts
+    if n == 3 { alive = 1 } else if n != 4 { alive = 0 }
+  }
+}
+```
+
+A law sees one cell at a time: its own value, the other fields of the cell, constants,
+`hour`, `day` and `light`, `rand` and `chance` (the cell's own dice), and its neighbours
+through **aggregates** over the 3 x 3 square, the cell included: `sum F within 1`, `avg`,
+`min`, `max`, and `count (cond) within 1`, the cells where `cond` holds. It has `let`,
+assignments to its own field and `if`/`else`; nothing that acts, searches, loops or calls,
+and it writes no other field (the compiler says so). Inside an aggregate a field is read as
+it stood before the law ran, and every law of a tick runs from the values the fields held
+before any of them: the chunks may run in any order and come out the same. The result is
+clamped to the field's `0..max`. Where the world isn't loaded, a law reads the chunk's own
+edge, so an even field stays even, or the field's `outside` value if it has one. A law is a
+column program: it runs over a whole chunk at once, as fast as hand-written code once it
+reads its neighbours (`docs/WORLD.md` §8), so a law is much cheaper than an actor in every
+cell. `packs/gather` grows its sugar back with one.
 
 ## 13. Cost
 
@@ -914,6 +947,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | tags, scent channels per rule set | 64, 4 |
 | fields per rule set | 64 |
 | fields one think adds to | 4 (a fifth traps) |
+| steps in one law | 128 (one per number, name, operator and aggregate, about) |
 | states per kind | 64 |
 | sight | 16 |
 | fuel per think | 4096 |

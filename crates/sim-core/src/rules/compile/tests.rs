@@ -2171,7 +2171,7 @@ fn field_errors_name_the_problem() {
         ("field f max 4 { color \"red\" }", "color takes"),
         (
             "field f max 4 { glyph \"x\" }",
-            "expected `init`, `color` or `}`",
+            "expected `init`, `color`, `outside`, `every` or `}`",
         ),
         ("field f max 4 field f max 5", "field `f` declared twice"),
         ("field k max 4 kind k { }", "`k` is already a kind"),
@@ -2235,4 +2235,89 @@ fn field_errors_name_the_problem() {
         let e = compile_err(text);
         assert!(e.contains(want), "{text}\n  got: {e}");
     }
+}
+
+/// A law says what it can't do, and where.
+#[test]
+fn law_errors_name_the_problem() {
+    let errs = [
+        (
+            "field f max 4 { every 0 { f = 1 } }",
+            "a law runs every 1 tick or more",
+        ),
+        (
+            "field f max 4 { every 1 { f = 1 } every 2 { f = 2 } }",
+            "`every` given twice",
+        ),
+        ("field f max 4 { outside 5 }", "outside 5 is not in 0..=4"),
+        (
+            "field f max 4 { every 1 { move north } }",
+            "`let`, assignments and `if` only",
+        ),
+        (
+            "field f max 4 { every 1 { while f > 0 { f -= 1 } } }",
+            "`let`, assignments and `if` only",
+        ),
+        (
+            "field f max 4 field g max 4 { every 1 { f = 1 } }",
+            "writes only its own field `g`, not `f`",
+        ),
+        ("field f max 4 { every 1 { f = zz } }", "unknown name `zz`"),
+        (
+            "field f max 4 { every 1 { zz = 1 } }",
+            "unknown name `zz`: declare it with `let`",
+        ),
+        ("field f max 4 { every 1 { let f = 1 } }", "`f` is a field"),
+        (
+            "field f max 4 { every 1 { f = age } }",
+            "only the clock of the senses",
+        ),
+        (
+            "field f max 4 { every 1 { f = sum f within 2 } }",
+            "within 1, not 2",
+        ),
+        (
+            "field f max 4 { every 1 { f = sum (sum f within 1) within 1 } }",
+            "`within` is a reserved word",
+        ),
+        (
+            "field f max 4 { every 1 { let s = sum f within 1  f = max s within 1 } }",
+            "an aggregate inside an aggregate",
+        ),
+        (
+            "field f max 4 { every 1 { f = count fox within 1 } }",
+            "searches, targets and calls",
+        ),
+        (
+            "field f max 4 { every 1 { f = dist(north) } }",
+            "searches, targets and calls",
+        ),
+        (
+            "field f max 4 { every 1 { if nearest f within 1 as v { f = 1 } } }",
+            "a law doesn't search",
+        ),
+        (
+            "kind k { when sum x within 1 > 0 => idle }",
+            "expected `=>`, found `x`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    // Clock, constants, dice and every operator a law has, compiled.
+    let k = compile(
+        "t.rules",
+        "const R = 3
+         field g max 9
+         field f max 100 { outside 4  every 1h {
+           let a = clamp(f + R * 2 - g / 2 % 3, 0, 50)
+           if (hour > 6 and light >= 0) or not (day < 0) { f = max(a, min(f, abs(-sign(a)))) }
+           else { f -= rand(3) + chance(10) }
+           f += count (g > 1 or f == 0) within 1 + min g within 1 + avg f within 1
+         } }",
+    )
+    .unwrap();
+    let law = k.fields[1].law.as_ref().unwrap();
+    assert_eq!((law.every, k.fields[1].outside), (900, Some(4)));
 }

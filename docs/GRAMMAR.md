@@ -69,7 +69,8 @@ IDENT = NAME that is not a reserved word
 | `water`, `soil`, `rock`, `bare` | a predicate (`pred`), and a `pred` argument of a call | a need, mem, local... name; never a kind or a tag |
 | `target`, `pred` | a sub parameter's type, after `:` | any name |
 | `dx`, `dy` | a binding's offset, after `.` | any name |
-| `conserved`, `fixed`, `init`, `noise`, `scale` | in a `field` declaration | any name |
+| `conserved`, `fixed`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
+| `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
 
 ## 2. Files and items
@@ -79,6 +80,7 @@ file      = { item | sub | const | field } EOF
 const     = "const" IDENT "=" expr [ ";" ]
 field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "{" { field_part } "}" ]
 field_part = "init" ( "noise" "scale" additive | additive ) | "color" STRING
+           | "outside" additive | "every" additive block      (the block: a law, §6)
 item      = kind | trait
 kind      = "kind" IDENT [ extends ] body_
 trait     = "trait" IDENT [ "(" [ IDENT { "," IDENT } ] ")" ] [ extends ] body_
@@ -238,6 +240,16 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   radii of `nearest`, `sniff`, `best` and `for each` are an `additive`.
 - *`IDENT args` with a field's name reads that field: one argument, a target (`sugar(here)`,
   `sugar(s)` for a binding `s`).*
+- In a field's law, two more primaries:
+  ```
+  primary = ( "sum" | "avg" | "min" | "max" ) IDENT "within" unary
+          | "count" "(" cond ")" "within" unary
+  ```
+  *The radius folds to 1. A law's block holds `let`, assignments to its own field and to its
+  locals, and `if`/`else`; its expressions read fields, locals, constants, `hour`, `day`,
+  `light`, `rand`, `chance`, `min`, `max`, `abs`, `sign`, `clamp` and aggregates, never one
+  aggregate inside another (through a local either). Inside an aggregate a field's name is
+  its value before the law ran. At most 128 steps.*
 - A bare IDENT argument is an int, a target or a predicate as the called sub's parameter
   says; `water`, `soil`, `rock` and `bare` passed to a `pred` parameter are the predicates
   unless a local of that name is in scope.

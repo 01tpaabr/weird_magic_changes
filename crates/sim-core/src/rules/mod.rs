@@ -12,6 +12,7 @@ pub mod builtin;
 pub mod compile;
 #[cfg(test)]
 pub mod gen_rules;
+pub mod law;
 pub mod vm;
 
 use bevy_ecs::prelude::*;
@@ -70,6 +71,11 @@ pub struct FieldDef {
     /// `0xRRGGBB` the renderer tints a cell toward, by value; `None`: not
     /// drawn.
     pub color: Option<u32>,
+    /// What its law reads where nothing is loaded; `None`: the chunk's own
+    /// edge.
+    pub outside: Option<u16>,
+    /// Its law, if it has one.
+    pub law: Option<law::Law>,
 }
 
 /// One kind's properties and where its program starts.
@@ -437,7 +443,11 @@ impl Kinds {
                 init,
                 scale,
                 f.color.map_or(u64::MAX, u64::from),
+                f.outside.map_or(u64::MAX, u64::from),
             ] {
+                h = splitmix64(h ^ v);
+            }
+            for v in f.law.iter().flat_map(law::Law::words) {
                 h = splitmix64(h ^ v);
             }
             self.hash = splitmix64(h);

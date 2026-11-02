@@ -560,6 +560,13 @@ impl<'a> G<'a> {
             if self.maybe(50) {
                 parts.push("color \"#c08040\"".to_string());
             }
+            if self.maybe(30) {
+                parts.push(format!("outside {}", self.n(max + 1)));
+            }
+            if self.maybe(50) {
+                let every = self.one(&["1", "2", "7", "1h", "16"]);
+                parts.push(format!("every {every} {}", self.law_body(name)));
+            }
             let block = if parts.is_empty() && self.maybe(50) {
                 String::new()
             } else {
@@ -1327,6 +1334,102 @@ impl<'a> G<'a> {
         }
     }
 
+    /// A valid law for field `own`: `let`s, assignments to `own` and `if`s
+    /// over fields, constants, the clock, dice and aggregates within 1.
+    fn law_body(&mut self, own: &str) -> String {
+        let mut locals: Vec<String> = Vec::new();
+        let mut out = Vec::new();
+        for _ in 0..1 + self.n(3) {
+            let s = match self.n(4) {
+                0 => {
+                    let v = format!("lv{}", locals.len());
+                    let e = self.law_expr(2, &locals, true);
+                    locals.push(v.clone());
+                    format!("let {v} = {e}")
+                }
+                1 => {
+                    let op = self.one(&["=", "+=", "-="]);
+                    format!("{own} {op} {}", self.law_expr(2, &locals, true))
+                }
+                2 => {
+                    let c = self.law_cond(1, &locals, true);
+                    let a = self.law_expr(1, &locals, true);
+                    let b = self.law_expr(1, &locals, true);
+                    format!("if {c} {{ {own} = {a} }} else {{ {own} = {b} }}")
+                }
+                _ => format!("{own} = {}", self.law_expr(2, &locals, true)),
+            };
+            out.push(s);
+        }
+        format!("{{ {} }}", out.join(self.sep()))
+    }
+
+    /// An expression of a law; `agg`: an aggregate may appear here (never
+    /// inside another one; its source is always a field, never a local,
+    /// which may hold one).
+    fn law_expr(&mut self, d: u32, locals: &[String], agg: bool) -> String {
+        let fields: Vec<&str> = FIELDS[..self.fields].iter().map(|f| f.0).collect();
+        if d == 0 {
+            return match self.n(5) {
+                0 if !locals.is_empty() => self.one(locals),
+                1 => self.one(&["hour", "day", "light"]).to_string(),
+                2 if !self.consts.is_empty() => {
+                    let c = self.consts.clone();
+                    self.one(&c)
+                }
+                3 => self.one(&fields).to_string(),
+                _ => format!("{}", self.n(30)),
+            };
+        }
+        match self.n(7) {
+            0 => {
+                let op = self.one(&["+", "-", "*", "/", "%"]);
+                let a = self.law_expr(d - 1, locals, agg);
+                format!("({a} {op} {})", self.law_expr(d - 1, locals, agg))
+            }
+            1 => {
+                let f = self.one(&["min", "max"]);
+                let a = self.law_expr(d - 1, locals, agg);
+                format!("{f}({a}, {})", self.law_expr(d - 1, locals, agg))
+            }
+            2 => {
+                let x = self.law_expr(d - 1, locals, agg);
+                let (lo, hi) = (self.law_expr(0, locals, agg), self.law_expr(0, locals, agg));
+                format!("clamp({x}, {lo}, {hi})")
+            }
+            3 => {
+                let f = self.one(&["rand", "chance", "abs", "sign"]);
+                format!("{f}({})", self.law_expr(d - 1, locals, agg))
+            }
+            4 if agg => {
+                let f = self.one(&fields);
+                let a = self.one(&["sum", "avg", "min", "max"]);
+                format!("({a} {f} within 1)")
+            }
+            5 if agg => format!("(count ({}) within 1)", self.law_cond(d - 1, &[], false)),
+            _ => self.law_expr(0, locals, agg),
+        }
+    }
+
+    fn law_cond(&mut self, d: u32, locals: &[String], agg: bool) -> String {
+        match self.n(if d > 0 { 4 } else { 1 }) {
+            1 => {
+                let a = self.law_cond(d - 1, locals, agg);
+                format!("{a} and {}", self.law_cond(d - 1, locals, agg))
+            }
+            2 => {
+                let a = self.law_cond(d - 1, locals, agg);
+                format!("{a} or {}", self.law_cond(d - 1, locals, agg))
+            }
+            3 => format!("not ({})", self.law_cond(d - 1, locals, agg)),
+            _ => {
+                let op = self.op(&CMP);
+                let a = self.law_expr(1, locals, agg);
+                format!("{a}{op}{}", self.law_expr(1, locals, agg))
+            }
+        }
+    }
+
     /// A declared field's name (any pool name in the syntax mode).
     fn field_name(&mut self) -> String {
         if self.strict {
@@ -1555,10 +1658,11 @@ impl<'a> G<'a> {
                     let init = match self.n(3) {
                         0 => String::new(),
                         1 => format!(" {{ init {} }}", self.additive(1)),
-                        _ => format!(
-                            " {{ init noise scale {} color \"#102030\" }}",
-                            self.additive(1)
-                        ),
+                        _ => {
+                            let (scale, every) = (self.additive(1), self.additive(1));
+                            let b = self.block(2, true);
+                            format!(" {{ init noise scale {scale} outside 3 every {every} {b} }}")
+                        }
                     };
                     out += &format!("field {name} max {max}{policy}{init}");
                 }

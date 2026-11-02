@@ -34,6 +34,7 @@
 //! Adding a per-cell scalar (moisture, heat, mana): add an array to
 //! [`ChunkCells`], fold it into `hash`, encode it in `store`, render it in `app`.
 
+pub mod fields;
 pub mod scent;
 pub mod worldgen;
 
@@ -457,6 +458,7 @@ pub fn insert(world: &mut World, coord: ChunkCoord, data: ChunkData, dirty: bool
             Intents::default(),
             Scratch::default(),
             Outbox::default(),
+            fields::LawScratch::default(),
         ))
         .id();
     world.resource_mut::<Stage>().add(coord, e);

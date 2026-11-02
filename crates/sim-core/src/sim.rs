@@ -83,7 +83,7 @@ pub struct SimTick;
 /// ordered explicitly.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// Cell systems: scent fades.
+    /// Cell systems: scent fades, then the fields' laws run.
     Simulate,
     /// Every due actor runs its program; writes own minds + intents.
     Think,
@@ -170,7 +170,13 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
             .chain(),
     );
     schedule.add_systems((
-        crate::stage::scent::scent_decay.in_set(Phase::Simulate),
+        (
+            crate::stage::scent::scent_decay,
+            crate::stage::fields::law_compute,
+            crate::stage::fields::law_commit,
+        )
+            .chain()
+            .in_set(Phase::Simulate),
         systems::think.in_set(Phase::Think),
         systems::resolve.in_set(Phase::Resolve),
         systems::exchange.in_set(Phase::Exchange),
@@ -2359,6 +2365,120 @@ mod tests {
         );
         assert_eq!(field(&w, 1, here), 100, "80, then 50 more, clamped");
         assert_eq!(field(&w, 1, Pos::new(21, 30)), 0, "only its own cell");
+    }
+
+    /// Every live cell of field `f` in the loaded chunks, sorted.
+    fn live(w: &mut World, f: usize) -> Vec<Pos> {
+        let mut q = w.query::<(&ChunkCoord, &ChunkCells)>();
+        let mut v: Vec<Pos> = q
+            .iter(w)
+            .flat_map(|(c, cells)| {
+                cells.fields[f]
+                    .iter()
+                    .enumerate()
+                    .filter(|&(_, &x)| x > 0)
+                    .map(|(i, _)| c.cell(i))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        v.sort_by_key(|p| (p.y, p.x));
+        v
+    }
+
+    /// Conway's Life as a field law: a glider flies four cells across a
+    /// chunk border in sixteen generations, the same at any thread count.
+    #[test]
+    fn a_law_runs_life_across_chunk_borders() {
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field alive max 1 {
+               every 1 {
+                 let n = sum alive within 1      # the cell itself counts
+                 if n == 3 { alive = 1 } else if n != 4 { alive = 0 }
+               }
+             }
+             kind nobody { glyph \"n\"  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(15)
+        };
+        let mut w = new_world_with(&cfg, kinds).unwrap();
+        let glider = [(1, 0), (2, 1), (0, 2), (1, 2), (2, 2)];
+        for (dx, dy) in glider {
+            set_field(&mut w, 0, Pos::new(59 + dx, 20 + dy), 1);
+        }
+        let start = live(&mut w, 0);
+        for _ in 0..16 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let moved: Vec<Pos> = start.iter().map(|p| Pos::new(p.x + 4, p.y + 4)).collect();
+        assert_eq!(live(&mut w, 0), moved);
+        assert!(
+            moved.iter().any(|p| p.x >= 64),
+            "it crossed into the next chunk"
+        );
+    }
+
+    /// Where nothing is loaded a law reads the chunk's own edge, so an even
+    /// field stays even; with `outside 0` the edge drains. A law runs every
+    /// `every` ticks in a chunk, and `rand` draws the same at any thread
+    /// count (the checksum test runs it).
+    #[test]
+    fn a_laws_edge_is_a_mirror_or_its_outside_value() {
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field calm max 255 { init 90  every 1 { calm = avg calm within 1 } }
+             field drain max 255 { init 90  outside 0  every 1 { drain = avg drain within 1 } }
+             field slow max 255 { every 8 { slow += 1 } }
+             kind nobody { glyph \"n\"  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(16)
+        };
+        let mut w = new_world_with(&cfg, kinds).unwrap();
+        for _ in 0..16 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        for p in [Pos::new(0, 0), Pos::new(63, 30), Pos::new(30, 30)] {
+            assert_eq!(field(&w, 0, p), 90, "mirrored: {p:?}");
+        }
+        assert!(field(&w, 1, Pos::new(0, 0)) < 40, "drained at the corner");
+        assert_eq!(field(&w, 1, Pos::new(30, 30)), 90, "the middle not yet");
+        assert_eq!(field(&w, 2, Pos::new(5, 5)), 2, "every 8 ticks, 16 ticks");
+    }
+
+    /// Inside an aggregate a field is read as it stood before the law ran,
+    /// whatever the law assigned it first (a fuzz find: the new values of a
+    /// neighbour in the next chunk are not known).
+    #[test]
+    fn an_aggregate_reads_the_neighbours_as_they_stood() {
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field f max 90 { init 2  every 1 { f = 50  f = sum f within 1 } }
+             kind nobody { glyph \"n\"  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(17)
+        };
+        let mut w = new_world_with(&cfg, kinds).unwrap();
+        step(&mut w);
+        for p in [Pos::new(63, 5), Pos::new(64, 5), Pos::new(0, 0)] {
+            assert_eq!(field(&w, 0, p), 18, "nine cells of 2: {p:?}");
+        }
     }
 
     /// Fields are saved by name and come back as they were; rules that drop

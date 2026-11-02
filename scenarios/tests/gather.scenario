@@ -1,6 +1,6 @@
-# The gather pack (packs/gather): fields. Gatherers harvest the ground's
-# sugar into what they carry, eat from it, and take full loads home: some
-# fill a load the first day, and few starve over three days.
+# The gather pack (packs/gather): fields and a law. Gatherers harvest the
+# ground's sugar into what they carry, eat from it, and take full loads
+# home; the sugar grows back, so nobody starves in three days.
 #
 #   make run ARGS="scenario scenarios/tests/gather.scenario"
 #   make run ARGS="observe 3d --scenario scenarios/tests/gather.scenario"
@@ -11,6 +11,6 @@ terrain water_level 0 rock_on_soil 0 rock_on_water 0
 start gatherer 1 / 300
 run 3d
 expect eventually max sugar of gatherer >= 20 from 1h to 1d  # a full load, harvested
-expect mean avg sugar of gatherer >= 10 from 1d             # seen 13.6
-expect always count gatherer >= 70                          # of 78; seen 77 at the least
+expect mean avg sugar of gatherer >= 10 from 1d             # seen 15.1
+expect died gatherer == 0
 expect traps gatherer == 0
