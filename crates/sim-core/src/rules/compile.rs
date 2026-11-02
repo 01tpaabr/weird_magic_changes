@@ -1230,10 +1230,11 @@ pub const MAX_DEPTH: u32 = 128;
 
 // The other limits of a rule set (RULES §18; `tests/docs.rs` holds the doc
 // to these).
-/// The widest `sight`: a search stays inside the 3x3 chunk halo.
-pub const MAX_SIGHT: u8 = 16;
+/// The widest `sight`: one chunk, so a search from any cell stays inside
+/// the 3x3 chunk halo.
+pub const MAX_SIGHT: u8 = 64;
 /// The most `fuel` a kind may declare, in ops per think.
-pub const MAX_FUEL: u32 = 4096;
+pub const MAX_FUEL: u32 = 32768;
 /// `state` blocks per kind.
 pub const MAX_STATES: usize = 64;
 /// Fields in a rule set (`field`): a byte indexes them in the bytecode.

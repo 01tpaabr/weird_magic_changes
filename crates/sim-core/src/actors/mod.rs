@@ -30,7 +30,7 @@ pub use systems::{
 /// Need counters per actor, named per kind by its rules file.
 pub const NEED_SLOTS: usize = 4;
 /// Persistent memory slots per actor, named per kind by its rules file.
-pub const MEM_SLOTS: usize = 12;
+pub const MEM_SLOTS: usize = 32;
 /// Rows reserved per chunk when it is loaded. Growth past this is chunk-level
 /// and amortised (a `Vec` doubling), never a per-actor allocation.
 pub const RESERVE: usize = 256;
@@ -110,7 +110,7 @@ pub struct ActorMind {
 }
 
 const _: () = assert!(size_of::<ActorPub>() == 12);
-const _: () = assert!(size_of::<ActorMind>() == 88);
+const _: () = assert!(size_of::<ActorMind>() == 168);
 
 /// Public rows of one chunk. Same length and order as its [`ChunkMinds`].
 #[derive(Component, Debug, Clone, Default, PartialEq, Eq)]
@@ -310,11 +310,11 @@ mod tests {
     #[test]
     fn records_are_pod_sized_as_documented() {
         assert_eq!(size_of::<ActorPub>(), 12);
-        assert_eq!(size_of::<ActorMind>(), 88);
+        assert_eq!(size_of::<ActorMind>(), 168);
         assert_eq!(align_of::<ActorMind>(), 8);
         let m = mind(7);
         let bytes: &[u8] = bytemuck::bytes_of(&m);
-        assert_eq!(bytes.len(), 88);
+        assert_eq!(bytes.len(), 168);
         assert_eq!(bytes[0], 7);
     }
 

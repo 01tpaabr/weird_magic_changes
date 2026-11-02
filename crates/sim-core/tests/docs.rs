@@ -623,7 +623,15 @@ fn the_numbers_in_the_prose_are_the_codes() {
         &actors,
         &[
             format!("a {row_pub}-byte public record (`ActorPub`)"),
-            format!("an {row_mind}-byte private record (`ActorMind`)"),
+            {
+                // "an 88-byte", "a 168-byte": as it is said.
+                let n = row_mind.to_string();
+                let an = n.starts_with('8') || n == "11" || n.starts_with("18");
+                format!(
+                    "{} {n}-byte private record (`ActorMind`)",
+                    if an { "an" } else { "a" }
+                )
+            },
             format!(
                 "Per actor: {} B persistent ({row_pub} + {row_mind} + {occupant} occupant) + {intent} B intent scratch",
                 row_pub + row_mind + occupant

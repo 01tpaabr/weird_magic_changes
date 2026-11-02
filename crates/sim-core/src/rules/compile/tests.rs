@@ -141,7 +141,7 @@ fn errors_carry_positions_and_name_the_problem() {
         "t.rules:3:8: unknown name `watter` (not a need, mem slot or binding of this kind)"
     );
     assert!(compile_err("kind a { cadence 3 }").contains("power of two"));
-    assert!(compile_err("kind a { sight 40 }").contains("0 to 16"));
+    assert!(compile_err("kind a { sight 65 }").contains("0 to 64"));
     assert!(compile_err("kind a { need w max 1h need w max 2h }").contains("declared twice"));
     assert!(compile_err("kind a { mem m, m }").contains("declared twice"));
     assert!(compile_err("kind a { when 1 => become b }").contains("unknown kind `b`"));
@@ -2549,8 +2549,8 @@ fn build_and_dig_errors_name_the_problem() {
 #[test]
 fn height_errors_name_the_problem() {
     let errs = [
-        ("kind k { reach 0 }", "reach is 1 to 16 cells"),
-        ("kind k { reach 17 }", "reach is 1 to 16 cells"),
+        ("kind k { reach 0 }", "reach is 1 to 64 cells"),
+        ("kind k { reach 65 }", "reach is 1 to 64 cells"),
         ("kind k { climb 2 on height }", "no field `height`"),
         (
             "field h max 9 kind k { climb -1 on h }",
@@ -2842,7 +2842,7 @@ fn an_arenas_budget_bounds_its_players() {
     let e = err(&[("a.rules", "budget { } budget { }", None)]);
     assert!(e.contains("one `budget` in a rule set"), "{e}");
     for (text, want) in [
-        ("budget { fuel 0 }", "budget fuel 0: 1 to 4096"),
+        ("budget { fuel 0 }", "budget fuel 0: 1 to 32768"),
         ("budget { rows -1 }", "budget rows -1: 0 to"),
         ("budget { rows 1 rows 2 }", "given twice in the budget"),
         (

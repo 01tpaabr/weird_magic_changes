@@ -92,14 +92,14 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `solid` | no | drawn as a whole cell of its colour, no glyph (a solid cover: the background of whoever stands on it); for pictures and boards. Only the renderer reads it: `wmc show` and the inspector still use the glyph |
 | `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
 | `cadence N` | 8 | thinks every N ticks; a power of two |
-| `sight N` | 4 | the largest radius any search reaches, 0 to 16 |
-| `fuel N` | 512 | ops per think, 1 to 4096 |
+| `sight N` | 4 | the largest radius any search reaches, 0 to 64 |
+| `fuel N` | 512 | ops per think, 1 to 32768 |
 | `food T` | 0 | what eating a whole one gives an eater (see `eat`), 0 or more |
 | `bite N` | 1 | health taken per `eat`/`hit`/`graze`, 0 to 255 |
 | `reach N` | 1 | how far `eat`, `hit` and `graze` land: a target up to N cells away, 1 to 16. The rules check what is in the way (`sees`) |
 | `climb N on F` | none | `move` takes no step that rises more than N in field F (a height): it slides past one, as past a taken cell, and is `BLOCKED` if every way is too steep |
 | `need NAME max M [decay 0\|1] [vital]` | `decay 1` | a counter, at most 4 per kind; `decay 1` loses one per tick (ticks until empty), `decay 0` never decays (points). `decay` is a switch, not a rate: any other number is an error |
-| `mem a, b, ...` | | memory slots, at most 12 per kind, all 0 at birth |
+| `mem a, b, ...` | | memory slots, at most 32 per kind, all 0 at birth |
 
 **Needs.** A need is an integer from 0 to its max. By default it is *ticks until empty*: it
 loses one per tick, and a value like `water < 30min` reads naturally; `decay 1` says so
@@ -632,7 +632,8 @@ Ways to keep a kind cheap:
   it in a state that doesn't search; search again on arrival.
 - **Search less while wandering.** A wandering actor can look only every few thinks
   (`rest` in the bee).
-- **Keep radii small.** A radius-8 search reads 289 cells, radius 16 reads 1089.
+- **Keep radii small.** A radius-8 search reads 289 cells, radius 16 reads 1089, radius 64
+  reads 16641 (and costs about 2080 ops: give a far-sighted kind the `fuel` for it).
 
 ## 14. Scenarios
 
@@ -904,7 +905,7 @@ budget { fuel 256  rows 60  private 1 }
 
 | part | meaning |
 |---|---|
-| `fuel N` | a player's kinds think in at most N ops (1 to 4096): a kind's fuel, its own or the default 512, is cut to N. The arena's own kinds keep theirs |
+| `fuel N` | a player's kinds think in at most N ops (1 to 32768): a kind's fuel, its own or the default 512, is cut to N. The arena's own kinds keep theirs |
 | `rows N` | no player has more than N rows alive. Each tick the room a player has left is shared among its spawns, chunk by chunk in coordinate order, then in key order; the rest are `REFUSED`. A death makes room again. A scenario's `start` lines aren't held to it |
 | `private N` | a player declares at most N `private` fields |
 
@@ -1152,7 +1153,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 
 | | |
 |---|---|
-| needs, mem slots per kind | 4, 12 |
+| needs, mem slots per kind | 4, 32 |
 | tags per rule set | 64 |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |
@@ -1160,8 +1161,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |
 | states per kind | 64 |
-| sight | 16 |
-| fuel per think | 4096 |
+| sight | 64 |
+| fuel per think | 32768 |
 | sub call depth | 8 |
 | value stack per think | 64 (shared by a rule and the subs it calls; a rule or sub that needs more by itself is an error: nest less deeply or split with `let`) |
 | parameters and locals in one rule or sub | 16 slots (a target takes 2, a `for each` 5, a `choose` 1 per arm plus 1, a `repeat` 1, and `toward`, `away` and `random free` 2 while evaluated) |

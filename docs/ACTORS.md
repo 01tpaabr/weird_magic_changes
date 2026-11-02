@@ -12,7 +12,7 @@ compiled once, run by every individual of that kind against its own state).
 ## 1. The shape
 
 An actor is a **row in the chunk it stands on**: a 12-byte public record (`ActorPub`) that
-any chunk may read while thinking, an 88-byte private record (`ActorMind`) that only its
+any chunk may read while thinking, a 168-byte private record (`ActorMind`) that only its
 own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. A
 **cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
@@ -51,11 +51,11 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     layer: u8,      // 0 standing, 1 ground cover, 2 and up a declared layer (ChunkCells::extra)
     _pad: u8,
 }
-#[repr(C)] pub struct ActorMind {  // 88 B, Pod. Only the owning chunk touches it.
+#[repr(C)] pub struct ActorMind {  // 168 B, Pod. Only the owning chunk touches it.
     uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child, STREAM_UID_LAYER | layer << 16 in a declared layer]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
-    mem: [i32; 12],           // the program's whole persistent memory, named per kind
+    mem: [i32; 32],           // the program's whole persistent memory, named per kind
     state: u8, events: u8, hurt: u8, hurt_dir: u8,
     _pad: u32,
 }
@@ -105,7 +105,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
   `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
   a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
-- **Save**: chunk file v13 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
+- **Save**: chunk file v14 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
@@ -145,13 +145,13 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
 
-Per actor: 104 B persistent (12 + 88 + 4 occupant) + 64 B intent scratch.
+Per actor: 184 B persistent (12 + 168 + 4 occupant) + 64 B intent scratch.
 
 ## 3. Senses
 
 Pulled, not pushed: a sense is a bytecode op evaluated when a rule asks, against tick-start
 state (nothing writes `ChunkCells`/`ChunkActors` during Think, so the live state *is* the
-snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `sight <= 16`.
+snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `sight <= 64` (one chunk: a search from any cell stays inside the halo).
 
 | group | senses | source |
 |---|---|---|
@@ -288,7 +288,7 @@ TIME     := INT ("min" | "h" | "d")
 - Subs are file-scope, shared by every kind; may act (the think still ends when the rule
   body that called them finishes); recursion depth 8. Locals never persist.
 - **Fuel** is charged per bytecode op plus `(2r+1)^2 / 8` per search; default 512, kind
-  override up to 4096. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
+  override up to 32768. Fuel out, depth > 8 or a trap ends the think with `idle`, sets
   `trapped` for the next think and counts a trap for the kind (the `TRAPS` counter on the
   status row, the `traps` column of `wmc run`); needs and mem written before the trap stay,
   the action, `next`, `look`, `signal` and `mark` are dropped. The sim never panics on a

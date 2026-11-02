@@ -373,6 +373,6 @@ A program that parses compiles only if it also keeps these. Each points at the s
   is visible in that rule's or statement's body only.
 
 **Limits** are in `RULES.md` §18: needs 4 and mems 12 per kind after merging, 64 tags and
-64 fields per rule set and 4 a think adds to, 64 states, `sight` 0 to 16, `fuel` 1 to 4096, `cadence` a power of two,
+64 fields per rule set and 4 a think adds to, 64 states, `sight` 0 to 64, `fuel` 1 to 32768, `cadence` a power of two,
 `bite` 0 to 255, 16 local slots and a 64-value stack per rule or sub, 8 nested calls,
 32767 ops per rule, state or sub, a chain of `extends` 128 deep.

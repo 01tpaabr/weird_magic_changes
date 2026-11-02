@@ -26,6 +26,8 @@
 
 use proptest::prelude::*;
 
+use crate::actors::MEM_SLOTS;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Syntax,
@@ -439,7 +441,7 @@ impl<'a> G<'a> {
                     o.own_needs.push(format!("{n}n{j}"));
                 }
             }
-            for j in 0..self.n(4).min(12 - o.mems.len()) {
+            for j in 0..self.n(4).min(MEM_SLOTS - o.mems.len()) {
                 o.own_mems.push(format!("{n}m{j}"));
             }
             o.own_states = (0..self.n(3)).map(|j| format!("{n}st{j}")).collect();
@@ -514,7 +516,7 @@ impl<'a> G<'a> {
                 }
                 o.own_needs.push(name);
             }
-            for j in 0..self.n(5).min(12 - o.mems.len()) {
+            for j in 0..self.n(9).min(MEM_SLOTS - o.mems.len()) {
                 o.own_mems.push(format!("k{i}m{j}"));
             }
             o.mems.extend(o.own_mems.iter().cloned());
@@ -737,10 +739,16 @@ impl<'a> G<'a> {
                 d.push(format!("cadence {}", 1u32 << self.n(10)));
             }
             if self.maybe(40) {
-                d.push(format!("sight {}", self.n(17)));
+                // Mostly near; now and then as far as a chunk.
+                let r = if self.maybe(80) {
+                    self.n(17)
+                } else {
+                    self.n(65)
+                };
+                d.push(format!("sight {r}"));
             }
             if self.maybe(20) {
-                d.push(format!("fuel {}", 1 + self.n(4096)));
+                d.push(format!("fuel {}", 1 + self.n(8192)));
             }
             if self.maybe(30) {
                 let v = self.time_or_int();
