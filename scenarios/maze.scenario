@@ -1,0 +1,33 @@
+# The maze pack (packs/maze): a search over the cells. Six runners plan
+# their way through a maze to its two exits, keep the plan in a memory
+# array, follow it a step a think, and plan again when blocked or when
+# the plan runs out (a way longer than 24 steps). All of them get out.
+#
+#   make run ARGS="play saves/maze --scenario scenarios/maze.scenario"
+rules ../packs/maze
+seed 1
+size 64 64
+outside rock
+map {
+###############################
+#r#.........#.............#...~
+#.###.#.#####.#########.#.#.#.#
+#...#.#..r..........#...#.#.#.#
+###.#.#############.#.###.#.#.#
+#.#.#.#...#.......#.#.#...#.#.#
+#.#.###.#.#.#####.#.#.#.#####.#
+#.#..r..#...#.....#.#.#.......#
+#.###########.#######.#######.#
+#.....#.....#r..#.....#.....#.#
+#.###.#.#.#.###.#.#####.#####.#
+#..r#.#.#.#...#...#...#...#...#
+#.#.###.#.#########.#.#.#.#.###
+#r#.....#...........#...#.....~
+###############################
+}
+legend {
+# rock
+. soil
+~ water
+r runner
+}

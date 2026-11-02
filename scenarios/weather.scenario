@@ -1,0 +1,12 @@
+# Two arena packs that both declare a field `path`: packs/gather (the
+# gatherers' footsteps) and packs/weather, whose `namespace weather` makes
+# its own `weather.path` (the rain behind its clouds). Without the
+# namespace the two would not load together.
+#
+#   make run ARGS="play saves/weather --scenario scenarios/weather.scenario"
+rules ../packs/gather ../packs/weather
+seed 5
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start gatherer 1 / 300
+start weather.cloud 1 / 600

@@ -1,0 +1,11 @@
+# The pasture pack (packs/pasture): sheep that see grass 40 cells off, a
+# law that tramples grass under them, wolves that see a whole chunk but not
+# through hedges (rock redeclared opaque).
+#
+#   make run ARGS="play saves/pasture --scenario scenarios/pasture.scenario"
+rules ../packs/pasture
+seed 3
+size 192 128
+terrain water_level 0 rock_on_soil 0.08 rock_on_water 0
+start sheep 1 / 150
+start wolf 1 / 3000

@@ -1,0 +1,10 @@
+# The lakes pack (packs/lakes): `flow` in a law. Water starts level and runs
+# into the hollows; the edges mirror, so the total never changes; the deer
+# find the lakes and drink.
+#
+#   make run ARGS="play saves/lakes --scenario scenarios/lakes.scenario"
+rules ../packs/lakes
+seed 3
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start deer 1 / 400
