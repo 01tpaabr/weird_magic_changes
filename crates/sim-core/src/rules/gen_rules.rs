@@ -132,6 +132,10 @@ struct Owner {
     inherited: Vec<Sig>,
     /// Inherited states it writes a block for.
     extra_states: Vec<String>,
+    /// Where a kind lives: `cover`, `layer gair` or `layer gdeep`, else
+    /// standing; its own, or its kind parent's (said again or not).
+    place: Option<&'static str>,
+    own_place: bool,
     /// Inherited member subs it redefines, with the same signature.
     overrides: Vec<Sig>,
 }
@@ -156,6 +160,8 @@ struct G<'a> {
     fields: usize,
     /// A ground `gmud` and a feature `gwall` are declared.
     materials: bool,
+    /// Layers `gair` (flies) and `gdeep` are declared.
+    layers: bool,
     /// Writing a law's block (the syntax mode): there `count (` starts an
     /// aggregate, so no field condition goes where a search's predicate does.
     in_law: bool,
@@ -187,6 +193,7 @@ impl<'a> G<'a> {
             withs: Vec::new(),
             fields: 0,
             materials: false,
+            layers: false,
             in_law: false,
             owner: None,
             locals: Vec::new(),
@@ -408,6 +415,7 @@ impl<'a> G<'a> {
     fn plan(&mut self) {
         self.fields = self.n(FIELDS.len() + 1);
         self.materials = self.maybe(40);
+        self.layers = self.maybe(30);
         let consts = self.n(4);
         self.consts = (0..consts).map(|i| format!("C{i}")).collect();
         let tag_pool: Vec<String> = (0..self.n(5)).map(|i| format!("tg{i}")).collect();
@@ -463,6 +471,18 @@ impl<'a> G<'a> {
                 o.inherited = (p.inherited.iter().chain(&p.subs).chain(&p.overrides))
                     .cloned()
                     .collect();
+                o.place = p.place;
+            }
+            // A kind lives in one layer: its parent's, else one of its own.
+            if o.place.is_none() {
+                o.own_place = true;
+                o.place = if self.maybe(10) {
+                    Some("cover")
+                } else if self.layers && self.maybe(30) {
+                    Some(self.one(&["layer gair", "layer gdeep"]))
+                } else {
+                    None
+                };
             }
             for t in 0..traits {
                 self.extend_trait(&mut o, t, 35);
@@ -554,6 +574,10 @@ impl<'a> G<'a> {
 
     fn emit(&mut self) -> String {
         let mut out = String::new();
+        if self.layers {
+            let sep = self.sep();
+            out += &format!("layer gair {{ flies }}{sep}layer gdeep\n");
+        }
         if self.materials {
             let sep = self.sep();
             let water = if self.maybe(50) {
@@ -685,8 +709,10 @@ impl<'a> G<'a> {
             if self.maybe(30) {
                 d.push(format!("color \"#{:06x}\"", self.next() & 0xFF_FFFF));
             }
-            if self.maybe(10) {
-                d.push("cover".into());
+            if let Some(p) = o.place
+                && (o.own_place || self.maybe(30))
+            {
+                d.push(p.into());
             }
             if self.maybe(10) {
                 d.push("solid".into());

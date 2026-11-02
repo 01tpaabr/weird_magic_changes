@@ -213,7 +213,16 @@ fn render_row<'c>(
                     );
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
                 for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
-                    // Who stands here, on what grows here, in which fields.
+                    // Who is on top here (the last declared layer that holds
+                    // someone, else who stands), on what grows here, in
+                    // which fields.
+                    let o = c
+                        .extra
+                        .iter()
+                        .rev()
+                        .map(|l| l[local + k])
+                        .find(|id| !id.is_none())
+                        .unwrap_or(o);
                     let s = style_of(
                         ground_look(g, looks.soil, looks.materials),
                         feature_look(f, looks.materials),
@@ -299,10 +308,11 @@ mod tests {
                 let want = match stage::chunk(&world, cc) {
                     Some(ch) => {
                         actors += usize::from(!ch.occupant[i].is_none() || !ch.cover[i].is_none());
+                        let top = ch.extra.iter().rev().map(|l| l[i]).find(|id| !id.is_none());
                         let s = style(
                             ch.ground[i],
                             ch.feature[i],
-                            looks.occupant(ch.occupant[i]),
+                            looks.occupant(top.unwrap_or(ch.occupant[i])),
                             looks.actor(ch.cover[i]),
                             looks.soil,
                         );

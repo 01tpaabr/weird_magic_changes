@@ -158,6 +158,21 @@ impl Materials {
     }
 }
 
+/// A layer a pack declares beside standing and ground cover (`layer NAME
+/// { flies }`, `docs/WORLD.md` §7): one actor a cell, over or under the
+/// others, never in their way.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayerDef {
+    pub name: String,
+    /// Its rows move and start over any ground (birds over water), not
+    /// only where one can walk.
+    pub flies: bool,
+}
+
+/// Declared layers in a rule set: rows keep the layer in a byte, after the
+/// two the engine has.
+pub const MAX_LAYERS: usize = 8;
+
 /// One kind's properties and where its program starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindDef {
@@ -196,6 +211,9 @@ pub struct KindDef {
     /// Ground cover: lives in the cell's `cover` layer, never blocks, lies
     /// under whoever stands there; eaten with `graze`, not `eat`.
     pub cover: bool,
+    /// The layer its rows live in: 0 standing, 1 cover (with `cover`), 2
+    /// and up a declared one (`layer NAME`, `Kinds::layers[layer - 2]`).
+    pub layer: u8,
     /// Drawn as a whole cell of its colour, no glyph (`solid`). Opaque to
     /// the sim, like `color`.
     pub solid: bool,
@@ -422,6 +440,8 @@ pub struct Kinds {
     pub fields: Vec<FieldDef>,
     /// Grounds and features: what a cell's `ground` and `feature` index.
     pub materials: Materials,
+    /// Declared layers, layer 2 first: `ChunkCells::extra` holds one each.
+    pub layers: Vec<LayerDef>,
     /// Source positions and names, for `wmc why`.
     pub debug: DebugInfo,
     /// Hash of everything above: the rules as an input to the checksum.
@@ -484,6 +504,7 @@ impl Kinds {
             subs,
             fields: Vec::new(),
             materials: Materials::default(),
+            layers: Vec::new(),
             debug: DebugInfo::default(),
             hash,
             remaps,
@@ -558,6 +579,29 @@ impl Kinds {
         self
     }
 
+    /// The same rules with these declared layers (folded into the hash;
+    /// none leaves it as it was).
+    pub fn with_layers(mut self, layers: Vec<LayerDef>) -> Self {
+        for l in &layers {
+            let mut h = self.hash ^ 0x1A7E5;
+            for b in l.name.bytes() {
+                h = splitmix64(h ^ u64::from(b));
+            }
+            self.hash = splitmix64(h ^ u64::from(l.flies));
+        }
+        self.layers = layers;
+        self
+    }
+
+    /// Does layer `layer` fly (its rows go over any ground)?
+    #[inline]
+    pub fn flies(&self, layer: u8) -> bool {
+        usize::from(layer)
+            .checked_sub(2)
+            .and_then(|i| self.layers.get(i))
+            .is_some_and(|l| l.flies)
+    }
+
     /// The index of field `name`.
     pub fn field_named(&self, name: &str) -> Option<usize> {
         self.fields.iter().position(|f| f.name == name)
@@ -606,7 +650,8 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.cadence_shift) << 8
             | u64::from(d.sight) << 16
             | u64::from(d.bite) << 24
-            | u64::from(d.reach) << 32);
+            | u64::from(d.reach) << 32
+            | u64::from(d.layer) << 40);
         if let Some((f, n)) = d.climb {
             mix(u64::from(f) << 32 | u64::from(n as u32));
         }

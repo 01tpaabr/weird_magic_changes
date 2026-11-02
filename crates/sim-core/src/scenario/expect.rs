@@ -226,19 +226,27 @@ pub fn holds(
             let Some(cells) = stage::chunk(world, cc) else {
                 return Ok((false, "that chunk is not loaded".into(), None));
             };
-            let here = cells.occupant[i]
-                .unpack()
-                .or(cells.cover[i].unpack())
-                .map(|(k, _)| k);
-            let got = here.map_or("nobody".to_string(), |k| kinds.def(k).name.clone());
-            let ok = match (who, here) {
-                (None, None) => true,
-                (Some(w), Some(k)) => expect_family(kinds, w)?.contains(&k),
-                (Some(w), None) => {
-                    expect_family(kinds, w)?;
-                    false
+            // Everyone there, top down: the declared layers, who stands,
+            // the cover.
+            let here: Vec<u16> = cells
+                .extra
+                .iter()
+                .rev()
+                .chain([&cells.occupant, &cells.cover])
+                .filter_map(|l| l[i].unpack().map(|(k, _)| k))
+                .collect();
+            let got = if here.is_empty() {
+                "nobody".to_string()
+            } else {
+                let names: Vec<&str> = here.iter().map(|&k| kinds.def(k).name.as_str()).collect();
+                names.join(" over ")
+            };
+            let ok = match who {
+                None => here.is_empty(),
+                Some(w) => {
+                    let family = expect_family(kinds, w)?;
+                    here.iter().any(|k| family.contains(k))
                 }
-                (None, Some(_)) => false,
             };
             Ok((ok, got, None))
         }

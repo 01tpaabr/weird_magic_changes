@@ -28,8 +28,8 @@ use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
 use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, Level, MaterialDef,
-    Materials, NeedDef, Policy, RuleInfo, RuleShape, Term,
+    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, LayerDef, Level,
+    MAX_LAYERS, MaterialDef, Materials, NeedDef, Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS};
@@ -459,6 +459,8 @@ struct Decls {
     fuel: Option<(Expr, Pos)>,
     food: Option<(Expr, Pos)>,
     bite: Option<(Expr, Pos)>,
+    /// `layer NAME`: a declared layer its rows live in.
+    layer: Option<(String, Pos)>,
     /// `reach N`: how far `eat`, `hit` and `graze` reach.
     reach: Option<(Expr, Pos)>,
     /// `climb N on F`: the most a step may rise in field F.
@@ -495,6 +497,8 @@ struct Items {
     consts: Vec<ConstAst>,
     fields: Vec<FieldAst>,
     materials: Vec<MaterialAst>,
+    /// `layer NAME { flies }`: declared layers, with where.
+    layers: Vec<(LayerDef, Pos)>,
 }
 
 /// `ground NAME { walkable  drink  glyph "c"  color "#rrggbb" }` or
@@ -989,9 +993,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 15] = [
+const DECL_WORDS: [&str; 16] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
-    "place", "need", "mem", "reach", "climb",
+    "place", "need", "mem", "reach", "climb", "layer",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -1166,9 +1170,24 @@ impl Parser<'_> {
                 items.fields.push(self.field()?);
             } else if self.is_kw("ground") || self.is_kw("feature") {
                 items.materials.push(self.material()?);
+            } else if self.eat_kw("layer") {
+                let (name, at) = self.ident("layer name")?;
+                let mut flies = false;
+                if self.eat_sym("{") {
+                    while !self.eat_sym("}") {
+                        if !self.eat_kw("flies") {
+                            return Err(self.err(format!(
+                                "expected `flies` or `}}` in a layer, found {}",
+                                self.describe()
+                            )));
+                        }
+                        flies = true;
+                    }
+                }
+                items.layers.push((LayerDef { name, flies }, at));
             } else {
                 return Err(self.err(format!(
-                    "expected `kind`, `trait`, `sub`, `const`, `field`, `ground` or `feature`, found {}",
+                    "expected `kind`, `trait`, `sub`, `const`, `field`, `ground`, `feature` or `layer`, found {}",
                     self.describe()
                 )));
             }
@@ -1550,6 +1569,7 @@ impl Parser<'_> {
                 ("food", d.food.is_some()),
                 ("bite", d.bite.is_some()),
                 ("reach", d.reach.is_some()),
+                ("layer", d.layer.is_some()),
                 ("climb", d.climb.is_some()),
             ];
             if let Some((w, _)) = given.iter().find(|(w, set)| *set && self.is_kw(w)) {
@@ -1597,6 +1617,9 @@ impl Parser<'_> {
                 d.bite = Some((self.additive()?, p));
             } else if self.eat_kw("reach") {
                 d.reach = Some((self.additive()?, p));
+            } else if self.eat_kw("layer") {
+                let (name, _) = self.ident("layer name")?;
+                d.layer = Some((name, p));
             } else if self.eat_kw("climb") {
                 let n = self.additive()?;
                 self.expect_kw("on")?;
@@ -2607,6 +2630,8 @@ struct Inst<'a> {
     reach: Option<u8>,
     /// The most a step may rise, and in which field.
     climb: Option<(i32, u8)>,
+    /// A declared layer (2 and up).
+    layer: Option<u8>,
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
@@ -2756,6 +2781,8 @@ struct Gen<'a> {
     /// with the engine's three.
     materials_ast: &'a [MaterialAst],
     materials: Materials,
+    /// The `layer` declarations.
+    items_ast_layers: &'a [(LayerDef, Pos)],
     /// Per kind named by a `spawn ... with`: the memory slots those spawns
     /// set, in first-appearance order (at most two), each with where it
     /// was first named. They take the kind's first slots, which is where
@@ -2881,6 +2908,7 @@ impl<'a> Gen<'a> {
             field_defs: Vec::new(),
             materials_ast: &items.materials,
             materials: Materials::default(),
+            items_ast_layers: &items.layers,
             const_vals: Vec::new(),
             insts: Vec::new(),
             kind_insts: Vec::new(),
@@ -2954,6 +2982,32 @@ impl<'a> Gen<'a> {
             .map(|(n, _)| n.clone())
             .zip(inst.args.iter().copied())
             .collect()
+    }
+
+    /// Layers: global names like a kind's; at most [`MAX_LAYERS`].
+    fn resolve_layers(&self) -> Result<()> {
+        if let Some((_, at)) = self.items_ast_layers.get(MAX_LAYERS) {
+            return Err(self.err(at, format!("at most {MAX_LAYERS} layers in a rule set")));
+        }
+        for (i, (l, at)) in self.items_ast_layers.iter().enumerate() {
+            let taken = self.items_ast_layers[..i]
+                .iter()
+                .any(|(o, _)| o.name == l.name)
+                || self.item_named(&l.name).is_some()
+                || self.subs.iter().any(|s| s.name == l.name)
+                || self.tags.contains(&l.name)
+                || self.consts.iter().any(|c| c.name == l.name)
+                || self.materials.ground(&l.name).is_some()
+                || self.materials.feature(&l.name).is_some()
+                || ["standing", "cover"].contains(&l.name.as_str());
+            if taken {
+                return Err(self.err(
+                    at,
+                    format!("`{}` is already a name: a layer takes its own", l.name),
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// Grounds and features: the engine's soil, water and rock first, each
@@ -3338,6 +3392,7 @@ impl<'a> Gen<'a> {
             });
         }
         self.resolve_materials()?;
+        self.resolve_layers()?;
         self.resolve_fields()?;
         for it in items {
             for (pn, pat) in &it.params {
@@ -3430,7 +3485,13 @@ impl<'a> Gen<'a> {
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
             .with_fields(std::mem::take(&mut self.field_defs))
-            .with_materials(std::mem::take(&mut self.materials));
+            .with_materials(std::mem::take(&mut self.materials))
+            .with_layers(
+                self.items_ast_layers
+                    .iter()
+                    .map(|(l, _)| l.clone())
+                    .collect(),
+            );
         self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
@@ -3721,7 +3782,34 @@ impl<'a> Gen<'a> {
             }
         };
         let climb = self.pick(climb, &parents, |i| i.climb, "climbs", item)?;
+        let layer = match &d.layer {
+            None => None,
+            Some((name, at)) => {
+                let i = self
+                    .items_ast_layers
+                    .iter()
+                    .position(|(l, _)| l.name == *name);
+                let i = i.ok_or_else(|| {
+                    self.err(
+                        at,
+                        format!("no layer `{name}`: declare it with `layer {name}`"),
+                    )
+                })?;
+                Some(u8::try_from(i + 2).expect("at most MAX_LAYERS layers"))
+            }
+        };
+        let layer = self.pick(layer, &parents, |i| i.layer, "layers", item)?;
         let cover = d.cover || parents.iter().any(|&p| self.insts[p].cover);
+        if cover && let Some(l) = layer {
+            let name = &self.items_ast_layers[usize::from(l) - 2].0.name;
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` is ground cover and in layer `{name}`: a kind lives in one layer",
+                    it.name
+                ),
+            ));
+        }
         let solid = d.solid || parents.iter().any(|&p| self.insts[p].solid);
 
         let mut tags: Vec<String> = Vec::new();
@@ -3945,6 +4033,7 @@ impl<'a> Gen<'a> {
             bite,
             reach,
             climb,
+            layer,
             tags,
             needs,
             mems,
@@ -4159,6 +4248,11 @@ impl<'a> Gen<'a> {
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
             cover: inst.cover,
+            layer: if inst.cover {
+                1
+            } else {
+                inst.layer.unwrap_or(0)
+            },
             solid: inst.solid,
             parent,
         })

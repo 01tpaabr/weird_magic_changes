@@ -39,7 +39,7 @@ use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
 use crate::rules::{Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
-use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
+use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER, STREAM_UID_LAYER};
 use crate::stage::{
     ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Feature, Ground, Pos, Stage, cell_u16,
 };
@@ -175,6 +175,9 @@ pub struct CrossScratch {
 pub struct Scratch {
     claim: Vec<u64>,
     touched: Vec<u16>,
+    /// Claims in the declared layers, `(layer, cell, key)`, sorted: the
+    /// first of a `(layer, cell)` wins it.
+    layer_claims: Vec<(u8, u16, u64)>,
     pub hits: Vec<Hit>,
     pub deaths: u32,
     events: Vec<[u32; LIFE_EVENTS]>,
@@ -244,6 +247,7 @@ impl Default for Scratch {
         Self {
             claim: vec![UNCLAIMED; CHUNK_CELLS],
             touched: Vec::new(),
+            layer_claims: Vec::new(),
             hits: Vec::new(),
             deaths: 0,
             events: Vec::new(),
@@ -253,6 +257,16 @@ impl Default for Scratch {
 }
 
 impl Scratch {
+    /// Does `key` hold the lowest claim on `cell` of declared layer `layer`?
+    fn layer_won(&self, layer: u8, cell: usize, key: u64) -> bool {
+        let at = self
+            .layer_claims
+            .partition_point(|&(l, c, _)| (l, usize::from(c)) < (layer, cell));
+        self.layer_claims
+            .get(at)
+            .is_some_and(|&(l, c, k)| (l, usize::from(c), k) == (layer, cell, key))
+    }
+
     /// `claim[cell] = min(claim[cell], key)`, unless the cell was touched.
     fn claim(&mut self, cell: usize, key: u64) {
         let c = &mut self.claim[cell];
@@ -523,6 +537,7 @@ fn think_one<const TRACE: bool>(
                 i32::from(out.dx),
                 i32::from(out.dy),
                 kind.climb,
+                kind.layer,
             );
             #[allow(clippy::cast_possible_truncation)] // a unit step, -1..=1
             let step = (dx as i8, dy as i8);
@@ -555,7 +570,7 @@ fn clear_events(mind: &mut ActorMind) {
 /// counter-clockwise. None free: the straight step, which Apply will
 /// report as BLOCKED. `(0, 0)` stays `(0, 0)`.
 pub fn step_toward(halo: &Halo<'_>, lx: i32, ly: i32, dx: i32, dy: i32) -> (i32, i32) {
-    step_toward_climbing(halo, lx, ly, dx, dy, None)
+    step_toward_climbing(halo, lx, ly, dx, dy, None, 0)
 }
 
 /// [`step_toward`] for a kind that climbs at most `n` in field `f`
@@ -568,6 +583,7 @@ pub fn step_toward_climbing(
     dx: i32,
     dy: i32,
     climb: Option<(u8, i32)>,
+    layer: u8,
 ) -> (i32, i32) {
     let s = (dx.signum(), dy.signum());
     if s == (0, 0) {
@@ -583,7 +599,7 @@ pub fn step_toward_climbing(
     let i = dirs.iter().position(|&d| d == s).expect("a unit step");
     for j in [i, (i + 1) % 8, (i + 7) % 8] {
         let (cx, cy) = dirs[j];
-        if halo.free(lx, ly, cx, cy) && gentle(cx, cy) {
+        if halo.test(lx, ly, cx, cy, halo.free_of(layer)) && gentle(cx, cy) {
             return (cx, cy);
         }
     }
@@ -660,11 +676,13 @@ pub fn resolve(
                     continue;
                 }
                 let (dx, dy) = (i32::from(it.dx), i32::from(it.dy));
-                // `eat`/`hit` bite a neighbour; `graze` the cover next to or
+                // `eat`/`hit` bite a neighbour, or from a declared layer the
+                // one standing under the biter; `graze` the cover next to or
                 // under the grazer.
                 let cover = it.action == Action::Graze;
                 let reach = i32::from(kinds.def(pubs.rows[slot].kind).reach);
-                let res = if dx.abs() > reach || dy.abs() > reach || ((dx, dy) == (0, 0) && !cover)
+                let under = cover || pubs.rows[slot].layer >= 2;
+                let res = if dx.abs() > reach || dy.abs() > reach || ((dx, dy) == (0, 0) && !under)
                 {
                     result::REFUSED
                 } else {
@@ -674,7 +692,7 @@ pub fn resolve(
                     // From afar too: the direction the bite came from.
                     let dir = vm::dir_index((-dx).signum(), (-dy).signum());
                     match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
-                        Where::Here(cell) => match cells.layer(cover)[cell].unpack() {
+                        Where::Here(cell) => match cells.layer(u8::from(cover))[cell].unpack() {
                             None => result::MISSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
@@ -777,7 +795,7 @@ pub fn exchange(
         };
         let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
-                match cells.layer(cover)[usize::from(fx.cell)].unpack() {
+                match cells.layer(u8::from(cover))[usize::from(fx.cell)].unpack() {
                     None => result::MISSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
@@ -825,7 +843,7 @@ pub fn exchange(
             let group = i..j;
             i = j;
             let cell = usize::from(first.cell);
-            let Some((vk, vslot)) = cells.layer(first.cover)[cell].unpack() else {
+            let Some((vk, vslot)) = cells.layer(u8::from(first.cover))[cell].unpack() else {
                 continue;
             };
             let vslot = usize::from(vslot);
@@ -1030,6 +1048,7 @@ pub fn apply(
             // Claims: in-chunk targets free at tick start and untouched, lowest
             // key wins. Intents are in key order since Resolve; a winner
             // touches the cell, so a tied key (twin uids) after it is blocked.
+            scratch.layer_claims.clear();
             for it in &intents.list {
                 if !matches!(it.action, Action::Move | Action::Spawn | Action::Build) {
                     continue;
@@ -1039,6 +1058,22 @@ pub fn apply(
                 }
                 let row = pubs.rows[usize::from(it.slot)];
                 if row.flags & flags::DEAD != 0 {
+                    continue;
+                }
+                // A declared layer: its own claims, a slot empty at tick
+                // start, any ground if it flies.
+                let layer = match it.action {
+                    Action::Move => row.layer,
+                    Action::Spawn => kinds.def(it.kind).layer,
+                    _ => 0,
+                };
+                if layer >= 2 {
+                    if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
+                        && cells.layer(layer)[cell].is_none()
+                        && (kinds.flies(layer) || cells.walkable(cell, &kinds.materials.table))
+                    {
+                        scratch.layer_claims.push((layer, cell_u16(cell), it.key));
+                    }
                     continue;
                 }
                 if it.action == Action::Move && row.flags & flags::COVER != 0 {
@@ -1052,6 +1087,7 @@ pub fn apply(
                 }
             }
 
+            scratch.layer_claims.sort_unstable();
             for it in &intents.list {
                 let slot = usize::from(it.slot);
                 let kind = pubs.rows[slot].kind;
@@ -1158,6 +1194,35 @@ pub fn apply(
                     }
                     // Ground cover is rooted.
                     Action::Move if cover => Some(result::REFUSED),
+                    Action::Move if actors.pubs[slot].layer >= 2 => {
+                        let l = actors.pubs[slot].layer;
+                        Some(match target_of(*coord, from, it.dx, it.dy) {
+                            // Still walkable: a `build` settled before it may
+                            // have changed that.
+                            Where::Here(cell)
+                                if scratch.layer_won(l, cell, it.key)
+                                    && (kinds.flies(l)
+                                        || actors.cells.walkable(cell, &kinds.materials.table)) =>
+                            {
+                                let kind = actors.pubs[slot].kind;
+                                actors.cells.layer_mut(l)[from] = ActorId::NONE;
+                                actors.cells.layer_mut(l)[cell] = ActorId::pack(kind, it.slot);
+                                actors.pubs[slot].cell = cell_u16(cell);
+                                result::OK
+                            }
+                            Where::Here(_) => result::BLOCKED,
+                            Where::Elsewhere(to, cell) => {
+                                outbox.list.push(Effect {
+                                    key: it.key,
+                                    slot: it.slot,
+                                    what: EffectKind::Move,
+                                    to,
+                                    cell: cell_u16(cell),
+                                });
+                                result::NONE
+                            }
+                        })
+                    }
                     Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key => {
                             let kind = actors.pubs[slot].kind;
@@ -1182,6 +1247,42 @@ pub fn apply(
                     }),
                     // Past the halo, even into a loaded chunk: as unloaded.
                     Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
+                    Action::Spawn if kinds.def(it.kind).layer >= 2 => {
+                        let l = kinds.def(it.kind).layer;
+                        Some(match target_of(*coord, from, it.dx, it.dy) {
+                            Where::Here(cell)
+                                if scratch.layer_won(l, cell, it.key)
+                                    && (kinds.flies(l)
+                                        || actors.cells.walkable(cell, &kinds.materials.table)) =>
+                            {
+                                let child = spawn_mind(
+                                    kinds,
+                                    seed,
+                                    tick,
+                                    coord.cell(cell),
+                                    it.kind,
+                                    it.with,
+                                );
+                                actors.push_in(cell, it.kind, child, l);
+                                scratch.count(it.kind, life::BORN);
+                                result::OK
+                            }
+                            Where::Here(_) => result::BLOCKED,
+                            Where::Elsewhere(to, cell) => {
+                                outbox.list.push(Effect {
+                                    key: it.key,
+                                    slot: it.slot,
+                                    what: EffectKind::Spawn {
+                                        kind: it.kind,
+                                        with: it.with,
+                                    },
+                                    to,
+                                    cell: cell_u16(cell),
+                                });
+                                result::NONE
+                            }
+                        })
+                    }
                     // Ground cover: the first spawn in key order onto a
                     // walkable cell with no cover gets it.
                     Action::Spawn if is_cover(kinds, it.kind) => {
@@ -1285,7 +1386,14 @@ fn lay(kinds: &Kinds, cells: &mut ChunkCells, cell: usize, material: u16) -> boo
         }
         (Ground(g), cells.feature[cell])
     };
-    if !m.table.walkable(g, f) && !cells.cover[cell].is_none() {
+    // Nobody is left on a cell they can't stand on: the cover, and anyone
+    // in a declared layer that does not fly.
+    if !m.table.walkable(g, f)
+        && (!cells.cover[cell].is_none()
+            || (2u8..)
+                .zip(&cells.extra)
+                .any(|(l, a)| !a[cell].is_none() && !kinds.flies(l)))
+    {
         return false;
     }
     (cells.ground[cell], cells.feature[cell]) = (g, f);
@@ -1407,10 +1515,10 @@ fn spawn_mind(
     kind: u16,
     with: [i32; 2],
 ) -> ActorMind {
-    let stream = if is_cover(kinds, kind) {
-        STREAM_UID_COVER
-    } else {
-        STREAM_UID
+    let stream = match kinds.def(kind).layer {
+        0 => STREAM_UID,
+        1 => STREAM_UID_COVER,
+        l => STREAM_UID_LAYER | u64::from(l) << 16,
     };
     let uid = hash_cell(seed, stream, pos.x, pos.y) ^ splitmix64(tick);
     let mut child = newborn(kinds, kind, uid, tick);
@@ -1425,8 +1533,8 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if usize::from(to) >= kinds.len() {
         return result::REFUSED;
     }
-    let cover = actors.pubs[slot].flags & flags::COVER != 0;
-    if kinds.def(to).cover != cover {
+    let layer = actors.pubs[slot].layer;
+    if kinds.def(to).layer != layer {
         return result::REFUSED; // a row cannot change layers
     }
     let from = actors.pubs[slot].kind;
@@ -1454,7 +1562,7 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     m.born = stamp(tick);
     actors.pubs[slot].kind = to;
     let cell = usize::from(actors.pubs[slot].cell);
-    actors.cells.layer_mut(cover)[cell] = ActorId::pack(to, slot_u16(slot));
+    actors.cells.layer_mut(layer)[cell] = ActorId::pack(to, slot_u16(slot));
     result::OK
 }
 
@@ -1536,13 +1644,20 @@ pub fn migrate(
             );
             continue;
         }
-        let cover = matches!(fx.what, EffectKind::Spawn { kind, .. } if is_cover(&kinds, kind));
-        let ok = dst_cells.walkable(cell, &kinds.materials.table)
-            && if cover {
-                dst_cells.cover[cell].is_none()
-            } else {
-                dst_cells.occupant[cell].is_none() && dst_scratch.enterable(cell)
-            };
+        let layer = match fx.what {
+            EffectKind::Spawn { kind, .. } => kinds.def(kind).layer,
+            _ => src.1.rows[slot].layer,
+        };
+        let walkable = dst_cells.walkable(cell, &kinds.materials.table);
+        let ok = match layer {
+            0 => walkable && dst_cells.occupant[cell].is_none() && dst_scratch.enterable(cell),
+            1 => walkable && dst_cells.cover[cell].is_none(),
+            l => {
+                usize::from(l) < 2 + dst_cells.extra.len()
+                    && dst_cells.layer(l)[cell].is_none()
+                    && (walkable || kinds.flies(l))
+            }
+        };
         if !ok {
             set_result_in(&mut src.2, slot, result::BLOCKED);
             continue;
@@ -1558,7 +1673,7 @@ pub fn migrate(
                 let row = src_pubs.rows[slot];
                 let mut mind = src_minds.rows[slot];
                 mind.events = (mind.events & !result::MASK) | result::OK;
-                let new = to.push(cell, row.kind, mind);
+                let new = to.push_in(cell, row.kind, mind, layer);
                 let moved = &mut to.pubs[usize::from(new)];
                 moved.signal = row.signal;
                 moved.look = row.look;
@@ -1570,11 +1685,13 @@ pub fn migrate(
                 };
                 from.kill(slot);
                 src_scratch.deaths += 1;
-                src_scratch.touch(usize::from(row.cell));
+                if layer == 0 {
+                    src_scratch.touch(usize::from(row.cell));
+                }
             }
             EffectKind::Spawn { kind, with } => {
                 let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with);
-                to.push_in(cell, kind, child, cover);
+                to.push_in(cell, kind, child, layer);
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
@@ -1583,7 +1700,7 @@ pub fn migrate(
             | EffectKind::Build { .. }
             | EffectKind::Dig => unreachable!("handled above"),
         }
-        if !cover {
+        if layer == 0 {
             dst_scratch.touch(cell);
         }
         dst_meta.dirty = true;
@@ -1668,6 +1785,7 @@ mod tests {
         let mut chunks = [None; 9];
         chunks[4] = Some((cells, actors));
         Halo {
+            flies: 0,
             chunks,
             tags: &[],
             family_end: &[],
@@ -1684,6 +1802,7 @@ mod tests {
             signal: 0,
             look: 0,
             flags: 0,
+            layer: 0,
             _pad: 0,
         };
         assert!(due(5, &row, 8)); // (5 + 3) % 8 == 0

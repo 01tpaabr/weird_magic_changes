@@ -38,6 +38,8 @@ start grass 1 / 10
 start seed 1 / 50
 start hive at (30, 30)
 start bee at (32, 30) with (home_x = 30, home_y = 30)
+start gull at (32, 30)
+start gull at (1, 0)
 ";
 
 /// The one chunk, alone: nothing else streams in.
@@ -46,8 +48,9 @@ const ONE: LoadPolicy = LoadPolicy { load: 0, unload: 0 };
 const COORD: ChunkCoord = ChunkCoord::new(0, 0);
 
 /// Where a chunk file's rows start: header, coord, `last_ticked`, the
-/// cell layers, the field count and [`FIELDS`]' two layers, the row count.
-const ROWS_AT: usize = 28 + CHUNK_CELLS * 10 + 4 + 2 * 2 * CHUNK_CELLS + 4;
+/// cell layers, the declared layer count and [`LAYER`]'s array, the field
+/// count and [`FIELDS`]' two layers, the row count.
+const ROWS_AT: usize = 28 + CHUNK_CELLS * 10 + 4 + 4 * CHUNK_CELLS + 4 + 2 * 2 * CHUNK_CELLS + 4;
 
 /// Two fields beside the built-in kinds, so a save holds field layers; in
 /// the other order for [`REVERSED`], so opening remaps them too.
@@ -55,12 +58,18 @@ const FIELDS: [&str; 2] = [
     "field fz max 9 { init noise scale 3 }",
     "field fy max 300 conserved { init 7 }",
 ];
+/// A declared layer beside the built-in kinds, with a kind in it that
+/// starts in the chunk, so a save holds a declared layer's array and rows in
+/// it; [`REVERSED`] declares another before it, so opening moves it.
+const LAYER: &str =
+    "layer air { flies }\nkind gull { layer air cadence 2 when true => move random free }";
+
 /// Where a world file's starts start: header, seed, tick, ticks/day,
 /// size, terrain, the start count.
 const STARTS_AT: usize = 12 + 3 * 8 + 2 * 4 + 4 * 4 + 4;
 
 static BUILTIN: LazyLock<Kinds> = LazyLock::new(|| {
-    let fields = FIELDS.join("\n") + "\nground mud { walkable }";
+    let fields = FIELDS.join("\n") + "\nground mud { walkable }\n" + LAYER;
     let mut files = crate::rules::builtin::FILES.to_vec();
     files.push(("fields.rules", &fields));
     crate::rules::compile_files(&files).expect("the built-in rules and two fields compile")
@@ -71,7 +80,9 @@ static BUILTIN: LazyLock<Kinds> = LazyLock::new(|| {
 /// through a remap.
 static REVERSED: LazyLock<Kinds> = LazyLock::new(|| {
     let fields = FIELDS.iter().rev().copied().collect::<Vec<_>>().join("\n")
-        + "\nground clay { walkable }\nground mud { walkable }\nfeature wall { blocks }";
+        + "\nground clay { walkable }\nground mud { walkable }\nfeature wall { blocks }"
+        + "\nlayer deep\n"
+        + LAYER;
     let mut files = crate::rules::builtin::FILES.to_vec();
     files.reverse();
     files.push(("fields.rules", &fields));
@@ -189,6 +200,7 @@ fn corrupt() -> impl Strategy<Value = Corrupt> {
         Just(1 << 24),
         Just(FORMAT_VERSION + 1),
         Just(2 * CHUNK_CELLS as u32 + 1),
+        Just(crate::rules::MAX_LAYERS as u32 + 1),
         any::<u32>(),
     ];
     let u64s = prop_oneof![
@@ -307,6 +319,8 @@ fn every_truncated_save_is_refused() {
         28,
         28 + CHUNK_CELLS,
         28 + 2 * CHUNK_CELLS,
+        28 + 10 * CHUNK_CELLS,
+        28 + 10 * CHUNK_CELLS + 4,
         ROWS_AT - 4,
         ROWS_AT,
     ] {
@@ -666,7 +680,7 @@ fn a_bad_world_header_never_panics() {
                     meta.kinds.clone(),
                     vec![SavedKind {
                         name: "dragon".into(),
-                        cover: false,
+                        layer: 0,
                         needs: vec![],
                         mems: vec![],
                         states: vec![],
@@ -692,7 +706,7 @@ fn a_bad_world_header_never_panics() {
                     .kinds
                     .iter()
                     .map(|k| SavedKind {
-                        cover: !k.cover,
+                        layer: u8::from(k.layer == 0),
                         ..k.clone()
                     })
                     .collect(),

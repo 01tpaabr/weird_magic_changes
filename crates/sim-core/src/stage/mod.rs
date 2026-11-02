@@ -341,6 +341,10 @@ pub struct ChunkCells {
     /// What grows on the ground here, at most one (a `cover` kind: never
     /// blocks, lies under whoever stands on the cell).
     pub cover: [ActorId; CHUNK_CELLS],
+    /// Who lives in each of the rules' declared layers (`Kinds::layers`,
+    /// same order; layer 2 is `extra[0]`), at most one a cell each.
+    /// Sized when the chunk is made or read; empty when none is declared.
+    pub extra: Vec<[ActorId; CHUNK_CELLS]>,
     /// One layer per field the rules declare (`Kinds::fields`, same
     /// order), each value in `0..=max`. Sized when the chunk is made or
     /// read, never inside a tick; empty when the rules declare none.
@@ -355,6 +359,7 @@ impl Default for ChunkCells {
             occupant: [ActorId::NONE; CHUNK_CELLS],
             cover: [ActorId::NONE; CHUNK_CELLS],
             fields: Vec::new(),
+            extra: Vec::new(),
         }
     }
 }
@@ -367,19 +372,23 @@ impl ChunkCells {
         m.walkable(self.ground[i], self.feature[i])
     }
 
-    /// The occupant layer, or the cover layer.
+    /// A layer by number: 0 standing, 1 ground cover, 2 and up declared.
     #[inline]
-    pub fn layer(&self, cover: bool) -> &[ActorId; CHUNK_CELLS] {
-        if cover { &self.cover } else { &self.occupant }
+    pub fn layer(&self, layer: u8) -> &[ActorId; CHUNK_CELLS] {
+        match layer {
+            0 => &self.occupant,
+            1 => &self.cover,
+            n => &self.extra[usize::from(n) - 2],
+        }
     }
 
     /// [`ChunkCells::layer`], mutable.
     #[inline]
-    pub fn layer_mut(&mut self, cover: bool) -> &mut [ActorId; CHUNK_CELLS] {
-        if cover {
-            &mut self.cover
-        } else {
-            &mut self.occupant
+    pub fn layer_mut(&mut self, layer: u8) -> &mut [ActorId; CHUNK_CELLS] {
+        match layer {
+            0 => &mut self.occupant,
+            1 => &mut self.cover,
+            n => &mut self.extra[usize::from(n) - 2],
         }
     }
 
@@ -389,6 +398,10 @@ impl ChunkCells {
         let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
         let h = fnv1a(h, bytemuck::cast_slice(&self.occupant));
         let h = fnv1a(h, bytemuck::cast_slice(&self.cover));
+        let h = self
+            .extra
+            .iter()
+            .fold(h, |h, l| fnv1a(h, bytemuck::cast_slice(l)));
         // No fields, no change: a world without them keeps its checksums.
         self.fields
             .iter()

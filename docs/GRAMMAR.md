@@ -70,18 +70,20 @@ IDENT = NAME that is not a reserved word
 | `target`, `pred` | a sub parameter's type, after `:` | any name |
 | `dx`, `dy` | a binding's offset, after `.` | any name |
 | `conserved`, `fixed`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
-| `ground`, `feature` | start a material at the top of a file | any name |
-| `reach`, `climb` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
+| `ground`, `feature`, `layer` | start a material or a layer at the top of a file | any name |
+| `reach`, `climb`, `layer` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
 | `relief` | in a `field` block | any name |
 | `walkable`, `blocks` | in a material's block | any name |
+| `flies` | in a layer's block | any name |
 | `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
 
 ## 2. Files and items
 
 ```
-file      = { item | sub | const | field | material } EOF
+file      = { item | sub | const | field | material | layer } EOF
+layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
           | "feature" IDENT "{" { "blocks" | "glyph" STRING | "color" STRING } "}"
 const     = "const" IDENT "=" expr [ ";" ]
@@ -124,7 +126,7 @@ decl = "glyph" STRING
      | "solid"
      | "tags" { TAG }
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
-     | "reach" additive | "climb" additive "on" IDENT
+     | "reach" additive | "climb" additive "on" IDENT | "layer" IDENT
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
      | "mem" IDENT { "," IDENT }
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
@@ -132,7 +134,7 @@ TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 
 - *`glyph`: a string of one printable ASCII character (`!` to `~`). `color`: `"#rrggbb"`,
   six hex digits. Neither in a trait.*
-- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food` and `bite` are given at
+- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food`, `bite`, `reach`, `climb` and `layer` are given at
   most once per body; `tags`, `need` and `mem` repeat, each name once (a mem may not repeat
   a need of the same body).*
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*

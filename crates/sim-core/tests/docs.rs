@@ -103,8 +103,8 @@ fn marked_error(b: &Block) -> (u32, String) {
 
 /// Items start at column 0 with one of these words; an item runs until the
 /// next one (or the end of the file).
-const ITEM_WORDS: [&str; 7] = [
-    "kind", "trait", "sub", "const", "field", "ground", "feature",
+const ITEM_WORDS: [&str; 8] = [
+    "kind", "trait", "sub", "const", "field", "ground", "feature", "layer",
 ];
 
 /// The item a line at column 0 starts, by name.
@@ -436,6 +436,10 @@ fn the_limits_table_is_the_codes() {
                 n(sim_core::stage::MAX_GROUNDS),
                 n(sim_core::stage::MAX_FEATURES),
             ],
+        ),
+        (
+            "declared layers per rule set".into(),
+            vec![n(sim_core::rules::MAX_LAYERS)],
         ),
         (
             "fields one think adds to".into(),
@@ -975,7 +979,7 @@ fn the_rows_in_the_actors_design_are_the_codes() {
         .find(|b| b.info == "rust")
         .expect("ACTORS.md shows the rows in a rust block");
     let code = std::fs::read_to_string(repo().join("crates/sim-core/src/actors/mod.rs")).unwrap();
-    for (name, n) in [("ActorPub", 7), ("ActorMind", 10)] {
+    for (name, n) in [("ActorPub", 8), ("ActorMind", 10)] {
         let want = fields(&code, name);
         assert_eq!(want.len(), n, "{name}: {want:?}");
         assert_eq!(fields(&rust.text, name), want, "{name}");

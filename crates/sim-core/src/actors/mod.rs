@@ -75,7 +75,11 @@ pub struct ActorPub {
     pub look: u8,
     /// See [`flags`].
     pub flags: u8,
-    pub _pad: u16,
+    /// The layer it lives in: 0 standing, 1 ground cover (with
+    /// [`flags::COVER`]), 2 and up a pack's declared layers
+    /// (`Kinds::layers`, `docs/WORLD.md` §7).
+    pub layer: u8,
+    pub _pad: u8,
 }
 
 /// The private record: everything only the actor's own rules see.
@@ -152,17 +156,18 @@ impl ActorsMut<'_> {
     /// Returns the slot. Panics if the cell is taken: callers claim cells
     /// first.
     pub fn push(&mut self, cell: usize, kind: u16, mind: ActorMind) -> u16 {
-        self.push_in(cell, kind, mind, false)
+        self.push_in(cell, kind, mind, 0)
     }
 
     /// Append a live ground-cover row on a cell with no cover yet.
     pub fn push_cover(&mut self, cell: usize, kind: u16, mind: ActorMind) -> u16 {
-        self.push_in(cell, kind, mind, true)
+        self.push_in(cell, kind, mind, 1)
     }
 
-    /// [`ActorsMut::push`] or [`ActorsMut::push_cover`], by `cover`.
-    pub fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, cover: bool) -> u16 {
-        let layer = self.cells.layer_mut(cover);
+    /// Append a live row in layer `layer` (0 standing, 1 cover, 2 and up
+    /// declared) on a cell that layer leaves empty.
+    pub fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, layer_no: u8) -> u16 {
+        let layer = self.cells.layer_mut(layer_no);
         assert!(layer[cell].is_none(), "cell {cell} is occupied");
         let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
         layer[cell] = ActorId::pack(kind, slot);
@@ -174,7 +179,8 @@ impl ActorsMut<'_> {
             stagger,
             signal: 0,
             look: 0,
-            flags: if cover { flags::COVER } else { 0 },
+            flags: if layer_no == 1 { flags::COVER } else { 0 },
+            layer: layer_no,
             _pad: 0,
         });
         self.minds.push(mind);
@@ -188,7 +194,7 @@ impl ActorsMut<'_> {
         let p = self.pubs[slot];
         if p.flags & flags::DEAD == 0 {
             self.pubs[slot].flags |= flags::DEAD;
-            self.cells.layer_mut(p.flags & flags::COVER != 0)[usize::from(p.cell)] = ActorId::NONE;
+            self.cells.layer_mut(p.layer)[usize::from(p.cell)] = ActorId::NONE;
         }
     }
 
@@ -205,7 +211,7 @@ impl ActorsMut<'_> {
             self.minds.swap_remove(i);
             if i < self.pubs.len() {
                 let moved = self.pubs[i];
-                self.cells.layer_mut(moved.flags & flags::COVER != 0)[usize::from(moved.cell)] =
+                self.cells.layer_mut(moved.layer)[usize::from(moved.cell)] =
                     ActorId::pack(moved.kind, slot_u16(i));
             }
         }
@@ -243,7 +249,20 @@ pub fn validate(
         if cell >= CHUNK_CELLS {
             return Err(format!("row {slot} is on cell {cell}, outside the chunk"));
         }
-        let layer = cells.layer(p.flags & flags::COVER != 0);
+        if usize::from(p.layer) >= 2 + cells.extra.len() {
+            return Err(format!(
+                "row {slot} is in layer {}, the chunk has {}",
+                p.layer,
+                2 + cells.extra.len()
+            ));
+        }
+        if (p.layer == 1) != (p.flags & flags::COVER != 0) {
+            return Err(format!(
+                "row {slot}: layer {} and its cover flag disagree",
+                p.layer
+            ));
+        }
+        let layer = cells.layer(p.layer);
         let want = ActorId::pack(p.kind, slot_u16(slot));
         if layer[cell] != want {
             return Err(format!(
@@ -253,7 +272,12 @@ pub fn validate(
         }
     }
     let occupied = cells.occupant.iter().filter(|o| !o.is_none()).count()
-        + cells.cover.iter().filter(|o| !o.is_none()).count();
+        + cells.cover.iter().filter(|o| !o.is_none()).count()
+        + cells
+            .extra
+            .iter()
+            .map(|l| l.iter().filter(|o| !o.is_none()).count())
+            .sum::<usize>();
     if occupied != pubs.len() {
         return Err(format!("{occupied} occupied cells but {} rows", pubs.len()));
     }
@@ -383,9 +407,18 @@ mod tests {
         let mut bad = p.clone();
         bad[1].flags = flags::COVER;
         assert!(
+            validate(o, &bad, m, KINDS)
+                .unwrap_err()
+                .contains("disagree")
+        );
+        bad[1].layer = 1;
+        assert!(
             validate(o, &bad, m, KINDS).unwrap_err().contains("expects"),
             "a row must sit in its own layer"
         );
+        let mut bad = p.clone();
+        bad[1].layer = 2;
+        assert!(validate(o, &bad, m, KINDS).unwrap_err().contains("layer 2"));
         let mut bad_c = o.clone();
         bad_c.occupant[7] = ActorId::pack(SEED, 0);
         assert!(

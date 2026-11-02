@@ -8,8 +8,9 @@
 //! exists (rows of a kind that is gone are dropped), each need and mem
 //! carries over by name (clamped to the new max; new needs start full, new
 //! mems at 0), the state by its name (else the first), each field by its
-//! name (clamped to its max; a new one starts at its `init`). A kind cannot move between standing and ground
-//! cover (refused: restart). The world's starts are all kept: one whose
+//! name (clamped to its max; a new one starts at its `init`), each
+//! declared layer by its name. A kind cannot move between layers (standing,
+//! ground cover, a declared one, by name; refused: restart). The world's starts are all kept: one whose
 //! kind is gone places nobody (a share keeps its interval, so the others
 //! keep their cells) and starts again when the kind comes back.
 //!
@@ -25,8 +26,7 @@
 use bevy_ecs::prelude::*;
 
 use crate::actors::{
-    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
-    slot_u16,
+    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, slot_u16,
 };
 use crate::rules::{FieldDef, Kinds};
 use crate::scenario::{Placement, absent, present};
@@ -80,6 +80,11 @@ pub struct Plan {
     /// feature (0 none), the new one (else none).
     grounds: Vec<u8>,
     features: Vec<u8>,
+    /// Per new declared layer, the old one of its name (else it starts
+    /// empty).
+    layers: Vec<Option<usize>>,
+    /// Declared layers a chunk written under the old rules holds.
+    old_layers: usize,
     /// The world's seed: a new field's `init` noise.
     seed: u64,
 }
@@ -92,25 +97,42 @@ pub struct PendingRemap(pub Option<Plan>);
 
 impl Plan {
     /// From the rules a world was written with (`old`, as a save keeps
-    /// them) to `new`. A kind that moved between standing and ground cover
-    /// is an error.
+    /// them) to `new`. A kind that moved between layers is an error.
     pub fn between(
         old: &[SavedKind],
         old_fields: &[String],
         (old_grounds, old_features): (&[String], &[String]),
+        old_layers: &[String],
         new: &Kinds,
         seed: u64,
     ) -> Result<Plan, String> {
+        let old_name = |l: u8| match l {
+            0 => "standing",
+            1 => "ground cover",
+            l => old_layers
+                .get(usize::from(l) - 2)
+                .map_or("?", String::as_str),
+        };
+        let new_name = |l: u8| match l {
+            0 => "standing",
+            1 => "ground cover",
+            l => new
+                .layers
+                .get(usize::from(l) - 2)
+                .map_or("?", |d| d.name.as_str()),
+        };
         let mut kinds = Vec::with_capacity(old.len());
         for od in old {
             let Some(nd) = new.by_name(&od.name) else {
                 kinds.push(None);
                 continue;
             };
-            if nd.cover != od.cover {
+            if old_name(od.layer) != new_name(nd.layer) {
                 return Err(format!(
-                    "kind `{}` moved between standing and ground cover: restart to change that",
-                    od.name
+                    "kind `{}` moved from {} to {}: restart to change that",
+                    od.name,
+                    old_name(od.layer),
+                    new_name(nd.layer)
                 ));
             }
             let mut t = Target {
@@ -164,6 +186,12 @@ impl Plan {
                         .map(|f| new.materials.feature(f).map_or(0, |f| f.0)),
                 )
                 .collect(),
+            layers: new
+                .layers
+                .iter()
+                .map(|l| old_layers.iter().position(|o| *o == l.name))
+                .collect(),
+            old_layers: old_layers.len(),
             seed,
         })
     }
@@ -182,6 +210,12 @@ impl Plan {
     /// How many field layers the old rules had: saved chunks hold that many.
     pub fn old_fields(&self) -> usize {
         self.old_fields
+    }
+
+    /// How many declared layers the old rules had: saved chunks hold that
+    /// many.
+    pub fn old_layers(&self) -> usize {
+        self.old_layers
     }
 
     /// Remap one chunk's rows and fields. Returns whether anything
@@ -213,8 +247,7 @@ impl Plan {
                 }
                 Some(t) => {
                     actors.pubs[slot].kind = t.kind;
-                    let cover = row.flags & flags::COVER != 0;
-                    actors.cells.layer_mut(cover)[usize::from(row.cell)] =
+                    actors.cells.layer_mut(row.layer)[usize::from(row.cell)] =
                         ActorId::pack(t.kind, slot_u16(slot));
                     let old = actors.minds[slot];
                     let m = &mut actors.minds[slot];
@@ -234,6 +267,23 @@ impl Plan {
         }
         if dead {
             actors.compact();
+        }
+        // Declared layers by name: the rows left are in layers the new
+        // rules declare (`between` checked their kinds).
+        let identity = self.layers.len() == self.old_layers
+            && self.layers.iter().enumerate().all(|(i, &o)| o == Some(i));
+        if !identity {
+            let old = std::mem::take(&mut actors.cells.extra);
+            let to = |o: usize| self.layers.iter().position(|&n| n == Some(o));
+            for row in actors.pubs.iter_mut().filter(|r| r.layer >= 2) {
+                let n = to(usize::from(row.layer) - 2).expect("a kept kind's layer is declared");
+                row.layer = u8::try_from(n + 2).expect("at most MAX_LAYERS layers");
+            }
+            actors.cells.extra = self
+                .layers
+                .iter()
+                .map(|o| o.map_or([ActorId::NONE; crate::stage::CHUNK_CELLS], |i| old[i]))
+                .collect();
         }
         let same = |m: &[u8]| m.iter().enumerate().all(|(i, &v)| usize::from(v) == i);
         let mut terrain = false;
@@ -279,6 +329,12 @@ pub fn feature_names(kinds: &Kinds) -> Vec<String> {
         .iter()
         .map(|f| f.name.clone())
         .collect()
+}
+
+/// The rules' declared layer names, layer 2 first: what a save keeps of
+/// them.
+pub fn layer_names(kinds: &Kinds) -> Vec<String> {
+    kinds.layers.iter().map(|l| l.name.clone()).collect()
 }
 
 /// The rules' field names, in layer order: what a save keeps of them.
@@ -364,6 +420,7 @@ pub fn reload_rules(
         &SavedKind::table(&old),
         &field_names(&old),
         (&ground_names(&old), &feature_names(&old)),
+        &layer_names(&old),
         &new,
         seed,
     )?;

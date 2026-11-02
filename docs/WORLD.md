@@ -1,7 +1,9 @@
 # The world
 
-Status: **steps 1 and 2, fields and their laws, are built** (2026-11-01: §2-§4, `RULES.md`
-§12 "Fields", decisions 54-56; scent is gone, the bees' trail is a field); the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
+Status: **steps 1 to 5 are built**: fields and their laws (2026-11-01: §2-§4, `RULES.md`
+§12 "Fields", decisions 54-56; scent is gone, the bees' trail is a field), declared terrain
+with `build` and `dig` (§5, decisions 58-59), height (§6, decision 60) and declared layers
+(§7, decision 61), 2026-11-02; the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
 measurement in §8 is done; the build order is §10. Syntax below is a proposal until its step
 lands in `GRAMMAR.md` and `RULES.md`, and may change there.
 
@@ -200,15 +202,20 @@ went, not a fixed ground type.
 
 ## 7. Layers
 
-"Standing + cover" becomes declared layers; each kind says which it lives in, each layer what
-it blocks. One `u32` array per declared layer per chunk:
+Built 2026-11-02 (decision 61, `RULES.md` §12 "Layers"), smaller than first drawn: standing
+and cover stay the engine's two layers (0 and 1), and a pack declares more, `layer air {
+flies }`, one `u32` array each per chunk (`ChunkCells::extra`), at most 8. A kind names
+its layer (`layer air`), a row keeps it in a byte. Each layer has its own occupancy and its
+own claims (`Scratch::layer_claims`: a sorted `(layer, cell, key)` list, the lowest key
+wins), so a flier and a walker never contest a cell; `flies` lets a layer's actors over any
+ground. `free` reads the thinker's own layer, kind and tag predicates see every layer, and
+from a declared layer `eat`/`hit` reach the one standing beneath (`here`). Saves keep layers
+by name (store v13). Not built from the first sketch: an `item` layer with `pick`/`put`, and
+what a layer blocks (`blocks standing`); both wait for a world that needs them.
 
 ```text
-layer ground   # grass, moss: under whoever stands there (today's cover)
-layer item     # what lies there: an egg, dropped food, a tool; `pick`, `put`
-layer standing # today's occupants: one a cell, blocks
-layer air      # bees and birds fly over the standing
-layer below    # roots, burrows
+layer air { flies }   # gulls over the sea (packs/sky)
+layer burrow          # moles under the walkers
 ```
 
 ## 8. Cost (measured)
@@ -267,7 +274,9 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
    (decision 56).
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
 4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
-5. **Layers.**
+5. **Layers** (built, 2026-11-02): declared layers, per-layer claims and occupancy, `flies`,
+   `free` in the reader's layer, a bite from above, store v13; `packs/sky` and its scenario
+   test.
 6. **Arenas and players** (§12), with namespaces, when the game work begins; private fields
    last.
 

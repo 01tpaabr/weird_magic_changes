@@ -33,6 +33,9 @@ pub const STREAM_UID_COVER: u64 = 0x0007;
 /// Field noise: this, with a hash of the field's name above bit 16, so a
 /// field keeps its values whatever else the rules declare.
 pub const STREAM_FIELD: u64 = 0x0008;
+/// A declared layer's uids, with the layer above bit 16: run-time births in
+/// it, and a start stacked over another on one cell; never reuse.
+pub const STREAM_UID_LAYER: u64 = 0x0011;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -109,6 +112,10 @@ pub fn generate_chunk(
     }
     cells.occupant = [super::ActorId::NONE; CHUNK_CELLS];
     cells.cover = [super::ActorId::NONE; CHUNK_CELLS];
+    cells.extra.clear();
+    cells
+        .extra
+        .resize(placement.layers, [super::ActorId::NONE; CHUNK_CELLS]);
     out.actors.rows.clear();
     out.minds.rows.clear();
     let explicit = placement.explicit_in(coord);
@@ -119,19 +126,32 @@ pub fn generate_chunk(
     let mut explicit = explicit.iter().peekable();
     for i in 0..CHUNK_CELLS {
         let p = coord.cell(i);
-        let here = match explicit.next_if(|e| usize::from(e.cell) == i) {
-            Some(e) => Some(e.placed),
-            None if out.cells.walkable(i, &placement.table) => {
-                placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
-            }
-            None => None,
+        let mind = ActorMind {
+            uid: hash_cell(seed, STREAM_UID, p.x, p.y),
+            ..ActorMind::zeroed()
         };
-        if let Some(Placed { kind, cover }) = here {
-            let mind = ActorMind {
-                uid: hash_cell(seed, STREAM_UID, p.x, p.y),
-                ..ActorMind::zeroed()
+        // A cell's explicit starts, one a layer; else its share draw.
+        let mut any = false;
+        while let Some(e) = explicit.next_if(|e| usize::from(e.cell) == i) {
+            // The cell's uid for its first, lowest layer; a start above
+            // that one gets its layer's.
+            let uid = if any {
+                let stream = STREAM_UID_LAYER | u64::from(e.placed.layer) << 16;
+                hash_cell(seed, stream, p.x, p.y)
+            } else {
+                mind.uid
             };
-            out.actors_mut().push_in(i, kind, mind, cover);
+            let mind = ActorMind { uid, ..mind };
+            out.actors_mut()
+                .push_in(i, e.placed.kind, mind, e.placed.layer);
+            any = true;
+        }
+        if !any
+            && out.cells.walkable(i, &placement.table)
+            && let Some(Placed { kind, layer }) =
+                placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
+        {
+            out.actors_mut().push_in(i, kind, mind, layer);
         }
     }
 }

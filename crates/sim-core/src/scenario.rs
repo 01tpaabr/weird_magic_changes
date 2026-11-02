@@ -362,8 +362,8 @@ pub enum Expect {
         op: Op,
         v: i64,
     },
-    /// `at (X, Y) [only] K` or `nobody`: the standing actor there, else the
-    /// cover.
+    /// `at (X, Y) [only] K` or `nobody`: someone there in any layer is a K;
+    /// nobody there in any.
     At {
         x: i32,
         y: i32,
@@ -1685,8 +1685,8 @@ pub fn absent(starts: &[Start], kinds: &Kinds) -> Vec<String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {
     pub kind: u16,
-    /// Ground cover: goes in the cell's cover layer.
-    pub cover: bool,
+    /// The layer it goes in: 0 standing, 1 ground cover, 2 and up declared.
+    pub layer: u8,
 }
 
 /// An explicit start, resolved.
@@ -1718,6 +1718,8 @@ pub struct Placement {
     explicit: Vec<Explicit>,
     /// The rules' materials: which cells are walkable.
     pub table: MaterialTable,
+    /// How many declared layers a chunk holds (layers 2 and up).
+    pub layers: usize,
 }
 
 impl Placement {
@@ -1781,7 +1783,7 @@ impl Placement {
             };
             let placed = Placed {
                 kind: def.id,
-                cover: def.cover,
+                layer: def.layer,
             };
             match s {
                 Start::Share { kind, region, .. } => {
@@ -1800,7 +1802,7 @@ impl Placement {
                         let name = name.map_or("?", |d| d.name.as_str());
                         return Err(err(format!("`{kind}` at ({x}, {y}) is on {name}")));
                     }
-                    if !m.table.walkable(g, Feature::None) {
+                    if !m.table.walkable(g, Feature::None) && !kinds.flies(def.layer) {
                         let name = m
                             .grounds
                             .get(usize::from(g.0))
@@ -1889,12 +1891,13 @@ impl Placement {
                 msg,
             });
         }
-        // Stable: of two starts on one cell, the later is the error.
-        explicit.sort_by_key(|(e, _)| (e.chunk.y, e.chunk.x, e.cell));
-        if let Some(w) = explicit
-            .windows(2)
-            .find(|w| (w[0].0.chunk, w[0].0.cell) == (w[1].0.chunk, w[1].0.cell))
-        {
+        // Stable: of two starts on one cell in one layer, the later is the
+        // error; one cell holds a start in each layer.
+        explicit.sort_by_key(|(e, _)| (e.chunk.y, e.chunk.x, e.cell, e.placed.layer));
+        if let Some(w) = explicit.windows(2).find(|w| {
+            (w[0].0.chunk, w[0].0.cell, w[0].0.placed.layer)
+                == (w[1].0.chunk, w[1].0.cell, w[1].0.placed.layer)
+        }) {
             let p = w[0].0.chunk.cell(usize::from(w[0].0.cell));
             return Err(StartError {
                 start: Some(w[1].1),
@@ -1916,6 +1919,7 @@ impl Placement {
             bounds,
             explicit,
             table: kinds.materials.table,
+            layers: kinds.layers.len(),
         })
     }
 
@@ -2612,16 +2616,7 @@ legend {
         let parse = |text: &str| Scenario::parse("t", text).unwrap().starts;
         let pl = Placement::resolve(&parse("start b 1 / 4\nstart a 1 / 2"), &k, &t).unwrap();
         // In the order written, whatever the kind ids; `b` is cover.
-        let (a, b) = (
-            Placed {
-                kind: 0,
-                cover: false,
-            },
-            Placed {
-                kind: 1,
-                cover: true,
-            },
-        );
+        let (a, b) = (Placed { kind: 0, layer: 0 }, Placed { kind: 1, layer: 1 });
         assert_eq!(pl.placed(0, 0, 0), Some(b));
         assert_eq!(pl.placed(PLACE_ONE / 4 - 1, 0, 0), Some(b));
         assert_eq!(pl.placed(PLACE_ONE / 4, 0, 0), Some(a));
@@ -2715,14 +2710,8 @@ legend {
         let k = crate::rules::compile("t.rules", "kind a { }\nkind b { cover }").unwrap();
         let p = GenParams::default();
         let pl = Placement::resolve(&sc.starts, &k, &noise(7, &p)).unwrap();
-        let a = Placed {
-            kind: 0,
-            cover: false,
-        };
-        let b = Placed {
-            kind: 1,
-            cover: true,
-        };
+        let a = Placed { kind: 0, layer: 0 };
+        let b = Placed { kind: 1, layer: 1 };
         let (eighth, quarter) = (PLACE_ONE / 8, PLACE_ONE / 4);
         assert_eq!(pl.placed(0, 0, 0), Some(a));
         assert_eq!(

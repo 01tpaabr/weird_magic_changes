@@ -331,6 +331,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
         && reload::field_names(kinds) == m.fields
         && reload::ground_names(kinds) == m.grounds
         && reload::feature_names(kinds) == m.features
+        && reload::layer_names(kinds) == m.layers
     {
         None
     } else {
@@ -339,6 +340,7 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
                 &m.kinds,
                 &m.fields,
                 (&m.grounds, &m.features),
+                &m.layers,
                 kinds,
                 m.seed,
             )
@@ -417,6 +419,7 @@ pub fn meta(world: &World) -> WorldMeta {
         fields: reload::field_names(kinds),
         grounds: reload::ground_names(kinds),
         features: reload::feature_names(kinds),
+        layers: reload::layer_names(kinds),
         packs: kinds.debug.packs.clone(),
         rules_hash: kinds.hash,
     }
@@ -576,6 +579,9 @@ fn load_chunks(
     let nfields = remap
         .as_ref()
         .map_or(world.resource::<Kinds>().fields.len(), Plan::old_fields);
+    let nlayers = remap
+        .as_ref()
+        .map_or(world.resource::<Kinds>().layers.len(), Plan::old_layers);
     let (ngrounds, nfeatures) = remap.as_ref().map_or_else(
         || {
             let m = &world.resource::<Kinds>().materials;
@@ -606,6 +612,13 @@ fn load_chunks(
                         "{}: feature {} past the save's {nfeatures} features",
                         s.chunk_path(c).display(),
                         f.0
+                    ));
+                }
+                if d.data.cells.extra.len() != nlayers {
+                    return Err(format!(
+                        "{}: {} declared layers, the save's rules declare {nlayers}",
+                        s.chunk_path(c).display(),
+                        d.data.cells.extra.len()
                     ));
                 }
                 if d.data.cells.fields.len() != nfields {
@@ -679,7 +692,7 @@ fn load_chunks(
                 if e.needs.is_empty() && e.mems.is_empty() {
                     continue;
                 }
-                let (_, slot) = data.cells.layer(e.placed.cover)[usize::from(e.cell)]
+                let (_, slot) = data.cells.layer(e.placed.layer)[usize::from(e.cell)]
                     .unpack()
                     .expect("an explicit start is placed");
                 let m = &mut data.minds.rows[usize::from(slot)];
@@ -804,9 +817,10 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
     };
-    let (cover, table) = {
+    let (layer, flies, table) = {
         let kinds = world.resource::<Kinds>();
-        (kinds.def(kind).cover, kinds.materials.table)
+        let layer = kinds.def(kind).layer;
+        (layer, kinds.flies(layer), kinds.materials.table)
     };
     let mut q = world.query::<(
         &mut ChunkCells,
@@ -817,7 +831,10 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
         return false;
     };
-    if !cells.walkable(i, &table) || !cells.layer(cover)[i].is_none() {
+    if usize::from(layer) >= 2 + cells.extra.len()
+        || !(flies || cells.walkable(i, &table))
+        || !cells.layer(layer)[i].is_none()
+    {
         return false;
     }
     let mut actors = ActorsMut {
@@ -825,7 +842,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
         minds: &mut minds.rows,
         cells: &mut cells,
     };
-    actors.push_in(i, kind, mind, cover);
+    actors.push_in(i, kind, mind, layer);
     meta.dirty = true;
     true
 }
@@ -841,8 +858,8 @@ pub fn checksum(world: &mut World) -> u64 {
 /// What every world holds between two ticks, for tests and the simulation
 /// fuzzer: the stage directory and the chunk entities agree; every chunk's
 /// rows pass [`crate::actors::validate`] (one row per occupied cell of each
-/// layer, each pointing back); every row stands on a walkable cell, in the
-/// layer its kind says, with only the flags a row may keep between ticks,
+/// layer, each pointing back); every row stands on a walkable cell (any
+/// cell in a layer that flies), in the layer its kind says, with only the flags a row may keep between ticks,
 /// the stagger of its uid, its needs in `0..=max` (unused slots 0), unused
 /// mem slots 0, a state of its kind, and clocks not past now; every chunk
 /// holds a layer per field, each value in `0..=max`. The first broken one,
@@ -887,14 +904,22 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
                     def.name, mind.uid, at.x, at.y
                 ))
             };
-            if !cells.walkable(usize::from(r.cell), &kinds.materials.table) {
+            if !kinds.flies(r.layer) && !cells.walkable(usize::from(r.cell), &kinds.materials.table)
+            {
                 return bad("on a cell that is not walkable".into());
             }
             if r.flags & !(flags::WAKE | flags::COVER) != 0 {
                 return bad(format!("flags {:#04x}", r.flags));
             }
-            if (r.flags & flags::COVER != 0) != def.cover {
-                return bad("in the other layer than its kind's".into());
+            if r.layer != def.layer {
+                return bad(format!("in layer {}, its kind's is {}", r.layer, def.layer));
+            }
+            if cells.extra.len() != kinds.layers.len() {
+                return bad(format!(
+                    "{} declared layers in its chunk for {}",
+                    cells.extra.len(),
+                    kinds.layers.len()
+                ));
             }
             if r.stagger != mind.uid as u16 {
                 return bad(format!("stagger {:#x}", r.stagger));
@@ -3933,7 +3958,7 @@ mod tests {
             let id = w.resource::<Kinds>().by_name(name).unwrap().id;
             let cells = stage::chunk(w, c).unwrap();
             (0..CHUNK_CELLS)
-                .filter(|&i| cells.layer(false)[i].unpack().is_some_and(|(k, _)| k == id))
+                .filter(|&i| cells.layer(0)[i].unpack().is_some_and(|(k, _)| k == id))
                 .collect()
         };
         let store = tmp_store("reload-starts");
@@ -4158,7 +4183,7 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             crate::rules::compile("g.rules", "kind hen { } kind fox { } kind grass { }").unwrap();
         let e = open_world_with(&store, standing).unwrap_err().to_string();
         assert!(
-            e.contains("`grass` moved between standing and ground cover"),
+            e.contains("`grass` moved from ground cover to standing"),
             "{e}"
         );
         std::fs::remove_dir_all(store.dir()).unwrap();

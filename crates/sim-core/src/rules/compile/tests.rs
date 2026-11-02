@@ -28,6 +28,7 @@ fn run_think_in(
     let mut chunks = [None; 9];
     chunks[4] = Some((cells, actors));
     let halo = Halo {
+        flies: 0,
         chunks,
         tags: &k.tag_bits,
         family_end: &k.family_end,
@@ -2543,4 +2544,85 @@ fn height_errors_name_the_problem() {
         "inherited"
     );
     assert!(k.fields[0].relief);
+}
+
+/// Packs declare layers after the engine's two (standing, ground cover);
+/// a kind names one, inherits its parent's, and lives in one layer only.
+#[test]
+fn layers_are_declared_named_and_inherited() {
+    let k = compile(
+        "t.rules",
+        "layer air { flies }
+         layer burrow
+         kind gull { layer air  when true => move random free }
+         kind tern extends gull { }
+         kind mole { layer burrow }
+         kind crab { }
+         kind weed { cover }",
+    )
+    .unwrap();
+    let layer = |n: &str| k.by_name(n).unwrap().layer;
+    assert_eq!(
+        [
+            layer("gull"),
+            layer("tern"),
+            layer("mole"),
+            layer("crab"),
+            layer("weed")
+        ],
+        [2, 2, 3, 0, 1]
+    );
+    assert!(k.flies(2) && !k.flies(3) && !k.flies(0) && !k.flies(1));
+    assert_ne!(
+        k.hash,
+        compile(
+            "t.rules",
+            "layer air
+             layer burrow
+             kind gull { layer air  when true => move random free }
+             kind tern extends gull { }
+             kind mole { layer burrow }
+             kind crab { }
+             kind weed { cover }"
+        )
+        .unwrap()
+        .hash,
+        "whether a layer flies is in the hash"
+    );
+    let errs = [
+        ("layer air layer air", "already a name"),
+        ("kind air { } layer air", "already a name"),
+        ("const air = 1  layer air", "already a name"),
+        ("layer soil", "already a name"),
+        ("layer standing", "already a name"),
+        (
+            "layer air { walkable }",
+            "expected `flies` or `}` in a layer",
+        ),
+        ("kind k { layer air }", "no layer `air`"),
+        (
+            "layer air  kind k { layer air  layer air }",
+            "`layer` declared twice",
+        ),
+        (
+            "layer air  kind k { cover  layer air }",
+            "a kind lives in one layer",
+        ),
+        (
+            "layer air  kind k { cover }  kind j extends k { layer air }",
+            "a kind lives in one layer",
+        ),
+        (
+            "layer a  layer b  trait k { layer a }  trait j { layer b }  kind m extends k, j { }",
+            "layers",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    let many: String = (0..=crate::rules::MAX_LAYERS)
+        .map(|i| format!("layer l{i} "))
+        .collect();
+    assert!(compile_err(&many).contains("at most 8 layers"));
 }

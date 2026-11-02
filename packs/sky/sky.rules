@@ -1,0 +1,37 @@
+# sky: a declared layer (docs/RULES.md §12, Layers). Gulls live in the `air`
+# layer, which flies: they cross the sea, and a gull and a crab share a cell,
+# one above the other, without contesting it. Crabs walk the sand below and
+# breed there; a hungry gull stoops on the crab under it (`eat here`: from a
+# declared layer a bite reaches the one standing beneath). Each remembers
+# whether it was ever over water: gulls are, crabs never.
+# scenarios/tests/sky.scenario plays it.
+
+layer air { flies }
+
+kind gull {
+  glyph "v"
+  color "#f4f4f4"
+  layer air
+  cadence 2
+  sight 6
+  need food max 2d vital
+  mem wet
+
+  when is(here, water) and wet == 0           => { wet = 1  move random free }
+  when food < 40h and is(here, crab)           => eat here
+  when food < 40h and nearest crab within 6 as c => move toward c
+  when true                                   => move random free
+}
+
+kind crab {
+  glyph "c"
+  color "#e0603a"
+  cadence 4
+  food 12h
+  need health max 1 decay 0 vital     # one stoop
+  mem wet
+
+  when is(here, water)                        => { wet = 1  idle }
+  when rand(4000) < 1 and nearest free within 1 as n => spawn crab at n   # about every 18h
+  when true                                   => move random free
+}

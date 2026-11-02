@@ -47,11 +47,12 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     stagger: u16,   // uid low bits: cadence phase
     signal: i16,    // rule-written, readable by others via signal_of(t)
     look: u8,       // rule-written public byte: `kind:look`, `look_of`, `wmc why`; not drawn
-    flags: u8,      // DEAD | WAKE
-    _pad: u16,
+    flags: u8,      // DEAD | WAKE | COVER
+    layer: u8,      // 0 standing, 1 ground cover, 2 and up a declared layer (ChunkCells::extra)
+    _pad: u8,
 }
 #[repr(C)] pub struct ActorMind {  // 88 B, Pod. Only the owning chunk touches it.
-    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child]
+    uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child, STREAM_UID_LAYER | layer << 16 in a declared layer]
     born: u32, last_think: u32,   // wrapping ticks
     needs: [i32; 4],          // ticks-until-empty, or points when decay 0; named per kind
     mem: [i32; 12],           // the program's whole persistent memory, named per kind
@@ -104,7 +105,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
   `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
   a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
-- **Save**: chunk file v12 = cell layers (`occupant`, `cover`, the field layers), `n`, `ActorPub[n]`,
+- **Save**: chunk file v13 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'

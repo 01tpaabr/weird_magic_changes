@@ -88,6 +88,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `glyph "c"` | `?` | one printable ASCII character |
 | `color "#rrggbb"` | pale yellow | the glyph's colour |
 | `cover` | no | ground cover (grass): lies under whoever stands on the cell, never blocks, never moves; eaten with `graze` |
+| `layer NAME` | standing | the declared layer (§12, Layers) its actors live in, one a cell, apart from who stands there and the cover; not with `cover` |
 | `solid` | no | drawn as a whole cell of its colour, no glyph (a solid cover: the background of whoever stands on it); for pictures and boards. Only the renderer reads it: `wmc show` and the inspector still use the glyph |
 | `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
 | `cadence N` | 8 | thinks every N ticks; a power of two |
@@ -271,16 +272,16 @@ first). Those names are not words of the language; the last three read as the sh
 |---|---|
 | `idle` | nothing; ends the rule |
 | `die` | the actor is removed |
-| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between standing and cover kinds |
-| `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover. `BLOCKED` if the cell is taken, not loaded or out of reach (at least 64 cells each way, §11) |
+| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between layers (standing, cover, a declared one) |
+| `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover; a kind in a declared layer a cell with nobody in that layer, walkable unless the layer flies. `BLOCKED` if the cell is taken, not loaded or out of reach (at least 64 cells each way, §11) |
 | `move t` | one step toward t; slides past a blocked cell by 45 degrees. Contested cells go to the actor with the lowest key this tick; a cell someone left or died on this tick can't be entered until the next. `BLOCKED` if it didn't move |
 | `drink t` | t must be adjacent water: the need named `water` refills to max; else `REFUSED` |
-| `eat t` | bites the standing actor at adjacent cell t, which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
+| `eat t` | bites the standing actor at adjacent cell t (from a declared layer also `here`: the one standing under it), which needs `health`: takes up to `bite` of it, and gives the eater's `food` the same share of the victim's `food`. At 0 health the victim dies |
 | `hit t` | like `eat`, without the food |
 | `graze t` | like `eat`, on the ground cover at t, adjacent or `here` |
 | `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes, if anything moved. `BLOCKED` if nothing moved (own NEED full, the target's empty, or `n` is 0) |
 | `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover. `BLOCKED` if nothing moved |
-| `build M at t` | lays ground or feature M (the rules' own, or soil, water, rock) on the adjacent cell t, which must be walkable and empty at tick start; claimed like a move, so the lowest key wins it. A feature goes only where there is none; whatever makes the cell unwalkable only where no ground cover lies. `BLOCKED` if it may not; `REFUSED` for a cell not adjacent. In a chunk or across its border, as `spawn` is |
+| `build M at t` | lays ground or feature M (the rules' own, or soil, water, rock) on the adjacent cell t, which must be walkable and empty at tick start; claimed like a move, so the lowest key wins it. A feature goes only where there is none; whatever makes the cell unwalkable only where no ground cover lies and nobody is in a declared layer that does not fly. `BLOCKED` if it may not; `REFUSED` for a cell not adjacent. In a chunk or across its border, as `spawn` is |
 | `dig t` | clears the feature of t, adjacent or underfoot: a rock, a wall. `BLOCKED` if there is none; `REFUSED` for a cell not adjacent |
 | `harvest F n` | moves up to `n` of field F on the actor's own cell into its need of the same name, never past the need's max (§12, Fields). `BLOCKED` if nothing moved; a `fixed` field can't be harvested |
 | `drop F n` | moves up to `n` of the need named F into field F on the actor's own cell, never past the field's max. `BLOCKED` if nothing moved |
@@ -316,9 +317,9 @@ Effects combine with the action and don't end the think.
 | `taken` | something was taken from it since its last think |
 | `trapped` | its last think ran out of fuel or faulted |
 | `count pred within r` | matching cells in the square of radius r, **own cell included**. The radius is one term (a number, a name, a call or a parenthesised expression): `count fox within 3 - 1` is the count minus one; write `within (R - 1)` for a sum |
-| `free(t)` | the cell is walkable and nobody stands there |
+| `free(t)` | the cell is walkable and nobody stands there; for a kind in a declared layer, nobody is there in its layer (and it is walkable, unless the layer flies) |
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
-| `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover; 0 for nobody |
+| `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover, else of the first declared layer holding someone; 0 for nobody |
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
 
@@ -359,11 +360,11 @@ A **predicate** says what a cell must hold:
 
 | predicate | matches |
 |---|---|
-| a kind (`fox`) or a tag (`meat`) | whoever stands there, or the cover there; a kind matches its whole family (§6) |
+| a kind (`fox`) or a tag (`meat`) | whoever stands there, the cover there, or anyone in a declared layer there; a kind matches its whole family (§6) |
 | `only fox` | that kind exactly, not the kinds that extend it |
 | `kind:look` (`flower:1`), `only kind:look` | that kind (family, or exactly) showing that look |
 | `water`, `soil`, `rock` | the ground, the feature |
-| `free` | walkable, nobody standing |
+| `free` | walkable, nobody standing; read by a kind in a declared layer: nobody there in its layer, walkable unless the layer flies |
 | `bare` | walkable, no ground cover |
 | `(F op v and ...)` | a **field condition**: each field of the cell compares true against its value (`(sugar < 20)`, `(trail > 100 and free)`); one plain predicate may join them; at most three fields. The values are worked out once, before the search, so `(sugar < ROOM - 1)` costs one sum, not one a cell. An unloaded cell never matches. It takes two local slots a field and one more while its search runs (`for each`: while the loop runs) |
 
@@ -450,6 +451,43 @@ among them. The terrain generator lays only the three; a drawn map's legend name
 (§14). A save keeps materials by name: reopened under rules that number them otherwise,
 every cell keeps its material; one the rules no longer declare becomes the first ground,
 or no feature.
+
+### Layers
+
+A cell holds one actor in each **layer**. The engine has two: who stands there and the
+ground cover under them (`cover`). A pack declares more beside its kinds, and a kind names
+the one it lives in:
+
+```rules
+layer air { flies }
+
+kind gull {
+  glyph "v"
+  layer air
+  sight 6
+  need food max 2d vital
+  when food < 40h and is(here, crab) => eat here     # stoops on the crab under it
+  when food < 40h and nearest crab within 6 as c => move toward c
+  when true => move random free                      # free: nobody in the air there
+}
+
+kind crab {
+  glyph "c"
+  need health max 1 decay 0 vital
+  when true => move random free                      # free: nobody standing there
+}
+```
+
+Each layer has its own occupants and its own claims: a gull and a crab share a cell
+without contesting it, and two gulls contest it as two crabs do (the lowest key wins).
+`flies` lets the layer's actors over any ground, water and rock too; without it, they
+need walkable cells, as walkers do. `free` means free in the reader's own layer; a kind
+or tag predicate (`nearest crab`, `is(here, gull)`) finds an actor in any layer; from a
+declared layer, `eat` and `hit` reach the one standing under the biter (`here`) as well as
+its neighbours. A kind inherits its parent's layer; ground cover can't be in a declared
+layer. A layer's name is global like a kind's, never `standing` or `cover`; at most 8 a
+rule set. The renderer draws the topmost layer holding someone. A save keeps layers by
+name; a kind that moved to another layer is refused (restart). `packs/sky` plays it.
 
 ### Fields
 
@@ -617,7 +655,8 @@ Where regions overlap, an error names the line and a cell where the shares pass 
 is exact to one part in 2^24 (the smallest is 1 / 16777216), so
 halves, quarters and eighths add up exactly (`start alive 3 / 8` and `start dead 5 / 8` fill
 every cell), while `1 / 3` and `2 / 3` leave about one cell in 16.7 million empty. An explicit start takes its cell, whatever the
-shares would have put there. A cover kind starts in the cover layer. Everyone starts newborn,
+shares would have put there. A kind starts in its layer: a cell holds one explicit start a layer (a gull over a crab),
+and the shares one actor a cell, in its kind's layer, on walkable cells. Everyone starts newborn,
 needs full, but for what `with` sets.
 
 **A drawn map.** A scenario can draw its ground instead of rolling it. The map's size is the
@@ -679,7 +718,7 @@ expect became chick == 1
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
-| `expect at (X, Y) K` | the standing actor there, else the cover, is a K; `nobody` for an empty cell; the cell must be inside the world |
+| `expect at (X, Y) K` | someone there, in any layer, is a K; `nobody` for a cell with nobody in any layer; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
 `OP` is one of `== != < <= > >=`, and `V` a whole number or a time. A kind means its
@@ -837,7 +876,7 @@ does. Kinds, needs, memory, states and fields are matched **by name**, so every 
 keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
 writes to the save, the whole directory moves over to the new numbering, and from then on it
 belongs to the new set of packs. Rules that lack one of the save's kinds are refused with the
-list, and so is a kind that turned from standing into ground cover, or back. A saved start
+list, and so is a kind that moved to another layer (standing, ground cover, a declared one by name). A saved start
 naming a kind the rules lack (its rows went in a reload, below) is skipped, said so on
 stderr, and kept in the save: its share keeps its slice of the draw, so the other kinds
 keep their cells, and the kind starts again in new ground when it is back.
@@ -1003,6 +1042,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | tags per rule set | 64 |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |
+| declared layers per rule set | 8 (beside standing and cover) |
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |
 | states per kind | 64 |

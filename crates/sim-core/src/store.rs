@@ -4,11 +4,12 @@
 //!
 //! ```text
 //! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
-//!                              gen params, starts, drawn map, kinds (names, cover, slot
-//!                              names), fields, grounds and features, packs, rules hash
+//!                              gen params, starts, drawn map, kinds (names, layer, slot
+//!                              names), fields, grounds and features, layers, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
-//!                              as raw bytes (ground, feature, occupant, cover),
-//!                              then f and f field layers (u16 each), then n, n public actor
+//!                              as raw bytes (ground, feature, occupant, cover), then l and
+//!                              l declared layers (u32 each), then f and f field layers
+//!                              (u16 each), then n, n public actor
 //!                              rows, n private actor rows, as raw bytes
 //! ```
 //!
@@ -37,17 +38,17 @@ use std::path::{Path, PathBuf};
 use bevy_ecs::resource::Resource;
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
-use crate::rules::Kinds;
 use crate::rules::compile::MAX_FIELDS;
+use crate::rules::{Kinds, MAX_LAYERS};
 use crate::scenario::{DrawnMap, Region, Start, in_world};
 use crate::stage::worldgen::GenParams;
 use crate::stage::{
-    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, MAX_FEATURES,
-    MAX_GROUNDS, WORLD_EXTENT,
+    ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData,
+    MAX_FEATURES, MAX_GROUNDS, WORLD_EXTENT,
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 12;
+pub const FORMAT_VERSION: u32 = 13;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -72,6 +73,8 @@ pub struct WorldMeta {
     /// Ground and feature names of those rules, by index (features from 1).
     pub grounds: Vec<String>,
     pub features: Vec<String>,
+    /// Declared layer names of those rules, layer 2 first.
+    pub layers: Vec<String>,
     /// The rule packs the world is played with, as given (step 8c).
     pub packs: Vec<String>,
     /// `Kinds::hash` of the rules the save was last played with. Recorded,
@@ -85,7 +88,8 @@ pub struct WorldMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SavedKind {
     pub name: String,
-    pub cover: bool,
+    /// 0 standing, 1 ground cover, 2 and up a declared layer.
+    pub layer: u8,
     pub needs: Vec<String>,
     pub mems: Vec<String>,
     pub states: Vec<String>,
@@ -99,7 +103,7 @@ impl SavedKind {
             .iter()
             .map(|d| SavedKind {
                 name: d.name.clone(),
-                cover: d.cover,
+                layer: d.layer,
                 needs: d.needs.iter().map(|n| n.name.clone()).collect(),
                 mems: d.mems.clone(),
                 states: kinds
@@ -304,7 +308,7 @@ impl Store {
         for _ in 0..n {
             let k = SavedKind {
                 name: r.str()?,
-                cover: r.u8()? != 0,
+                layer: r.u8()?,
                 needs: r.strs()?,
                 mems: r.strs()?,
                 states: r.strs()?,
@@ -323,6 +327,24 @@ impl Store {
         let fields = r.strs()?;
         let grounds = r.strs()?;
         let features = r.strs()?;
+        let layers = r.strs()?;
+        if layers.len() > MAX_LAYERS {
+            return Err(bad(format!(
+                "{} layers, this build holds {MAX_LAYERS}",
+                layers.len()
+            )));
+        }
+        if let Some(k) = kinds
+            .iter()
+            .find(|k| usize::from(k.layer) >= 2 + layers.len())
+        {
+            return Err(bad(format!(
+                "kind `{}` in layer {}, the save declares {}",
+                k.name,
+                k.layer,
+                layers.len()
+            )));
+        }
         if grounds.len() > MAX_GROUNDS || features.len() > MAX_FEATURES {
             return Err(bad(format!(
                 "{} grounds and {} features, this build holds {MAX_GROUNDS} and {MAX_FEATURES}",
@@ -351,6 +373,7 @@ impl Store {
             fields,
             grounds,
             features,
+            layers,
             packs,
             rules_hash,
         }))
@@ -426,7 +449,7 @@ impl Store {
         w.len(m.kinds.len());
         for k in &m.kinds {
             w.str(&k.name);
-            w.u8(u8::from(k.cover));
+            w.u8(k.layer);
             w.strs(&k.needs);
             w.strs(&k.mems);
             w.strs(&k.states);
@@ -434,6 +457,7 @@ impl Store {
         w.strs(&m.fields);
         w.strs(&m.grounds);
         w.strs(&m.features);
+        w.strs(&m.layers);
         w.strs(&m.packs);
         w.u64(m.rules_hash);
         write_atomic(&self.meta_path(), &w.buf)
@@ -488,6 +512,20 @@ impl Store {
         for (o, b) in cells.cover.iter_mut().zip(cover.as_chunks::<4>().0) {
             o.0 = u32::from_le_bytes(*b);
         }
+        let l = r.u32()? as usize;
+        if l > MAX_LAYERS {
+            return Err(bad(format!(
+                "{l} declared layers, this build holds {MAX_LAYERS}"
+            )));
+        }
+        for _ in 0..l {
+            let bytes = r.bytes(CHUNK_CELLS * 4)?;
+            let mut layer = [ActorId::NONE; CHUNK_CELLS];
+            for (o, b) in layer.iter_mut().zip(bytes.as_chunks::<4>().0) {
+                o.0 = u32::from_le_bytes(*b);
+            }
+            cells.extra.push(layer);
+        }
         let f = r.u32()? as usize;
         if f > MAX_FIELDS {
             return Err(bad(format!(
@@ -503,8 +541,11 @@ impl Store {
             cells.fields.push(layer);
         }
         let n = r.u32()? as usize;
-        if n > 2 * CHUNK_CELLS {
-            return Err(bad(format!("{n} actor rows for {CHUNK_CELLS} cells")));
+        if n > (2 + l) * CHUNK_CELLS {
+            return Err(bad(format!(
+                "{n} actor rows for {CHUNK_CELLS} cells in {} layers",
+                2 + l
+            )));
         }
         let actors = ChunkActors {
             rows: r.rows::<ActorPub>(n)?,
@@ -545,6 +586,10 @@ impl Store {
         w.buf
             .extend_from_slice(bytemuck::cast_slice(&cells.feature));
         for o in cells.occupant.iter().chain(&cells.cover) {
+            w.buf.extend_from_slice(&o.0.to_le_bytes());
+        }
+        w.u32(u32::try_from(cells.extra.len()).expect("at most MAX_LAYERS layers"));
+        for o in cells.extra.iter().flatten() {
             w.buf.extend_from_slice(&o.0.to_le_bytes());
         }
         w.u32(u32::try_from(cells.fields.len()).expect("at most MAX_FIELDS fields"));
@@ -806,14 +851,14 @@ mod tests {
             kinds: vec![
                 SavedKind {
                     name: "seed".into(),
-                    cover: false,
+                    layer: 0,
                     needs: names(&["water", "health"]),
                     mems: names(&["lit"]),
                     states: Vec::new(),
                 },
                 SavedKind {
                     name: "árvore".into(),
-                    cover: true,
+                    layer: 3,
                     needs: Vec::new(),
                     mems: Vec::new(),
                     states: names(&["grow", "rest"]),
@@ -822,6 +867,7 @@ mod tests {
             fields: names(&["sugar", "höhe"]),
             grounds: names(&["soil", "water", "mud"]),
             features: names(&["rock", "wall"]),
+            layers: names(&["air", "tief"]),
             packs: names(&["/rules/base", "rules/mod"]),
             rules_hash: 0xABCD,
         };
@@ -891,7 +937,7 @@ mod tests {
         let slot = |n: usize| (0..n).map(|i| format!("s{i}")).collect::<Vec<_>>();
         let kind = |needs: usize, mems: usize| SavedKind {
             name: "seed".into(),
-            cover: false,
+            layer: 0,
             needs: slot(needs),
             mems: slot(mems),
             states: Vec::new(),
@@ -1044,8 +1090,24 @@ mod tests {
         bytes[28] = 200; // an invalid Ground discriminant (after magic, version, bits, coord, tick)
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
+        // A declared layer count past the most, then one the file does not
+        // hold.
+        let l_at = 28 + CHUNK_CELLS * 10;
+        let mut bytes = good.clone();
+        bytes[l_at..l_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(
+            s.read_chunk(c)
+                .unwrap_err()
+                .to_string()
+                .contains("declared layers")
+        );
+        let mut bytes = good.clone();
+        bytes[l_at..l_at + 4].copy_from_slice(&3u32.to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(s.read_chunk(c).is_err());
         // A field count past the most, then one the file does not hold.
-        let f_at = 28 + CHUNK_CELLS * 10;
+        let f_at = l_at + 4;
         let mut bytes = good.clone();
         bytes[f_at..f_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
@@ -1127,6 +1189,7 @@ mod tests {
             fields: Vec::new(),
             grounds: Vec::new(),
             features: Vec::new(),
+            layers: Vec::new(),
             packs: Vec::new(),
             rules_hash: 0,
         };

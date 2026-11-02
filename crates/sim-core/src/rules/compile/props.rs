@@ -171,8 +171,9 @@ fn generated_programs_use_fields() {
         "sees(",
         " along ",
         "climb ",
+        "layer gair",
     ];
-    let mut seen = [0usize; 20];
+    let mut seen = [0usize; 21];
     let mut h = 7u64;
     for i in 0..3000 {
         let choices: Vec<u32> = (0..1500)

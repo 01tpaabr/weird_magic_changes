@@ -181,13 +181,19 @@ pub fn pick(world: &World, p: Pos, selected: Option<u64>) -> Option<(u64, ChunkC
             .and_then(|(_, slot)| minds.rows.get(usize::from(slot)))
             .map(|m| m.uid)
     };
-    let (standing, cover) = (uid(cells.occupant[i]), uid(cells.cover[i]));
-    let uid = match (standing, cover) {
-        (Some(s), Some(c)) if selected == Some(s) => c,
-        (Some(s), _) => s,
-        (None, c) => c?,
-    };
-    Some((uid, cc))
+    // Top down: the declared layers, who stands, the cover; a click on the
+    // selected one picks the next below it.
+    let here: Vec<u64> = cells
+        .extra
+        .iter()
+        .rev()
+        .chain([&cells.occupant, &cells.cover])
+        .filter_map(|l| uid(l[i]))
+        .collect();
+    let next = selected
+        .and_then(|s| here.iter().position(|&u| u == s))
+        .and_then(|at| here.get(at + 1));
+    Some((*next.or(here.first())?, cc))
 }
 
 /// Where the actor `uid` is: its cell, chunk and row. First in chunk `near`

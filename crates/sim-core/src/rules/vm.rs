@@ -519,6 +519,9 @@ pub enum Want {
     /// Someone whose kind carries tag bit `b`.
     Tag(u32),
     Free,
+    /// `free` for a kind in declared layer `.0`: nobody there in that
+    /// layer, and walkable unless the layer flies (`.1`).
+    FreeIn(u8, bool),
     Bare,
     Ground(i32),
     Feature(i32),
@@ -583,6 +586,33 @@ impl Want {
         Want::Kinds(lo, hi)
     }
 
+    /// Is actor `id` a kind or tag this wants? For the declared layers.
+    #[inline]
+    fn hits(self, id: ActorId, actors: &ChunkActors, tags: &[u64]) -> bool {
+        let Some((k, slot)) = id.unpack() else {
+            return false;
+        };
+        match self {
+            Want::Kinds(lo, hi) => k >= lo && k < hi,
+            Want::KindsLook(lo, hi, look) => {
+                k >= lo
+                    && k < hi
+                    && actors
+                        .rows
+                        .get(usize::from(slot))
+                        .is_some_and(|r| r.look == look)
+            }
+            Want::Tag(bit) => tags.get(usize::from(k)).is_some_and(|t| t >> bit & 1 == 1),
+            _ => false,
+        }
+    }
+
+    /// [`Want::hits`] in the declared layers of local cell `i`.
+    #[inline(never)]
+    fn hits_above(self, cells: &ChunkCells, actors: &ChunkActors, i: usize, tags: &[u64]) -> bool {
+        cells.extra.iter().any(|l| self.hits(l[i], actors, tags))
+    }
+
     /// Does local cell `i` hold what this wants? `actors` are the chunk's
     /// public rows (for looks), `tags` the tag bitset per kind.
     #[inline]
@@ -594,12 +624,16 @@ impl Want {
         tags: &[u64],
         m: &MaterialTable,
     ) -> bool {
-        // A kind or a tag matches whoever stands on the cell or covers it.
+        // A kind or a tag matches whoever stands on the cell, covers it or
+        // is in one of its declared layers (out of line: most worlds have
+        // none, and every search tests every cell).
         let (occupant, cover) = (cells.occupant[i], cells.cover[i]);
         match self {
             Want::Kinds(lo, hi) => {
                 let hit = |id: ActorId| id.unpack().is_some_and(|(k, _)| k >= lo && k < hi);
-                hit(occupant) || hit(cover)
+                hit(occupant)
+                    || hit(cover)
+                    || (!cells.extra.is_empty() && self.hits_above(cells, actors, i, tags))
             }
             Want::KindsLook(lo, hi, look) => {
                 let hit = |id: ActorId| {
@@ -612,7 +646,9 @@ impl Want {
                                 .is_some_and(|r| r.look == look)
                     })
                 };
-                hit(occupant) || hit(cover)
+                hit(occupant)
+                    || hit(cover)
+                    || (!cells.extra.is_empty() && self.hits_above(cells, actors, i, tags))
             }
             Want::Tag(bit) => {
                 let hit = |id: ActorId| {
@@ -620,9 +656,16 @@ impl Want {
                         tags.get(usize::from(k)).is_some_and(|t| t >> bit & 1 == 1)
                     })
                 };
-                hit(occupant) || hit(cover)
+                hit(occupant)
+                    || hit(cover)
+                    || (!cells.extra.is_empty() && self.hits_above(cells, actors, i, tags))
             }
             Want::Free => cells.walkable(i, m) && occupant.is_none(),
+            Want::FreeIn(l, flies) => {
+                usize::from(l) < 2 + cells.extra.len()
+                    && cells.layer(l)[i].is_none()
+                    && (flies || cells.walkable(i, m))
+            }
             Want::Bare => cells.walkable(i, m) && cover.is_none(),
             Want::Ground(g) => i32::from(cells.ground[i].0) == g,
             Want::Feature(f) => i32::from(cells.feature[i].0) == f,
@@ -644,6 +687,8 @@ pub struct Halo<'a> {
     pub family_end: &'a [u16],
     /// What walks, drinks and blocks (`Kinds::materials`).
     pub materials: &'a MaterialTable,
+    /// Bit `l`: declared layer `l` flies (`Kinds::flies`).
+    pub flies: u16,
 }
 
 impl<'a> Halo<'a> {
@@ -665,6 +710,20 @@ impl<'a> Halo<'a> {
             tags: &kinds.tag_bits,
             materials: &kinds.materials.table,
             family_end: &kinds.family_end,
+            flies: (2..2 + kinds.layers.len())
+                .filter(|&l| kinds.flies(u8::try_from(l).expect("at most MAX_LAYERS")))
+                .fold(0, |m, l| m | 1 << l),
+        }
+    }
+
+    /// What `free` means to a kind in `layer`: in a declared layer, nobody
+    /// there in it; else nobody standing there.
+    #[inline]
+    pub fn free_of(&self, layer: u8) -> Want {
+        if layer < 2 {
+            Want::Free
+        } else {
+            Want::FreeIn(layer, self.flies >> layer & 1 == 1)
         }
     }
 
@@ -727,11 +786,15 @@ impl<'a> Halo<'a> {
             .unwrap_or(0)
     }
 
-    /// The public row of whoever stands at the cell, else of its cover.
+    /// The public row of whoever stands at the cell, else of its cover,
+    /// else of the first declared layer that holds someone.
     #[inline]
     pub fn row_at(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> Option<&'a ActorPub> {
         let (cells, actors, i) = self.at(lx, ly, dx, dy)?;
-        let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
+        let (_, slot) = cells.occupant[i]
+            .unpack()
+            .or(cells.cover[i].unpack())
+            .or_else(|| cells.extra.iter().find_map(|l| l[i].unpack()))?;
         actors.rows.get(usize::from(slot))
     }
 }
@@ -917,7 +980,7 @@ impl Machine<'_> {
         let side = (2 * r + 1) as u32;
         self.spend(side * side / SEARCH_DIV)?;
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-        let want = self.ctx.halo.want(pred);
+        let want = self.want(pred);
         let mut n = 0;
         for dy in -r..=r {
             for dx in -r..=r {
@@ -935,7 +998,7 @@ impl Machine<'_> {
         let side = (2 * r + 1) as u32;
         self.spend(side * side / SEARCH_DIV)?;
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-        let want = self.ctx.halo.want(pred);
+        let want = self.want(pred);
         for ring in 1..=r {
             let n = 8 * ring;
             let start = self.draw_below(n);
@@ -949,6 +1012,21 @@ impl Machine<'_> {
         Ok(None)
     }
 
+    /// Decode a predicate as this think reads it: `free` in its own layer.
+    #[inline]
+    fn want(&self, pred: i32) -> Want {
+        match self.ctx.halo.want(pred) {
+            Want::Free => self.free(),
+            w => w,
+        }
+    }
+
+    /// `free` in the thinker's layer.
+    #[inline]
+    fn free(&self) -> Want {
+        self.ctx.halo.free_of(self.ctx.kind.layer)
+    }
+
     /// A free neighbour (`random free`): ring 1 as [`Machine::nearest`]
     /// scans it, with its draw and fuel, but not capped by `sight`: a
     /// neighbour is not a search (`free(east)` is not capped either).
@@ -958,7 +1036,7 @@ impl Machine<'_> {
         let start = (self.draw() % 8) as i32;
         for k in 0..8 {
             let (dx, dy) = ring_cell(1, (start + k) % 8);
-            if self.ctx.halo.free(lx, ly, dx, dy) {
+            if self.ctx.halo.test(lx, ly, dx, dy, self.free()) {
                 return Ok(Some((dx, dy)));
             }
         }
@@ -973,7 +1051,7 @@ impl Machine<'_> {
         let side = (2 * r + 1) as u32;
         self.spend(side * side / SEARCH_DIV)?;
         let f = usize::try_from(f).map_err(|_| Trap::BadSense)?;
-        let want = (pred != pred::ANY).then(|| self.ctx.halo.want(pred));
+        let want = (pred != pred::ANY).then(|| self.want(pred));
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
         let mut best = (0, 0, 0);
         for ring in 1..=r {
@@ -1067,7 +1145,7 @@ impl Machine<'_> {
             self.spend(side * side / SEARCH_DIV)?;
         }
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-        let want = self.ctx.halo.want(pred);
+        let want = self.want(pred);
         // Cells before ring `ring` (rings from 1): 4 * ring * (ring - 1).
         let mut ring = 1;
         while ring <= r && 4 * ring * (ring + 1) <= cursor {
@@ -1402,14 +1480,15 @@ impl Machine<'_> {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                        self.push(i32::from(self.ctx.halo.free(lx, ly, dx, dy)))?;
+                        let free = self.free();
+                        self.push(i32::from(self.ctx.halo.test(lx, ly, dx, dy, free)))?;
                     }
                     O::IsAt => {
                         let pred = self.pop()?;
                         let dy = self.pop()?;
                         let dx = self.pop()?;
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                        let want = self.ctx.halo.want(pred);
+                        let want = self.want(pred);
                         self.push(i32::from(self.cell_ok(lx, ly, dx, dy, want)))?;
                     }
                     O::DirOf => {
@@ -1749,6 +1828,7 @@ mod tests {
             entry,
             color: 0,
             cover: false,
+            layer: 0,
             solid: false,
             parent: None,
         }
@@ -1813,6 +1893,7 @@ mod tests {
     fn run_at(kinds: &Kinds, mind: &mut ActorMind, tick: u64) -> Outcome {
         let (cells, actors) = stage();
         let halo = Halo {
+            flies: 0,
             chunks: [
                 None,
                 None,
@@ -1944,6 +2025,7 @@ mod tests {
     fn the_trapping_op_is_traced() {
         let (cells, actors) = stage();
         let mut halo = Halo {
+            flies: 0,
             chunks: [None; 9],
             tags: &[],
             family_end: &[],
@@ -2314,6 +2396,7 @@ mod tests {
     fn halo_addressing_crosses_into_neighbours() {
         let (cells, actors) = stage();
         let mut halo = Halo {
+            flies: 0,
             chunks: [None; 9],
             tags: &[],
             family_end: &[],

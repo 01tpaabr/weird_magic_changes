@@ -1,0 +1,32 @@
+# The sky pack (packs/sky): a declared layer that flies. Gulls cross the sea
+# that crabs cannot enter, share cells with crabs without contesting them,
+# and eat the crab under them.
+#
+#   make run ARGS="scenario scenarios/tests/sky.scenario"
+rules ../../packs/sky
+seed 4
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+map {
+  ..........~~~~~~~~~~
+  ..........~~~~~~~~~~
+  ..........~~~~~~~~~~
+  ..........~~~~~~~~~~
+}
+legend {
+  . soil
+  ~ water
+}
+start crab 1 / 20
+start gull at (14, 1)                          # over the sea
+start gull at (3, 3)
+start crab at (3, 3)                           # under that gull: one cell, two layers
+run 1d
+expect eventually at (3, 3) gull to 1min
+expect eventually at (3, 3) crab to 1min
+expect eventually max wet of gull == 1         # a gull over water
+expect never max wet of crab > 0               # a crab never
+expect eaten crab by gull > 0
+expect born crab > 0
+expect traps gull == 0
+expect traps crab == 0
