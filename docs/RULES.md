@@ -467,6 +467,9 @@ when to_water() as p => move dir(p.via)
 - **The same everywhere.** Ties go to the state offered first, so a plan is the same on any
   number of threads.
 
+`packs/maze` finds its way through a maze this way and keeps the route in a memory array;
+`packs/workshop` plans its chores over what it carries.
+
 ```rules
 kind ant {
   glyph "a"
@@ -989,7 +992,7 @@ budget { fuel 256  rows 60  private 1 }
 | part | meaning |
 |---|---|
 | `fuel N` | a player's kinds think in at most N ops (1 to 32768): a kind's fuel, its own or the default 512, is cut to N. The arena's own kinds keep theirs |
-| `rows N` | no player has more than N rows alive. Each tick the room a player has left is shared among its spawns, chunk by chunk in coordinate order, then in key order; the rest are `REFUSED`. A death makes room again. A scenario's `start` lines aren't held to it |
+| `rows N` | no player has more than N rows alive. Each tick the room a player has left is shared among its spawns, chunk by chunk in coordinate order, then in key order; the rest are `REFUSED`. A death makes room again. A scenario's `start` lines aren't held to it. It counts the rows of the loaded world: scenarios, tests and `lab` load all of it, so there it is exact; in an endless world played with streaming, rows in chunks off screen are frozen (§11) and uncounted until they load again, which can bring a player over until deaths make room |
 | `private N` | a player declares at most N `private` fields |
 
 Only the arena declares a budget; a player's pack that does is refused. `packs/colony` keeps

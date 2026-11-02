@@ -103,7 +103,7 @@ pub fn player_of(pack: &str) -> (Option<&str>, &str) {
 
 /// Words a player's item can't take: renamed into the player's namespace,
 /// they would stop meaning what the language reads them as.
-const NOT_PLAYER_NAMES: [&str; 41] = [
+const NOT_PLAYER_NAMES: [&str; 50] = [
     "food",
     "health",
     "water",
@@ -132,6 +132,15 @@ const NOT_PLAYER_NAMES: [&str; 41] = [
     "blocks",
     "opaque",
     "budget",
+    "rows",
+    "namespace",
+    "goal",
+    "guess",
+    "limit",
+    "cost",
+    "via",
+    "steps",
+    "into",
     "reach",
     "climb",
     "along",
@@ -3548,7 +3557,7 @@ struct Gen<'a> {
     in_when: bool,
     /// Compiling a search's `next`: its state's first local, width and
     /// guess, for a `try`.
-    in_next: Option<(u8, u8, Option<Expr>)>,
+    in_next: Option<(u8, u8, Option<Expr>, usize)>,
 }
 
 /// Does this statement emit an action? Its position, if so.
@@ -5336,6 +5345,10 @@ impl<'a> Gen<'a> {
                     || body(&se.next)
                     || self.cond_acts(&se.goal, depth)
                     || se.guess.as_ref().is_some_and(|e| self.expr_acts(e, depth))
+                    || se
+                        .limit
+                        .as_ref()
+                        .is_some_and(|(e, _)| self.expr_acts(e, depth))
             }
             Stmt::Try {
                 values, cost, via, ..
@@ -5725,6 +5738,14 @@ impl<'a> Gen<'a> {
         let mut len = 1u8;
         while self.mem_slot(&format!("{n}[{len}]")) == Some(base + len) {
             len += 1;
+        }
+        // Declared twice with two lengths (a trait's, its kind's): the
+        // elements of the longer don't follow one another.
+        if self.mem_slot(&format!("{n}[{len}]")).is_some() {
+            return Err(self.err(
+                at,
+                format!("`{n}` is declared with two lengths (in a trait and its kind, say): declare the array once"),
+            ));
         }
         Ok((base, len))
     }
@@ -6439,7 +6460,9 @@ impl<'a> Gen<'a> {
         self.cond(&se.goal, expand, false)?;
         self.asm.search(OpCode::SearchDone, 0, 0).push(1).ret(true);
         self.asm.bind(expand);
-        let outer = self.in_next.replace((base, k, se.guess.clone()));
+        // The guess at each `try` sees the search's names, not `next`'s.
+        let scope = self.locals.len();
+        let outer = self.in_next.replace((base, k, se.guess.clone(), scope));
         let r = self.scoped(|g| g.stmts(&se.next));
         self.in_next = outer;
         r?;
@@ -6567,7 +6590,7 @@ impl<'a> Gen<'a> {
                 via,
                 at,
             } => {
-                let Some((base, k, guess)) = self.in_next.clone() else {
+                let Some((base, k, guess, scope)) = self.in_next.clone() else {
                     return Err(self.err(at, "`try` belongs in a search's `next`"));
                 };
                 if values.len() != usize::from(k) {
@@ -6596,7 +6619,10 @@ impl<'a> Gen<'a> {
                 match &guess {
                     Some(gu) => {
                         self.asm.search(OpCode::SearchSwap, base, k);
-                        self.expr(gu)?;
+                        let inner = self.locals.split_off(scope.min(self.locals.len()));
+                        let r = self.expr(gu);
+                        self.locals.extend(inner);
+                        r?;
                         self.asm.search(OpCode::SearchSwap, base, k);
                     }
                     None => self.push_int(0)?,

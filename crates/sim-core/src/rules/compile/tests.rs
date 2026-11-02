@@ -3100,3 +3100,60 @@ fn search_errors_name_the_problem() {
         assert!(e.contains(want), "{text}\n  got: {e}");
     }
 }
+
+/// Review finds, each fixed: a search whose `limit` acts is refused; a
+/// namespace's or a player's `const steps` doesn't rename the `.steps` of a
+/// plan; an array declared with two lengths is refused where it is used;
+/// the guess at a `try` reads the search's names, not a `let` in `next`.
+#[test]
+fn search_and_rename_review_finds_stay_fixed() {
+    let e = compile_err(
+        "sub mover() { move east  return 5 }
+         search s { state a = 0  next { try a + 1 }  goal a == 3  limit mover() }
+         kind k { glyph \"k\"  when true => { if s() { idle } else { idle } } }",
+    );
+    assert!(e.contains("a search doesn't act"), "{e}");
+
+    let spaced = "namespace foo
+                  const steps = 3
+                  const cost = 2
+                  search s { state a = 0  next { try a + 1 cost cost }  goal a >= steps }
+                  kind k { glyph \"k\"  mem m  when s() as p and p.steps > 0 => { m = p.cost  idle }  when true => idle }";
+    let k = compile("t.rules", spaced).unwrap();
+    assert!(k.by_name("foo.k").is_some());
+    let e = compile_owned(
+        &[
+            ("a.rules", "kind a { glyph \"a\" when true => idle }", None),
+            ("r.rules", "const steps = 3", Some("red")),
+        ],
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("a word the language reads"), "{e}");
+
+    let e = compile_err(
+        "trait t { mem route[2], z }
+         kind k extends t { glyph \"k\"  mem route[4]  when true => { route[3] = 7  idle } }",
+    );
+    assert!(e.contains("`route` is declared with two lengths"), "{e}");
+
+    // The guess reads the constant gx, whatever `next` binds: from the
+    // start and at each try alike (10 - a), so the plan is the same as
+    // without the `let`.
+    let plan = |next: &str| {
+        let text = format!(
+            "const gx = 10
+             search s {{ state a = 0  next {{ {next} try a + 1 }}  goal a >= 4  guess gx - a }}
+             kind k {{ glyph \"k\"  when s() as p => idle }}"
+        );
+        compile("t.rules", &text).unwrap().code
+    };
+    let with_let = plan("let gx = 0");
+    let without = plan("");
+    assert_eq!(
+        with_let.iter().filter(|o| o.code == OpCode::Load).count(),
+        without.iter().filter(|o| o.code == OpCode::Load).count(),
+        "the guess loads no local `gx`"
+    );
+}
