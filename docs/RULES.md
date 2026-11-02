@@ -894,6 +894,23 @@ start red.ant 1 / 200 in (0, 0) to (63, 127)
 start blue.ant 1 / 200 in (64, 0) to (127, 127)
 ```
 
+**A budget.** An arena may set what each player gets, so one player's code can't slow the
+world or crowd it for the others: one `budget` block, beside its fields, each part a
+constant expression and each optional.
+
+```rules
+budget { fuel 256  rows 60  private 1 }
+```
+
+| part | meaning |
+|---|---|
+| `fuel N` | a player's kinds think in at most N ops (1 to 4096): a kind's fuel, its own or the default 512, is cut to N. The arena's own kinds keep theirs |
+| `rows N` | no player has more than N rows alive. Each tick the room a player has left is shared among its spawns, chunk by chunk in coordinate order, then in key order; the rest are `REFUSED`. A death makes room again. A scenario's `start` lines aren't held to it |
+| `private N` | a player declares at most N `private` fields |
+
+Only the arena declares a budget; a player's pack that does is refused. `packs/colony` keeps
+each colony to 60 ants.
+
 Scenarios, `expect` lines and the tools name a player's kinds as `red.ant`. A save keeps
 each pack's player (`red=/abs/path`). A world without players is as it always was.
 

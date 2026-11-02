@@ -1,9 +1,14 @@
 # colony: an arena and its players (docs/RULES.md §15, Arenas and players).
 # This pack is the arena: the world's crumbs and how they grow back, and a
-# trait every player's ants may take. The players, packs/colony/red and
-# packs/colony/blue, declare kinds and `private` fields only; both name
-# theirs `ant` and `trail`, and neither can read the other's trail.
+# trait every player's ants may take, and the budget each player keeps
+# to. The players, packs/colony/red and packs/colony/blue, declare kinds
+# and `private` fields only; both name theirs `ant` and `trail`, and
+# neither can read the other's trail.
 # scenarios/tests/colony.scenario plays them.
+
+# What the arena leaves each player: ops a think, ants alive, private
+# fields. A colony that breeds past 60 ants has its eggs refused.
+budget { fuel 256  rows 60  private 1 }
 
 field room max 9 fixed { init noise scale 8 }       # what a cell holds, grown back
 

@@ -29,7 +29,7 @@ use super::vm::{
 };
 use super::{
     DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, LayerDef, Level,
-    MAX_LAYERS, MaterialDef, Materials, NeedDef, Policy, RuleInfo, RuleShape, Term,
+    MAX_LAYERS, MaterialDef, Materials, NeedDef, Players, Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS};
@@ -102,7 +102,7 @@ pub fn player_of(pack: &str) -> (Option<&str>, &str) {
 
 /// Words a player's item can't take: renamed into the player's namespace,
 /// they would stop meaning what the language reads them as.
-const NOT_PLAYER_NAMES: [&str; 40] = [
+const NOT_PLAYER_NAMES: [&str; 41] = [
     "food",
     "health",
     "water",
@@ -130,6 +130,7 @@ const NOT_PLAYER_NAMES: [&str; 40] = [
     "drink",
     "blocks",
     "opaque",
+    "budget",
     "reach",
     "climb",
     "along",
@@ -186,6 +187,9 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
             &f.at,
             "only a player's pack declares a `private` field",
         ));
+    }
+    if let Some(b) = items.budgets.get(1) {
+        return Err(pos_err(&b.at, "one `budget` in a rule set"));
     }
     let mut players: Vec<&str> = Vec::new();
     for &(_, _, o) in &lexed {
@@ -249,6 +253,12 @@ fn player_names(player: &str, own: &Items, arena: &Items) -> Result<Vec<String>>
                 "`{}`: a player's pack declares no layer: the arena shapes the world",
                 l.name
             ),
+        ));
+    }
+    if let Some(b) = own.budgets.first() {
+        return Err(pos_err(
+            &b.at,
+            "a player's pack declares no budget: the arena sets it",
         ));
     }
     if let Some(f) = own.fields.iter().find(|f| !f.private) {
@@ -705,6 +715,19 @@ struct Items {
     materials: Vec<MaterialAst>,
     /// `layer NAME { flies }`: declared layers, with where.
     layers: Vec<(LayerDef, Pos)>,
+    /// `budget { fuel N  rows N  private N }`: the arena's room for players.
+    budgets: Vec<BudgetAst>,
+}
+
+/// `budget { fuel N  rows N  private N }`, each part optional: what an
+/// arena leaves each player (`docs/RULES.md` §15). Numbers are constant
+/// expressions.
+#[derive(Debug, Clone)]
+struct BudgetAst {
+    at: Pos,
+    fuel: Option<(Expr, Pos)>,
+    rows: Option<(Expr, Pos)>,
+    private: Option<(Expr, Pos)>,
 }
 
 /// `ground NAME { walkable  drink  glyph "c"  color "#rrggbb" }` or
@@ -1404,14 +1427,50 @@ impl Parser<'_> {
                     }
                 }
                 items.layers.push((LayerDef { name, flies }, at));
+            } else if self.is_kw("budget") {
+                let at = self.pos();
+                self.bump();
+                items.budgets.push(self.budget(at)?);
             } else {
                 return Err(self.err(format!(
-                    "expected `kind`, `trait`, `sub`, `const`, `field`, `ground`, `feature` or `layer`, found {}",
+                    "expected `kind`, `trait`, `sub`, `const`, `field`, `ground`, `feature`, `layer` or `budget`, found {}",
                     self.describe()
                 )));
             }
         }
         Ok(())
+    }
+
+    /// The block of a `budget`, after the word.
+    fn budget(&mut self, at: Pos) -> Result<BudgetAst> {
+        let mut b = BudgetAst {
+            at,
+            fuel: None,
+            rows: None,
+            private: None,
+        };
+        self.expect_sym("{")?;
+        while !self.eat_sym("}") {
+            let p = self.pos();
+            let slot = if self.eat_kw("fuel") {
+                &mut b.fuel
+            } else if self.eat_kw("rows") {
+                &mut b.rows
+            } else if self.eat_kw("private") {
+                &mut b.private
+            } else {
+                return Err(self.err(format!(
+                    "expected `fuel`, `rows`, `private` or `}}` in a budget, found {}",
+                    self.describe()
+                )));
+            };
+            if slot.is_some() {
+                return Err(self.err_at(&p, "given twice in the budget"));
+            }
+            let e = self.additive()?;
+            *slot = Some((e, p));
+        }
+        Ok(b)
     }
 
     /// `ground NAME { ... }` or `feature NAME { ... }`.
@@ -3015,6 +3074,9 @@ struct Gen<'a> {
     tags: Vec<String>,
     /// The `field` declarations, and what they resolve to (same order).
     fields_ast: &'a [FieldAst],
+    /// The arena's `budget`, as written, and folded: fuel, rows, private.
+    budget_ast: Option<&'a BudgetAst>,
+    budget: [Option<u32>; 3],
     field_defs: Vec<FieldDef>,
     /// The `ground` and `feature` declarations, and the materials they make
     /// with the engine's three.
@@ -3144,6 +3206,8 @@ impl<'a> Gen<'a> {
             subs: &items.subs,
             consts: &items.consts,
             fields_ast: &items.fields,
+            budget_ast: items.budgets.first(),
+            budget: [None; 3],
             field_defs: Vec::new(),
             materials_ast: &items.materials,
             materials: Materials::default(),
@@ -3402,6 +3466,84 @@ impl<'a> Gen<'a> {
         Ok(())
     }
 
+    /// The arena's `budget`, folded: `fuel` 1 to [`MAX_FUEL`], `rows` and
+    /// `private` 0 or more. A player's private fields are counted here.
+    fn resolve_budget(&mut self) -> Result<()> {
+        let Some(b) = self.budget_ast else {
+            return Ok(());
+        };
+        let parts = [
+            (&b.fuel, 1, MAX_FUEL),
+            (&b.rows, 0, u32::MAX),
+            (&b.private, 0, u32::MAX),
+        ];
+        for (i, (part, lo, hi)) in parts.into_iter().enumerate() {
+            let Some((e, at)) = part else {
+                continue;
+            };
+            let v = self.fold(e, at)?;
+            let v = u32::try_from(v)
+                .ok()
+                .filter(|v| (lo..=hi).contains(v))
+                .ok_or_else(|| {
+                    let what = ["fuel", "rows", "private"][i];
+                    self.err(at, format!("budget {what} {v}: {lo} to {hi}"))
+                })?;
+            self.budget[i] = Some(v);
+        }
+        if let Some(cap) = self.budget[2] {
+            let mut seen: Vec<(&str, u32)> = Vec::new();
+            for f in self.fields_ast.iter().filter(|f| f.private) {
+                let player = f.name.split('.').next().unwrap_or_default();
+                let n = match seen.iter_mut().find(|(p, _)| *p == player) {
+                    Some((_, n)) => n,
+                    None => {
+                        seen.push((player, 0));
+                        &mut seen.last_mut().expect("just pushed").1
+                    }
+                };
+                *n += 1;
+                if *n > cap {
+                    return Err(self.err(
+                        &f.at,
+                        format!("player `{player}` declares more private fields than the arena's budget of {cap}"),
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Who owns which kind: a player's kinds are named `PLAYER.NAME`. With
+    /// the budget's `fuel`, a player's kind thinks in at most that many ops.
+    fn players(&self, defs: &mut [KindDef]) -> Players {
+        let mut p = Players {
+            rows: self.budget[1],
+            ..Players::default()
+        };
+        for d in defs.iter_mut() {
+            let Some((player, _)) = d.name.split_once('.') else {
+                p.of.push(Players::NONE);
+                continue;
+            };
+            let i = match p.names.iter().position(|n| n == player) {
+                Some(i) => i,
+                None => {
+                    p.names.push(player.to_string());
+                    p.names.len() - 1
+                }
+            };
+            p.of.push(u8::try_from(i).unwrap_or(Players::NONE));
+            if let Some(cap) = self.budget[0] {
+                d.fuel = d.fuel.min(cap);
+            }
+        }
+        if p.names.is_empty() && p.rows.is_none() {
+            return Players::default();
+        }
+        p
+    }
+
     /// Every field's law, once the kinds are numbered: a law reads any
     /// field, declared before it or after, and any kind (`is(here, hen)`).
     fn resolve_laws(&mut self) -> Result<()> {
@@ -3636,6 +3778,7 @@ impl<'a> Gen<'a> {
                 ),
             });
         }
+        self.resolve_budget()?;
         self.resolve_materials()?;
         self.resolve_layers()?;
         self.resolve_fields()?;
@@ -3729,6 +3872,7 @@ impl<'a> Gen<'a> {
                     .collect()
             })
             .collect();
+        let players = self.players(&mut defs);
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
             .with_fields(std::mem::take(&mut self.field_defs))
             .with_materials(std::mem::take(&mut self.materials))
@@ -3737,7 +3881,8 @@ impl<'a> Gen<'a> {
                     .iter()
                     .map(|(l, _)| l.clone())
                     .collect(),
-            );
+            )
+            .with_players(players);
         self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }

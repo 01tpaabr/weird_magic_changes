@@ -103,8 +103,8 @@ fn marked_error(b: &Block) -> (u32, String) {
 
 /// Items start at column 0 with one of these words; an item runs until the
 /// next one (or the end of the file).
-const ITEM_WORDS: [&str; 8] = [
-    "kind", "trait", "sub", "const", "field", "ground", "feature", "layer",
+const ITEM_WORDS: [&str; 9] = [
+    "kind", "trait", "sub", "const", "field", "ground", "feature", "layer", "budget",
 ];
 
 /// The item a line at column 0 starts, by name.

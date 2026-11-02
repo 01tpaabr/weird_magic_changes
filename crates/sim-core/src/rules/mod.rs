@@ -173,6 +173,31 @@ pub struct LayerDef {
     pub flies: bool,
 }
 
+/// The players of an arena (`docs/RULES.md` §15) and the room the arena's
+/// `budget` leaves them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Players {
+    /// Each player's name, in the order its first kind is numbered.
+    pub names: Vec<String>,
+    /// Per kind, its player's index, or [`Players::NONE`] (the arena's).
+    pub of: Vec<u8>,
+    /// `budget { rows N }`: no player has more than N rows alive.
+    pub rows: Option<u32>,
+}
+
+impl Players {
+    pub const NONE: u8 = u8::MAX;
+
+    /// The player kind `kind` belongs to, if any.
+    #[inline]
+    pub fn of(&self, kind: u16) -> Option<usize> {
+        self.of
+            .get(usize::from(kind))
+            .filter(|&&p| p != Self::NONE)
+            .map(|&p| usize::from(p))
+    }
+}
+
 /// Declared layers in a rule set: rows keep the layer in a byte, after the
 /// two the engine has.
 pub const MAX_LAYERS: usize = 8;
@@ -446,6 +471,8 @@ pub struct Kinds {
     pub materials: Materials,
     /// Declared layers, layer 2 first: `ChunkCells::extra` holds one each.
     pub layers: Vec<LayerDef>,
+    /// Who owns which kinds, and the arena's cap on their rows.
+    pub players: Players,
     /// Source positions and names, for `wmc why`.
     pub debug: DebugInfo,
     /// Hash of everything above: the rules as an input to the checksum.
@@ -509,6 +536,7 @@ impl Kinds {
             fields: Vec::new(),
             materials: Materials::default(),
             layers: Vec::new(),
+            players: Players::default(),
             debug: DebugInfo::default(),
             hash,
             remaps,
@@ -595,6 +623,26 @@ impl Kinds {
             self.hash = splitmix64(h ^ u64::from(l.flies));
         }
         self.layers = layers;
+        self
+    }
+
+    /// The same rules with these players (folded into the hash; none leaves
+    /// it as it was).
+    pub fn with_players(mut self, players: Players) -> Self {
+        if !players.names.is_empty() || players.rows.is_some() {
+            let mut h = self.hash ^ 0xB0D6E7;
+            for n in &players.names {
+                for b in n.bytes() {
+                    h = splitmix64(h ^ u64::from(b));
+                }
+                h = splitmix64(h ^ 0xFF);
+            }
+            for &p in &players.of {
+                h = splitmix64(h ^ u64::from(p));
+            }
+            self.hash = splitmix64(h ^ players.rows.map_or(u64::MAX, u64::from));
+        }
+        self.players = players;
         self
     }
 

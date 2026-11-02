@@ -406,8 +406,12 @@ fn pathological_texts_are_refused_quickly() {
 fn a_players_program_is_the_same_program() {
     check(runner(CASES).run(&gen_rules::program(Mode::Valid), |p| {
         let fail = |e: String| TestCaseError::fail(format!("{e}\n--- program ---\n{}", p.text));
-        // A player declares kinds, traits, subs, consts and private fields only.
-        if p.text.contains("field ") || p.text.contains("ground ") || p.text.contains("layer g") {
+        // A player declares kinds, traits, subs, consts and private fields
+        // only: no budget either.
+        if ["field ", "ground ", "layer g", "budget "]
+            .iter()
+            .any(|w| p.text.contains(w))
+        {
             return Ok(());
         }
         let k = compile("g.rules", &p.text).map_err(|e| fail(e.to_string()))?;

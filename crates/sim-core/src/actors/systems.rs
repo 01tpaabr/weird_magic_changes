@@ -183,6 +183,11 @@ pub struct Scratch {
     events: Vec<[u32; LIFE_EVENTS]>,
     /// This tick's deaths, by kind and cause: few, so a list.
     causes: Vec<(u16, Cause)>,
+    /// Per player, with a `budget { rows N }`: its rows here and its spawns
+    /// wanted here ([`ration`] fills them), then the spawns this chunk may
+    /// make this tick (Apply spends them in key order).
+    players: Vec<(u32, u32)>,
+    quota: Vec<u32>,
 }
 
 /// Life events and work counted per kind: `Tally::counts[kind][event]`.
@@ -252,11 +257,29 @@ impl Default for Scratch {
             deaths: 0,
             events: Vec::new(),
             causes: Vec::new(),
+            players: Vec::new(),
+            quota: Vec::new(),
         }
     }
 }
 
 impl Scratch {
+    /// May a spawn of `kind` go ahead under the arena's budget? A player's
+    /// spends one of its chunk's spawns this tick; there are none left: no.
+    fn ration(&mut self, kinds: &Kinds, kind: u16) -> bool {
+        if kinds.players.rows.is_none() {
+            return true;
+        }
+        let Some(q) = kinds.players.of(kind).and_then(|p| self.quota.get_mut(p)) else {
+            return true;
+        };
+        if *q == 0 {
+            return false;
+        }
+        *q -= 1;
+        true
+    }
+
     /// Does `key` hold the lowest claim on `cell` of declared layer `layer`?
     fn layer_won(&self, layer: u8, cell: usize, key: u64) -> bool {
         let at = self
@@ -1245,6 +1268,8 @@ pub fn apply(
                             result::NONE // Migrate decides
                         }
                     }),
+                    // The arena's budget: this player has no room left.
+                    Action::Spawn if !scratch.ration(kinds, it.kind) => Some(result::REFUSED),
                     // Past the halo, even into a loaded chunk: as unloaded.
                     Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
                     Action::Spawn if kinds.def(it.kind).layer >= 2 => {
@@ -1741,6 +1766,58 @@ pub fn tally(mut total: ResMut<Tally>, mut q: Query<&mut Scratch>) {
                 *a += u64::from(*b);
                 *b = 0;
             }
+        }
+    }
+}
+
+/// The arena's `budget { rows N }` (`docs/RULES.md` §15): no player has
+/// more than N rows alive. Each chunk counts its players' rows and the
+/// spawns they want this tick, in parallel; then, in coordinate order,
+/// each chunk gets what is left of a player's room for its spawns. Apply
+/// spends it in key order and refuses the rest (`REFUSED`), so the cap is
+/// never passed, on any number of threads.
+pub fn ration(
+    kinds: Res<Kinds>,
+    stage: Res<Stage>,
+    mut q: Query<(&ChunkActors, &Intents, &mut Scratch)>,
+) {
+    let players = &kinds.players;
+    let Some(cap) = players.rows else {
+        return;
+    };
+    let n = players.names.len();
+    q.par_iter_mut().for_each(|(pubs, intents, mut s)| {
+        s.players.clear();
+        s.players.resize(n, (0, 0));
+        for r in &pubs.rows {
+            if let Some(p) = players.of(r.kind) {
+                s.players[p].0 += 1;
+            }
+        }
+        for it in intents.list.iter().filter(|i| i.action == Action::Spawn) {
+            if let Some(p) = players.of(it.kind) {
+                s.players[p].1 += 1;
+            }
+        }
+    });
+    let mut left = vec![cap; n];
+    for &(_, e) in stage.active() {
+        if let Ok((_, _, s)) = q.get(e) {
+            for (l, &(alive, _)) in left.iter_mut().zip(&s.players) {
+                *l = l.saturating_sub(alive);
+            }
+        }
+    }
+    for &(_, e) in stage.active() {
+        let Ok((_, _, mut s)) = q.get_mut(e) else {
+            continue;
+        };
+        let s = &mut *s;
+        s.quota.clear();
+        for (l, &(_, wants)) in left.iter_mut().zip(&s.players) {
+            let take = wants.min(*l);
+            *l -= take;
+            s.quota.push(take);
         }
     }
 }

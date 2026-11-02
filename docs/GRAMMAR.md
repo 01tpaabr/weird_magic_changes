@@ -82,7 +82,8 @@ IDENT = NAME that is not a reserved word
 ## 2. Files and items
 
 ```
-file      = { item | sub | const | field | material | layer } EOF
+file      = { item | sub | const | field | material | layer | budget } EOF
+budget    = "budget" "{" { ( "fuel" | "rows" | "private" ) additive } "}"     (each part once; an arena's only)
 layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
           | "feature" IDENT "{" { "blocks" | "opaque" | "glyph" STRING | "color" STRING } "}"

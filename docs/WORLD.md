@@ -354,5 +354,4 @@ kind ant {
 - A scenario's `terrain` and drawn `map` syntax for declared materials and fields.
 - Namespaces for two *arena* packs of different authors that should not collide on a name
   (players have theirs, §12).
-- A player's budget in an arena (ops a think, rows, private fields), so one player's code
-  can't slow the world for the others.
+- A player's budget: built (decision 66), `budget { fuel N  rows N  private N }` in the arena.

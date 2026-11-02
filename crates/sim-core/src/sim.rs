@@ -177,7 +177,9 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
             .chain()
             .in_set(Phase::Simulate),
         systems::think.in_set(Phase::Think),
-        systems::resolve.in_set(Phase::Resolve),
+        (systems::resolve, systems::ration)
+            .chain()
+            .in_set(Phase::Resolve),
         systems::exchange.in_set(Phase::Exchange),
         systems::apply.in_set(Phase::Apply),
         systems::migrate.in_set(Phase::Migrate),
@@ -2628,6 +2630,83 @@ mod tests {
             "the unloaded corner is rock"
         );
         assert_eq!(field(&w, 2, Pos::new(10, 10)), 0);
+    }
+
+    /// An arena's `budget { rows N }`: a player's spawns stop at N rows
+    /// alive, exactly, wherever they are (two chunks here); another
+    /// player's and the arena's kinds are not held back; a death makes room.
+    #[test]
+    fn a_players_rows_stop_at_the_arenas_budget() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile_owned;
+        let arena = "budget { rows 12 }
+                     kind weed { glyph \"w\"  cadence 1
+                       when nearest free within 1 as n => spawn weed at n
+                       when true => idle }";
+        let red = "kind ant { glyph \"a\"  cadence 1
+                     when age > 120 => die
+                     when nearest free within 1 as n => spawn ant at n
+                     when true => move random free }";
+        let blue = "kind ant { glyph \"b\"  cadence 1
+                      when nearest free within 1 as n => spawn ant at n
+                      when true => idle }";
+        let kinds = compile_owned(
+            &[
+                ("arena.rules", arena, None),
+                ("red.rules", red, Some("red")),
+                ("blue.rules", blue, Some("blue")),
+            ],
+            &[],
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 192,
+            height: 64,
+            ..cfg(24)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let id = |n: &str| kinds.by_name(n).unwrap().id;
+        let now = tick(&w);
+        for (x, kind, uid) in [
+            (63, "red.ant", 1),
+            (64, "red.ant", 2),
+            (130, "blue.ant", 3),
+            (100, "weed", 4),
+        ] {
+            assert!(place_actor(
+                &mut w,
+                Pos::new(x, 30),
+                id(kind),
+                newborn(&kinds, id(kind), uid, now)
+            ));
+        }
+        let count = |w: &mut World, k: u16| rows(w).iter().filter(|r| r.1 == k).count();
+        let mut most = 0;
+        for _ in 0..100 {
+            step(&mut w);
+            let n = count(&mut w, id("red.ant"));
+            assert!(n <= 12, "red has {n} rows, over its budget");
+            most = most.max(n);
+        }
+        check_invariants(&mut w);
+        assert_eq!(most, 12, "red filled its budget");
+        assert_eq!(count(&mut w, id("blue.ant")), 12, "and blue its own");
+        assert!(
+            count(&mut w, id("weed")) > 12,
+            "the arena's kinds are not held"
+        );
+        // Red's ants die at 120 ticks old: room again.
+        for _ in 0..100 {
+            step(&mut w);
+            assert!(count(&mut w, id("red.ant")) <= 12);
+        }
+        assert!(
+            rows(&mut w)
+                .iter()
+                .any(|r| r.1 == id("red.ant") && r.3.uid > 2 && r.3.born > 120),
+            "a red ant born after the first died"
+        );
     }
 
     /// Inside an aggregate a field is read as it stood before the law ran,

@@ -2772,3 +2772,88 @@ fn players_have_their_own_names_and_only_a_players_part() {
     assert_eq!(crate::rules::player_of("Red=x"), (None, "Red=x"));
     assert_eq!(crate::rules::player_of("a/b=c"), (None, "a/b=c"));
 }
+
+/// An arena's `budget`: each player's kinds think in at most `fuel` ops,
+/// a player declares at most `private` private fields, and the rows cap
+/// reaches the kinds table with who owns which kind. Only an arena sets
+/// it, once.
+#[test]
+fn an_arenas_budget_bounds_its_players() {
+    let arena = "const ROOM = 40
+                 budget { fuel 300  rows ROOM  private 1 }
+                 kind crumb { glyph \"c\"  fuel 900  when true => idle }";
+    let red = "field trail max 9 private
+               kind ant { glyph \"a\"  fuel 2000  when true => idle }
+               kind scout { glyph \"s\"  fuel 100  when true => idle }";
+    let blue = "kind ant { glyph \"b\"  when true => idle }";
+    let k = compile_owned(
+        &[
+            ("arena.rules", arena, None),
+            ("red.rules", red, Some("red")),
+            ("blue.rules", blue, Some("blue")),
+        ],
+        &[],
+    )
+    .unwrap();
+    let fuel = |n: &str| k.by_name(n).unwrap().fuel;
+    assert_eq!(
+        [
+            fuel("crumb"),
+            fuel("red.ant"),
+            fuel("red.scout"),
+            fuel("blue.ant")
+        ],
+        [900, 300, 100, 300],
+        "the arena's own kinds are not bound"
+    );
+    assert_eq!(k.players.rows, Some(40));
+    let mut names = k.players.names.clone();
+    names.sort_unstable();
+    assert_eq!(names, ["blue", "red"]);
+    let owner = |n: &str| {
+        k.players
+            .of(k.by_name(n).unwrap().id)
+            .map(|p| k.players.names[p].as_str())
+    };
+    assert_eq!(
+        [owner("crumb"), owner("red.ant"), owner("blue.ant")],
+        [None, Some("red"), Some("blue")]
+    );
+
+    let err =
+        |files: &[(&str, &str, Option<&str>)]| compile_owned(files, &[]).unwrap_err().to_string();
+    let e = err(&[
+        ("arena.rules", arena, None),
+        (
+            "red.rules",
+            "field a max 9 private  field b max 9 private",
+            Some("red"),
+        ),
+    ]);
+    assert!(
+        e.contains("player `red` declares more private fields than the arena's budget of 1"),
+        "{e}"
+    );
+    let e = err(&[
+        ("arena.rules", arena, None),
+        ("red.rules", "budget { rows 9 }", Some("red")),
+    ]);
+    assert!(e.contains("a player's pack declares no budget"), "{e}");
+    let e = err(&[("a.rules", "budget { } budget { }", None)]);
+    assert!(e.contains("one `budget` in a rule set"), "{e}");
+    for (text, want) in [
+        ("budget { fuel 0 }", "budget fuel 0: 1 to 4096"),
+        ("budget { rows -1 }", "budget rows -1: 0 to"),
+        ("budget { rows 1 rows 2 }", "given twice in the budget"),
+        (
+            "budget { speed 1 }",
+            "expected `fuel`, `rows`, `private` or `}` in a budget",
+        ),
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    // No players, no budget: the table stays empty and the hash as it was.
+    let plain = compile_ok("kind k { glyph \"k\"  when true => idle }");
+    assert_eq!(plain.players, crate::rules::Players::default());
+}

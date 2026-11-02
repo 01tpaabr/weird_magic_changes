@@ -1,6 +1,7 @@
 # An arena and two players (packs/colony): red and blue both name their kind
 # `ant` and their private field `trail`; each is its own (`red.ant`,
-# `blue.ant`). Both colonies feed on the arena's crumbs for two days.
+# `blue.ant`). Both colonies feed on the arena's crumbs for two days; red
+# breeds, and the arena's budget stops it at 60 ants.
 #
 #   make run ARGS="scenario scenarios/tests/colony.scenario"
 rules ../../packs/colony
@@ -14,6 +15,8 @@ start blue.ant 1 / 200 in (64, 0) to (127, 127)
 run 2d
 expect eventually max crumbs of red.ant >= 6 from 1h to 1d    # a full load
 expect eventually max crumbs of blue.ant >= 4 from 1h to 1d
+expect never count red.ant > 60                                # the budget
+expect eventually count red.ant == 60
 expect died red.ant == 0
 expect died blue.ant == 0
 expect traps red.ant == 0

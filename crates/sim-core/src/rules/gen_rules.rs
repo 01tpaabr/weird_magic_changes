@@ -590,6 +590,21 @@ impl<'a> G<'a> {
                 "ground gmud {{ walkable glyph \",\" }}{sep}feature gwall {{ blocks{opaque} color \"#999999\" }}{sep}{water}\n"
             );
         }
+        // An arena's budget: without players it binds nobody, but it
+        // parses, folds and goes into the hash.
+        if self.maybe(10) {
+            let mut parts = Vec::new();
+            if self.maybe(50) {
+                parts.push(format!("fuel {}", 1 + self.n(4096)));
+            }
+            if self.maybe(50) {
+                parts.push(format!("rows {}", self.n(500)));
+            }
+            if self.maybe(50) {
+                parts.push(format!("private {}", self.n(4)));
+            }
+            out += &format!("budget {{ {} }}\n", parts.join(" "));
+        }
         for &(name, policy) in &FIELDS[..self.fields] {
             let max = 1 + self.n(300);
             let mut parts = Vec::new();
@@ -1738,6 +1753,10 @@ impl<'a> G<'a> {
                 0 => out += &self.syntax_item(false),
                 1 => out += &self.syntax_item(true),
                 2 => out += &self.syntax_sub(),
+                5 if self.maybe(30) => {
+                    let part = self.one(&["fuel", "rows", "private"]);
+                    out += &format!("budget {{ {part} {} }}", self.additive(1));
+                }
                 4 => {
                     let w = self.one(&["ground", "feature"]);
                     let word = if w == "ground" {
