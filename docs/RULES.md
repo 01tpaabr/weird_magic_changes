@@ -278,6 +278,8 @@ first). Those names are not words of the language; the last three read as the sh
 | `graze t` | like `eat`, on the ground cover at t, adjacent or `here` |
 | `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes, if anything moved. `BLOCKED` if nothing moved (own NEED full, the target's empty, or `n` is 0) |
 | `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover. `BLOCKED` if nothing moved |
+| `build M at t` | lays ground or feature M (the rules' own, or soil, water, rock) on the adjacent cell t, which must be walkable and empty at tick start; claimed like a move, so the lowest key wins it. A feature goes only where there is none; whatever makes the cell unwalkable only where no ground cover lies. `BLOCKED` if it may not; `REFUSED` for a cell not adjacent. In a chunk or across its border, as `spawn` is |
+| `dig t` | clears the feature of t, adjacent or underfoot: a rock, a wall. `BLOCKED` if there is none; `REFUSED` for a cell not adjacent |
 | `harvest F n` | moves up to `n` of field F on the actor's own cell into its need of the same name, never past the need's max (§12, Fields). `BLOCKED` if nothing moved; a `fixed` field can't be harvested |
 | `drop F n` | moves up to `n` of the need named F into field F on the actor's own cell, never past the field's max. `BLOCKED` if nothing moved |
 

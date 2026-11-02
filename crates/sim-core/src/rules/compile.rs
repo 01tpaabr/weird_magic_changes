@@ -678,6 +678,14 @@ enum Stmt {
         at: Pos,
     },
     Move(Target, Pos),
+    /// `dig t`: clear the feature at `t`.
+    Dig(Target, Pos),
+    /// `build M at t`: lay ground or feature `M` on the free cell `t`.
+    Build {
+        material: String,
+        target: Target,
+        at: Pos,
+    },
     Drink(Target, Pos),
     Eat(Target, Pos),
     Hit(Target, Pos),
@@ -904,6 +912,8 @@ pub const KEYWORDS: &[&str] = &[
     "become",
     "spawn",
     "move",
+    "dig",
+    "build",
     "drink",
     "eat",
     "hit",
@@ -1825,6 +1835,19 @@ impl Parser<'_> {
         if self.eat_kw("move") {
             return Ok(Stmt::Move(self.target()?, at));
         }
+        if self.eat_kw("dig") {
+            return Ok(Stmt::Dig(self.target()?, at));
+        }
+        if self.eat_kw("build") {
+            let (material, _) = self.ident("ground or feature name")?;
+            self.expect_kw("at")?;
+            let target = self.target()?;
+            return Ok(Stmt::Build {
+                material,
+                target,
+                at,
+            });
+        }
         if self.eat_kw("drink") {
             return Ok(Stmt::Drink(self.target()?, at));
         }
@@ -2406,6 +2429,8 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Transfer { .. }
         | Stmt::Harvest { .. }
         | Stmt::Move(..)
+        | Stmt::Dig(..)
+        | Stmt::Build { .. }
         | Stmt::Drink(..)
         | Stmt::Eat(..)
         | Stmt::Hit(..)
@@ -2442,6 +2467,8 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Transfer { .. }
             | Stmt::Harvest { .. }
             | Stmt::Move(..)
+            | Stmt::Dig(..)
+            | Stmt::Build { .. }
             | Stmt::Drink(..)
             | Stmt::Eat(..)
             | Stmt::Hit(..)
@@ -2678,6 +2705,8 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Transfer { at, .. }
         | Stmt::Harvest { at, .. }
         | Stmt::Move(_, at)
+        | Stmt::Dig(_, at)
+        | Stmt::Build { at, .. }
         | Stmt::Drink(_, at)
         | Stmt::Eat(_, at)
         | Stmt::Hit(_, at)
@@ -2720,6 +2749,8 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Transfer { .. }
         | Stmt::Harvest { .. }
         | Stmt::Move(..)
+        | Stmt::Dig(..)
+        | Stmt::Build { .. }
         | Stmt::Drink(..)
         | Stmt::Eat(..)
         | Stmt::Hit(..)
@@ -5334,6 +5365,29 @@ impl<'a> Gen<'a> {
             Stmt::Move(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Move);
+            }
+            Stmt::Dig(t, _) => {
+                self.target(t)?;
+                self.asm.act(Action::Dig);
+            }
+            Stmt::Build {
+                material,
+                target,
+                at,
+            } => {
+                let code = if let Some(g) = self.materials.ground(material) {
+                    i32::from(g.0)
+                } else if let Some(f) = self.materials.feature(material) {
+                    0x100 | i32::from(f.0)
+                } else {
+                    return Err(self.err(
+                        at,
+                        format!("`build {material}`: no ground or feature `{material}`"),
+                    ));
+                };
+                self.push_int(code)?;
+                self.target(target)?;
+                self.asm.act(Action::Build);
             }
             Stmt::Drink(t, _) => {
                 self.target(t)?;

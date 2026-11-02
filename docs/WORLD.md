@@ -145,10 +145,12 @@ the paths bites and transfers use across a chunk border today.
 
 ## 5. Terrain, declared and changeable
 
-Step 3a is built (2026-11-02, decision 58): materials declared as below, the engine's three
-kept at the indices the generator and drawn maps use, names as predicates, saves remapped
-by name. Left: `dig` and `build` (3b), `cost`, `opaque`, and the generator laying a pack's
-own materials.
+Step 3 is built (2026-11-02, decisions 58 and 59): materials declared as below, the engine's
+three kept at the indices the generator and drawn maps use, names as predicates, saves
+remapped by name; `build M at t` and `dig t` on an adjacent cell, settled like `spawn`, in a
+chunk or across its border. Left for when a world asks: `cost` (slow ground), `opaque`, a
+`digs` field (height moved by digging, with step 4), and the generator laying a pack's own
+materials.
 
 `Ground` and `Feature` stop being Rust enums. A pack declares materials; a cell keeps two slots
 as today, a ground (under foot) and a feature (on it), each a byte index into the declared

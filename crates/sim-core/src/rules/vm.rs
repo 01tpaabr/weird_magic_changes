@@ -202,9 +202,15 @@ impl OpCode {
                 Some(Action::Spawn) => (3, 0),
                 Some(Action::Take | Action::Give) => (4, 0),
                 Some(Action::Harvest | Action::Drop) => (3, 0),
-                Some(Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze) => {
-                    (2, 0)
-                }
+                Some(Action::Build) => (3, 0),
+                Some(
+                    Action::Move
+                    | Action::Drink
+                    | Action::Eat
+                    | Action::Hit
+                    | Action::Graze
+                    | Action::Dig,
+                ) => (2, 0),
                 Some(Action::Idle | Action::Die) | None => (0, 0),
             },
         }
@@ -303,6 +309,11 @@ pub enum Action {
     /// `field need amount`: move up to `amount` of own need `need` into
     /// field `field` on the actor's cell
     Drop,
+    /// `material dx dy`: lay a ground (`material < 0x100`) or a feature
+    /// (`0x100 | feature`) on the adjacent free cell there
+    Build,
+    /// `dx dy`: clear the feature of the cell there (adjacent or underfoot)
+    Dig,
 }
 
 impl Action {
@@ -321,6 +332,8 @@ impl Action {
             10 => Some(Self::Give),
             11 => Some(Self::Harvest),
             12 => Some(Self::Drop),
+            13 => Some(Self::Build),
+            14 => Some(Self::Dig),
             _ => None,
         }
     }
@@ -1044,6 +1057,14 @@ impl Machine<'_> {
                 self.out.dx = clamp_i8(dx);
                 self.out.dy = clamp_i8(dy);
             }
+            Action::Build => {
+                let dy = self.pop()?;
+                let dx = self.pop()?;
+                let material = self.pop()?;
+                self.out.kind = u16::try_from(material).map_err(|_| Trap::BadAction)?;
+                self.out.dx = clamp_i8(dx);
+                self.out.dy = clamp_i8(dy);
+            }
             Action::Harvest | Action::Drop => {
                 let amount = self.pop()?;
                 let need = self.pop()?;
@@ -1056,7 +1077,12 @@ impl Machine<'_> {
                 self.out.need = need;
                 self.out.amount = amount.max(0);
             }
-            Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze => {
+            Action::Move
+            | Action::Drink
+            | Action::Eat
+            | Action::Hit
+            | Action::Graze
+            | Action::Dig => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
                 // Far targets are fine: Think reduces a move to one step,

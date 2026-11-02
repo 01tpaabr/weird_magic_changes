@@ -295,6 +295,8 @@ fn action_name(a: Action) -> &'static str {
         Action::Give => "give",
         Action::Harvest => "harvest",
         Action::Drop => "drop",
+        Action::Build => "build",
+        Action::Dig => "dig",
     }
 }
 

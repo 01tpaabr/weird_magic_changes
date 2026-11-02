@@ -126,10 +126,17 @@ impl Seen<'_> {
                 self.expr(amount);
             }
             Stmt::Move(t, _)
+            | Stmt::Dig(t, _)
             | Stmt::Drink(t, _)
             | Stmt::Eat(t, _)
             | Stmt::Hit(t, _)
             | Stmt::Graze(t, _) => self.target(t),
+            Stmt::Build {
+                material, target, ..
+            } => {
+                self.names.all.insert(material.clone());
+                self.target(target);
+            }
             Stmt::Look(e) => self.expr(e),
             Stmt::Signal(e) => {
                 self.names.signal_set = true;
@@ -938,7 +945,9 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            Stmt::Move(t, _) => self.walk_target(kinds, w, t, out),
+            Stmt::Move(t, _) | Stmt::Dig(t, _) | Stmt::Build { target: t, .. } => {
+                self.walk_target(kinds, w, t, out)
+            }
             Stmt::Idle(_) | Stmt::Die(_) | Stmt::Next(..) => {}
         }
     }

@@ -46,7 +46,7 @@ kind trait sub const extends inherit state when
 glyph color cover solid tags cadence sight fuel bite place need max decay vital mem
 if else while repeat for each choose let return
 and or not true false nearest best count within as only is free
-idle die become spawn with move drink eat hit graze take give next look signal
+idle die become spawn with move dig build drink eat hit graze take give next look signal
 field add harvest drop
 here attacker toward away random at dir north east south west
 min abs sign clamp rand chance dist look_of signal_of pack hi lo
@@ -153,7 +153,8 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | "become" IDENT
       | "spawn" IDENT "at" target [ "with" "(" IDENT "=" expr { "," IDENT "=" expr } ")" ]
       | ( "take" | "give" ) target IDENT expr
-      | ( "move" | "drink" | "eat" | "hit" | "graze" ) target
+      | ( "move" | "drink" | "eat" | "hit" | "graze" | "dig" ) target
+      | "build" IDENT "at" target
       | "look" "=" expr
       | "signal" "=" expr
       | "add" IDENT expr

@@ -2469,3 +2469,28 @@ fn materials_are_declared_redeclared_and_named() {
         .collect();
     assert!(compile_err(&many).contains("at most 16 grounds"));
 }
+
+/// `build` names a declared material; `dig` and `build` are actions.
+#[test]
+fn build_and_dig_errors_name_the_problem() {
+    let errs = [
+        (
+            "kind k { when true => build clay at east }",
+            "no ground or feature `clay`",
+        ),
+        ("kind k { when true => build rock east }", "expected `at`"),
+        (
+            "kind k { when true => { dig east  dig west } }",
+            "a second action",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    compile(
+        "t.rules",
+        "kind k { when true => build rock at north  when true => dig south }",
+    )
+    .unwrap();
+}

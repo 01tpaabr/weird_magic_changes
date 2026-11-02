@@ -166,8 +166,10 @@ fn generated_programs_use_fields() {
         " (fb",
         "ground gmud",
         "gwall within",
+        "dig ",
+        "build g",
     ];
-    let mut seen = [0usize; 15];
+    let mut seen = [0usize; 17];
     let mut h = 7u64;
     for i in 0..3000 {
         let choices: Vec<u32> = (0..1500)

@@ -40,7 +40,9 @@ use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
 use crate::rules::{Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
-use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Pos, Stage, cell_u16};
+use crate::stage::{
+    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Feature, Ground, Pos, Stage, cell_u16,
+};
 use crate::time::stamp;
 
 /// One actor's decision this tick, waiting for the resolve phases.
@@ -104,6 +106,12 @@ pub enum EffectKind {
         kind: u16,
         with: [i32; 2],
     },
+    /// `build`: the material (a ground, or `0x100 | feature`).
+    Build {
+        material: u16,
+    },
+    /// `dig`: clear the feature.
+    Dig,
     /// `take` (or `give`): up to `amount` of the mover's need `need` and
     /// the target's need of the same name. In-chunk ones too: every
     /// transfer is settled in Exchange, in key order.
@@ -993,7 +1001,7 @@ pub fn apply(
             // key wins. Intents are in key order since Resolve; a winner
             // touches the cell, so a tied key (twin uids) after it is blocked.
             for it in &intents.list {
-                if !matches!(it.action, Action::Move | Action::Spawn) {
+                if !matches!(it.action, Action::Move | Action::Spawn | Action::Build) {
                     continue;
                 }
                 if it.action == Action::Spawn && is_cover(kinds, it.kind) {
@@ -1078,6 +1086,45 @@ pub fn apply(
                     }
                     Action::Harvest | Action::Drop => {
                         Some(harvest(kinds, &mut actors, slot, from, it))
+                    }
+                    Action::Build | Action::Dig => {
+                        let near = it.dx.abs() <= 1 && it.dy.abs() <= 1;
+                        let build = it.action == Action::Build;
+                        Some(match target_of(*coord, from, it.dx, it.dy) {
+                            _ if !near || (build && it.dx == 0 && it.dy == 0) => result::REFUSED,
+                            Where::Here(cell) if build => {
+                                let claimed = scratch.claim[cell] == it.key;
+                                if claimed && lay(kinds, actors.cells, cell, it.kind) {
+                                    scratch.touch(cell);
+                                    result::OK
+                                } else {
+                                    result::BLOCKED
+                                }
+                            }
+                            Where::Here(cell) => {
+                                if actors.cells.feature[cell] == Feature::None {
+                                    result::BLOCKED
+                                } else {
+                                    actors.cells.feature[cell] = Feature::None;
+                                    scratch.touch(cell);
+                                    result::OK
+                                }
+                            }
+                            Where::Elsewhere(to, cell) => {
+                                outbox.list.push(Effect {
+                                    key: it.key,
+                                    slot: it.slot,
+                                    what: if build {
+                                        EffectKind::Build { material: it.kind }
+                                    } else {
+                                        EffectKind::Dig
+                                    },
+                                    to,
+                                    cell: cell_u16(cell),
+                                });
+                                result::NONE
+                            }
+                        })
                     }
                     // Ground cover is rooted.
                     Action::Move if cover => Some(result::REFUSED),
@@ -1187,6 +1234,32 @@ pub fn apply(
             }
         },
     );
+}
+
+/// Lay `material` (a ground, or `0x100 | feature`) on `cell`, which the
+/// builder claimed (walkable and empty at tick start). A feature only where
+/// there is none; whatever leaves the cell unwalkable only where no ground
+/// cover lies. `false` if it may not, or the material is not the rules'.
+fn lay(kinds: &Kinds, cells: &mut ChunkCells, cell: usize, material: u16) -> bool {
+    let m = &kinds.materials;
+    let (g, f) = if material >= 0x100 {
+        let f = u8::try_from(material - 0x100).unwrap_or(u8::MAX);
+        if f == 0 || usize::from(f) > m.features.len() || cells.feature[cell] != Feature::None {
+            return false;
+        }
+        (cells.ground[cell], Feature(f))
+    } else {
+        let g = u8::try_from(material).unwrap_or(u8::MAX);
+        if usize::from(g) >= m.grounds.len() {
+            return false;
+        }
+        (Ground(g), cells.feature[cell])
+    };
+    if !m.table.walkable(g, f) && !cells.cover[cell].is_none() {
+        return false;
+    }
+    (cells.ground[cell], cells.feature[cell]) = (g, f);
+    true
 }
 
 /// A value clamped into a field's `0..=max`.
@@ -1402,6 +1475,37 @@ pub fn migrate(
             continue;
         };
         let (dst_cells, dst_pubs, dst_minds, dst_scratch, dst_meta) = &mut dst;
+        // The ground's own: a cell taken by nobody, laid or cleared.
+        if let EffectKind::Build { material } = fx.what {
+            let ok = dst_cells.walkable(cell, &kinds.materials.table)
+                && dst_cells.occupant[cell].is_none()
+                && dst_scratch.enterable(cell)
+                && lay(&kinds, dst_cells, cell, material);
+            if ok {
+                dst_scratch.touch(cell);
+                dst_meta.dirty = true;
+            }
+            set_result_in(
+                &mut src.2,
+                slot,
+                if ok { result::OK } else { result::BLOCKED },
+            );
+            continue;
+        }
+        if fx.what == EffectKind::Dig {
+            let ok = dst_cells.feature[cell] != Feature::None;
+            if ok {
+                dst_cells.feature[cell] = Feature::None;
+                dst_scratch.touch(cell);
+                dst_meta.dirty = true;
+            }
+            set_result_in(
+                &mut src.2,
+                slot,
+                if ok { result::OK } else { result::BLOCKED },
+            );
+            continue;
+        }
         let cover = matches!(fx.what, EffectKind::Spawn { kind, .. } if is_cover(&kinds, kind));
         let ok = dst_cells.walkable(cell, &kinds.materials.table)
             && if cover {
@@ -1444,9 +1548,10 @@ pub fn migrate(
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
-            EffectKind::Bite { .. } | EffectKind::Transfer { .. } => {
-                unreachable!("skipped above")
-            }
+            EffectKind::Bite { .. }
+            | EffectKind::Transfer { .. }
+            | EffectKind::Build { .. }
+            | EffectKind::Dig => unreachable!("handled above"),
         }
         if !cover {
             dst_scratch.touch(cell);

@@ -401,6 +401,17 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
             need(it.kind),
             at(it.dx, it.dy)
         ),
+        Action::Build => {
+            let m = &kinds.materials;
+            let name = if it.kind >= 0x100 {
+                m.features.get(usize::from(it.kind - 0x100).wrapping_sub(1))
+            } else {
+                m.grounds.get(usize::from(it.kind))
+            };
+            let name = name.map_or("?", |d| d.name.as_str());
+            format!("build {name} at {}", at(it.dx, it.dy))
+        }
+        Action::Dig => format!("dig {}", at(it.dx, it.dy)),
         Action::Harvest | Action::Drop => {
             let field = kinds
                 .fields

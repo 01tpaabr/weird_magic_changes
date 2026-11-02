@@ -1200,6 +1200,17 @@ impl<'a> G<'a> {
         match self.n(11) {
             0 => "idle".into(),
             1 => "die".into(),
+            9 if self.strict && self.materials && self.maybe(50) => {
+                let t = self.one(&["north", "east", "south", "west", "here"]);
+                if t == "here" || self.maybe(40) {
+                    format!("dig {t}")
+                } else {
+                    format!(
+                        "build {} at {t}",
+                        self.one(&["gmud", "gwall", "rock", "water"])
+                    )
+                }
+            }
             10 if !self.strict || !carried.is_empty() => {
                 let verb = self.one(&["harvest", "drop"]);
                 let f = if self.strict {

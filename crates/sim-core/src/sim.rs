@@ -2650,6 +2650,95 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    /// `build` lays a declared feature or ground on a free neighbour and
+    /// `dig` clears a feature, in a chunk and across its border; a target
+    /// too far is refused, nothing to dig is blocked, a built cell is saved,
+    /// and the walkers beside keep the invariants.
+    #[test]
+    fn actors_build_and_dig_across_chunk_borders() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "feature wall { blocks }
+             ground mud { walkable }
+             kind mason { glyph \"m\"  cadence 1  mem mode, r1, r2, r3, r4
+               when mode == 0 => { mode = 1  build wall at east }
+               when mode == 1 => { mode = 2  r1 = result  idle }
+               when mode == 2 => { mode = 3  dig east }
+               when mode == 3 => { mode = 4  r2 = result  build wall at at(x + 3, y) }
+               when mode == 4 => { mode = 5  r3 = result  dig west }
+               when mode == 5 => { mode = 6  r4 = result  build mud at south }
+               when true => idle }
+             kind walker { glyph \"w\"  cadence 1  when true => move east }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(20)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        // One mason in the chunk, one on its east edge building into the next.
+        for (x, uid) in [(20, 0xD1), (63, 0xD2)] {
+            assert!(place_actor(
+                &mut w,
+                Pos::new(x, 10),
+                0,
+                newborn(&kinds, 0, uid, now)
+            ));
+        }
+        let wall = Feature(2);
+        let cell = |w: &World, p: Pos| {
+            let (c, i) = p.split();
+            let c = stage::chunk(w, c).unwrap();
+            (c.ground[i], c.feature[i])
+        };
+        step(&mut w);
+        assert_eq!(cell(&w, Pos::new(21, 10)).1, wall, "built in the chunk");
+        assert_eq!(
+            cell(&w, Pos::new(64, 10)).1,
+            wall,
+            "built across the border"
+        );
+        // A walker heading into the new wall stays put.
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(64, 11),
+            1,
+            newborn(&kinds, 1, 0xE1, now)
+        ));
+        for _ in 0..6 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        for (uid, x) in [(0xD1u64, 21), (0xD2, 64)] {
+            let m = rows(&mut w).into_iter().find(|r| r.0 == uid).unwrap().3;
+            assert_eq!(
+                &m.mem[..5],
+                &[6, 1, 1, 4, 2],
+                "mason {uid:x}: built, dug, too far, nothing"
+            );
+            assert_eq!(cell(&w, Pos::new(x, 10)).1, Feature::None, "dug");
+        }
+        assert_eq!(cell(&w, Pos::new(20, 11)).0, Ground(2), "mud laid south");
+        let store = tmp_store("build");
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, kinds).unwrap().unwrap();
+        ensure_loaded(
+            &mut back,
+            Pos::new(64, 32),
+            LoadPolicy { load: 1, unload: 2 },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(cell(&back, Pos::new(20, 11)).0, Ground(2), "saved");
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
     /// Fields are saved by name and come back as they were; rules that drop
     /// one, lower another's max and add a third remap every chunk, loaded
     /// and saved: kept values clamped, the new field at its `init`.
