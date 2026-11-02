@@ -17,9 +17,7 @@
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
-use crate::stage::{
-    ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos, SCENT_CHANNELS,
-};
+use crate::stage::{ActorId, CHUNK_BITS, CHUNK_SIZE, ChunkCells, ChunkCoord, Feature, Ground, Pos};
 use crate::time::{Clock, daylight, stamp};
 
 use super::{KindDef, Kinds};
@@ -142,16 +140,6 @@ pub enum OpCode {
     /// `a b ->`: the next `spawn`'s child starts with `mem[0] = a`,
     /// `mem[1] = b` (`spawn kind at t with (a, b)`)
     SpawnWith,
-    /// `v ->`: add `v` (clamped to `0..=255`) to scent channel `a` of the
-    /// actor's cell, saturating (an effect, applied in Apply)
-    Mark,
-    /// `dx dy -> scent` of channel `a` at that cell (0 where not loaded)
-    ScentAt,
-    /// `ch r -> found`; on success `locals[a], locals[a+1] = dx, dy` of the
-    /// cell with the most of scent `ch` in rings `1..=r` (the first such in
-    /// scan order; each ring's start rotated by one draw); not found if
-    /// every cell there has none
-    Sniff,
     /// One step of `for each`. Locals `a..a+5` hold `dx, dy, cursor, pred,
     /// r`. `-> found`: the first matching cell at or after the cursor, in
     /// ring order (rings `1..=r`, each clockwise from its top-left corner),
@@ -166,8 +154,9 @@ pub enum OpCode {
     FieldAt,
     /// `f pred r -> found`; on success `locals[a], locals[a+1] = dx, dy` of
     /// the cell with the most of field `f` in rings `1..=r` among those
-    /// matching `pred` ([`pred::ANY`]: every cell), as `Sniff` scans; not
-    /// found if every such cell holds 0
+    /// matching `pred` ([`pred::ANY`]: every cell), in scan order (each
+    /// ring's start rotated by one draw, as `Nearest`); not found if every
+    /// such cell holds 0
     Best,
     /// `v ->`: add `v` to field `a` on the actor's cell (an effect, applied
     /// in Apply; several to one field add up)
@@ -184,14 +173,14 @@ impl OpCode {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
             O::RandomFree => (0, 1),
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
-            O::SetLook | O::SetSignal | O::Mark | O::FieldAdd => (1, 0),
+            O::SetLook | O::SetSignal | O::FieldAdd => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
             O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
             O::Min | O::Max | O::Pack => (2, 1),
             O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
-            O::Count | O::Nearest | O::Sniff | O::Dist | O::FreeAt => (2, 1),
-            O::LookAt | O::SignalAt | O::ScentAt | O::FieldAt => (2, 1),
+            O::Count | O::Nearest | O::Dist | O::FreeAt => (2, 1),
+            O::LookAt | O::SignalAt | O::FieldAt => (2, 1),
             O::Best => (3, 1),
             O::DirOf => (1, 2),
             O::SpawnWith => (2, 0),
@@ -391,9 +380,6 @@ pub struct Outcome {
     pub adds: [(u8, i32); ADDS],
     /// First two `mem` values of a `Spawn`'s child (`with (a, b)`).
     pub with: [i32; 2],
-    /// `mark ch v` effects: what to add to each scent channel (several
-    /// marks add up, saturating).
-    pub mark: [u8; SCENT_CHANNELS],
     pub next: Option<u8>,
     /// `look = v` effect, if the think set one.
     pub look: Option<u8>,
@@ -416,7 +402,6 @@ impl Default for Outcome {
             field: 0,
             adds: [(NO_FIELD, 0); ADDS],
             with: [0; 2],
-            mark: [0; SCENT_CHANNELS],
             next: None,
             look: None,
             signal: None,
@@ -666,14 +651,6 @@ impl<'a> Halo<'a> {
         self.test(lx, ly, dx, dy, Want::Free)
     }
 
-    /// Scent channel `ch` at the cell; 0 where not loaded.
-    #[inline]
-    pub fn scent(&self, lx: i32, ly: i32, dx: i32, dy: i32, ch: usize) -> u8 {
-        self.at(lx, ly, dx, dy)
-            .and_then(|(cells, _, i)| cells.scent.get(ch).map(|s| s[i]))
-            .unwrap_or(0)
-    }
-
     /// Field `f` at the cell; 0 where not loaded.
     #[inline]
     pub fn field(&self, lx: i32, ly: i32, dx: i32, dy: i32, f: usize) -> i32 {
@@ -876,34 +853,9 @@ impl Machine<'_> {
         Ok(None)
     }
 
-    /// The cell with the most scent `ch` in rings `1..=r`: the first such
-    /// in scan order, each ring's start rotated by one draw (as `nearest`).
-    fn sniff(&mut self, ch: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
-        let r = r.clamp(0, i32::from(self.ctx.kind.sight));
-        let side = (2 * r + 1) as u32;
-        self.spend(side * side / SEARCH_DIV)?;
-        let ch = usize::try_from(ch).map_err(|_| Trap::BadSense)?;
-        if ch >= SCENT_CHANNELS {
-            return Err(Trap::BadSense);
-        }
-        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-        let mut best = (0u8, 0, 0);
-        for ring in 1..=r {
-            let n = 8 * ring;
-            let start = self.draw_below(n);
-            for k in 0..n {
-                let (dx, dy) = ring_cell(ring, (start + k) % n);
-                let v = self.ctx.halo.scent(lx, ly, dx, dy, ch);
-                if v > best.0 {
-                    best = (v, dx, dy);
-                }
-            }
-        }
-        Ok((best.0 > 0).then_some((best.1, best.2)))
-    }
-
     /// The cell with the most of field `f` in rings `1..=r` among those
-    /// matching `pred`: scanned as [`Self::sniff`] scans.
+    /// matching `pred`: each ring's start rotated by one draw, the first
+    /// such in scan order.
     fn best(&mut self, f: i32, pred: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
         let r = r.clamp(0, i32::from(self.ctx.kind.sight));
         let side = (2 * r + 1) as u32;
@@ -1222,18 +1174,14 @@ impl Machine<'_> {
                         let n = self.count(pred, r)?;
                         self.push(n)?;
                     }
-                    O::Nearest | O::Sniff => {
+                    O::Nearest => {
                         let r = self.pop()?;
                         let what = self.pop()?;
                         let i = self.local(op.a)?;
                         if usize::from(op.a) + 1 >= FRAME_LOCALS {
                             return Err(Trap::BadLocal);
                         }
-                        let found = if op.code == O::Nearest {
-                            self.nearest(what, r)?
-                        } else {
-                            self.sniff(what, r)?
-                        };
+                        let found = self.nearest(what, r)?;
                         match found {
                             Some((dx, dy)) => {
                                 self.locals[i] = dx;
@@ -1339,24 +1287,6 @@ impl Machine<'_> {
                         let b = self.pop()?;
                         let a = self.pop()?;
                         self.out.with = [a, b];
-                    }
-                    O::Mark => {
-                        let v = self.pop()?;
-                        if usize::from(op.a) >= SCENT_CHANNELS {
-                            return Err(Trap::BadSense);
-                        }
-                        let m = &mut self.out.mark[usize::from(op.a)];
-                        *m = m.saturating_add(v.clamp(0, 255) as u8);
-                    }
-                    O::ScentAt => {
-                        let dy = self.pop()?;
-                        let dx = self.pop()?;
-                        if usize::from(op.a) >= SCENT_CHANNELS {
-                            return Err(Trap::BadSense);
-                        }
-                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                        let v = self.ctx.halo.scent(lx, ly, dx, dy, usize::from(op.a));
-                        self.push(i32::from(v))?;
                     }
                     O::FieldAt => {
                         let dy = self.pop()?;
@@ -1538,7 +1468,6 @@ fn think_with<const TRACE: bool>(
         m.out.next = None;
         m.out.look = None;
         m.out.signal = None;
-        m.out.mark = [0; SCENT_CHANNELS];
         m.out.adds = [(NO_FIELD, 0); ADDS];
     }
     m.out
@@ -2108,7 +2037,7 @@ mod tests {
             .set_mem(1);
         a.push(0).push_k(0).op(OpCode::LookAt).set_mem(2);
         a.push(0).push_k(0).op(OpCode::SignalAt).set_mem(3);
-        a.push_k(0).push(0).scent_at(0).set_mem(4);
+        a.push_k(0).push(0).field_at(0).set_mem(4);
         a.push_k(1).op(OpCode::DirOf).set_mem(6).set_mem(5);
         a.push(9).op(OpCode::DirOf).set_mem(8).set_mem(7);
         a.push_k(0).op(OpCode::DirOf).set_mem(10).set_mem(9);

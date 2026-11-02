@@ -45,11 +45,11 @@ SYMBOL   = "=>" | "==" | "!=" | "<=" | ">=" | "+=" | "-="
 kind trait sub const extends inherit state when
 glyph color cover solid tags cadence sight fuel bite place need max decay vital mem
 if else while repeat for each choose let return
-and or not true false nearest sniff best count within as only is free
-idle die become spawn with move drink eat hit graze take give next look signal mark
+and or not true false nearest best count within as only is free
+idle die become spawn with move drink eat hit graze take give next look signal
 field add harvest drop
 here attacker toward away random at dir north east south west
-min abs sign clamp rand chance dist look_of signal_of scent pack hi lo
+min abs sign clamp rand chance dist look_of signal_of pack hi lo
 blocked missed refused
 x y age light hour day kind look signal state hurt hurt_dir result taken trapped
 ```
@@ -152,7 +152,6 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | ( "move" | "drink" | "eat" | "hit" | "graze" ) target
       | "look" "=" expr
       | "signal" "=" expr
-      | "mark" IDENT expr
       | "add" IDENT expr
       | ( "harvest" | "drop" ) IDENT expr
       | "next" IDENT
@@ -172,7 +171,7 @@ arm   = expr ":" ( block | stmt ) [ ";" ]
   `return` followed on its line by nothing, a comment, `;` or `}` returns nothing, and the
   next line is the next statement or arm. Everywhere else a newline is whitespace.
 - **An expression runs as far as it can.** A statement that ends in an expression (`x = y`,
-  `mark t 5`, `take f n 1`) absorbs a following `-` or `(`: in `choose { 1: x = y  -1: idle }`
+  `add f 5`, `take f n 1`) absorbs a following `-` or `(`: in `choose { 1: x = y  -1: idle }`
   the arm is `x = y - 1`, and `1: x = g  (2): idle` calls `g(2)`. No statement starts with
   `-` or `(`, so this only bites a `choose` weight: separate such an arm with `;`.
 - *`with` names distinct memory slots, at most two.*
@@ -185,13 +184,12 @@ cond     = and_cond { "or" and_cond }
 and_cond = not_cond { "and" not_cond }
 not_cond = "not" not_cond
          | "nearest" pred "within" additive "as" IDENT
-         | "sniff" IDENT "within" additive "as" IDENT
          | "best" IDENT [ "on" pred ] "within" additive "as" IDENT
          | "(" cond ")"                (when no binary operator follows the ")")
          | expr
 ```
 
-Conditions are the only place `and`, `or`, `not`, `nearest`, `sniff` and `best` appear: after `when`,
+Conditions are the only place `and`, `or`, `not`, `nearest` and `best` appear: after `when`,
 `if` and `while`. An expression is a condition (nonzero is true), but a condition is not an
 expression: `let b = x > 0 and y > 0` is an error.
 
@@ -214,7 +212,6 @@ primary  = INT | TIME
          | ( "rand" | "chance" ) "(" expr ")"
          | ( "dist" | "free" | "look_of" | "signal_of" ) "(" target ")"
          | "is" "(" target "," pred ")"
-         | "scent" "(" IDENT [ "," target ] ")"
          | ( "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" ) "(" expr { "," expr } ")"
          | IDENT args
          | IDENT "." ( "dx" | "dy" )
@@ -237,7 +234,7 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   `clamp` 3.*
 - `blocked`, `missed` and `refused` read as `result == BLOCKED` (and so on).
 - `count`'s radius is one `unary`: `count fox within 3 - 1` is the count minus one. The
-  radii of `nearest`, `sniff`, `best` and `for each` are an `additive`.
+  radii of `nearest`, `best` and `for each` are an `additive`.
 - *`IDENT args` with a field's name reads that field: one argument, a target (`sugar(here)`,
   `sugar(s)` for a binding `s`).*
 - In a field's law, two more primaries:
@@ -299,7 +296,7 @@ A program that parses compiles only if it also keeps these. Each points at the s
 **Names and scopes.**
 - *Global, across every file and pack* (§1, §15): kinds and traits share one namespace;
   file subs, consts and tags are global too, and none of them may reuse a kind's, trait's
-  or each other's name. Scent names are a namespace of their own, at most 4 (§9).
+  or each other's name; fields are global too (§2).
 - *Per kind or trait:* needs and mems share one namespace (a name is a need or a mem, not
   both); states and member subs have their own. A member sub may not share a name with a
   file sub, a kind or a trait (§15).
@@ -341,11 +338,11 @@ A program that parses compiles only if it also keeps these. Each points at the s
   field; `harvest` and `drop` a `fixed` one.
 - `spawn` and `become` name a kind, never a trait; `spawn ... with` names mems of that kind,
   and all the spawns of one kind name at most two distinct ones.
-- `nearest ... as`, `sniff ... as` and `best ... as` bind only as a top-level conjunct of a `when`, `if` or
+- `nearest ... as` and `best ... as` bind only as a top-level conjunct of a `when`, `if` or
   `while` condition (under `and` or parentheses, not under `or` or `not`), and the binding
   is visible in that rule's or statement's body only.
 
-**Limits** are in `RULES.md` §18: needs 4 and mems 12 per kind after merging, 64 tags and 4
-scents per rule set, 64 fields per rule set and 4 a think adds to, 64 states, `sight` 0 to 16, `fuel` 1 to 4096, `cadence` a power of two,
+**Limits** are in `RULES.md` §18: needs 4 and mems 12 per kind after merging, 64 tags and
+64 fields per rule set and 4 a think adds to, 64 states, `sight` 0 to 16, `fuel` 1 to 4096, `cadence` a power of two,
 `bite` 0 to 255, 16 local slots and a 64-value stack per rule or sub, 8 nested calls,
 32767 ops per rule, state or sub, a chain of `extends` 128 deep.

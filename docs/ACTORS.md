@@ -18,12 +18,12 @@ own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slo
 lies under whoever stands on the cell and never blocks a move. There is no actor entity. A **kind** is a text file compiled at world open into bytecode plus a
 property table (`Res<Programs>`), shared read-only by every thread. Persistent per-actor
 state is exactly needs + memory + a state byte: no saved program counter, so a think is a
-pure function of (own row, the world after this tick's Simulate phase (scent faded), tick,
+pure function of (own row, the world after this tick's Simulate phase (field laws run), tick,
 seed).
 
 ```text
 SimTick  (Phase sets chained; one system per set; ambiguity_detection = Error)
- Simulate  seq   scent_decay (cadence 16)     W ChunkCells.scent of due chunks (one thread: too little work to split)
+ Simulate  par   law_compute, law_commit      R ANY ChunkCells.fields, W LawScratch; then W own ChunkCells.fields (`docs/WORLD.md` §3)
  Think     par   actors::think                R Tick SimConfig Programs Stage, ANY ChunkCells + ChunkActors
                                               W own ChunkMinds Intents Outbox ChunkMeta.dirty
  Resolve   par   actors::resolve              sort own intents by key; WAKE consumed; in-chunk bites recorded on the victim chunk
@@ -100,24 +100,20 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   occupant or the cover, `free` asks only about the occupant, `bare` means walkable with no
   cover. The renderer tints a covered cell toward the cover's colour and draws the occupant,
   else the cover's glyph.
-- **Scent**: `ChunkCells.scent` holds `SCENT_CHANNELS` (4) `u8` layers. `mark ch v` adds
-  `v` (saturating) to the actor's tick-start cell in Apply (the marks of one think add up,
-  per channel: `Intent.mark` is one byte per channel); `scent_decay` (Simulate phase)
-  takes `ceil(s / 32)` from every cell of a chunk's scented channels every 16 ticks,
-  staggered by a hash of the chunk coordinate (a fresh 255 halves in ~22 game minutes, gone
-  in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
-  the code; a fifth name is a compile error. The renderer washes a scented cell toward the
-  channel's colour.
-- **Save**: chunk file v10 = cell layers (`occupant`, `cover`, the scent channels, the field layers), `n`, `ActorPub[n]`,
+- **Fields** (`docs/WORLD.md`): `ChunkCells.fields` holds a `u16` layer per field the
+  rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
+  `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
+  a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
+- **Save**: chunk file v11 = cell layers (`occupant`, `cover`, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
   clocks run on, so every save and unload writes it again, stamped with the tick.
   `world.wmc` carries the scenario (seed, initial size, terrain, starts, a drawn map from
-  step 8e) and the kind table with each kind's need, mem and state names and the scent
-  channel names, and the rule packs it was played with. A save opens under any rules that
-  define its kinds (step 8c): `sim::open` matches kinds, needs, mems, states and scent
-  channels by name into a `reload::Plan`, every chunk read goes through it, and the first
+  step 8e) and the kind table with each kind's need, mem and state names and the field
+  names, and the rule packs it was played with. A save opens under any rules that
+  define its kinds (step 8c): `sim::open` matches kinds, needs, mems, states and
+  fields by name into a `reload::Plan`, every chunk read goes through it, and the first
   write to the store (a save, an unload, a reload) first rewrites every chunk file and then
   the header, so a directory never mixes two numberings. A kind the rules lack, or one that
   moved between standing and ground cover, refuses the open.
@@ -136,8 +132,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   was opened: `--rules`, `WMC_RULES`, the save's packs or the scenario's `rules`; `./rules`
   for the built-in set) are recompiled and swapped in between two ticks. Rows are remapped by
   name: kind (rows of a kind that is gone are dropped and reported), each need (clamped to
-  the new max; new needs start full) and mem (new ones 0), the state by its name, each scent
-  channel by its name. Saved chunks that are not loaded are rewritten the same way and
+  the new max; new needs start full) and mem (new ones 0), the state by its name, each field
+  by its name (a new one at its `init`). Saved chunks that are not loaded are rewritten the same way and
   `world.wmc` gets the new kind list, so the save opens with the new rules (and no longer
   with the old). The starts stay whole: a removed kind's start places nobody (reported),
   its share keeping its interval, and starts again when the kind is back. Moving a kind
@@ -160,8 +156,8 @@ snapshot; no `Prev` copy). Every Think task resolves its 3x3 chunk halo once; `s
 |---|---|---|
 | self | each need and mem by name, `age`, `x`, `y`, `kind`, `look`, `signal`, `state`, `light`, `hour`, `day` | own rows, `Tick`, `time::daylight`, `Clock::at` |
 | events | `hurt`, `hurt_dir`, `result` (OK / BLOCKED / MISSED / REFUSED / NONE; `blocked`, `missed`, `refused` are shorthands for `result == ...`), `taken` (something was taken from it), `trapped` (its last think ran out of fuel or faulted) | latched bytes written by the resolve phases, cleared after the think that read them |
-| here / at | `scent(ch)`; `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo (the reach of every target: at least 64 cells each way); unloaded or beyond the halo = rock, no actor |
-| search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `sniff ch within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
+| here / at | `F(t)` (a field); `free(t)`, `is(t, pred)` (`is(here, water)` for the ground, `is(here, rock)` for the feature), `look_of(t)`, `signal_of(t)` | cells and public rows in the halo (the reach of every target: at least 64 cells each way); unloaded or beyond the halo = rock, no actor |
+| search | `nearest pred within r as v`, `count pred within r`, `for each pred within r as v`, `best F [on pred] within r as v` | Chebyshev rings 1..=r, each clockwise from its top-left; `nearest`/`sniff` rotate the ring start by one RNG draw, `for each` does not |
 | geometry | `dist(t)`, `t.dx`, `t.dy`, `toward t`, `away t`, `at(x, y)` | arithmetic |
 
 A *pred* is one integer at run time: a kind, `kind:look`, a tag, a ground, a feature,
@@ -169,7 +165,7 @@ A *pred* is one integer at run time: a kind, `kind:look`, a tag, a ground, a fea
 herbivore, and a kind or tag matches the cell's occupant or its cover.
 **The message system is the latched byte set**: bounded, Pod, delivered to exactly the next
 think. Hits in one tick sum into `hurt` (saturating); `hurt_dir` is the lowest-key attacker.
-No per-actor queues. Broadcast goes through `signal`, `look` and per-cell scent layers.
+No per-actor queues. Broadcast goes through `signal`, `look` and fields (`add`, read by anyone).
 
 ## 4. Needs
 
@@ -219,8 +215,8 @@ action   := "idle" | "die" | "become" NAME
           | "move" target | "eat" target | "hit" target | "graze" target | "drink" target
           | "take" target NAME expr | "give" target NAME expr
           | "spawn" NAME "at" target [ "with" "(" NAME "=" expr [ "," NAME "=" expr ] ")" ]   # the named mems take the kind's first slots
-effect   := "signal" "=" expr | "look" "=" expr | "mark" NAME expr
-cond     := expr | "nearest" pred "within" expr "as" NAME | "sniff" NAME "within" expr "as" NAME
+effect   := "signal" "=" expr | "look" "=" expr | "add" NAME expr
+cond     := expr | "nearest" pred "within" expr "as" NAME | "best" NAME [ "on" pred ] "within" expr "as" NAME
           | cond "and" cond | cond "or" cond | "not" cond | "(" cond ")"
 target   := NAME | "here" | "attacker" | "toward" target | "away" target | "at" "(" expr "," expr ")"
           | "north" | "east" | "south" | "west" | "dir" "(" expr ")" | "random" "free"
@@ -228,7 +224,7 @@ pred     := [ "only" ] NAME [ ":" INT ] | "water" | "soil" | "rock" | "free" | "
 expr     := INT | TIME | NAME | sense | "blocked" | "missed" | "refused" | "(" expr ")"
           | expr ("+"|"-"|"*"|"/"|"%"|"<"|"<="|"=="|"!="|">="|">"|"and"|"or") expr | "not" expr
           | "rand" "(" expr ")" | "chance" "(" expr ")" | "count" pred "within" expr | "dist" "(" target ")"
-          | "scent" "(" NAME [ "," target ] ")" | "look_of" "(" target ")" | "signal_of" "(" target ")"
+          | NAME "(" target ")" | "look_of" "(" target ")" | "signal_of" "(" target ")"
           | ("min"|"max"|"abs"|"sign"|"clamp"|"pack"|"hi"|"lo") "(" expr ("," expr)* ")"
           | NAME "(" [ expr ("," expr)* ] ")"
 TIME     := INT ("min" | "h" | "d")
@@ -519,7 +515,7 @@ where it touches the tick.
    8 and follow the last place they saw it, hold a territory and have a litter only where
    prey is plentiful; old age is a daily chance past an age, so cohorts do not die together.
    Tests: grazing onto walkable grass, bites by share, the hatch-to-chick path.
-6. **Social primitives.** `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
+6. **Social primitives.** (Scent, below, was removed 2026-11-01 for fields: decision 56.) `signal`, `take`/`give`, `mark`/scent layers (store v8), `state`
    blocks, `for each`, `sniff`; the bee is the acceptance test. Done: `state`/`next`,
    `const`, `for each`, `signal =`, `look_of`/`signal_of`, `kind:look`, `pack`/`hi`/`lo`
    (new opcodes appended, so the programs of the existing kinds and their hash are unchanged);

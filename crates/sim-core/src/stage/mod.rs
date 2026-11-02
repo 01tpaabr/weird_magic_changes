@@ -35,7 +35,6 @@
 //! [`ChunkCells`], fold it into `hash`, encode it in `store`, render it in `app`.
 
 pub mod fields;
-pub mod scent;
 pub mod worldgen;
 
 use std::collections::HashMap;
@@ -60,9 +59,6 @@ pub const CHUNK_BITS: u32 = 6;
 pub const CHUNK_SIZE: i32 = 1 << CHUNK_BITS;
 /// Cells per chunk.
 pub const CHUNK_CELLS: usize = (CHUNK_SIZE * CHUNK_SIZE) as usize;
-/// Scent channels per cell (`mark`, `sniff`): named by the rules, numbered
-/// in first-appearance order.
-pub const SCENT_CHANNELS: usize = 4;
 const _: () = assert!(CHUNK_CELLS <= 1 << u16::BITS);
 
 /// A local cell index, `0..CHUNK_CELLS`, as the `u16` that rows, effects
@@ -284,8 +280,6 @@ pub struct ChunkCells {
     /// What grows on the ground here, at most one (a `cover` kind: never
     /// blocks, lies under whoever stands on the cell).
     pub cover: [ActorId; CHUNK_CELLS],
-    /// Scent per channel: raised by `mark`, decayed by `scent_decay`.
-    pub scent: [[u8; CHUNK_CELLS]; SCENT_CHANNELS],
     /// One layer per field the rules declare (`Kinds::fields`, same
     /// order), each value in `0..=max`. Sized when the chunk is made or
     /// read, never inside a tick; empty when the rules declare none.
@@ -299,7 +293,6 @@ impl Default for ChunkCells {
             feature: [Feature::None; CHUNK_CELLS],
             occupant: [ActorId::NONE; CHUNK_CELLS],
             cover: [ActorId::NONE; CHUNK_CELLS],
-            scent: [[0; CHUNK_CELLS]; SCENT_CHANNELS],
             fields: Vec::new(),
         }
     }
@@ -334,7 +327,6 @@ impl ChunkCells {
         let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
         let h = fnv1a(h, bytemuck::cast_slice(&self.occupant));
         let h = fnv1a(h, bytemuck::cast_slice(&self.cover));
-        let h = fnv1a(h, bytemuck::cast_slice(&self.scent));
         // No fields, no change: a world without them keeps its checksums.
         self.fields
             .iter()

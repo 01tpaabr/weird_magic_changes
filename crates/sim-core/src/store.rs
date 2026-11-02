@@ -5,9 +5,9 @@
 //! ```text
 //! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
 //!                              gen params, starts, drawn map, kinds (names, cover, slot
-//!                              names), scent channels, fields, packs, rules hash
+//!                              names), fields, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
-//!                              as raw bytes (ground, feature, occupant, cover, scent channels),
+//!                              as raw bytes (ground, feature, occupant, cover),
 //!                              then f and f field layers (u16 each), then n, n public actor
 //!                              rows, n private actor rows, as raw bytes
 //! ```
@@ -20,7 +20,7 @@
 //! refused rather than misread. The header also carries `TICKS_PER_DAY`:
 //! every duration in a world is in ticks, so a build with a different day
 //! length must not open it. Kinds travel by name, with the names of their
-//! need, mem and state slots and the scent channel names, so rows can be
+//! need, mem and state slots and the field names, so rows can be
 //! checked against (and remapped to) the loaded kind table on open
 //! (`sim::open`). The scenario's starts travel by kind name too. Every
 //! position a save holds (a start, the initial region, a drawn map, a
@@ -42,12 +42,11 @@ use crate::rules::compile::MAX_FIELDS;
 use crate::scenario::{DrawnMap, Region, Start, in_world};
 use crate::stage::worldgen::GenParams;
 use crate::stage::{
-    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, SCENT_CHANNELS,
-    WORLD_EXTENT,
+    CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, ChunkCells, ChunkCoord, ChunkData, WORLD_EXTENT,
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 10;
+pub const FORMAT_VERSION: u32 = 11;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -67,8 +66,6 @@ pub struct WorldMeta {
     pub map: Option<DrawnMap>,
     /// Kind table of the rules that wrote the save, by index.
     pub kinds: Vec<SavedKind>,
-    /// Scent channel names of those rules, in channel order.
-    pub scents: Vec<String>,
     /// Field names of those rules, in layer order.
     pub fields: Vec<String>,
     /// The rule packs the world is played with, as given (step 8c).
@@ -319,13 +316,6 @@ impl Store {
             }
             kinds.push(k);
         }
-        let scents = r.strs()?;
-        if scents.len() > SCENT_CHANNELS {
-            return Err(bad(format!(
-                "{} scent channels, this build holds {SCENT_CHANNELS}",
-                scents.len()
-            )));
-        }
         let fields = r.strs()?;
         if fields.len() > MAX_FIELDS {
             return Err(bad(format!(
@@ -345,7 +335,6 @@ impl Store {
             starts,
             map,
             kinds,
-            scents,
             fields,
             packs,
             rules_hash,
@@ -427,7 +416,6 @@ impl Store {
             w.strs(&k.mems);
             w.strs(&k.states);
         }
-        w.strs(&m.scents);
         w.strs(&m.fields);
         w.strs(&m.packs);
         w.u64(m.rules_hash);
@@ -462,9 +450,6 @@ impl Store {
         let feature = r.bytes(CHUNK_CELLS)?;
         let occupant = r.bytes(CHUNK_CELLS * 4)?;
         let cover = r.bytes(CHUNK_CELLS * 4)?;
-        for ch in &mut cells.scent {
-            ch.copy_from_slice(r.bytes(CHUNK_CELLS)?);
-        }
         cells.ground.copy_from_slice(
             bytemuck::checked::try_cast_slice(ground).map_err(|e| bad(e.to_string()))?,
         );
@@ -536,9 +521,6 @@ impl Store {
             .extend_from_slice(bytemuck::cast_slice(&cells.feature));
         for o in cells.occupant.iter().chain(&cells.cover) {
             w.buf.extend_from_slice(&o.0.to_le_bytes());
-        }
-        for ch in &cells.scent {
-            w.buf.extend_from_slice(ch);
         }
         w.u32(u32::try_from(cells.fields.len()).expect("at most MAX_FIELDS fields"));
         for layer in &cells.fields {
@@ -812,7 +794,6 @@ mod tests {
                     states: names(&["grow", "rest"]),
                 },
             ],
-            scents: names(&["trail"]),
             fields: names(&["sugar", "höhe"]),
             packs: names(&["/rules/base", "rules/mod"]),
             rules_hash: 0xABCD,
@@ -826,7 +807,6 @@ mod tests {
                 ..m.map.clone().unwrap()
             }),
             kinds: Vec::new(),
-            scents: Vec::new(),
             fields: Vec::new(),
             packs: Vec::new(),
             ..m.clone()
@@ -891,7 +871,7 @@ mod tests {
         };
         let full = WorldMeta {
             kinds: vec![kind(NEED_SLOTS, MEM_SLOTS)],
-            scents: slot(SCENT_CHANNELS),
+            fields: slot(crate::rules::compile::MAX_FIELDS),
             ..m.clone()
         };
         s.write_meta(&full).unwrap();
@@ -899,10 +879,10 @@ mod tests {
         for (over, want) in [
             (
                 WorldMeta {
-                    scents: slot(SCENT_CHANNELS + 1),
+                    fields: slot(crate::rules::compile::MAX_FIELDS + 1),
                     ..full.clone()
                 },
-                "scent channels",
+                "fields, this build holds",
             ),
             (
                 WorldMeta {
@@ -1038,7 +1018,7 @@ mod tests {
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
         // A field count past the most, then one the file does not hold.
-        let f_at = 28 + CHUNK_CELLS * (10 + crate::stage::SCENT_CHANNELS);
+        let f_at = 28 + CHUNK_CELLS * 10;
         let mut bytes = good.clone();
         bytes[f_at..f_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
@@ -1117,7 +1097,6 @@ mod tests {
             starts: Vec::new(),
             map: None,
             kinds: Vec::new(),
-            scents: Vec::new(),
             fields: Vec::new(),
             packs: Vec::new(),
             rules_hash: 0,

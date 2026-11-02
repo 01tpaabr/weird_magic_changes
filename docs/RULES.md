@@ -46,7 +46,7 @@ kind seed {
 
 Files compile in file-name order. Kinds are numbered in pre-order: roots in file then
 declaration order, each kind's children right after it, so a family is one range of ids
-(`wmc lint` prints the numbering). Kind, sub, const, tag and scent names are global across all
+(`wmc lint` prints the numbering). Kind, sub, const, tag and field names are global across all
 files. `#` starts a comment. `;` after a statement, a declaration or a `const` is optional. A kind says nothing about
 where it starts in a new world: a scenario does (§14).
 The formal grammar, token by token, is `GRAMMAR.md`.
@@ -71,7 +71,7 @@ day is 21 600 ticks: 900 an hour, 15 a minute.
    ```
 5. **Nothing matched.** Falling off the end is `idle`.
 
-**One action per think.** A second action traps. Effects (`look =`, `signal =`, `mark`) don't
+**One action per think.** A second action traps. Effects (`look =`, `signal =`, `add`) don't
 count as actions and ride along with whichever action happens.
 
 A think reads the world **as it was at the start of the tick**. Nothing anyone does this
@@ -120,7 +120,7 @@ short-circuit. Two conditions also bind a name to a cell:
 
 ```rules
 when nearest fox within 5 as f => flee(f)       # f is the nearest cell holding a fox
-when sniff trail within 4 as v => move toward v # v is the cell with the most `trail` scent
+when best trail within 4 as v => move toward v  # v is the cell with the most of the field `trail`
 ```
 
 A binding is only visible in the body if its search is a top-level conjunct: allowed under
@@ -295,7 +295,6 @@ Effects combine with the action and don't end the think.
 |---|---|
 | `look = v` | a public byte, 0 to 255, that other actors read (`kind:look` predicates, `look_of(t)`) and `wmc why` shows; it is not drawn |
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
-| `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Several marks in one think add up, per channel, even from rules that fall through. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 4 channels in a rule set, numbered by first use |
 | `add F v` | adds `v` (negative takes away) to field F on the actor's cell, clamped to the field's `0..max`, in key order with the other actors on the cell. Several adds in one think add up; one think adds to at most 4 fields (a fifth traps). Not on a `conserved` or `fixed` field (§12, Fields) |
 
 ## 10. Senses
@@ -312,7 +311,6 @@ Effects combine with the action and don't end the think.
 | `result`, `blocked`, `missed`, `refused` | the last action's outcome |
 | `taken` | something was taken from it since its last think |
 | `trapped` | its last think ran out of fuel or faulted |
-| `scent(CH)`, `scent(CH, t)` | scent channel CH here, or at target t |
 | `count pred within r` | matching cells in the square of radius r, **own cell included**. The radius is one term (a number, a name, a call or a parenthesised expression): `count fox within 3 - 1` is the count minus one; write `within (R - 1)` for a sum |
 | `free(t)` | the cell is walkable and nobody stands there |
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
@@ -327,7 +325,7 @@ nothing is loaded or beyond reach. A condition finds the richest cell:
 |---|---|
 | `best F [on pred] within r as v` | binds `v` to the cell in rings 1 to r (not its own) with the most of field F, among the cells matching `pred` if `on` names one (`best sugar on free within 6 as s`); false if every such cell holds 0. Scanned as `sniff` scans, so ties go to a random start |
 
-Searches (`count`, `nearest`, `sniff`, `best`, `for each`) are capped by `sight` and see into the
+Searches (`count`, `nearest`, `best`, `for each`) are capped by `sight` and see into the
 neighbouring chunks. An unloaded chunk reads as rock with nobody on it, and so does any
 cell out of reach (§11). `nearest` scans
 rings 1 to r (not its own cell), and each ring starts at a random point so a flock doesn't
@@ -477,14 +475,16 @@ clamped to the field's `0..max`. Where the world isn't loaded, a law reads the c
 edge, so an even field stays even, or the field's `outside` value if it has one. A law is a
 column program: it runs over a whole chunk at once, as fast as hand-written code once it
 reads its neighbours (`docs/WORLD.md` §8), so a law is much cheaper than an actor in every
-cell. `packs/gather` grows its sugar back with one.
+cell. A law without dice or the clock that leaves 0 at 0 (a fade, a regrowth to a cap,
+Life) skips every chunk where the fields it reads are all 0: a trail that covers a few
+chunks costs only there. `packs/gather` grows its sugar back with one.
 
 ## 13. Cost
 
 Each op costs 1 fuel, and a search costs `(2r + 1)² / 8` more. A think that runs out of fuel
 becomes `idle`, sets `trapped`, and counts under `TRAPS` on the status bar and in
 `wmc run`. So does any other trap (a second action, a fault). Writes to needs and mem made
-before the trap stay; the action, `next`, `look`, `signal` and `mark` are dropped. Write
+before the trap stay; the action, `next`, `look`, `signal` and `add` are dropped. Write
 the memory a trap must not half-update last, or after the search that might run out.
 The `ops/think` column of `wmc run` counts ops, not fuel: a search's extra
 `(2r + 1)² / 8` is not in it, so a kind that searches a lot costs more than the column
@@ -698,7 +698,7 @@ they use `scenarios/default.scenario`, which starts the built-in kinds.
 A **pack** is a directory of `*.rules` files (one with none is an error), or one file. A
 world's rules are one or more packs compiled together, in the order given, files sorted by
 name inside each. Every kind,
-trait, file sub, const, tag and scent name is global across all of them: a kind in one pack
+trait, file sub, const, tag and field name is global across all of them: a kind in one pack
 can extend a kind or trait of another, call its subs and use its constants, and a name
 declared twice, in any two files, is an error naming both. A sub declared inside a kind or
 trait is that item's own: two items may each have a `wander`, but it can't share a name with
@@ -777,7 +777,7 @@ global, so packs meant to share a world keep their consts and traits apart
 soups in their own regions (§14), and checks that each runs as it does alone.
 
 A save also opens under packs that number things differently, which is what adding a pack
-does. Kinds, needs, memory, states and scent channels are matched **by name**, so every actor
+does. Kinds, needs, memory, states and fields are matched **by name**, so every actor
 keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
 writes to the save, the whole directory moves over to the new numbering, and from then on it
 belongs to the new set of packs. Rules that lack one of the save's kinds are refused with the
@@ -806,7 +806,7 @@ eggs), `plant` (flowers, grass, seeds, trees), `feed` (what hens eat: grass and 
 `signal` packs the offset to the flowers, read with `hi` and `lo`), `hive:1` has stores,
 `hive:2` full.
 
-**Scents.** `trail`, laid by laden bees on their way home, strongest near the flowers.
+**Fields.** `trail`, laid by laden bees on their way home, strongest near the flowers, and fading by a 32nd every 16 ticks: its law.
 
 **Families.** `chick extends chicken`: `nearest chicken` finds chicks too, `only chicken` does
 not.
@@ -841,7 +841,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   on stderr when it opens, and a hot reload says `N warnings (log)`. What the lint checks:
   - a rule that can never run; an ancestor whose rules no `inherit` splices (a note);
   - a predicate tag no kind carries (`wolf looks for meat, but no kind ... is tagged meat`);
-  - a `sniff` or `scent()` of a channel nothing marks, `signal_of` when no rule sets
+  - `signal_of` when no rule sets
     `signal`, `K:n` (n above 0: every actor starts at look 0) when no rule of K's family,
     nor of a kind that becomes one, sets `look`;
   - `eat`, `hit` or `graze` of a target whose predicate the lint can follow (the `nearest`
@@ -934,7 +934,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and
-  changes nothing. Actors keep kind, needs, memory, state and scent by name. Rows of a kind
+  changes nothing. Actors keep kind, needs, memory, state and fields by name. Rows of a kind
   you removed are dropped: the one way to take a kind out of a save. Saved chunks are
   rewritten to match. Its starts stay in the save and place nobody (`starts skipped` on the
   status bar) until the kind is back (§15).
@@ -944,7 +944,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | | |
 |---|---|
 | needs, mem slots per kind | 4, 12 |
-| tags, scent channels per rule set | 64, 4 |
+| tags per rule set | 64 |
 | fields per rule set | 64 |
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |

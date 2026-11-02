@@ -1,7 +1,7 @@
 # The world
 
 Status: **steps 1 and 2, fields and their laws, are built** (2026-11-01: §2-§4, `RULES.md`
-§12 "Fields", decisions 54 and 55; scent is not a field yet); the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
+§12 "Fields", decisions 54-56; scent is gone, the bees' trail is a field); the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
 measurement in §8 is done; the build order is §10. Syntax below is a proposal until its step
 lands in `GRAMMAR.md` and `RULES.md`, and may change there.
 
@@ -55,9 +55,9 @@ field fox_scent max 255 { every 16 { fox_scent -= (fox_scent + 31) / 32 } }   # 
   reaches them.
 - **Drawn** by a declared colour ramp (`color "#e0c040"`: intensity by value), and `relief` for
   a height field: hillshade from the neighbours.
-- **Scent becomes fields** with step 2: `mark` and `scent(CH)` re-expressed as a field the
-  built-in pack declares, with the decay law above; the 4-channel limit and the fixed fade go
-  away. It needs laws, so scent stays as it is until then.
+- **Scent is gone** (decision 56): `mark`, `scent()`, `sniff`, the 4 channels and their fixed
+  fade were removed from the engine. The bees declare `field trail` with the decay law above,
+  `add` it and find it with `best`.
 
 **Reads by actors** (inside `sight`, as every search): `sugar(t)`, and the best cell, `best
 sugar [on PRED] within 6 as s` (the largest value among the cells matching `PRED`, ties broken
@@ -70,8 +70,10 @@ Built 2026-11-01 (decision 55), as below, with these settled in the building: `e
 any number of ticks (`every 1h`), not only powers of two; an aggregate's square includes the
 cell itself, as `count ... within` does for actors; inside an aggregate a field is read as it
 stood before the law ran, whatever the law assigned it first (the fuzzer found that a
-neighbour's new value isn't known across a chunk's border); the quiet-chunk skip waits for a
-measurement that asks for it.
+neighbour's new value isn't known across a chunk's border); the quiet-chunk skip came with
+scent's removal (decision 56): the compiler marks a law **quiet** when, without dice or the
+clock, it leaves 0 at 0, and a chunk where every field such a law reads is 0 (its
+neighbours' too, if it reads them) is skipped.
 
 A law is a block on a field, run in every cell of a chunk at the field's cadence (`every N`,
 a power of two of ticks, staggered by the chunk coordinate like scent today). It is written in
@@ -248,7 +250,8 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
    field's total plus its needs' total stays put under `harvest` and `drop`.
 2. **Laws** (built, 2026-11-01): the column compiler and interpreter, cadence, compute/commit
    phases, the neighbour halo, the edge rule (§11); `packs/gather` grows its sugar back; Life
-   as a field law, with a PERF row. Left: scent re-expressed as fields, the quiet-chunk skip.
+   as a field law, with a PERF row. Scent removed for a field, and the quiet-chunk skip
+   (decision 56).
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
 4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
 5. **Layers.**

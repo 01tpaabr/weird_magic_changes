@@ -1799,7 +1799,7 @@ fn a_local_that_hides_a_need_or_mem_is_an_error() {
             "t.rules:2:7: binding `m` has the name of a need or mem slot of `a`",
         ),
         (
-            "kind a { mem m\n when sniff s within 3 as m => idle }",
+            "field s max 9  kind a { mem m\n when best s within 3 as m => idle }",
             "binding `m` has the name of a need or mem slot of `a`",
         ),
         (
@@ -2320,4 +2320,39 @@ fn law_errors_name_the_problem() {
     .unwrap();
     let law = k.fields[1].law.as_ref().unwrap();
     assert_eq!((law.every, k.fields[1].outside), (900, Some(4)));
+}
+
+/// A law that leaves 0 at 0, known without dice or the clock, may skip a
+/// chunk where the fields it reads are all 0; any other may not.
+#[test]
+fn a_law_that_leaves_zero_at_zero_is_quiet() {
+    let k = compile(
+        "t.rules",
+        "field room max 9
+         field fade max 255 { every 16 { fade -= (fade + 31) / 32 } }
+         field grow max 9 { every 1h { grow = min(grow + 1, room) } }
+         field life max 1 { every 1 { let n = sum life within 1  if n == 3 { life = 1 } else if n != 4 { life = 0 } } }
+         field up max 9 { every 1 { up += 1 } }
+         field dice max 9 { every 1 { dice = chance(50) * 0 } }
+         field dark max 9 { every 1 { dark = 0 * hour } }
+         field some max 9 { every 1 { if room == 0 { some = 3 } } }",
+    )
+    .unwrap();
+    let quiet: Vec<(&str, bool)> = k
+        .fields
+        .iter()
+        .filter_map(|f| f.law.as_ref().map(|l| (f.name.as_str(), l.quiet)))
+        .collect();
+    assert_eq!(
+        quiet,
+        [
+            ("fade", true),
+            ("grow", true),
+            ("life", true),
+            ("up", false),
+            ("dice", false),
+            ("dark", false),
+            ("some", false),
+        ]
+    );
 }

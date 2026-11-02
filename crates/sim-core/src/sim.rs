@@ -33,7 +33,7 @@ use crate::reload::{self, PendingRemap, Plan};
 use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
 pub use crate::scenario::{Event, check_expect, expect, run_checks, run_checks_until};
-use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
+use crate::stage::fields::{around, run_due};
 use crate::stage::worldgen::{GenParams, Terrain, fill_fields_many, generate_many};
 use crate::stage::{
     self, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage,
@@ -83,7 +83,7 @@ pub struct SimTick;
 /// ordered explicitly.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Phase {
-    /// Cell systems: scent fades, then the fields' laws run.
+    /// Cell systems: the fields' laws.
     Simulate,
     /// Every due actor runs its program; writes own minds + intents.
     Think,
@@ -171,7 +171,6 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
     );
     schedule.add_systems((
         (
-            crate::stage::scent::scent_decay,
             crate::stage::fields::law_compute,
             crate::stage::fields::law_commit,
         )
@@ -328,13 +327,10 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
             missing.join(", ")
         )));
     }
-    let remap = if SavedKind::table(kinds) == m.kinds
-        && kinds.scents == m.scents
-        && reload::field_names(kinds) == m.fields
-    {
+    let remap = if SavedKind::table(kinds) == m.kinds && reload::field_names(kinds) == m.fields {
         None
     } else {
-        Some(Plan::between(&m.kinds, &m.scents, &m.fields, kinds, m.seed).map_err(bad)?)
+        Some(Plan::between(&m.kinds, &m.fields, kinds, m.seed).map_err(bad)?)
     };
     let terrain = Terrain {
         seed: m.seed,
@@ -405,7 +401,6 @@ pub fn meta(world: &World) -> WorldMeta {
         starts: c.starts.clone(),
         map: c.map.clone(),
         kinds: SavedKind::table(kinds),
-        scents: kinds.scents.clone(),
         fields: reload::field_names(kinds),
         packs: kinds.debug.packs.clone(),
         rules_hash: kinds.hash,
@@ -705,22 +700,29 @@ pub fn explain_slots(
     let seed = world.resource::<SimConfig>().seed;
     let e = stage.entity(cc)?;
     let (pubs, minds) = (world.get::<ChunkActors>(e)?, world.get::<ChunkMinds>(e)?);
-    // The think sees the world after the Simulate phase, so a chunk due to
-    // fade its scent this tick is faded first, in a copy. Mirror every
-    // Simulate system here.
-    let faded: Vec<(ChunkCoord, ChunkCells)> = (0..9)
+    // The think sees the world after the Simulate phase, so a chunk with a
+    // law due this tick has it run first, in a copy: mirror every Simulate
+    // system here.
+    let cells_at = |c: ChunkCoord| world.get::<ChunkCells>(stage.entity(c)?);
+    let mut layers = Vec::new();
+    let ruled: Vec<(ChunkCoord, ChunkCells)> = (0..9)
         .filter_map(|k| {
             let c = ChunkCoord::new(cc.x + k % 3 - 1, cc.y + k / 3 - 1);
-            if !chunk_due(tick, c, SCENT_CADENCE) {
+            let mine = cells_at(c)?;
+            run_due(kinds, seed, tick, c, around(c, cells_at), &mut layers);
+            if layers.is_empty() {
                 return None;
             }
-            let mut cells = world.get::<ChunkCells>(stage.entity(c)?)?.clone();
-            fade_chunk(&mut cells).then_some((c, cells))
+            let mut cells = mine.clone();
+            for (f, layer) in &layers {
+                cells.fields[usize::from(*f)] = *layer;
+            }
+            Some((c, cells))
         })
         .collect();
     let halo = crate::rules::vm::Halo::around(cc, kinds, |c| {
         let e = stage.entity(c)?;
-        let cells = match faded.iter().find(|f| f.0 == c) {
+        let cells = match ruled.iter().find(|f| f.0 == c) {
             Some((_, cells)) => cells,
             None => world.get::<ChunkCells>(e)?,
         };
@@ -1016,7 +1018,6 @@ mod tests {
         feature: Feature,
         occupant: crate::stage::ActorId,
         cover: crate::stage::ActorId,
-        scent: [u8; crate::stage::SCENT_CHANNELS],
     }
 
     fn get(world: &World, p: Pos) -> Option<Cell> {
@@ -1026,7 +1027,6 @@ mod tests {
             feature: c.feature[i],
             occupant: c.occupant[i],
             cover: c.cover[i],
-            scent: std::array::from_fn(|j| c.scent[j][i]),
         })
     }
 
@@ -1591,9 +1591,14 @@ mod tests {
         let d_slot =
             west.actors_mut()
                 .push(40 * 64 + 63, CHICKEN, newborn(&kinds, CHICKEN, 400, 0));
+        // A layer per field of the rules, as a made chunk has.
+        let layers = vec![[0; crate::stage::CHUNK_CELLS]; kinds.fields.len()];
+        west.cells.fields.clone_from(&layers);
+        let mut east = ChunkData::default();
+        east.cells.fields = layers;
         stage::remove(&mut w, ChunkCoord::new(0, 0));
         let west_e = stage::insert(&mut w, ChunkCoord::new(0, 0), west, true);
-        let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), ChunkData::default(), true);
+        let east_e = stage::insert(&mut w, ChunkCoord::new(1, 0), east, true);
         let tick = tick(&w);
         let key = |uid| intent_key(uid, tick);
         let mut ob = w.get_mut::<Outbox>(west_e).unwrap();
@@ -1770,7 +1775,6 @@ mod tests {
             signal: None,
             amount: 0,
             with: [0; 2],
-            mark: [0; crate::stage::SCENT_CHANNELS],
             field: 0,
             add_fields: [crate::rules::vm::NO_FIELD; crate::rules::vm::ADDS],
             add_values: [0; crate::rules::vm::ADDS],
@@ -2552,119 +2556,6 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
-    /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a
-    /// step later `sniff` finds it (in the chunk and across a border); the
-    /// scent is saved with the chunk and fades to nothing in two hours; a
-    /// fifth channel does not compile.
-    #[test]
-    fn marks_are_sniffed_saved_and_fade() {
-        use crate::actors::systems::newborn;
-        use crate::rules::compile;
-        use crate::time::hours;
-        let kinds = compile(
-            "t.rules",
-            "kind ant { glyph \"a\"  cadence 1  sight 4
-               mem mode, here_s, sx, sy, far
-               when mode == 0 => { mode = 1  mark trail 200  idle }
-               when mode == 1 => { mode = 2  here_s = scent(trail)  idle }
-               when mode == 2 => { mode = 3  move east }
-               when mode == 3 and sniff trail within 3 as v => { mode = 4  sx = v.dx  sy = v.dy  far = scent(trail, v) }
-               when true => idle }",
-        )
-        .unwrap();
-        assert_eq!(kinds.scents, vec!["trail".to_string()]);
-        let cfg = Scenario {
-            width: 128,
-            height: 64,
-            ..cfg(12)
-        };
-        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
-        flatten(&mut w);
-        let now = tick(&w);
-        for (x, uid) in [(20, 0xA1), (63, 0xA2)] {
-            assert!(place_actor(
-                &mut w,
-                Pos::new(x, 30),
-                0,
-                newborn(&kinds, 0, uid, now)
-            ));
-        }
-        for _ in 0..6 {
-            step(&mut w);
-            check_invariants(&mut w);
-        }
-        let all = rows(&mut w);
-        for (uid, x) in [(0xA1, 20), (0xA2, 63)] {
-            let a = all.iter().find(|r| r.0 == uid).unwrap();
-            assert_eq!(a.2, Pos::new(x + 1, 30), "ant {uid:x} stepped east");
-            let m = a.3.mem;
-            assert_eq!(m[0], 4, "ant {uid:x}: {m:?}");
-            assert!(m[1] > 150 && m[1] <= 200, "read its own mark: {m:?}");
-            assert_eq!((m[2], m[3]), (-1, 0), "sniffed the cell it left");
-            assert!(m[4] > 150, "{m:?}");
-            assert!(get(&w, Pos::new(x, 30)).unwrap().scent[0] > 150);
-        }
-        // Saved and read back with the chunk.
-        let store = tmp_store("scent");
-        let c = ChunkCoord::new(0, 0);
-        let cells = stage::chunk(&w, c).unwrap().clone();
-        let e = w.resource::<Stage>().entity(c).unwrap();
-        let actors = w.get::<ChunkActors>(e).unwrap().clone();
-        let minds = w.get::<ChunkMinds>(e).unwrap().clone();
-        store
-            .write_chunk(c, &cells, &actors, &minds, tick(&w))
-            .unwrap();
-        let back = store.read_chunk(c).unwrap().unwrap();
-        assert_eq!(back.data.cells, cells);
-        std::fs::remove_dir_all(store.dir()).unwrap();
-        // Two hours later it is gone.
-        for _ in 0..hours(2) {
-            step(&mut w);
-        }
-        assert_eq!(
-            get(&w, Pos::new(20, 30)).unwrap().scent,
-            [0; crate::stage::SCENT_CHANNELS]
-        );
-
-        let e = compile(
-            "t.rules",
-            "kind a { when true => { mark s1 1  mark s2 1  mark s3 1  mark s4 1  mark s5 1 } }",
-        )
-        .unwrap_err();
-        assert!(e.to_string().contains("at most 4 scents"), "{e}");
-    }
-
-    /// Several `mark`s in one think add up, per channel and saturating,
-    /// also when they come from rules that fall through to one another.
-    #[test]
-    fn marks_in_one_think_add_up_per_channel() {
-        use crate::actors::systems::newborn;
-        use crate::rules::compile;
-        let kinds = compile(
-            "t.rules",
-            "kind ant { glyph \"a\"  cadence 1
-               mem n, t, h, f
-               when n == 1 => { n = 2  t = scent(trail)  h = scent(home)  f = scent(food) }
-               when n == 0 => { mark trail 50  mark home 50 }
-               when n == 0 => { n = 1  mark trail 20  mark food 200  mark food 100  idle } }",
-        )
-        .unwrap();
-        let mut w = new_world_with(&cfg(12), kinds.clone()).unwrap();
-        flatten(&mut w);
-        let now = tick(&w);
-        assert!(place_actor(
-            &mut w,
-            Pos::new(20, 30),
-            0,
-            newborn(&kinds, 0, 0xA1, now)
-        ));
-        for _ in 0..3 {
-            step(&mut w);
-        }
-        let all = rows(&mut w);
-        assert_eq!(&all[0].3.mem[..4], &[2, 70, 50, 255], "{:?}", all[0].3.mem);
-    }
-
     /// The acceptance test of the social primitives (docs/ACTORS.md §11
     /// step 6): a hive 25 cells from a flower patch it cannot see. Its bees
     /// wander until one finds the flowers, sips them (`take`), flies home
@@ -2730,7 +2621,8 @@ mod tests {
                     _ => {}
                 }
             }
-            trail |= (60..84).any(|x| get(&w, Pos::new(x, 62)).unwrap().scent[0] > 0);
+            let f = usize::from(kinds.field_named("trail").map(|i| i as u8).unwrap());
+            trail |= (60..84).any(|x| field(&w, f, Pos::new(x, 62)) > 0);
         }
         let all = rows(&mut w);
         let hive = all.iter().find(|r| r.1 == HIVE).unwrap().3;
@@ -2917,15 +2809,16 @@ mod tests {
         assert_eq!((e.row.kind, e.before.uid), (GRASS, 0x6A));
     }
 
-    /// `explain` sees the scent the think will see: faded first on the
-    /// chunk's fade tick (the Simulate phase runs before Think).
+    /// `explain` sees the fields the think will see: a law due this tick
+    /// runs first (the Simulate phase runs before Think).
     #[test]
-    fn explain_reads_scent_after_the_fade() {
+    fn explain_reads_fields_after_their_laws() {
         let kinds = crate::rules::compile(
             "dot.rules",
-            "kind dot { cadence 1  mem seen\n\
-               when true => seen = scent(trail)\n\
-               when true => { mark trail 255  idle } }",
+            "field glow max 255 { every 4 { glow -= 7 } }\n\
+             kind dot { cadence 1  mem seen\n\
+               when true => seen = glow(here)\n\
+               when true => { add glow 255  idle } }",
         )
         .unwrap();
         let s = Scenario::parse(
@@ -2946,8 +2839,7 @@ mod tests {
     }
 
     /// Hot reload maps rows by name: kinds renumbered, a kind gone (its rows
-    /// dropped), needs and mems moved, added and removed, a scent channel
-    /// gone; a saved chunk that is not loaded is rewritten, so it loads
+    /// dropped), needs and mems moved, added and removed, a field gone; a saved chunk that is not loaded is rewritten, so it loads
     /// under the new rules and the save reopens with them.
     #[test]
     fn reload_remaps_rows_by_name_in_memory_and_on_disk() {
@@ -2956,8 +2848,9 @@ mod tests {
         use crate::rules::compile;
         let a = compile(
             "a.rules",
-            "kind a { glyph \"a\"  need p max 100 decay 0  need q max 50 decay 0  mem m1, m2
-               when true => { mark s1 10  idle } }
+            "field s1 max 255
+             kind a { glyph \"a\"  need p max 100 decay 0  need q max 50 decay 0  mem m1, m2
+               when true => { add s1 10  idle } }
              kind b { glyph \"b\"  when true => idle }
              kind c { glyph \"c\"  cover  need health max 4 decay 0 vital }",
         )
@@ -3003,7 +2896,7 @@ mod tests {
         for _ in 0..8 {
             step(&mut w); // kind a thinks every 8 ticks
         }
-        assert!(get(&w, Pos::new(5, 5)).unwrap().scent[0] > 0);
+        assert!(field(&w, 0, Pos::new(5, 5)) > 0);
         save(&mut w, &store).unwrap();
         // Chunk (1, 0) goes to disk and out of memory.
         ensure_loaded(
@@ -3043,9 +2936,11 @@ mod tests {
         assert_eq!(c1.1, 2);
         let cell = get(&w, Pos::new(7, 5)).unwrap();
         assert_eq!(cell.cover.unpack().map(|(k, _)| k), Some(2));
-        let none = [0; crate::stage::SCENT_CHANNELS];
-        assert_eq!(cell.scent, none);
-        assert_eq!(get(&w, Pos::new(5, 5)).unwrap().scent, none, "s1 is gone");
+        let (cc, _) = Pos::new(5, 5).split();
+        assert!(
+            stage::chunk(&w, cc).unwrap().fields.is_empty(),
+            "s1 is gone"
+        );
         // The chunk on disk loads under the new rules.
         ensure_loaded(
             &mut w,
@@ -3800,22 +3695,23 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
-    const HENS: &str = "kind hen {
+    const HENS: &str = "field trail max 255
+kind hen {
   glyph \"h\"  cadence 4
   need food  max 1d vital
   need water max 4h
   mem steps, seen
-  when true => { steps += 1  mark trail 50  move random free }
+  when true => { steps += 1  add trail 50  move random free }
 }
 kind fox   { glyph \"f\"  cadence 8  when true => idle }
 kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
 ";
 
     /// Pack A (hens, a fox, grass), and A after a pack B whose file sorts
-    /// first: `ant` takes kind 0 and `musk` scent channel 0, so every id
-    /// A's rows and scent layers hold moves.
+    /// first: `ant` takes kind 0 and `musk` field 0, so every id A's rows
+    /// and field layers hold moves.
     fn packs_a_ab() -> (Kinds, Kinds) {
-        let b = "kind ant { glyph \"a\"  when true => mark musk 9 }";
+        let b = "field musk max 255  kind ant { glyph \"a\"  when true => add musk 9 }";
         let a = crate::rules::compile_files(&[("a/hens.rules", HENS)]).unwrap();
         let ab =
             crate::rules::compile_files(&[("b/ants.rules", b), ("a/hens.rules", HENS)]).unwrap();
@@ -3843,12 +3739,12 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             .collect()
     }
 
-    /// Every scented cell by channel name, in cell order.
-    fn scents_named(w: &mut World) -> Vec<(Pos, String, u8)> {
-        let names = w.resource::<Kinds>().scents.clone();
+    /// Every cell holding some of a field, by field name, in cell order.
+    fn fields_named(w: &mut World) -> Vec<(Pos, String, u16)> {
+        let names = crate::reload::field_names(w.resource::<Kinds>());
         let mut v = Vec::new();
         for (c, cells) in w.query::<(&ChunkCoord, &ChunkCells)>().iter(w) {
-            for (name, ch) in names.iter().zip(&cells.scent) {
+            for (name, ch) in names.iter().zip(&cells.fields) {
                 for (i, &s) in ch.iter().enumerate().filter(|(_, s)| **s > 0) {
                     v.push((c.cell(i), name.clone(), s));
                 }
@@ -3859,8 +3755,8 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
     }
 
     /// Under pack A: two hens (one in chunk (1, 0)), a fox and a tuft, eight
-    /// ticks of marking trails, saved. Its rows and scent, by name.
-    fn saved_hens(store: &Store, a: &Kinds) -> (Vec<Named>, Vec<(Pos, String, u8)>) {
+    /// ticks of laying trails, saved. Its rows and fields, by name.
+    fn saved_hens(store: &Store, a: &Kinds) -> (Vec<Named>, Vec<(Pos, String, u16)>) {
         use crate::actors::systems::newborn;
         let mut w = new_world_with(&cfg(3), a.clone()).unwrap();
         flatten(&mut w);
@@ -3873,12 +3769,12 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             step(&mut w);
         }
         save(&mut w, store).unwrap();
-        (named(&mut w), scents_named(&mut w))
+        (named(&mut w), fields_named(&mut w))
     }
 
     /// A save opens under a superset of its packs that numbers everything
     /// differently: every actor keeps its cell, uid, needs and memory, every
-    /// trail its channel by name, and opening writes nothing.
+    /// trail its field by name, and opening writes nothing.
     #[test]
     fn a_save_opens_with_a_superset_pack_and_keeps_every_actor() {
         let (a, ab) = packs_a_ab();
@@ -3887,10 +3783,13 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             (0, 1)
         );
         assert_eq!(
-            (&a.scents[..], &ab.scents[..]),
             (
-                &["trail".to_string()][..],
-                &["musk".to_string(), "trail".to_string()][..]
+                crate::reload::field_names(&a),
+                crate::reload::field_names(&ab)
+            ),
+            (
+                vec!["trail".to_string()],
+                vec!["musk".to_string(), "trail".to_string()]
             )
         );
         let store = tmp_store("superset");
@@ -3902,7 +3801,7 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
         ensure_loaded(&mut w, Pos::new(64, 32), around, Some(&store)).unwrap();
         check_invariants(&mut w);
         assert_eq!(named(&mut w), rows_a);
-        assert_eq!(scents_named(&mut w), scent_a);
+        assert_eq!(fields_named(&mut w), scent_a);
         let meta = store.read_meta().unwrap().unwrap();
         assert_eq!(meta.kinds, SavedKind::table(&a), "opening never writes");
         std::fs::remove_dir_all(store.dir()).unwrap();
@@ -3960,8 +3859,8 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             assert!(w.resource::<PendingRemap>().0.is_none());
             let meta = store.read_meta().unwrap().unwrap();
             assert_eq!(
-                (meta.kinds, meta.scents),
-                (SavedKind::table(&ab), ab.scents.clone())
+                (meta.kinds, meta.fields),
+                (SavedKind::table(&ab), crate::reload::field_names(&ab))
             );
             let mut back = open_world_with(&store, ab.clone()).unwrap().unwrap();
             assert!(

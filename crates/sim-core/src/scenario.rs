@@ -3004,7 +3004,7 @@ legend {
         let names: Vec<&str> = never.iter().map(|m| m.split('`').nth(1).unwrap()).collect();
         assert_eq!(names, ["flower", "hive", "bee", "grass", "seed", "tree"]);
         let d = &pen.unseen(&k)[0];
-        assert_eq!((d.file.as_str(), d.line), ("bees.rules", 18));
+        assert_eq!((d.file.as_str(), d.line), ("bees.rules", 25));
     }
 
     #[test]

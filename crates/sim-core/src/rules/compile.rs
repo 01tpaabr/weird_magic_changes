@@ -32,7 +32,7 @@ use super::{
     Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
-use crate::stage::{Feature, Ground, SCENT_CHANNELS};
+use crate::stage::{Feature, Ground};
 use crate::time::{days, hours, minutes};
 
 mod law;
@@ -558,13 +558,6 @@ enum Cond {
         bind: String,
         at: Pos,
     },
-    /// `sniff ch within r as v`: the strongest cell of scent `ch`.
-    Sniff {
-        ch: String,
-        r: Expr,
-        bind: String,
-        at: Pos,
-    },
     /// `best f [on pred] within r as v`: the cell with the most of field
     /// `f` (among those matching `pred`).
     Best {
@@ -677,8 +670,6 @@ enum Stmt {
     Look(Expr),
     /// `signal = v`: an effect, not an action.
     Signal(Expr),
-    /// `mark ch v`: an effect, adds `v` of scent `ch` to the actor's cell.
-    Mark(String, Expr, Pos),
     /// `add f v`: an effect, adds `v` to field `f` on the actor's cell.
     Add(String, Expr, Pos),
     /// `harvest f n` / `drop f n`: up to `n` of field `f` on the actor's
@@ -747,8 +738,6 @@ enum Expr {
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
     SignalOf(Target, Pos),
-    /// `scent(ch)` at the actor's cell, `scent(ch, t)` at a target.
-    Scent(String, Option<Target>, Pos),
     /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
     /// and its arguments.
     Fn(OpCode, Vec<Expr>),
@@ -930,9 +919,6 @@ pub const KEYWORDS: &[&str] = &[
     "take",
     "give",
     "with",
-    "mark",
-    "sniff",
-    "scent",
     "field",
     "add",
     "harvest",
@@ -1783,10 +1769,6 @@ impl Parser<'_> {
             let (name, at) = self.ident("state name")?;
             return Ok(Stmt::Next(name, at));
         }
-        if self.eat_kw("mark") {
-            let (ch, at) = self.ident("scent name")?;
-            return Ok(Stmt::Mark(ch, self.expr()?, at));
-        }
         if self.eat_kw("add") {
             let (field, at) = self.ident("field name")?;
             return Ok(Stmt::Add(field, self.expr()?, at));
@@ -1977,14 +1959,6 @@ impl Parser<'_> {
             self.expect_kw("as")?;
             let (bind, ..) = self.ident("binding name")?;
             return Ok(Cond::Nearest { pred, r, bind, at });
-        }
-        if self.eat_kw("sniff") {
-            let (ch, _) = self.ident("scent name")?;
-            self.expect_kw("within")?;
-            let r = self.additive()?; // a radius, never a comparison
-            self.expect_kw("as")?;
-            let (bind, ..) = self.ident("binding name")?;
-            return Ok(Cond::Sniff { ch, r, bind, at });
         }
         if self.eat_kw("best") {
             let (field, _) = self.ident("field name")?;
@@ -2213,17 +2187,6 @@ impl Parser<'_> {
                         self.expect_sym(")")?;
                         Ok(Expr::IsAt(t, p))
                     }
-                    "scent" => {
-                        self.expect_sym("(")?;
-                        let (ch, _) = self.ident("scent name")?;
-                        let t = if self.eat_sym(",") {
-                            Some(self.target()?)
-                        } else {
-                            None
-                        };
-                        self.expect_sym(")")?;
-                        Ok(Expr::Scent(ch, t, at))
-                    }
                     "look_of" | "signal_of" => {
                         self.expect_sym("(")?;
                         let t = self.target()?;
@@ -2317,7 +2280,6 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Graze(..)
         | Stmt::Look(_)
         | Stmt::Signal(_)
-        | Stmt::Mark(..)
         | Stmt::Add(..)
         | Stmt::Next(..) => false,
     })
@@ -2354,7 +2316,6 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Graze(..)
             | Stmt::Look(_)
             | Stmt::Signal(_)
-            | Stmt::Mark(..)
             | Stmt::Add(..)
             | Stmt::Next(..) => {}
         }
@@ -2549,8 +2510,6 @@ struct Gen<'a> {
     /// Tag names, in first-appearance order (item order, then declaration
     /// order): a tag's bit is its index here.
     tags: Vec<String>,
-    /// Scent channel names, in first-appearance order in the code.
-    scents: Vec<String>,
     /// The `field` declarations, and what they resolve to (same order).
     fields_ast: &'a [FieldAst],
     field_defs: Vec<FieldDef>,
@@ -2598,7 +2557,6 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Return { .. }
         | Stmt::Look(_)
         | Stmt::Signal(_)
-        | Stmt::Mark(..)
         | Stmt::Add(..)
         | Stmt::Next(..)
         | Stmt::ForEach { .. } => None,
@@ -2632,7 +2590,6 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Graze(..)
         | Stmt::Look(_)
         | Stmt::Signal(_)
-        | Stmt::Mark(..)
         | Stmt::Add(..)
         | Stmt::Next(..) => false,
     }
@@ -2681,7 +2638,6 @@ impl<'a> Gen<'a> {
             item_ids: Vec::new(),
             member_index: Vec::new(),
             tags: Vec::new(),
-            scents: Vec::new(),
             withs: Vec::new(),
             asm: Asm::new(),
             pool: Vec::new(),
@@ -3155,7 +3111,6 @@ impl<'a> Gen<'a> {
             })
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
-            .with_scents(std::mem::take(&mut self.scents))
             .with_fields(std::mem::take(&mut self.field_defs));
         self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
@@ -3933,14 +3888,13 @@ impl<'a> Gen<'a> {
     /// compiles for any kind that includes it, whether any kind does.
     fn check_traits(&mut self) -> Result<()> {
         let saved_asm = std::mem::take(&mut self.asm);
-        let marks = (self.pool.len(), self.scents.len(), self.debug.rules.len());
+        let marks = (self.pool.len(), self.debug.rules.len());
         let was = self.checking;
         self.checking = true;
         let r = self.check_all_traits();
         self.asm = saved_asm;
         self.pool.truncate(marks.0);
-        self.scents.truncate(marks.1);
-        self.debug.rules.truncate(marks.2);
+        self.debug.rules.truncate(marks.1);
         self.checking = was;
         self.kind = None;
         self.cur = None;
@@ -4074,9 +4028,7 @@ impl<'a> Gen<'a> {
             Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
                 self.expr_acts(value, depth)
             }
-            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Mark(_, e, _) | Stmt::Add(_, e, _) => {
-                self.expr_acts(e, depth)
-            }
+            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Add(_, e, _) => self.expr_acts(e, depth),
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
             Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
             Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
@@ -4094,10 +4046,9 @@ impl<'a> Gen<'a> {
 
     fn cond_acts(&self, c: &Cond, depth: u32) -> bool {
         match c {
-            Cond::Expr(e)
-            | Cond::Nearest { r: e, .. }
-            | Cond::Sniff { r: e, .. }
-            | Cond::Best { r: e, .. } => self.expr_acts(e, depth),
+            Cond::Expr(e) | Cond::Nearest { r: e, .. } | Cond::Best { r: e, .. } => {
+                self.expr_acts(e, depth)
+            }
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.cond_acts(a, depth) || self.cond_acts(b, depth)
             }
@@ -4118,14 +4069,11 @@ impl<'a> Gen<'a> {
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
-            | Expr::SignalOf(t, _)
-            | Expr::Scent(_, Some(t), _) => self.target_acts(t, depth),
+            | Expr::SignalOf(t, _) => self.target_acts(t, depth),
             Expr::Call { name, args, .. } => {
                 self.args_act(args, depth) || self.call_acts(name, depth)
             }
-            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Scent(..) => {
-                false
-            }
+            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) => false,
         }
     }
 
@@ -4310,24 +4258,6 @@ impl<'a> Gen<'a> {
         }
         shape.acts = acts(&rule.body);
         shape
-    }
-
-    /// The channel of scent `name`, numbered on first use.
-    fn scent(&mut self, name: &str, at: &Pos) -> Result<u8> {
-        if let Some(i) = self.scents.iter().position(|s| s == name) {
-            return Ok(u8::try_from(i).expect("at most SCENT_CHANNELS scents"));
-        }
-        if self.scents.len() == SCENT_CHANNELS {
-            return Err(self.err(
-                at,
-                format!(
-                    "at most {SCENT_CHANNELS} scents in a rule set ({} and `{name}`)",
-                    self.scents.join(", ")
-                ),
-            ));
-        }
-        self.scents.push(name.to_string());
-        Ok(u8::try_from(self.scents.len() - 1).expect("at most SCENT_CHANNELS scents"))
     }
 
     fn const_value(&self, n: &str) -> Option<i32> {
@@ -4591,28 +4521,6 @@ impl<'a> Gen<'a> {
                     ty: Ty::Target,
                 });
             }
-            Cond::Sniff { ch, r, bind, at } => {
-                if !top {
-                    return Err(self.err(
-                        at,
-                        "`sniff ... as` must be a top-level conjunct (not under `or` or `not`)",
-                    ));
-                }
-                if self.local(bind).is_some() {
-                    return Err(self.err(at, format!("`{bind}` is already bound")));
-                }
-                self.hides(bind, &format!("binding `{bind}`"), at)?;
-                let slot = self.alloc_local(at, 2)?;
-                let c = self.scent(ch, at)?;
-                self.push_int(i32::from(c))?;
-                self.expr(r)?;
-                self.asm.sniff(slot).jz(on_false);
-                self.locals.push(Local {
-                    name: bind.clone(),
-                    slot,
-                    ty: Ty::Target,
-                });
-            }
             Cond::And(a, b) => {
                 self.cond(a, on_false, top)?;
                 self.cond(b, on_false, top)?;
@@ -4834,16 +4742,6 @@ impl<'a> Gen<'a> {
             Expr::LookOf(t) => {
                 self.target(t)?;
                 self.asm.op(OpCode::LookAt);
-            }
-            Expr::Scent(ch, t, at) => {
-                let c = self.scent(ch, at)?;
-                match t {
-                    Some(t) => self.target(t)?,
-                    None => {
-                        self.asm.push(0).push(0);
-                    }
-                }
-                self.asm.scent_at(c);
             }
             Expr::SignalOf(t, _) => {
                 self.target(t)?;
@@ -5220,11 +5118,6 @@ impl<'a> Gen<'a> {
             Stmt::Signal(e) => {
                 self.expr(e)?;
                 self.asm.op(OpCode::SetSignal);
-            }
-            Stmt::Mark(ch, e, at) => {
-                let c = self.scent(ch, at)?;
-                self.expr(e)?;
-                self.asm.mark(c);
             }
             Stmt::Add(field, e, at) => {
                 let (f, def) = self.field(field, at)?;

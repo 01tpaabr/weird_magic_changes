@@ -95,6 +95,50 @@ pub struct Law {
     pub every: u32,
     pub ops: Vec<LawOp>,
     pub result: u16,
+    /// [`Law::leaves_zero`], worked out once by the compiler.
+    pub quiet: bool,
+}
+
+impl Law {
+    /// Does the law leave every cell at 0 where every field it reads is 0?
+    /// Then a chunk where they are all 0 (and its neighbours' too, if the
+    /// law reads them) can be skipped: the law would write 0 over 0. Known
+    /// only for a law without dice or the clock, evaluated once on fields
+    /// of 0 (every cell alike, so an aggregate is nine of a cell, or one).
+    pub fn leaves_zero(&self) -> bool {
+        let mut v: Vec<i32> = Vec::with_capacity(self.ops.len());
+        for op in &self.ops {
+            let c = |j: u16| v[usize::from(j)];
+            let x = match *op {
+                LawOp::Field(_) => 0,
+                LawOp::Const(k) => k,
+                LawOp::Clock(_) | LawOp::Rand(..) | LawOp::Chance(..) => return false,
+                LawOp::Bin(b, x, y) => bin(b, c(x), c(y)),
+                LawOp::Un(u, x) => un(u, c(x)),
+                LawOp::Clamp(x, l, h) => clamp(c(x), c(l), c(h)),
+                LawOp::Select(m, a, b) => {
+                    if c(m) != 0 {
+                        c(a)
+                    } else {
+                        c(b)
+                    }
+                }
+                LawOp::Agg(Agg::Sum, x) => c(x).wrapping_mul(9),
+                LawOp::Agg(_, x) => c(x),
+            };
+            v.push(x);
+        }
+        v[usize::from(self.result)] <= 0
+    }
+
+    /// The fields the law reads, and whether it reads any neighbour.
+    pub fn reads(&self) -> (impl Iterator<Item = u8> + '_, bool) {
+        let fields = self.ops.iter().filter_map(|o| match *o {
+            LawOp::Field(f) => Some(f),
+            _ => None,
+        });
+        (fields, self.ops.iter().any(|o| matches!(o, LawOp::Agg(..))))
+    }
 }
 
 impl Law {
@@ -229,23 +273,13 @@ pub fn run(
             }
             LawOp::Un(u, x) => {
                 for (d, &a) in dst.iter_mut().zip(c(x)) {
-                    *d = match u {
-                        Un::Neg => a.wrapping_neg(),
-                        Un::Abs => a.wrapping_abs(),
-                        Un::Sign => a.signum(),
-                        Un::Not => i32::from(a == 0),
-                    };
+                    *d = un(u, a);
                 }
             }
             LawOp::Clamp(x, l, h) => {
                 let (x, l, h) = (c(x), c(l), c(h));
                 for i in 0..COLUMN {
-                    // As the rules' `clamp`: a crossed pair gives the low bound.
-                    dst[i] = if l[i] <= h[i] {
-                        x[i].clamp(l[i], h[i])
-                    } else {
-                        l[i]
-                    };
+                    dst[i] = clamp(x[i], l[i], h[i]);
                 }
             }
             LawOp::Select(m, a, b) => {
@@ -320,6 +354,22 @@ pub fn run(
             out[y * n + x] = u16::try_from(v).expect("clamped into 0..=max");
         }
     }
+}
+
+#[inline]
+fn un(u: Un, a: i32) -> i32 {
+    match u {
+        Un::Neg => a.wrapping_neg(),
+        Un::Abs => a.wrapping_abs(),
+        Un::Sign => a.signum(),
+        Un::Not => i32::from(a == 0),
+    }
+}
+
+/// As the rules' `clamp`: a crossed pair gives the low bound.
+#[inline]
+fn clamp(x: i32, lo: i32, hi: i32) -> i32 {
+    if lo <= hi { x.clamp(lo, hi) } else { lo }
 }
 
 #[inline]

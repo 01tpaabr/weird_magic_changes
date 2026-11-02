@@ -3,8 +3,8 @@
 #
 #   FORAGE  find a flower showing nectar (`flower:1`), sip it with `take`;
 #           else follow a dance, else climb the trail, else wander
-#   HOME    fly back to the hive with a full crop, marking the way: the
-#           mark is strongest near the flowers, so the trail points at them
+#   HOME    fly back to the hive with a full crop, laying a trail (the
+#           field `trail`): strongest near the flowers, so it points at them
 #   DANCE   at the hive: `give` the crop, then show `look 2` for a while
 #           with the offset to the flowers packed in `signal`
 #   GOTO    fly to a flower it saw, or where a dance pointed
@@ -14,6 +14,13 @@
 
 const LOAD = 30min                  # a full crop
 const RICH = 20min                  # a flower shows `look 1` from here
+
+# The bees' trail: laid by laden bees, read by foragers, and fading by a
+# 32nd every 16 ticks, so it is gone in about an hour and a half.
+field trail max 255 {
+  color "#ffc430"
+  every 16 { trail -= (trail + 31) / 32 }
+}
 
 kind flower extends rooted(6, 1d, 1d), mortal(4d, 300) {
   glyph "*"
@@ -72,7 +79,7 @@ kind bee extends mortal(3d, 40), walker(2) {
     when nearest flower:1 within 8 as f => { tx = x + f.dx  ty = y + f.dy  next GOTO  move toward f }   # seen: fly there without looking again
     when nearest bee:2 within 4 as d and chance(50)
       => { tx = x + d.dx + hi(signal_of(d))  ty = y + d.dy + lo(signal_of(d))  next GOTO }
-    when sniff trail within 4 as v => { rest = 1  move toward v }
+    when best trail within 4 as v => { rest = 1  move toward v }
     when true                     => { rest = 3  wander() }
   }
   state GOTO {
@@ -84,7 +91,7 @@ kind bee extends mortal(3d, 40), walker(2) {
     when nearest hive within 1 as h and nectar >= LOAD => { nectar = 0  next FORAGE }       # the hive is full: spilt
     when nearest hive within 1 as h and food < 2h and look_of(h) >= 1 => take h nectar 4min    # a sip of the stores
     when nearest hive within 1 as h => next FORAGE
-    when nectar >= LOAD => { trip += 1  mark trail 250 - trip * 8  move toward at(home_x, home_y) }   # laden: lay the trail
+    when nectar >= LOAD => { trip += 1  add trail max(0, 250 - trip * 8)  move toward at(home_x, home_y) }   # laden: lay the trail
     when true           => move toward at(home_x, home_y)
   }
   state DANCE {

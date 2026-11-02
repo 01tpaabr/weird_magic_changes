@@ -39,7 +39,7 @@ impl Out {
 }
 
 /// What the rules mention anywhere, by name, and the uses the rule set as
-/// a whole must answer (a scent someone marks, a signal someone sets).
+/// a whole must answer (a signal someone sets, a look someone shows).
 #[derive(Default)]
 struct Names {
     /// Every name in a value, an assignment, a call, `with`, `take`/`give`.
@@ -48,14 +48,11 @@ struct Names {
     nexts: BTreeSet<String>,
     /// Names used as predicates (kinds, tags, `pred` parameters).
     preds: BTreeSet<String>,
-    marks: BTreeSet<String>,
     signal_set: bool,
     /// `(name, where, who)` of each predicate naming a kind or tag.
     pred_uses: Vec<(String, Pos, String)>,
     /// `(kind, only, look, where, who)` of each `kind:look`.
     looks: Vec<(String, bool, u8, Pos, String)>,
-    /// `(channel, where, who)` of each `sniff` and `scent()`.
-    smells: Vec<(String, Pos, String)>,
     /// Where `signal_of` is read, and by whom.
     signal_reads: Vec<(Pos, String)>,
 }
@@ -138,10 +135,6 @@ impl Seen<'_> {
                 self.names.signal_set = true;
                 self.expr(e);
             }
-            Stmt::Mark(ch, e, _) => {
-                self.names.marks.insert(ch.clone());
-                self.expr(e);
-            }
             Stmt::Add(f, e, _) => {
                 self.names.all.insert(f.clone());
                 self.expr(e);
@@ -166,12 +159,6 @@ impl Seen<'_> {
             Cond::Expr(e) => self.expr(e),
             Cond::Nearest { pred, r, .. } => {
                 self.pred(pred);
-                self.expr(r);
-            }
-            Cond::Sniff { ch, r, at, .. } => {
-                self.names
-                    .smells
-                    .push((ch.clone(), at.clone(), self.who.clone()));
                 self.expr(r);
             }
             Cond::Best { field, pred, r, .. } => {
@@ -210,12 +197,6 @@ impl Seen<'_> {
             Expr::SignalOf(t, at) => {
                 self.names.signal_reads.push((at.clone(), self.who.clone()));
                 self.target(t);
-            }
-            Expr::Scent(ch, t, at) => {
-                self.names
-                    .smells
-                    .push((ch.clone(), at.clone(), self.who.clone()));
-                t.iter().for_each(|t| self.target(t));
             }
             Expr::Fn(_, args) => args.iter().for_each(|a| self.expr(a)),
             Expr::Call { name, args, .. } => {
@@ -536,11 +517,6 @@ impl<'a> Gen<'a> {
                     at,
                     format!("{who} looks for `{kind}:{look}`, but no rule of `{kind}` sets `look`"),
                 );
-            }
-        }
-        for (ch, at, who) in &names.smells {
-            if !names.marks.contains(ch) {
-                out.warn(at, format!("{who} smells `{ch}`, but nothing marks it"));
             }
         }
         if !names.signal_set {
@@ -881,7 +857,6 @@ impl<'a> Gen<'a> {
             Stmt::Set { value, .. }
             | Stmt::Assign { value, .. }
             | Stmt::Signal(value)
-            | Stmt::Mark(_, value, _)
             | Stmt::Add(_, value, _)
             | Stmt::Harvest { amount: value, .. } => self.walk_expr(kinds, w, value, out),
             Stmt::If { cond, then, els } => {
@@ -965,10 +940,6 @@ impl<'a> Gen<'a> {
                 let m = self.matcher(kinds, w, pred);
                 w.binds.push((bind.clone(), m));
             }
-            Cond::Sniff { r, bind, at, .. } => {
-                self.radius(w, r, at, out);
-                w.binds.push((bind.clone(), None));
-            }
             Cond::Best {
                 pred, r, bind, at, ..
             } => {
@@ -1010,11 +981,6 @@ impl<'a> Gen<'a> {
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
             | Expr::SignalOf(t, _) => self.walk_target(kinds, w, t, out),
-            Expr::Scent(_, t, _) => {
-                if let Some(t) = t {
-                    self.walk_target(kinds, w, t, out);
-                }
-            }
             Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Agg { .. } => {
             }
         }
@@ -1179,17 +1145,11 @@ mod tests {
     }
 
     #[test]
-    fn scents_signals_and_looks_nobody_sets() {
+    fn signals_and_looks_nobody_sets() {
         let bad = "kind ant { mem a, b
-                     when sniff musk within 3 as v => move toward v
-                     when a == 0 and scent(musk) > 0 => a = signal_of(here)
+                     when a == 0 => a = signal_of(here)
                      when nearest ant:2 within 3 as o => b = 1 }";
         let got = lint(bad);
-        assert!(
-            got.iter()
-                .any(|d| d.contains("`ant` smells `musk`, but nothing marks it")),
-            "{got:?}"
-        );
         assert!(
             got.iter()
                 .any(|d| d.contains("`ant` reads `signal_of`, but no rule sets `signal`")),
@@ -1201,16 +1161,11 @@ mod tests {
             "{got:?}"
         );
         let good = "kind ant { mem a, b
-                      when true => { mark musk 9  signal = 3  look = 2 }
-                      when sniff musk within 3 as v => move toward v
-                      when a == 0 and scent(musk) > 0 => a = signal_of(here)
+                      when true => { signal = 3  look = 2 }
+                      when a == 0 => a = signal_of(here)
                       when nearest ant:2 within 3 as o => b = 1 }";
         let got = lint(good);
-        assert!(
-            !got.iter()
-                .any(|d| d.contains("nothing marks") || d.contains("no rule sets")),
-            "{got:?}"
-        );
+        assert!(!got.iter().any(|d| d.contains("no rule sets")), "{got:?}");
         // A file sub that sets `look` counts only for the kinds that call it.
         let got = lint(
             "sub show() { look = 2 }

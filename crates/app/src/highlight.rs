@@ -25,14 +25,14 @@ pub const SYMBOL: Color = Color::rgb(0x89, 0xa4, 0xbb);
 pub const COMMENT: Color = Color::rgb(0x63, 0x77, 0x77);
 
 /// Words that are an action: what a think does.
-const ACTIONS: [&str; 16] = [
+const ACTIONS: [&str; 15] = [
     "idle", "die", "become", "spawn", "move", "drink", "eat", "hit", "graze", "take", "give",
-    "mark", "next", "harvest", "drop", "add",
+    "next", "harvest", "drop", "add",
 ];
 
 /// Keywords that read the world or name a cell: functions, searches,
 /// targets, outcomes, constants.
-const BUILTINS: [&str; 39] = [
+const BUILTINS: [&str; 37] = [
     "nearest",
     "best",
     "count",
@@ -51,8 +51,6 @@ const BUILTINS: [&str; 39] = [
     "pack",
     "hi",
     "lo",
-    "sniff",
-    "scent",
     "toward",
     "away",
     "at",

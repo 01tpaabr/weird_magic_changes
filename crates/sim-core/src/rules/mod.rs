@@ -332,8 +332,6 @@ pub struct Kinds {
     pub consts: Vec<i32>,
     /// Entry pc per sub, indexed by `Call imm`.
     pub subs: Vec<u32>,
-    /// Scent channel names, in channel order (`mark`, `sniff`).
-    pub scents: Vec<String>,
     /// The fields, in declaration order: `ChunkCells::fields[i]` is
     /// `fields[i]`'s layer.
     pub fields: Vec<FieldDef>,
@@ -397,7 +395,6 @@ impl Kinds {
             code,
             consts,
             subs,
-            scents: Vec::new(),
             fields: Vec::new(),
             debug: DebugInfo::default(),
             hash,
@@ -408,20 +405,6 @@ impl Kinds {
     /// The same rules with source positions for `wmc why` (not hashed).
     pub fn with_debug(mut self, debug: DebugInfo) -> Self {
         self.debug = debug;
-        self
-    }
-
-    /// The same rules with these scent channel names (folded into the
-    /// hash; none leaves it as it was).
-    pub fn with_scents(mut self, scents: Vec<String>) -> Self {
-        for name in &scents {
-            let mut h = self.hash ^ 0x5CE7;
-            for b in name.bytes() {
-                h = splitmix64(h ^ u64::from(b));
-            }
-            self.hash = splitmix64(h);
-        }
-        self.scents = scents;
         self
     }
 
@@ -568,7 +551,11 @@ mod tests {
             k.debug.traits,
             ["fowl", "walker", "drinker", "rooted", "mortal"]
         );
-        assert_eq!(k.scents, vec!["trail".to_string()]);
+        assert_eq!(
+            k.field_named("trail"),
+            Some(0),
+            "the bees' trail is a field"
+        );
         assert_eq!(k.def(BEE).states, 4);
         assert_eq!(k.colors[usize::from(FOX)], 0x00E8_792B);
         assert_eq!(k.hash, Kinds::builtin().hash);

@@ -25,7 +25,9 @@ sense, an action, a layer, a tool), not a special case for that one kind.
 The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works today:
 
 - **The world.** An unbounded grid of 64 x 64-cell chunks: soil, water, rock, ground
-  cover and four scent layers. It is generated deterministically and streamed around the
+  cover, and the fields a pack declares: a number in every cell (sugar, a trail, heat)
+  that actors read and change on their own cell and that the field's own law changes
+  everywhere, locally. It is generated deterministically and streamed around the
   camera, and a save writes only the chunks that changed.
 - **Time.** Integer ticks, 8 a second at 1x (a game day is 21,600 ticks), day and night,
   pause, single step, and 1x to 16x speed.
@@ -37,7 +39,7 @@ The build order in `docs/ACTORS.md` §11 is complete (steps 1 to 8). What works 
   rules, subs, and traits with inheritance, compiled to a fuel-bounded bytecode VM.
 - **An example ecosystem** (the built-in pack, content rather than the product). Hens graze, drink, lay eggs and flee foxes. Chicks follow the
   hens and grow up. Foxes hunt, sleep and raise kits. Flowers make nectar, hives raise
-  bees, and bees find flowers, dance the way home and lay scent trails. Grass spreads and
+  bees, and bees find flowers, dance the way home and lay a trail (a field). Grass spreads and
   regrows, seeds grow into trees, and trees drop seeds.
 - **Content as input.** Rule packs (`--rules`, or named by the scenario), scenario files
   (seed, size, terrain or a hand-drawn map, who starts where), and saves that reopen under
@@ -66,9 +68,9 @@ them grass, steps in about 0.9 ms per tick on 8 threads, or 2.4 ms on one, on an
 Apple Silicon machine (`docs/PERF.md`).
 
 **Not there yet.** You can watch, pause, speed up, save and reload rules, but players
-cannot act on the world yet: input events and a replay log are open questions. Cell
-systems (scent fading) work chunk by chunk, and anything that spreads across chunk
-borders, such as diffusing smell, is still an open question. A hot reload is not
+cannot act on the world yet: input events and a replay log are open questions. Field laws read a
+cell's 3 x 3 neighbourhood across chunk borders (`docs/WORLD.md`); declared terrain,
+height and layers are designed, not built. A hot reload is not
 recorded, so a reloaded world cannot be replayed from its seed. The renderer draws one
 glyph per cell.
 

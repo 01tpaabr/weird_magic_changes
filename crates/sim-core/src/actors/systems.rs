@@ -41,8 +41,7 @@ use crate::rules::{Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
 use crate::stage::{
-    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, SCENT_CHANNELS, Stage,
-    cell_u16,
+    ActorId, CHUNK_CELLS, ChunkCells, ChunkCoord, ChunkMeta, Ground, Pos, Stage, cell_u16,
 };
 use crate::time::stamp;
 
@@ -67,9 +66,6 @@ pub struct Intent {
     pub amount: i32,
     /// A `Spawn`'s child's first two `mem` values.
     pub with: [i32; 2],
-    /// `mark ch v` effects, per channel: added to the actor's (tick-start)
-    /// cell in Apply.
-    pub mark: [u8; SCENT_CHANNELS],
     /// Field of `Harvest` / `Drop` (whose own need slot is in `kind`).
     pub field: u8,
     /// `add f v` effects: the fields (`vm::NO_FIELD`: unused) and what to
@@ -458,7 +454,6 @@ fn think_one<const TRACE: bool>(
         signal: None,
         amount: 0,
         with: [0; 2],
-        mark: [0; SCENT_CHANNELS],
         field: 0,
         add_fields: [vm::NO_FIELD; vm::ADDS],
         add_values: [0; vm::ADDS],
@@ -501,7 +496,6 @@ fn think_one<const TRACE: bool>(
     intent.signal = out.signal;
     intent.amount = out.amount;
     intent.with = out.with;
-    intent.mark = out.mark;
     intent.field = out.field;
     intent.add_fields = out.adds.map(|(f, _)| f);
     intent.add_values = out.adds.map(|(_, v)| v);
@@ -1179,12 +1173,6 @@ pub fn apply(
                 }
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
-                }
-                for (ch, &v) in it.mark.iter().enumerate() {
-                    if v > 0 {
-                        let s = &mut cells.scent[ch][from];
-                        *s = s.saturating_add(v);
-                    }
                 }
                 for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
                     let f = usize::from(f);

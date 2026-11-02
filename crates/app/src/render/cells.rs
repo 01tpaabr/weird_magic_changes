@@ -9,9 +9,9 @@
 
 use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
-use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos, SCENT_CHANNELS};
+use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, Looks, VOID, fielded, scented, style};
+use super::palette::{Color, Looks, VOID, fielded, style};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -197,10 +197,6 @@ fn render_row<'c>(
         let (g_out, f_out, b_out) = (&mut glyph[i..i + n], &mut fg[i..i + n], &mut bg[i..i + n]);
         match chunk(cc) {
             Some(c) => {
-                // Most spans hold no scent: then skip it per cell.
-                let scent: [&[u8]; SCENT_CHANNELS] =
-                    std::array::from_fn(|j| &c.scent[j][local..local + n]);
-                let scented_span = scent.iter().any(|ch| ch.iter().fold(0, |a, &s| a | s) != 0);
                 let cells = c.ground[local..local + n]
                     .iter()
                     .zip(&c.feature[local..local + n])
@@ -211,14 +207,9 @@ fn render_row<'c>(
                     );
                 let outs = g_out.iter_mut().zip(f_out.iter_mut().zip(b_out.iter_mut()));
                 for (k, (((&g, &f), (&o, &cover)), (go, (fo, bo)))) in cells.zip(outs).enumerate() {
-                    // Who stands here, on what grows here, in what scent.
+                    // Who stands here, on what grows here, in which fields.
                     let s = style(g, f, looks.occupant(o), looks.actor(cover), looks.soil);
-                    let bg = if scented_span {
-                        scented(s.bg, std::array::from_fn(|j| scent[j][k]))
-                    } else {
-                        s.bg
-                    };
-                    let bg = fielded(bg, looks.fields, &c.fields, local + k);
+                    let bg = fielded(s.bg, looks.fields, &c.fields, local + k);
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = bg.scaled(light).0;
@@ -291,12 +282,7 @@ mod tests {
                             looks.soil,
                         );
                         crate::render::palette::Style {
-                            bg: fielded(
-                                scented(s.bg, std::array::from_fn(|j| ch.scent[j][i])),
-                                looks.fields,
-                                &ch.fields,
-                                i,
-                            ),
+                            bg: fielded(s.bg, looks.fields, &ch.fields, i),
                             ..s
                         }
                     }

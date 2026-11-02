@@ -166,10 +166,12 @@ op (radius 8: 36; radius 16: 136). A think has `fuel` (512 by default, at most 4
 fuel, it traps and idles (observe: `TRAPS`). `sight` (at most 16) caps every radius.
 Conditions short-circuit left to right: dice first, searches last.
 
-## Scent
+## Fields
 
-`mark CH v` adds to a cell's channel; every 16 ticks each scented cell loses about 1/32 of
-it: a full mark is gone in about 1.5 game hours.
+A field's law runs every `N` ticks in each chunk (`every N`). The bees' `trail` loses about
+1/32 every 16 ticks: 255 is gone in about 1.5 game hours. Regrowth of `+1 every 1h` up to
+`room` refills an emptied cell of 20 in 20 game hours. `add` and `drop` on a cell clamp to
+its max; `harvest` takes at most what the cell holds.
 
 ## What the tools measure, and how often
 

@@ -51,11 +51,14 @@ impl Gen<'_> {
         let own = l.field_col(field)?;
         l.env.push((self.field_defs[field].name.clone(), own));
         l.stmts(body)?;
-        Ok(Law {
+        let mut law = Law {
             every,
             result: l.env[0].1,
             ops: l.ops,
-        })
+            quiet: false,
+        };
+        law.quiet = law.leaves_zero();
+        Ok(law)
     }
 }
 
@@ -336,11 +339,10 @@ impl L<'_, '_> {
                 let agg = self.any_agg(&[x]);
                 self.op(LawOp::Un(Un::Not, x), agg)
             }
-            Cond::Nearest { at, .. } | Cond::Sniff { at, .. } | Cond::Best { at, .. } => Err(self
-                .err(
-                    at,
-                    "a law doesn't search: `nearest`, `sniff` and `best` are an actor's",
-                )),
+            Cond::Nearest { at, .. } | Cond::Best { at, .. } => Err(self.err(
+                at,
+                "a law doesn't search: `nearest` and `best` are an actor's",
+            )),
         }
     }
 }

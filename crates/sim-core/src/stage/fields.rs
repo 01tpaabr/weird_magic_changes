@@ -29,18 +29,25 @@ thread_local! {
     static COLS: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Run every law due in each chunk, from the fields as they stand, into
-/// the chunk's [`LawScratch`].
-pub fn law_compute(
-    tick: Res<Tick>,
-    cfg: Res<SimConfig>,
-    kinds: Res<Kinds>,
-    stage: Res<Stage>,
-    cells: Query<&ChunkCells>,
-    mut own: Query<(Entity, &ChunkCoord, &mut LawScratch)>,
+/// Run every law due at `tick` in chunk `coord` into `out` (cleared first),
+/// from `chunks`: the chunk and its eight neighbours as they stand, in row
+/// order from the top-left. The one law runner: the tick and `wmc why`
+/// (which must see the fields the think will see) both call it.
+pub fn run_due(
+    kinds: &Kinds,
+    seed: u64,
+    tick: u64,
+    coord: ChunkCoord,
+    chunks: [Option<&ChunkCells>; 9],
+    out: &mut Vec<(u8, [u16; CHUNK_CELLS])>,
 ) {
-    let (tick, seed, kinds, stage, cells) = (tick.0, cfg.seed, &*kinds, &*stage, &cells);
-    if !kinds.fields.iter().any(|f| f.law.is_some()) {
+    out.clear();
+    let due = |f: &crate::rules::FieldDef| {
+        f.law
+            .as_ref()
+            .is_some_and(|l| law::law_due(tick, coord, l.every))
+    };
+    if !kinds.fields.iter().any(due) {
         return;
     }
     let at = Clock::at(tick);
@@ -49,48 +56,81 @@ pub fn law_compute(
         i32::try_from(at.day).unwrap_or(i32::MAX),
         i32::from(daylight(tick)),
     ];
-    own.par_iter_mut().for_each(|(e, coord, mut scratch)| {
-        scratch.out.clear();
-        let due = |f: &crate::rules::FieldDef| {
-            f.law
-                .as_ref()
-                .is_some_and(|l| law::law_due(tick, *coord, l.every))
-        };
-        if !kinds.fields.iter().any(due) {
-            return;
+    COLS.with_borrow_mut(|cols| {
+        for (f, def) in kinds.fields.iter().enumerate() {
+            let Some(l) = def.law.as_ref().filter(|_| due(def)) else {
+                continue;
+            };
+            if l.quiet && still(l, kinds, &chunks) {
+                continue; // it would write 0 over 0
+            }
+            let f = u8::try_from(f).expect("at most MAX_FIELDS fields");
+            let ctx = LawCtx {
+                seed,
+                tick,
+                coord,
+                field: f,
+                clock,
+                chunks,
+                defs: &kinds.fields,
+            };
+            out.push((f, [0; CHUNK_CELLS]));
+            let layer = &mut out.last_mut().expect("just pushed").1;
+            law::run(l, &ctx, def.max, cols, layer);
         }
-        let Ok(me) = cells.get(e) else {
-            return;
-        };
-        let chunks: [Option<&ChunkCells>; 9] = std::array::from_fn(|k| {
-            if k == 4 {
-                return Some(me);
-            }
-            let k = i32::try_from(k).expect("0..9");
-            let (ox, oy) = (k % 3 - 1, k / 3 - 1);
-            let e = stage.entity(ChunkCoord::new(coord.x + ox, coord.y + oy))?;
-            cells.get(e).ok()
-        });
-        COLS.with_borrow_mut(|cols| {
-            for (f, def) in kinds.fields.iter().enumerate() {
-                let Some(l) = def.law.as_ref().filter(|_| due(def)) else {
-                    continue;
-                };
-                let f = u8::try_from(f).expect("at most MAX_FIELDS fields");
-                let ctx = LawCtx {
-                    seed,
-                    tick,
-                    coord: *coord,
-                    field: f,
-                    clock,
-                    chunks,
-                    defs: &kinds.fields,
-                };
-                scratch.out.push((f, [0; CHUNK_CELLS]));
-                let out = &mut scratch.out.last_mut().expect("just pushed").1;
-                law::run(l, &ctx, def.max, cols, out);
-            }
-        });
+    });
+}
+
+/// Is every field law `l` reads 0 all over the chunk, and over its
+/// neighbours too if it reads them (where one isn't loaded, the law reads
+/// the chunk's own edge, or the field's `outside`)?
+fn still(l: &law::Law, kinds: &Kinds, chunks: &[Option<&ChunkCells>; 9]) -> bool {
+    let zero = |c: &ChunkCells, f: usize| {
+        c.fields
+            .get(f)
+            .is_none_or(|l| l.iter().fold(0, |a, &v| a | v) == 0)
+    };
+    let (mut fields, neighbours) = l.reads();
+    fields.all(|f| {
+        let f = usize::from(f);
+        let own = chunks[4].is_none_or(|c| zero(c, f));
+        own && (!neighbours
+            || chunks.iter().all(|c| match c {
+                Some(c) => zero(c, f),
+                None => kinds.fields[f].outside.is_none_or(|v| v == 0),
+            }))
+    })
+}
+
+/// The chunk at `c` and its eight neighbours, by `get`, in row order from
+/// the top-left.
+pub fn around<'a>(
+    c: ChunkCoord,
+    get: impl Fn(ChunkCoord) -> Option<&'a ChunkCells>,
+) -> [Option<&'a ChunkCells>; 9] {
+    std::array::from_fn(|k| {
+        let k = i32::try_from(k).expect("0..9");
+        get(ChunkCoord::new(c.x + k % 3 - 1, c.y + k / 3 - 1))
+    })
+}
+
+/// Run every law due in each chunk, from the fields as they stand, into
+/// the chunk's [`LawScratch`].
+pub fn law_compute(
+    tick: Res<Tick>,
+    cfg: Res<SimConfig>,
+    kinds: Res<Kinds>,
+    stage: Res<Stage>,
+    cells: Query<&ChunkCells>,
+    mut own: Query<(&ChunkCoord, &mut LawScratch)>,
+) {
+    let (tick, seed, kinds, stage, cells) = (tick.0, cfg.seed, &*kinds, &*stage, &cells);
+    if !kinds.fields.iter().any(|f| f.law.is_some()) {
+        return;
+    }
+    own.par_iter_mut().for_each(|(coord, mut scratch)| {
+        let chunks = around(*coord, |c| cells.get(stage.entity(c)?).ok());
+        run_due(kinds, seed, tick, *coord, chunks, &mut scratch.out);
     });
 }
 

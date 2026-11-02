@@ -152,21 +152,6 @@ impl Asm {
         self.emit(OpCode::RandomFree, slot, 0)
     }
 
-    /// `ch r -> found`, binding the strongest scent cell into `slot`, `slot + 1`.
-    pub fn sniff(&mut self, slot: u8) -> &mut Self {
-        self.emit(OpCode::Sniff, slot, 0)
-    }
-
-    /// `v ->`: mark scent channel `ch` on the actor's cell.
-    pub fn mark(&mut self, ch: u8) -> &mut Self {
-        self.emit(OpCode::Mark, ch, 0)
-    }
-
-    /// `dx dy -> v`: scent channel `ch` there.
-    pub fn scent_at(&mut self, ch: u8) -> &mut Self {
-        self.emit(OpCode::ScentAt, ch, 0)
-    }
-
     /// `dx dy -> v`: field `f` there.
     pub fn field_at(&mut self, f: u8) -> &mut Self {
         self.emit(OpCode::FieldAt, f, 0)

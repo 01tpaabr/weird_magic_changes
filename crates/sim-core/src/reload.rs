@@ -2,13 +2,13 @@
 //! play`, [`reload_rules`]) and opening a save with rules that number
 //! things differently (`sim::open`, [`PendingRemap`]).
 //!
-//! Rows refer to kinds, need slots, mem slots, states and scent channels by
+//! Rows refer to kinds, need slots, mem slots, states and fields by
 //! index; another rule set may number them differently. A [`Plan`] maps
 //! everything by name: a row keeps its kind if a kind of that name still
 //! exists (rows of a kind that is gone are dropped), each need and mem
 //! carries over by name (clamped to the new max; new needs start full, new
-//! mems at 0), the state by its name (else the first), each scent channel
-//! by its name (else empty). A kind cannot move between standing and ground
+//! mems at 0), the state by its name (else the first), each field by its
+//! name (clamped to its max; a new one starts at its `init`). A kind cannot move between standing and ground
 //! cover (refused: restart). The world's starts are all kept: one whose
 //! kind is gone places nobody (a share keeps its interval, so the others
 //! keep their cells) and starts again when the kind comes back.
@@ -32,7 +32,7 @@ use crate::rules::{FieldDef, Kinds};
 use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
 use crate::stage::worldgen::field_layer;
-use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, SCENT_CHANNELS, Stage};
+use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, Stage};
 use crate::store::{SavedKind, Store};
 
 /// What a reload changed.
@@ -66,13 +66,11 @@ struct Target {
     states: Vec<u8>,
 }
 
-/// How rows and scent written under one rule set map onto another.
+/// How rows and fields written under one rule set map onto another.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
     /// Per old kind; `None` = the kind is gone.
     kinds: Vec<Option<Target>>,
-    /// Per new channel: the old channel of that name.
-    scents: [Option<usize>; SCENT_CHANNELS],
     /// Per new field: the old layer of that name (clamped to the new max),
     /// else none and the field starts at its `init`.
     fields: Vec<(Option<usize>, FieldDef)>,
@@ -94,7 +92,6 @@ impl Plan {
     /// is an error.
     pub fn between(
         old: &[SavedKind],
-        old_scents: &[String],
         old_fields: &[String],
         new: &Kinds,
         seed: u64,
@@ -142,10 +139,6 @@ impl Plan {
                 .collect();
             kinds.push(Some(t));
         }
-        let mut scents = [None; SCENT_CHANNELS];
-        for (j, name) in new.scents.iter().enumerate() {
-            scents[j] = old_scents.iter().position(|o| o == name);
-        }
         let fields = new
             .fields
             .iter()
@@ -153,7 +146,6 @@ impl Plan {
             .collect();
         Ok(Plan {
             kinds,
-            scents,
             fields,
             old_fields: old_fields.len(),
             seed,
@@ -171,7 +163,7 @@ impl Plan {
         self.old_fields
     }
 
-    /// Remap one chunk's rows, scent and fields. Returns whether anything
+    /// Remap one chunk's rows and fields. Returns whether anything
     /// changed; counts dropped rows per old kind.
     pub fn apply(
         &self,
@@ -181,7 +173,7 @@ impl Plan {
         minds: &mut Vec<ActorMind>,
         dropped: &mut [usize],
     ) -> bool {
-        let mut changed = !pubs.is_empty();
+        let changed = !pubs.is_empty();
         let mut actors = ActorsMut { pubs, minds, cells };
         let mut dead = false;
         for slot in 0..actors.pubs.len() {
@@ -221,12 +213,6 @@ impl Plan {
         }
         if dead {
             actors.compact();
-        }
-        let old = cells.scent;
-        for (j, ch) in cells.scent.iter_mut().enumerate() {
-            let next = self.scents[j].map_or([0; crate::stage::CHUNK_CELLS], |i| old[i]);
-            changed |= *ch != next;
-            *ch = next;
         }
         let old = std::mem::take(&mut cells.fields);
         for (src, def) in &self.fields {
@@ -319,13 +305,7 @@ pub fn reload_rules(
     }
     let old = world.resource::<Kinds>().clone();
     let seed = world.resource::<SimConfig>().seed;
-    let plan = Plan::between(
-        &SavedKind::table(&old),
-        &old.scents,
-        &field_names(&old),
-        &new,
-        seed,
-    )?;
+    let plan = Plan::between(&SavedKind::table(&old), &field_names(&old), &new, seed)?;
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);

@@ -70,7 +70,6 @@ const SENSES: [&str; 15] = [
     "x", "y", "age", "light", "hour", "day", "kind", "look", "signal", "state", "hurt", "hurt_dir",
     "result", "taken", "trapped",
 ];
-const SCENTS: [&str; 3] = ["sc0", "sc1", "sc2"];
 /// The fields a valid program may declare, with their policy: free,
 /// conserved, fixed. Kinds may carry a need of a field's name.
 const FIELDS: [(&str, &str); 3] = [("fa", ""), ("fb", " conserved"), ("fc", " fixed")];
@@ -1062,23 +1061,11 @@ impl<'a> G<'a> {
     }
 
     fn effect(&mut self, d: u32) -> String {
-        match self.n(4) {
+        match self.n(3) {
             0 => format!("look = {}", self.expr(d)),
-            1 => format!("signal = {}", self.expr(d)),
             2 if !self.strict => format!("add {} {}", self.pool(&[]), self.expr(d)),
             2 if self.fields > 0 => format!("add fa {}", self.expr(d)),
-            _ => {
-                let ch = self.scent_name();
-                format!("mark {ch} {}", self.expr(d))
-            }
-        }
-    }
-
-    fn scent_name(&mut self) -> String {
-        if self.strict {
-            self.one(&SCENTS).to_string()
-        } else {
-            self.pool(&[])
+            _ => format!("signal = {}", self.expr(d)),
         }
     }
 
@@ -1310,13 +1297,6 @@ impl<'a> G<'a> {
                 self.local(v.clone(), Ty::Target, 2);
                 format!("nearest {p} within {r} as {v}")
             }
-            3 if bind => {
-                let ch = self.scent_name();
-                let r = self.additive(d - 1);
-                let v = self.fresh("v");
-                self.local(v.clone(), Ty::Target, 2);
-                format!("sniff {ch} within {r} as {v}")
-            }
             4 => format!("({})", self.cond(top, d - 1)),
             5 if bind && (!self.strict || self.fields > 0) => {
                 let f = self.field_name();
@@ -1500,14 +1480,6 @@ impl<'a> G<'a> {
             5 => {
                 let t = self.target(d - 1);
                 format!("is({t}, {})", self.pred())
-            }
-            6 => {
-                let ch = self.scent_name();
-                if self.maybe(50) {
-                    format!("scent({ch}, {})", self.target(d - 1))
-                } else {
-                    format!("scent({ch})")
-                }
             }
             7 => {
                 let (f, k) = self.one(&[

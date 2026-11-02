@@ -47,7 +47,7 @@ const COORD: ChunkCoord = ChunkCoord::new(0, 0);
 
 /// Where a chunk file's rows start: header, coord, `last_ticked`, the
 /// cell layers, the field count and [`FIELDS`]' two layers, the row count.
-const ROWS_AT: usize = 28 + CHUNK_CELLS * (10 + SCENT_CHANNELS) + 4 + 2 * 2 * CHUNK_CELLS + 4;
+const ROWS_AT: usize = 28 + CHUNK_CELLS * 10 + 4 + 2 * 2 * CHUNK_CELLS + 4;
 
 /// Two fields beside the built-in kinds, so a save holds field layers; in
 /// the other order for [`REVERSED`], so opening remaps them too.
@@ -727,22 +727,6 @@ fn a_bad_world_header_never_panics() {
                         ..k.clone()
                     })
                     .collect(),
-                ..meta.clone()
-            },
-            true,
-        ),
-        (
-            "scent channels renamed",
-            WorldMeta {
-                scents: vec!["x".into(), "y".into()],
-                ..meta.clone()
-            },
-            false,
-        ),
-        (
-            "too many scent channels",
-            WorldMeta {
-                scents: vec!["x".into(); SCENT_CHANNELS + 1],
                 ..meta.clone()
             },
             true,

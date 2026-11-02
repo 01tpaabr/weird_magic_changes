@@ -420,12 +420,6 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
     if let Some(v) = it.signal {
         let _ = write!(d, "; signal = {v}");
     }
-    for (ch, &v) in it.mark.iter().enumerate() {
-        if v > 0 {
-            let name = kinds.scents.get(ch).map_or("?", String::as_str);
-            let _ = write!(d, "; mark {name} {v}");
-        }
-    }
     for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
         if let Some(def) = kinds.fields.get(usize::from(f)) {
             let _ = write!(d, "; add {} {v}", def.name);

@@ -47,7 +47,7 @@ pub use scenario::Scenario;
 pub use sim::{LoadPolicy, Phase, SimConfig, SimTick, StreamStats, Tick};
 pub use stage::{
     ActorId, CHUNK_BITS, CHUNK_CELLS, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData,
-    ChunkMeta, Feature, Ground, Pos, SCENT_CHANNELS, Stage, StageCells, WORLD_EXTENT,
+    ChunkMeta, Feature, Ground, Pos, Stage, StageCells, WORLD_EXTENT,
 };
 pub use store::Store;
 pub use time::{Clock, TICKS_PER_DAY, daylight};

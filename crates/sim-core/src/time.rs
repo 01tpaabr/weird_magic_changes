@@ -8,7 +8,7 @@
 //!   boundaries; the sim never sees a wall clock.
 //! - **cadence**: how often a system or entity does work: every `k` ticks with
 //!   `k` a power of two, staggered by a stable id, never the slab slot: a hash
-//!   of the chunk coordinate for cell systems (`stage::scent::chunk_due`), the
+//!   of the chunk coordinate for cell systems (`rules::law::law_due`), the
 //!   actor's uid for actors (`systems::due`, `ActorPub.stagger`).
 //! - **speed**: real ticks per second. An `app` concern (`app::clock`); the sim
 //!   is identical at every speed.

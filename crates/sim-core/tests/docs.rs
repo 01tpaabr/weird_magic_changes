@@ -18,7 +18,7 @@
 //!
 //! Then the numbers and names the docs state, against the code: RULES §18's
 //! limits table row by row, the defaults and ranges in the prose, the
-//! reserved words, §16's vocabulary (parents, subs, traits, tags, scents),
+//! reserved words, §16's vocabulary (parents, subs, traits, tags, fields),
 //! and ACTORS.md's row records and sizes.
 
 use std::path::{Path, PathBuf};
@@ -411,16 +411,6 @@ fn bare_kind() -> sim_core::KindDef {
         .clone()
 }
 
-/// Ticks until a fresh 255 of scent is gone.
-fn scent_lifetime() -> u64 {
-    let (mut s, mut steps) = (255u8, 0);
-    while s > 0 {
-        s = sim_core::stage::scent::fade(s);
-        steps += 1;
-    }
-    steps * sim_core::stage::scent::SCENT_CADENCE
-}
-
 /// RULES §18, row by row: the numbers before any `(` or `:` in the second
 /// column are the code's limits. A row the test does not know fails, so a
 /// new limit gets checked too.
@@ -436,10 +426,7 @@ fn the_limits_table_is_the_codes() {
             "needs, mem slots per kind".into(),
             vec![n(NEED_SLOTS), n(MEM_SLOTS)],
         ),
-        (
-            "tags, scent channels per rule set".into(),
-            vec![n(MAX_TAGS), n(sim_core::SCENT_CHANNELS)],
-        ),
+        ("tags per rule set".into(), vec![n(MAX_TAGS)]),
         ("fields per rule set".into(), vec![n(MAX_FIELDS)]),
         (
             "fields one think adds to".into(),
@@ -535,17 +522,12 @@ fn the_numbers_in_the_prose_are_the_codes() {
     use sim_core::rules::compile::{MAX_FUEL, MAX_SIGHT, MAX_TAGS};
     use sim_core::rules::vm::{FOR_EACH_LOCALS, FRAMES, SEARCH_DIV};
     use sim_core::scenario::{MAX_SIZE_CHUNKS, PLACE_ONE};
-    use sim_core::stage::scent::SCENT_CADENCE;
     use sim_core::time::{TICKS_PER_DAY, TICKS_PER_HOUR, TICKS_PER_MINUTE};
-    use sim_core::{CHUNK_CELLS, CHUNK_SIZE, SCENT_CHANNELS};
+    use sim_core::{CHUNK_CELLS, CHUNK_SIZE};
     let k = bare_kind();
     let s = Scenario::default();
     let p = &s.params;
     let side = (MAX_SIZE_CHUNKS as f64).sqrt() as i32 * CHUNK_SIZE;
-    let lifetime = scent_lifetime();
-    // Rounded to half hours, as "about 1.5 game hours".
-    let half_hours = (lifetime * 2 + TICKS_PER_HOUR / 2) / TICKS_PER_HOUR;
-    let hours = format!("{}", half_hours as f64 / 2.0);
     let r = i64::from(MAX_SIGHT);
     says(
         "RULES.md",
@@ -578,10 +560,6 @@ fn the_numbers_in_the_prose_are_the_codes() {
                 sim_core::actors::MEM_SLOTS
             ),
             format!("(at least {CHUNK_SIZE} cells each way, §11)"),
-            format!(
-                "Scent fades by 1/32 every {SCENT_CADENCE} ticks: gone in about {hours} game hours"
-            ),
-            format!("At most {SCENT_CHANNELS} channels in a rule set"),
             format!(
                 "at least {CHUNK_SIZE} cells each way (up to {}, depending",
                 2 * CHUNK_SIZE - 1
@@ -638,11 +616,8 @@ fn the_numbers_in_the_prose_are_the_codes() {
                 row_pub + row_mind + occupant
             ),
             format!("chunk file v{}", sim_core::store::FORMAT_VERSION),
-            format!("`SCENT_CHANNELS` ({SCENT_CHANNELS})"),
             format!("up to 2 x {CHUNK_CELLS} rows"),
             format!("`sight <= {MAX_SIGHT}`"),
-            format!("every {SCENT_CADENCE} ticks"),
-            format!("gone in ~{hours} hours"),
             format!("recursion depth {FRAMES}"),
             format!("default {}, kind override up to {MAX_FUEL}", k.fuel),
             format!("({MAX_TAGS} at most"),
@@ -832,7 +807,7 @@ fn tags_of(name: &str, items: &[(String, String, String)]) -> Vec<String> {
 
 /// RULES §16 against the built-in rules: the reading list is each kind's
 /// parents, the subs and traits are `lib.rules`' (and `fowl`), the tags
-/// are carried by the kinds it names, the scents are the ones marked.
+/// are carried by the kinds it names, the fields are the ones declared.
 #[test]
 fn the_vocabulary_is_the_built_in_rules() {
     let md = doc("RULES.md");
@@ -961,9 +936,9 @@ fn the_vocabulary_is_the_built_in_rules() {
         assert_eq!(got, want, "§16: the kinds tagged `{tag}`");
     }
 
-    // Scents.
-    let scents: Vec<String> = spans(&para("**Scents.**"));
-    assert_eq!(scents, kinds.scents, "§16 scents");
+    // Fields.
+    let fields: Vec<String> = spans(&para("**Fields.**"));
+    assert_eq!(fields, sim_core::reload::field_names(&kinds), "§16 fields");
 }
 
 /// The fields of `struct NAME { ... }` in Rust text, in order.
