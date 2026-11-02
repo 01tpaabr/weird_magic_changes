@@ -177,8 +177,8 @@ from the map. A scenario's `terrain` knobs become noise thresholds onto declared
 ## 6. Height and what it does
 
 Built 2026-11-02 (decision 60): `along`, `sees`, `reach`, `climb` and `relief`, as in the
-table below; height is any field a pack declares. Left: `flow` (water from height), `dig`
-moving earth in a height field, and `opaque` materials.
+table below; height is any field a pack declares. Then `flow` (decision 63, below, and
+`packs/lakes`). Left: `dig` moving earth in a height field, and `opaque` materials.
 
 Height is a field (`field height max 4000 { init noise scale 60 relief }`): mountains,
 valleys and cliffs are shapes in it, `dig`/`build` move earth, and materials can follow from
@@ -196,11 +196,15 @@ What height does is the pack's, through general senses and actions:
 | `climb N on FIELD` on a kind | `move` refuses a step up more than N | cliffs, walls, passes |
 
 Slower steps uphill, better hits downhill (`height(here) - height(t)` in the dice) and cover
-behind a ridge stay in the pack's rules. **Water from height** is the next law past §3's
-form: a conserved flow (each pair of neighbours exchanges `(level - level') / k`, computed the
-same on both sides, so nothing is made or lost) needs a pairwise aggregate over the
-neighbours, `flow`. Then lakes fill hollows and rivers run downhill, and water is where water
-went, not a fixed ground type.
+behind a ridge stay in the pack's rules. **Water from height** (built 2026-11-02, decision
+63): `flow(w, level, rate)` in a law is what flows into a cell from its four neighbours, each
+pair moving `(level' - level) / rate` from the higher to the lower, at most a quarter of what
+the giver holds, computed the same on both sides, so nothing is made or lost. Lakes fill
+hollows and water is where water went, not a fixed ground type. Settled in the building: four
+neighbours, not eight (at a mirrored edge a straight neighbour mirrors the cell itself, a
+diagonal another cell, which would make water); a law with a flow runs in every chunk at the
+same tick (staggered, a pair across a border moved in two ticks and the test's total
+drifted); rain and a drain (`outside 0`) are the pack's, as a source and a sink.
 
 ## 7. Layers
 
@@ -275,7 +279,8 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
    as a field law, with a PERF row. Scent removed for a field, and the quiet-chunk skip
    (decision 56).
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
-4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
+4. **Height** (built, 2026-11-02): `along`, `sees`, `reach`, `climb`, hillshade; then `flow`
+   for water (decision 63), `packs/lakes` and its scenario test, with `expect sum FIELD`.
 5. **Layers** (built, 2026-11-02): declared layers, per-layer claims and occupancy, `flies`,
    `free` in the reader's layer, a bite from above, store v13; `packs/sky` and its scenario
    test.

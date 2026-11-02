@@ -231,6 +231,9 @@ impl Seen<'_> {
                 }
                 self.expr(r);
             }
+            Expr::Flow {
+                of, level, rate, ..
+            } => [of, level, rate].into_iter().for_each(|e| self.expr(e)),
         }
     }
 
@@ -1019,8 +1022,12 @@ impl<'a> Gen<'a> {
                     self.walk_expr(kinds, w, e, out);
                 }
             }
-            Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Agg { .. } => {
-            }
+            Expr::Int(_)
+            | Expr::Name(..)
+            | Expr::Field(..)
+            | Expr::Sense(_)
+            | Expr::Agg { .. }
+            | Expr::Flow { .. } => {}
         }
     }
 

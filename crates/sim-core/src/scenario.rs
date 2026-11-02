@@ -324,6 +324,8 @@ pub enum Metric {
     /// `min|max|sum|avg NAME of [only] K`: a need or memory over every
     /// actor of the kind; with none alive, no number.
     Value { agg: Agg, name: String, who: Who },
+    /// `min|max|sum|avg FIELD`: a field over every cell of the world.
+    Field { agg: Agg, name: String },
 }
 
 /// One cause of death, counted apart: `eaten K by [only] K2` (the bite
@@ -422,7 +424,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     }
 }
 
-const FORMS: &str = "expected `expect count [only] KIND [in STATE] OP N`, `expect born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|avg NAME of [only] KIND [in STATE] OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first four after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
+const FORMS: &str = "expected `expect count [only] KIND [in STATE] OP N`, `expect born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|avg NAME of [only] KIND [in STATE] OP V`, `expect min|max|sum|avg FIELD OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first four after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
 const MEAN_FORMS: &str = "expected `expect mean count|min|max|sum|avg ... OP V` or `expect mean born|became|eaten|died|thinks|traps [only] KIND per day OP V`, then `[from T] [to T]`";
 
 /// `[only] K [in STATE]` at `words[i..]`: who, and the next index.
@@ -496,8 +498,15 @@ fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
         ));
     }
     if let Some(agg) = agg(first) {
-        let name = words.get(1).filter(|w| is_name(w)).ok_or(FORMS)?;
+        let name = words
+            .get(1)
+            .filter(|w| is_name(w) || is_kind_name(w))
+            .ok_or(FORMS)?;
         if words.get(2) != Some(&"of") {
+            let name = name.to_string();
+            return Ok((Metric::Field { agg, name }, 2));
+        }
+        if !is_name(name) {
             return Err(FORMS.into());
         }
         let (who, i) = who_in(words, 3).ok_or(FORMS)?;
@@ -637,7 +646,7 @@ fn expectation(rest: &str, now: u64) -> Result<Expect, String> {
                     "a rate needs a window longer than zero: a `run` before this line, or `from` and `to`"
                         .into(),
                 ),
-                (Metric::Count(_) | Metric::Value { .. }, true) => Err(
+                (Metric::Count(_) | Metric::Value { .. } | Metric::Field { .. }, true) => Err(
                     "only a counter (born, became, eaten, died, thinks, traps) has a rate per day"
                         .into(),
                 ),

@@ -97,6 +97,20 @@ fn bench_laws(c: &mut Criterion) {
     let mut g = c.benchmark_group("laws");
     g.throughput(Throughput::Elements(100 * 4096));
     g.bench_function("life 10x10 chunks", |b| b.iter(|| sim::step(&mut w)));
+    // Water over a heightfield (packs/lakes), every tick in every chunk:
+    // one `flow` and the add, against Life's neighbour sum and selects.
+    let kinds = sim_core::rules::compile(
+        "lakes.rules",
+        "field height max 255 fixed { init noise scale 40 }
+         field water max 6000 conserved {
+           init 300
+           every 1 { water = water + flow(water, height * 16 + water, 4) }
+         }
+         kind nobody { glyph \"n\"  when true => idle }",
+    )
+    .expect("the bench's law compiles");
+    let mut w = sim::new_world_with(&board, kinds).unwrap();
+    g.bench_function("flow 10x10 chunks", |b| b.iter(|| sim::step(&mut w)));
     g.finish();
 }
 

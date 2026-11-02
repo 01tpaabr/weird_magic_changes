@@ -255,16 +255,18 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   radii of `nearest`, `best` and `for each` are an `additive`.
 - *`IDENT args` with a field's name reads that field: one argument, a target (`sugar(here)`,
   `sugar(s)` for a binding `s`).*
-- In a field's law, two more primaries:
+- In a field's law, three more primaries (`flow` is reserved, and an error outside a law):
   ```
   primary = ( "sum" | "avg" | "min" | "max" ) IDENT "within" unary
           | "count" "(" cond ")" "within" unary
+          | "flow" "(" expr "," expr "," expr ")"
   ```
   *In a law, `count (` always starts this aggregate, never a field condition. The radius folds to 1. A law's block holds `let`, assignments to its own field and to its
   locals, and `if`/`else`; its expressions read fields, locals, constants, `hour`, `day`,
-  `light`, `rand`, `chance`, `min`, `max`, `abs`, `sign`, `clamp` and aggregates, never one
-  aggregate inside another (through a local either). Inside an aggregate a field's name is
-  its value before the law ran. At most 128 steps.*
+  `light`, `rand`, `chance`, `min`, `max`, `abs`, `sign`, `clamp`, aggregates and flows, never
+  one aggregate or flow inside another (through a local either). Inside an aggregate or a
+  flow a field's name is its value before the law ran. `flow`'s rate folds to a number
+  above 0. At most 128 steps.*
 - A bare IDENT argument is an int, a target or a predicate as the called sub's parameter
   says; `water`, `soil`, `rock` and `bare` passed to a `pred` parameter are the predicates
   unless a local of that name is in scope.

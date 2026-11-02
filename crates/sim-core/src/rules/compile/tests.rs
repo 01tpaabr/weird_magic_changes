@@ -2299,6 +2299,30 @@ fn law_errors_name_the_problem() {
             "a law doesn't search",
         ),
         (
+            "field f max 4 { every 1 { f = f + flow(f, f, 0) } }",
+            "`flow`'s rate is a number above 0, not 0",
+        ),
+        (
+            "field f max 4 { every 1 { f = flow(sum f within 1, f, 2) } }",
+            "an aggregate or a flow inside a flow",
+        ),
+        (
+            "field f max 4 { every 1 { f = flow(f, flow(f, f, 1), 2) } }",
+            "an aggregate or a flow inside a flow",
+        ),
+        (
+            "field f max 4 { every 1 { f = count (flow(f, f, 1) > 0) within 1 } }",
+            "an aggregate inside an aggregate",
+        ),
+        (
+            "field f max 4 { every 1 { f = flow(f, f) } }",
+            "expected `,`",
+        ),
+        (
+            "field f max 4 kind k { glyph \"k\" when flow(f, f, 1) > 0 => idle }",
+            "`flow` belongs in a field's law",
+        ),
+        (
             "kind k { when sum x within 1 > 0 => idle }",
             "expected `=>`, found `x`",
         ),
@@ -2337,7 +2361,8 @@ fn a_law_that_leaves_zero_at_zero_is_quiet() {
          field up max 9 { every 1 { up += 1 } }
          field dice max 9 { every 1 { dice = chance(50) * 0 } }
          field dark max 9 { every 1 { dark = 0 * hour } }
-         field some max 9 { every 1 { if room == 0 { some = 3 } } }",
+         field some max 9 { every 1 { if room == 0 { some = 3 } } }
+         field wet max 9 { every 1 { wet += flow(wet, room + wet, 2) } }",
     )
     .unwrap();
     let quiet: Vec<(&str, bool)> = k
@@ -2355,8 +2380,16 @@ fn a_law_that_leaves_zero_at_zero_is_quiet() {
             ("dice", false),
             ("dark", false),
             ("some", false),
+            ("wet", true),
         ]
     );
+    let in_step: Vec<&str> = k
+        .fields
+        .iter()
+        .filter(|f| f.law.as_ref().is_some_and(|l| l.in_step))
+        .map(|f| f.name.as_str())
+        .collect();
+    assert_eq!(in_step, ["wet"], "only a law with a flow runs in step");
 }
 
 /// A field condition in a search says what is wrong with it.

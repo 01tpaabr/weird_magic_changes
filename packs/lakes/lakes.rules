@@ -1,0 +1,31 @@
+# lakes: water from height (docs/RULES.md §12, Flow). The land is a height
+# field drawn in relief; water starts level over all of it, a little in
+# every cell, and runs downhill: each pair of neighbours passes a quarter
+# of the difference in their levels, the land's height and the water on
+# it, from the higher to the lower. What one cell gives the other takes, so
+# the hills dry, the hollows fill until they lie level, and not a drop is
+# made or lost (the edge of the world is a mirror). Deer climb no steeper
+# than they can and walk to the lakes to drink. scenarios/tests/lakes.scenario
+# plays it.
+
+field height max 255 fixed { init noise scale 40  relief  color "#8c7a52" }
+
+field water max 6000 conserved {
+  init 300
+  color "#2f6fd8"
+  every 2 { water = water + flow(water, height * 16 + water, 4) }
+}
+
+kind deer {
+  glyph "d"
+  color "#d8b070"
+  cadence 4
+  sight 8
+  climb 3 on height
+  need thirst max 1d vital
+  mem drank
+
+  when thirst < 16h and water(here) > 200          => { thirst = 1d  drank += 1  idle }
+  when thirst < 16h and best water within 8 as w   => move toward w
+  when true                                        => move random free
+}

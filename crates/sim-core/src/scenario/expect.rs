@@ -12,7 +12,7 @@ use super::{Agg, CauseIs, Expect, Metric, Who};
 use crate::actors::{Cause, ChunkActors, ChunkMinds, Tally};
 use crate::rules::Kinds;
 use crate::sim::{Tick, checksum};
-use crate::stage::{self, Pos, Stage};
+use crate::stage::{self, ChunkCells, Pos, Stage};
 
 /// The kind ids an `expect` looks at: a kind's family, `only` the kind
 /// alone, as in the rules. An error when the rules have no such kind.
@@ -90,6 +90,11 @@ fn check_metric(kinds: &Kinds, m: &Metric) -> Result<(), String> {
                 return Err(format!("`{}` has no need or memory `{name}`", who.kind));
             }
             expect_states(kinds, who)?;
+        }
+        Metric::Field { name, .. } => {
+            if kinds.field_named(name).is_none() {
+                return Err(format!("the rules have no field `{name}`"));
+            }
         }
     }
     Ok(())
@@ -199,6 +204,25 @@ pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<f64>, 
                 Agg::Avg => (!vals.is_empty()).then(|| sum() / vals.len() as f64),
             }
         }
+        Metric::Field { agg, name } => {
+            let f = kinds.field_named(name).expect("checked above");
+            let (mut lo, mut hi, mut sum, mut n) = (u16::MAX, 0u16, 0u64, 0u64);
+            for &(_, e) in stage.active() {
+                let Some(layer) = world.get::<ChunkCells>(e).and_then(|c| c.fields.get(f)) else {
+                    continue;
+                };
+                for &v in layer {
+                    (lo, hi, sum) = (lo.min(v), hi.max(v), sum + u64::from(v));
+                }
+                n += layer.len() as u64;
+            }
+            (n > 0).then(|| match agg {
+                Agg::Min => f64::from(lo),
+                Agg::Max => f64::from(hi),
+                Agg::Sum => sum as f64,
+                Agg::Avg => sum as f64 / n as f64,
+            })
+        }
     })
 }
 
@@ -213,12 +237,13 @@ pub fn holds(
         Expect::Is { metric, op, v } => Ok(match measure(world, kinds, metric)? {
             Some(n) => (op.holds_f(n, *v as f64), decimal(n), Some(n)),
             None => {
-                let who = match metric {
+                let seen = match metric {
                     Metric::Count(w)
                     | Metric::Tally { who: w, .. }
-                    | Metric::Value { who: w, .. } => w,
+                    | Metric::Value { who: w, .. } => format!("no `{}` alive", w.kind),
+                    Metric::Field { .. } => "no cells loaded".into(),
                 };
-                (false, format!("no `{}` alive", who.kind), None)
+                (false, seen, None)
             }
         }),
         Expect::At { x, y, who } => {

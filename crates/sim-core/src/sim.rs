@@ -2526,6 +2526,57 @@ mod tests {
         assert_eq!(field(&w, 2, Pos::new(5, 5)), 2, "every 8 ticks, 16 ticks");
     }
 
+    /// `flow` moves water downhill and keeps every drop: across chunk
+    /// borders (its laws run in step), at a mirrored edge, and in any order
+    /// of chunks; and the low ground ends up wetter than the high.
+    #[test]
+    fn flow_keeps_what_it_moves() {
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field height max 4000 fixed { init noise scale 30 }
+             field water max 60000 conserved {
+               init 400
+               every 2 { water = water + flow(water, height * 4 + water, 3) }
+             }
+             kind nobody { glyph \"n\"  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 192,
+            height: 128,
+            ..cfg(18)
+        };
+        let mut w = new_world_with(&cfg, kinds).unwrap();
+        let total = |w: &mut World, f: usize| -> u64 {
+            let mut q = w.query::<&ChunkCells>();
+            q.iter(w)
+                .flat_map(|c| c.fields[f].iter())
+                .map(|&v| u64::from(v))
+                .sum()
+        };
+        let before = total(&mut w, 1);
+        assert_eq!(before, 400 * 192 * 128);
+        for _ in 0..200 {
+            step(&mut w);
+            assert_eq!(total(&mut w, 1), before, "no drop made or lost");
+        }
+        check_invariants(&mut w);
+        // Where it went: wetter where the ground is lower.
+        let mut q = w.query::<&ChunkCells>();
+        let (mut low, mut high) = ((0u64, 0u64), (0u64, 0u64));
+        for c in q.iter(&w) {
+            for (&h, &v) in c.fields[0].iter().zip(&c.fields[1]) {
+                let side = if h < 2000 { &mut low } else { &mut high };
+                *side = (side.0 + u64::from(v), side.1 + 1);
+            }
+        }
+        assert!(
+            low.0 * high.1 > 2 * high.0 * low.1,
+            "low ground holds more than twice the water a cell: {low:?} {high:?}"
+        );
+    }
+
     /// Inside an aggregate a field is read as it stood before the law ran,
     /// whatever the law assigned it first (a fuzz find: the new values of a
     /// neighbour in the next chunk are not known).
@@ -2767,7 +2818,8 @@ mod tests {
     /// Height: `sees` is blocked by a ridge and clears it from a higher eye,
     /// `max` and `sum ... along` read the line, `reach` lets a hit land six
     /// cells away, and `climb` stops a step that rises too much (but not a
-    /// gentle one).
+    /// gentle one). A line to a target as far as an i32 goes reads its first
+    /// `sight` cells, and `sees` says no (a fuzz find: both overflowed).
     #[test]
     fn height_sight_reach_and_climb() {
         use crate::actors::systems::newborn;
@@ -2776,9 +2828,11 @@ mod tests {
             "t.rules",
             "field height max 100
              kind archer { glyph \"a\"  cadence 1  sight 8  reach 6
-               mem mode, s1, s2, a1, a2, r
+               mem mode, s1, s2, a1, a2, r, f1, f2
                when mode == 0 => {
                  mode = 1
+                 f1 = sum height along at(-2147483647, 2147483647) + 1
+                 f2 = sees(at(2147483647, -2147483647)) over height
                  s1 = sees(at(x + 6, y)) over height
                  s2 = sees(at(x + 6, y)) over height eye 50
                  a1 = max height along at(x + 6, y)
@@ -2841,6 +2895,7 @@ mod tests {
             &[3, 0, 1, 40, 40, 1],
             "blocked, seen over, max, sum, hit"
         );
+        assert_eq!(&by(0xF1).3.mem[6..8], &[1, 0], "a far line: flat, unseen");
         assert_eq!(by(0xF2).3.needs[0], 8, "hit from six cells away");
         assert_eq!(by(0xF3).2, at(40, 30), "the cliff stops it");
         assert!(by(0xF4).2.x > 40, "the gentle step does not");

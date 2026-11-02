@@ -235,10 +235,22 @@ fn check() -> impl Strategy<Value = String> {
                         b.get(&names)
                     };
                     let agg = ["min", "max", "sum", "avg"][b.index(4)];
-                    format!(
-                        "expect {agg} {name} of {who}{state} {op} {}",
-                        time_text(n, only)
-                    )
+                    // A field over the world now and then: one the rules
+                    // have, or one they lack.
+                    let fields: Vec<&str> = KINDS
+                        .fields
+                        .iter()
+                        .map(|f| f.name.as_str())
+                        .chain(["nofield"])
+                        .collect();
+                    match wa % 4 {
+                        0 => format!("expect {agg} {} {op} {n}", a.get(&fields)),
+                        1 => format!("expect mean {agg} {} {op} {n} @W{wa}{wb}", a.get(&fields)),
+                        _ => format!(
+                            "expect {agg} {name} of {who}{state} {op} {}",
+                            time_text(n, only)
+                        ),
+                    }
                 }
                 3 if n % 2 == 0 => format!("expect at ({n}, {}) nobody", n / 2),
                 3 => format!("expect at({n},{n}) {who}"),
@@ -540,6 +552,10 @@ const LINES: &[&str] = &[
     "expect at (1,",
     "expect count",
     "expect min of fox > 1",
+    "expect sum nofield > 1",
+    "expect sum trail per day > 1",
+    "expect mean sum trail per day > 1",
+    "expect max red. > 1",
     "expect checksum zz",
     "expect always",
     "expect always count fox > 1 from",

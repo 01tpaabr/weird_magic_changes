@@ -234,9 +234,12 @@ impl<'a> Watch<'a> {
                     let who = match metric {
                         super::Metric::Count(w)
                         | super::Metric::Tally { who: w, .. }
-                        | super::Metric::Value { who: w, .. } => w,
+                        | super::Metric::Value { who: w, .. } => &w.kind,
+                        super::Metric::Field { .. } => {
+                            return Ok((false, "no cells at any check".into()));
+                        }
                     };
-                    return Ok((false, format!("no `{}` alive at any check", who.kind)));
+                    return Ok((false, format!("no `{who}` alive at any check")));
                 }
                 let mean = self.sum / self.read as f64;
                 (

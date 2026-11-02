@@ -56,8 +56,10 @@ impl Gen<'_> {
             result: l.env[0].1,
             ops: l.ops,
             quiet: false,
+            in_step: false,
         };
         law.quiet = law.leaves_zero();
+        law.in_step = law.ops.iter().any(|o| matches!(o, LawOp::Flow(..)));
         Ok(law)
     }
 }
@@ -308,6 +310,29 @@ impl L<'_, '_> {
                         self.bin(Bin::Div, sum, nine)?
                     }
                 }
+            }
+            Expr::Flow {
+                of,
+                level,
+                rate,
+                at,
+            } => {
+                let k = self.g.fold(rate, at)?;
+                if k <= 0 {
+                    return Err(self.err(at, format!("`flow`'s rate is a number above 0, not {k}")));
+                }
+                // As in an aggregate: the neighbours as they stood.
+                self.in_agg = true;
+                let cols = self.expr(of).and_then(|w| Ok((w, self.expr(level)?)));
+                self.in_agg = false;
+                let (w, l) = cols?;
+                if self.any_agg(&[w, l]) {
+                    return Err(self.err(
+                        at,
+                        "an aggregate or a flow inside a flow: compute it in two laws",
+                    ));
+                }
+                self.op(LawOp::Flow(w, l, k), true)?
             }
             _ => {
                 return Err(self.err(

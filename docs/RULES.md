@@ -573,6 +573,28 @@ cell. A law without dice or the clock that leaves 0 at 0 (a fade, a regrowth to 
 Life) skips every chunk where the fields it reads are all 0: a trail that covers a few
 chunks costs only there. `packs/gather` grows its sugar back with one.
 
+**Flow.** `flow(w, level, rate)` is what flows into a cell from its four neighbours (north,
+east, south, west), net: each pair of neighbours moves `(level' - level) / rate` (rounded
+towards zero) from the higher level to the lower, but never more than a quarter of what the
+giver holds of `w`. Both cells of a pair work out the same amount, so what one gains the
+other loses: `water = water + flow(water, height + water, 4)` keeps every drop, and water
+runs downhill, fills the hollows and lies level there. A law with a flow runs in every chunk
+at the same tick (not staggered), so a pair across a chunk's border moves together. A
+mirrored edge moves nothing; an `outside V` edge is a sink or a source (`outside 0` drains
+the world). The rate is a number above 0; the higher, the slower and smoother (with 4 or
+more a cell never overshoots its neighbours). Give the field room above what it will pool
+to, or the clamp to its max loses the rest. Inside a flow, as in an aggregate, a field is
+read as it stood before the law ran.
+
+```rules
+field height max 4000 fixed { init noise scale 40  relief }
+field water max 60000 conserved {
+  init 200
+  color "#3070e0"
+  every 2 { water = water + flow(water, height * 4 + water, 4) }   # lakes fill the hollows
+}
+```
+
 ## 13. Cost
 
 Each op costs 1 fuel, and a search costs `(2r + 1)² / 8` more. A think that runs out of fuel
@@ -719,6 +741,7 @@ expect became chick == 1
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
+| `expect min\|max\|sum\|avg FIELD OP V` | a field over every cell of the world: `always sum water == 3276800` holds what a conserved field moves to its total |
 | `expect at (X, Y) K` | someone there, in any layer, is a K; `nobody` for a cell with nobody in any layer; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
 
@@ -735,7 +758,7 @@ window of it instead:
 | `expect always COND [from T] [to T]` | COND held at every check in the window. COND is any line above but `checksum` and `state` |
 | `expect never COND ...` | it held at no check |
 | `expect eventually COND ...` | it held at one check at least |
-| `expect mean METRIC OP V ...` | the average, over the checks, of `count K` or `min\|max\|sum\|avg NAME of K`, each with its `in STATE` (a check with none alive is left out); `V` may be a decimal (`2.5`) |
+| `expect mean METRIC OP V ...` | the average, over the checks, of `count K`, `min\|max\|sum\|avg NAME of K` or of a field, each with its `in STATE` (a check with none alive is left out); `V` may be a decimal (`2.5`) |
 | `expect mean COUNTER K per day OP V ...` | how much a counter (`born`, `became`, `eaten`, `died`, `thinks`, `traps`, with its `by` or `of`) grew per day across the window: a rate |
 
 The window runs `from T` (else the world's start) `to T` (else the line itself), both times
@@ -1098,7 +1121,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 
 Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
-`rand`, `chance`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
+`rand`, `chance`, `flow`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
 `taken`, `trapped`), and `place` (where kinds start is a scenario's `start` line now, §14).
 `wmc lint` says so when you hit one. `water`,

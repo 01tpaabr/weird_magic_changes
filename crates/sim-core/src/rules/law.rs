@@ -85,6 +85,12 @@ pub enum LawOp {
     /// Over the 3 x 3 square of a column; the border of the result is 0 (no
     /// op reads it: an aggregate never holds another).
     Agg(Agg, u16),
+    /// `flow(w, l, k)`: what flows into a cell from its four neighbours, net.
+    /// Each pair moves `(l' - l) / k` (towards zero) from the higher `l` to
+    /// the lower, at most a quarter of the giver's `w`; both cells of a pair
+    /// work it out alike, so what one gains the other loses. Its border is
+    /// 0, as an aggregate's.
+    Flow(u16, u16, i32),
 }
 
 /// A field's law: its cadence and its program, whose column `result` is the
@@ -97,6 +103,9 @@ pub struct Law {
     pub result: u16,
     /// [`Law::leaves_zero`], worked out once by the compiler.
     pub quiet: bool,
+    /// The law holds a `flow`: it runs in every chunk at the same tick, not
+    /// staggered, so the two cells of a pair across a border move together.
+    pub in_step: bool,
 }
 
 impl Law {
@@ -125,6 +134,8 @@ impl Law {
                 }
                 LawOp::Agg(Agg::Sum, x) => c(x).wrapping_mul(9),
                 LawOp::Agg(_, x) => c(x),
+                // Every cell alike: nothing flows.
+                LawOp::Flow(..) => 0,
             };
             v.push(x);
         }
@@ -137,7 +148,11 @@ impl Law {
             LawOp::Field(f) => Some(f),
             _ => None,
         });
-        (fields, self.ops.iter().any(|o| matches!(o, LawOp::Agg(..))))
+        let neighbours = self
+            .ops
+            .iter()
+            .any(|o| matches!(o, LawOp::Agg(..) | LawOp::Flow(..)));
+        (fields, neighbours)
     }
 }
 
@@ -156,6 +171,7 @@ impl Law {
                 LawOp::Rand(n, d) => [8, u64::from(n), u64::from(d), 0],
                 LawOp::Chance(p, d) => [9, u64::from(p), u64::from(d), 0],
                 LawOp::Agg(a, x) => [10, a as u64, u64::from(x), 0],
+                LawOp::Flow(w, l, k) => [11, u64::from(w), u64::from(l), u64::from(k as u32)],
             }
         };
         [u64::from(self.every), u64::from(self.result)]
@@ -164,13 +180,17 @@ impl Law {
     }
 }
 
-/// Is a law of cadence `every` due in chunk `c` at `tick`? Staggered by a
-/// hash of the coordinate, as scent and actors are.
+/// Is `law` due in chunk `c` at `tick`? Staggered by a hash of the
+/// coordinate, as actors are, unless it runs in step.
 #[inline]
-pub fn law_due(tick: u64, c: ChunkCoord, every: u32) -> bool {
-    let stagger = splitmix64(u64::from(c.x as u32) << 32 | u64::from(c.y as u32) ^ 0x1A3);
+pub fn law_due(tick: u64, c: ChunkCoord, law: &Law) -> bool {
+    let stagger = if law.in_step {
+        0
+    } else {
+        splitmix64(u64::from(c.x as u32) << 32 | u64::from(c.y as u32) ^ 0x1A3)
+    };
     tick.wrapping_add(stagger)
-        .is_multiple_of(u64::from(every.max(1)))
+        .is_multiple_of(u64::from(law.every.max(1)))
 }
 
 /// A field's layers around a chunk: the chunk's own, then its eight
@@ -344,6 +364,38 @@ pub fn run(
                     }
                 }
             }
+            LawOp::Flow(w, l, k) => {
+                let (w, l) = (c(w), c(l));
+                dst.fill(0);
+                // Each edge between two cells once: what the first takes
+                // from the second, given to one and taken from the other
+                // where they are inside the chunk. Four edges a cell, each
+                // at most a quarter of an i32: the sum fits.
+                for y in 1..SIDE - 1 {
+                    for x in 0..SIDE - 1 {
+                        let (i, j) = (y * SIDE + x, y * SIDE + x + 1);
+                        let a = pair(w[i], l[i], w[j], l[j], k);
+                        if x >= 1 {
+                            dst[i] += a;
+                        }
+                        if x + 1 < SIDE - 1 {
+                            dst[j] -= a;
+                        }
+                    }
+                }
+                for y in 0..SIDE - 1 {
+                    for x in 1..SIDE - 1 {
+                        let (i, j) = (y * SIDE + x, (y + 1) * SIDE + x);
+                        let a = pair(w[i], l[i], w[j], l[j], k);
+                        if y >= 1 {
+                            dst[i] += a;
+                        }
+                        if y + 1 < SIDE - 1 {
+                            dst[j] -= a;
+                        }
+                    }
+                }
+            }
         }
     }
     let r = &cols[usize::from(law.result) * COLUMN..(usize::from(law.result) + 1) * COLUMN];
@@ -353,6 +405,28 @@ pub fn run(
             let v = r[(y + 1) * SIDE + x + 1].clamp(0, i32::from(max));
             out[y * n + x] = u16::try_from(v).expect("clamped into 0..=max");
         }
+    }
+}
+
+/// What flows into a cell (`w`, `l`) from its neighbour (`w2`, `l2`):
+/// `(l2 - l) / k` towards zero, from the higher to the lower, at most a
+/// quarter of what the giver holds. `pair(a, b) == -pair(b, a)`, and it is
+/// never more than a quarter of an i32 either way.
+#[inline]
+pub fn pair(w: i32, l: i32, w2: i32, l2: i32, k: i32) -> i32 {
+    let k = k.max(1);
+    let d = match l2.checked_sub(l) {
+        // `-i32::MIN` doesn't fit: one short, as the other side clamps.
+        Some(d) => (d / k).max(-i32::MAX),
+        // Wider than an i32, but no wider once divided by 2 or more.
+        #[allow(clippy::cast_possible_truncation)]
+        None => ((i64::from(l2) - i64::from(l)) / i64::from(k))
+            .clamp(-i64::from(i32::MAX), i64::from(i32::MAX)) as i32,
+    };
+    if d > 0 {
+        d.min(w2.max(0) / 4)
+    } else {
+        -(-d).min(w.max(0) / 4)
     }
 }
 
@@ -392,5 +466,55 @@ fn bin(b: Bin, x: i32, y: i32) -> i32 {
         Bin::Max => x.max(y),
         Bin::And => i32::from(x != 0 && y != 0),
         Bin::Or => i32::from(x != 0 || y != 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::rng::splitmix64;
+
+    /// What one cell of a pair gains the other loses, and no cell gives
+    /// more than it holds to its four neighbours.
+    #[test]
+    fn a_pair_moves_one_amount_and_a_giver_keeps_what_it_gives() {
+        let mut h = 7u64;
+        let mut draw = |m: i64| {
+            h = splitmix64(h);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+            let v = (h % (2 * m as u64 + 1)) as i64 - m;
+            i32::try_from(v).expect("within m")
+        };
+        for _ in 0..10_000 {
+            let (w, l, w2, l2) = (
+                draw(70_000),
+                draw(i32::MAX as i64),
+                draw(70_000),
+                draw(i32::MAX as i64),
+            );
+            let k = draw(40).abs() + 1;
+            assert_eq!(
+                pair(w, l, w2, l2, k),
+                -pair(w2, l2, w, l, k),
+                "{w} {l} {w2} {l2} {k}"
+            );
+            let out = -pair(w, l, w2, l2, k);
+            assert!(out <= w.max(0) / 4, "gives at most a quarter: {out} of {w}");
+        }
+        let ends = [i32::MIN, i32::MIN + 1, -1, 0, 1, i32::MAX - 1, i32::MAX];
+        for (&w, &l, &w2, &l2) in ends
+            .iter()
+            .flat_map(|a| ends.iter().map(move |b| (a, b)))
+            .flat_map(|(a, b)| ends.iter().map(move |c| (a, b, c)))
+            .flat_map(|(a, b, c)| ends.iter().map(move |d| (a, b, c, d)))
+        {
+            for k in [1, 2, 3, i32::MAX] {
+                assert_eq!(
+                    pair(w, l, w2, l2, k),
+                    -pair(w2, l2, w, l, k),
+                    "{w} {l} {w2} {l2} {k}"
+                );
+            }
+        }
     }
 }

@@ -1453,6 +1453,12 @@ impl<'a> G<'a> {
                 format!("({a} {f} within 1)")
             }
             5 if agg => format!("(count ({}) within 1)", self.law_cond(d - 1, &[], false)),
+            6 if agg => {
+                // No locals inside: one may hold an aggregate.
+                let w = self.law_expr(d - 1, &[], false);
+                let l = self.law_expr(d - 1, &[], false);
+                format!("flow({w}, {l}, {})", 1 + self.n(12))
+            }
             _ => self.law_expr(0, locals, agg),
         }
     }

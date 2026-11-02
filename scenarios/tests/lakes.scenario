@@ -1,0 +1,19 @@
+# The lakes pack (packs/lakes): `flow` in a law. Water starts level and runs
+# into the hollows; the edges mirror, so the total never changes; the deer
+# find the lakes and drink.
+#
+#   make run ARGS="scenario scenarios/tests/lakes.scenario"
+#   make run ARGS="show --scenario scenarios/tests/lakes.scenario"
+rules ../../packs/lakes
+seed 3
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start deer 1 / 400
+run 1d
+expect always sum water == 7372800             # 300 a cell, 192 x 128 cells
+expect eventually max water >= 1000 to 2h      # a lake, seen at 27min
+expect max water >= 1300                       # deeper by the day's end, seen 1534
+expect eventually min water <= 3 to 12h        # a dry hilltop
+expect died deer == 0
+expect eventually min drank of deer >= 1
+expect traps deer == 0

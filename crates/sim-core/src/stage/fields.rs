@@ -42,11 +42,8 @@ pub fn run_due(
     out: &mut Vec<(u8, [u16; CHUNK_CELLS])>,
 ) {
     out.clear();
-    let due = |f: &crate::rules::FieldDef| {
-        f.law
-            .as_ref()
-            .is_some_and(|l| law::law_due(tick, coord, l.every))
-    };
+    let due =
+        |f: &crate::rules::FieldDef| f.law.as_ref().is_some_and(|l| law::law_due(tick, coord, l));
     if !kinds.fields.iter().any(due) {
         return;
     }

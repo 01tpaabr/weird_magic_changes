@@ -1069,22 +1069,28 @@ impl Machine<'_> {
     }
 
     /// The cells of the line from the actor to `(dx, dy)`: `k` of `n`
-    /// steps, rounded (half up), the same whichever thread runs it.
+    /// steps, rounded (half up), the same whichever thread runs it. In
+    /// i64: a target may lie anywhere (a fuzz find); `k <= n`, so a cell is
+    /// never further than the target.
     #[inline]
-    fn line_cell(dx: i32, dy: i32, k: i32, n: i32) -> (i32, i32) {
-        let r = |d: i32| (2 * d * k + n).div_euclid(2 * n);
+    fn line_cell(dx: i32, dy: i32, k: i32, n: i64) -> (i32, i32) {
+        let r = |d: i32| {
+            let c = (2 * i64::from(d) * i64::from(k) + n).div_euclid(2 * n);
+            i32::try_from(c).expect("between 0 and d")
+        };
         (r(dx), r(dy))
     }
 
     /// [`OpCode::Along`].
     fn along(&mut self, a: u8, dx: i32, dy: i32) -> Result<i32, Trap> {
         let (f, op) = (usize::from(a & 63), a >> 6);
-        let n = dx.abs().max(dy.abs()).min(i32::from(self.ctx.kind.sight));
+        let full = dx.unsigned_abs().max(dy.unsigned_abs());
+        let n = i32::from(self.ctx.kind.sight).min(i32::try_from(full).unwrap_or(i32::MAX));
         if n == 0 {
             return Ok(0);
         }
         self.spend(n.unsigned_abs() / SEARCH_DIV)?;
-        let full = dx.abs().max(dy.abs());
+        let full = i64::from(full);
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
         let mut acc = match op {
             0 => 0,
@@ -1105,13 +1111,16 @@ impl Machine<'_> {
 
     /// [`OpCode::Sees`].
     fn sees(&mut self, f: u8, dx: i32, dy: i32, eye: i32) -> Result<bool, Trap> {
-        let n = dx.abs().max(dy.abs());
+        let n = dx.unsigned_abs().max(dy.unsigned_abs());
         if n == 0 {
             return Ok(true);
         }
-        if n > i32::from(self.ctx.kind.sight) {
+        let Some(n) = i32::try_from(n)
+            .ok()
+            .filter(|&n| n <= i32::from(self.ctx.kind.sight))
+        else {
             return Ok(false);
-        }
+        };
         self.spend(n.unsigned_abs() / SEARCH_DIV)?;
         let f = usize::from(f);
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
@@ -1119,7 +1128,7 @@ impl Machine<'_> {
         let (h0, h1) = (h(0, 0) + i64::from(eye), h(dx, dy) + i64::from(eye));
         let n64 = i64::from(n);
         for k in 1..n {
-            let (cx, cy) = Self::line_cell(dx, dy, k, n);
+            let (cx, cy) = Self::line_cell(dx, dy, k, n64);
             if self.ctx.halo.at(lx, ly, cx, cy).is_none() {
                 return Ok(false);
             }

@@ -1012,6 +1012,14 @@ enum Expr {
         r: Box<Expr>,
         at: Pos,
     },
+    /// In a field's law only: `flow(w, level, rate)`, what flows in from
+    /// the four neighbours.
+    Flow {
+        of: Box<Expr>,
+        level: Box<Expr>,
+        rate: Box<Expr>,
+        at: Pos,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1195,6 +1203,7 @@ pub const KEYWORDS: &[&str] = &[
     "clamp",
     "rand",
     "chance",
+    "flow",
     "dist",
     "is",
     "free",
@@ -2629,6 +2638,21 @@ impl Parser<'_> {
                             Expr::Rand(Box::new(e))
                         } else {
                             Expr::Chance(Box::new(e))
+                        })
+                    }
+                    "flow" => {
+                        self.expect_sym("(")?;
+                        let of = self.expr()?;
+                        self.expect_sym(",")?;
+                        let level = self.expr()?;
+                        self.expect_sym(",")?;
+                        let rate = self.expr()?;
+                        self.expect_sym(")")?;
+                        Ok(Expr::Flow {
+                            of: Box::new(of),
+                            level: Box::new(level),
+                            rate: Box::new(rate),
+                            at,
                         })
                     }
                     "dist" => {
@@ -4707,7 +4731,7 @@ impl<'a> Gen<'a> {
                 self.expr_acts(a, depth)
             }
             // Only in a law, which never acts.
-            Expr::Agg { .. } => false,
+            Expr::Agg { .. } | Expr::Flow { .. } => false,
             Expr::Along { target, .. } => self.target_acts(target, depth),
             Expr::Sees { target, eye, .. } => {
                 self.target_acts(target, depth)
@@ -5338,6 +5362,9 @@ impl<'a> Gen<'a> {
         match e {
             Expr::Agg { at, .. } => {
                 return Err(self.err(at, "an aggregate belongs in a field's law"));
+            }
+            Expr::Flow { at, .. } => {
+                return Err(self.err(at, "`flow` belongs in a field's law"));
             }
             Expr::Along {
                 op,
