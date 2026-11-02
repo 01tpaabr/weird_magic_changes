@@ -378,6 +378,7 @@ fn valid() -> impl Strategy<Value = Valid> {
                 blocks.extend(shares.into_iter().chain(ats).map(|l| vec![l]));
                 if rules {
                     blocks.push(vec!["rules packs/one ../two".into()]);
+                    blocks.push(vec!["player red_2 ../red".into()]);
                 }
                 if let Some((n, pass)) = seeds {
                     blocks.push(vec![format!("seeds {n}")]);
@@ -522,6 +523,15 @@ const LINES: &[&str] = &[
     "outside",
     "outside lava",
     "rules",
+    "player",
+    "player red",
+    "player Red packs/red",
+    "player 2red packs/red",
+    "player red packs/red packs/blue",
+    "start red.ant 1 / 2",
+    "start red. 1 / 2",
+    "start .ant at (1, 1)",
+    "start a.b.c 1 / 2",
     "run",
     "run 0",
     "run -1d",
@@ -713,6 +723,8 @@ proptest! {
         prop_assert_eq!(s.start_lines.len(), v.starts);
         prop_assert_eq!(s.checks.len(), v.checks);
         prop_assert_eq!(s.seeds, v.seeds);
+        let players = s.packs.iter().filter(|p| crate::rules::player_of(p).0 == Some("red_2")).count();
+        prop_assert_eq!((s.packs.len(), players), if v.text.contains("rules packs/one") { (3, 1) } else { (0, 0) });
         exercise(&s);
     }
 }

@@ -79,13 +79,16 @@ pub fn packs_or(cli: &[String], scenario: &[String]) -> Vec<PathBuf> {
     }
 }
 
-/// A scenario file, its packs (`rules` lines) made relative to where it is.
+/// A scenario file, its packs (`rules` and `player` lines) made relative to
+/// where it is.
 pub fn read_scenario(f: &str) -> anyhow::Result<sim_core::Scenario> {
     let text = std::fs::read_to_string(f).with_context(|| format!("reading {f}"))?;
     let mut s = sim_core::Scenario::parse(f, &text)?;
     let dir = Path::new(f).parent().unwrap_or(Path::new(""));
     for p in &mut s.packs {
-        *p = dir.join(&*p).to_string_lossy().into_owned();
+        let (owner, path) = sim_core::rules::player_of(p);
+        let path = dir.join(path).to_string_lossy().into_owned();
+        *p = owner.map_or_else(|| path.clone(), |o| format!("{o}={path}"));
     }
     Ok(s)
 }
@@ -127,7 +130,13 @@ pub fn rules_for(store: &Store, cli: &[String], scenario: &[String]) -> anyhow::
         .filter(|m| packs.is_empty() && !m.packs.is_empty())
     {
         let saved: Vec<PathBuf> = m.packs.iter().map(PathBuf::from).collect();
-        let gone: Vec<&PathBuf> = saved.iter().filter(|p| !p.exists()).collect();
+        let gone: Vec<&PathBuf> = saved
+            .iter()
+            .filter(|p| {
+                let p = p.to_string_lossy();
+                !Path::new(sim_core::rules::player_of(&p).1).exists()
+            })
+            .collect();
         if gone.is_empty() {
             eprintln!("rules: the save's packs, {}", shown(&saved));
             packs = saved;

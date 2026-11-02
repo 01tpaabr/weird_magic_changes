@@ -1,9 +1,11 @@
 # The world
 
-Status: **steps 1 to 5 are built**: fields and their laws (2026-11-01: §2-§4, `RULES.md`
+Status: **all six steps are built**: fields and their laws (2026-11-01: §2-§4, `RULES.md`
 §12 "Fields", decisions 54-56; scent is gone, the bees' trail is a field), declared terrain
 with `build` and `dig` (§5, decisions 58-59), height (§6, decision 60) and declared layers
-(§7, decision 61), 2026-11-02; the rest is design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
+(§7, decision 61) and arenas with player packs and private fields (§12, decision 62),
+2026-11-02; `flow`, the open questions (§13) and a player's budget remain design (owner,
+2026-11-01; ARCHITECTURE decisions 49-53). The cost
 measurement in §8 is done; the build order is §10. Syntax below is a proposal until its step
 lands in `GRAMMAR.md` and `RULES.md`, and may change there.
 
@@ -277,8 +279,10 @@ workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `s
 5. **Layers** (built, 2026-11-02): declared layers, per-layer claims and occupancy, `flies`,
    `free` in the reader's layer, a bite from above, store v13; `packs/sky` and its scenario
    test.
-6. **Arenas and players** (§12), with namespaces, when the game work begins; private fields
-   last.
+6. **Arenas and players** (built, 2026-11-02): player packs (`NAME=PATH`, a scenario's
+   `player` line), namespaces by renaming a player's top-level names `PLAYER.NAME`, what a
+   player may declare, `private` fields; `packs/colony` (an arena, red and blue) and its
+   scenario test.
 
 ## 11. Unloaded chunks
 
@@ -292,6 +296,16 @@ declares one. A scenario line to keep a region simulated in play waits for a wor
 it.
 
 ## 12. Arenas and players
+
+Built 2026-11-02 (decision 62, `RULES.md` §15 "Arenas and players"), as below, with these
+settled in the building. A player's pack is `NAME=PATH` (or a scenario's `player NAME
+PATH`), the arena every other pack. Namespaces are a rename: every name token in a player's
+files that is one of its top-level names (kinds, traits, file subs, consts, fields) becomes
+`PLAYER.NAME` before parsing, so the compiler is unchanged past the lexer and a player's
+program compiles to the same code as alone (a property test). Member subs and tags are not
+renamed (a member sub overrides by name; tags are the shared vocabulary that lets colonies
+find each other). A `private` field is then just a field in the player's namespace: no
+other code can name it. No cap on private fields yet.
 
 A programming game (players write creatures in the language, they meet in one world) needs to
 know who may shape the world. A world's packs get a role:
@@ -331,7 +345,7 @@ kind ant {
   array is a column too; add when a world needs it.
 - Does `light` become a field (shade under trees), with the clock's daylight its default?
 - A scenario's `terrain` and drawn `map` syntax for declared materials and fields.
-- Namespaces per pack, before two packs of different authors share a world: needed by §12,
-  and by any two packs that should not collide on a name.
+- Namespaces for two *arena* packs of different authors that should not collide on a name
+  (players have theirs, §12).
 - A player's budget in an arena (ops a think, rows, private fields), so one player's code
   can't slow the world for the others.

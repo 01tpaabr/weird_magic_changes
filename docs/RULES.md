@@ -613,6 +613,7 @@ start hive at (77, 103)                        # exactly there
 | statement | default | meaning |
 |---|---|---|
 | `rules PATH ...` | the built-in rules | the packs the world runs (§15), relative to the scenario file |
+| `player NAME PATH` | none | a player's pack (§15, Arenas and players), relative to the scenario file; its kinds are `NAME.KIND` |
 | `seed N` | 42 | the world's seed: terrain, placement and every actor's dice |
 | `size W H` | 80 24 | the region generated at creation, rounded up to whole 64-cell chunks, at most 4096 of them (4096 x 4096 cells); the rest generates as the camera reaches it |
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
@@ -821,6 +822,39 @@ the built-in rules in place of the missing packs: from then on the save opens wi
 even once the packs are back (pass `--rules` to return to them). `wmc lint --scenario <file>`, with no packs (no
 `--rules`, positional pack or `WMC_RULES`), lints the ones the scenario names, the same order
 as for a new world.
+
+**Arenas and players.** In a game where people write creatures and meet in one world, the
+world's packs are the **arena**, and each person's is a **player** pack, given as
+`NAME=PATH` (`--rules red=packs/red`) or by a scenario's `player NAME PATH` line. A player's
+top-level names (kinds, traits, subs, consts, fields) are its own: inside its files it
+writes `ant`, and the world knows it as `red.ant`, so two players may both have an `ant` and
+neither can name the other's. A player uses the arena's fields, traits, subs and constants,
+within their write policy (`conserved`, `fixed`), and tags stay global, so colonies can find
+each other (`nearest insect`). It declares kinds, traits, subs, consts and `private` fields
+only: no ground, feature, layer or shared field, so its code can't change the world's
+physics or make a resource. It can't take a name the arena has, or a word the language
+reads (`food`, `health`, `glyph`, ...). A `private` field is a field only the player's code
+can name, with a law if it likes: a trail the other colony can't smell.
+
+```text
+# packs/colony/red/red.rules
+field trail max 255 private { every 16 { trail = trail - (trail + 31) / 32 } }
+kind ant extends forager {                  # the arena's trait: its needs, its tag
+  when crumbs >= 6 => { add trail 60  move toward at(nest_x, nest_y) }
+  when best trail on free within 6 as t => move toward t
+  ...
+}
+
+# scenarios/tests/colony.scenario
+rules ../../packs/colony
+player red ../../packs/colony/red
+player blue ../../packs/colony/blue
+start red.ant 1 / 200 in (0, 0) to (63, 127)
+start blue.ant 1 / 200 in (64, 0) to (127, 127)
+```
+
+Scenarios, `expect` lines and the tools name a player's kinds as `red.ant`. A save keeps
+each pack's player (`red=/abs/path`). A world without players is as it always was.
 
 The main menu (`wmc` alone) makes a new pack from a template: Packs, then `+ New pack` and a
 name, writes `packs/<name>/<name>.rules` (two small kinds, every line explained, their names

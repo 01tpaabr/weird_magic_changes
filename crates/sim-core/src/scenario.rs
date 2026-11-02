@@ -414,10 +414,10 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     };
     match *words.get(i)? {
         "only" => {
-            let k = words.get(i + 1).filter(|w| is_name(w))?;
+            let k = words.get(i + 1).filter(|w| is_kind_name(w))?;
             Some((who(k, true), i + 2))
         }
-        k if is_name(k) => Some((who(k, false), i + 1)),
+        k if is_kind_name(k) => Some((who(k, false), i + 1)),
         _ => None,
     }
 }
@@ -809,6 +809,14 @@ fn is_name(w: &str) -> bool {
         && !w.starts_with(|c: char| c.is_ascii_digit())
 }
 
+/// A kind's name: a name, or a player's (`red.ant`, `docs/WORLD.md` §12).
+fn is_kind_name(w: &str) -> bool {
+    match w.split_once('.') {
+        Some((player, name)) => is_name(player) && is_name(name),
+        None => is_name(w),
+    }
+}
+
 /// A time as a scenario's `run` line writes it (`64`, `90min`, `2h`,
 /// `1d`): its ticks, if it is one and above zero. For tools that take a
 /// time (`wmc observe 4d`).
@@ -1182,7 +1190,7 @@ impl Scenario {
                             "expected `start KIND N / D` or `start KIND at (X, Y)`".into(),
                         ));
                     };
-                    if !is_name(kind) {
+                    if !is_kind_name(kind) {
                         return Err(err(line_no, format!("`{kind}` is not a kind name")));
                     }
                     let tail = rest[1..].join(" ");
@@ -1356,7 +1364,7 @@ impl Scenario {
                             "soil" => cell(Ground::Soil, Feature::None),
                             "water" => cell(Ground::Water, Feature::None),
                             "rock" => cell(Ground::Soil, Feature::Rock),
-                            k if is_name(k) => Legend::Kind {
+                            k if is_kind_name(k) => Legend::Kind {
                                 kind: k.to_string(),
                                 with: if tail.trim().is_empty() {
                                     Vec::new()
@@ -1414,6 +1422,21 @@ impl Scenario {
                     }
                     s.packs.extend(rest.iter().map(|p| p.to_string()));
                 }
+                "player" => {
+                    let [name, path] = rest[..] else {
+                        return Err(err(line_no, "expected `player NAME PATH`".into()));
+                    };
+                    let pack = format!("{name}={path}");
+                    if crate::rules::player_of(&pack).0 != Some(name) {
+                        return Err(err(
+                            line_no,
+                            format!(
+                                "`{name}`: a player's name is lowercase letters, digits and `_`, from a letter"
+                            ),
+                        ));
+                    }
+                    s.packs.push(pack);
+                }
                 "run" => {
                     let t = match rest[..] {
                         [t] => value(t).filter(|&t| t > 0),
@@ -1440,7 +1463,7 @@ impl Scenario {
                     return Err(err(
                         line_no,
                         format!(
-                            "unknown statement `{other}` (rules, seed, size, terrain, start, map, legend, outside, run, expect, seeds, pass)"
+                            "unknown statement `{other}` (rules, player, seed, size, terrain, start, map, legend, outside, run, expect, seeds, pass)"
                         ),
                     ));
                 }
@@ -2025,6 +2048,12 @@ mod tests {
         let packs = Scenario::parse("p", "rules ../packs/life  # its own\nrules more").unwrap();
         assert_eq!(packs.packs, ["../packs/life", "more"]);
         assert!(Scenario::parse("p", "rules").is_err());
+        let s = Scenario::parse(
+            "p",
+            "rules arena\nplayer red packs/red\nstart red.ant 1 / 2",
+        )
+        .unwrap();
+        assert_eq!(s.packs, ["arena", "red=packs/red"]);
     }
 
     /// Expectations over a window: `always`, `never`, `eventually` take a
@@ -2353,6 +2382,9 @@ mod tests {
             ),
             ("expect at (-1000000001, 0) hive", "is outside the world"),
             ("spawn fox", "unknown statement `spawn`"),
+            ("player red", "expected `player NAME PATH`"),
+            ("player Red packs/red", "a player's name is lowercase"),
+            ("start red. 1 / 2", "`red.` is not a kind name"),
             ("terrain water_level nan", "`nan` is not a number"),
             ("terrain water_scale 0", "above 0"),
             (

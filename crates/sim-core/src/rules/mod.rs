@@ -24,8 +24,8 @@ use vm::Op;
 
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
 pub use compile::{
-    CompileError, ConstSet, compile, compile_files, compile_files_with, compile_packs,
-    compile_packs_with,
+    CompileError, ConstSet, compile, compile_files, compile_files_with, compile_owned,
+    compile_packs, compile_packs_with, player_of,
 };
 
 /// One need of a kind: `need NAME max M [decay 0|1] [vital]`.

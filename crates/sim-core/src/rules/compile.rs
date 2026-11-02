@@ -81,7 +81,77 @@ pub fn compile_files(files: &[(&str, &str)]) -> Result<Kinds> {
 /// [`compile_files`] with some constants set from outside: each must name a
 /// `const` the files declare.
 pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result<Kinds> {
-    if let Some((name, _)) = files.get(MAX_FILES) {
+    let owned: Vec<(&str, &str, Option<&str>)> = files.iter().map(|&(n, t)| (n, t, None)).collect();
+    compile_owned(&owned, consts)
+}
+
+/// A pack given as `NAME=PATH` is player NAME's (`docs/WORLD.md` §12): its
+/// name and the path; any other, the arena's.
+pub fn player_of(pack: &str) -> (Option<&str>, &str) {
+    match pack.split_once('=') {
+        Some((n, path))
+            if n.starts_with(|c: char| c.is_ascii_lowercase())
+                && n.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_') =>
+        {
+            (Some(n), path)
+        }
+        _ => (None, pack),
+    }
+}
+
+/// Words a player's item can't take: renamed into the player's namespace,
+/// they would stop meaning what the language reads them as.
+const NOT_PLAYER_NAMES: [&str; 39] = [
+    "food",
+    "health",
+    "water",
+    "soil",
+    "rock",
+    "bare",
+    "target",
+    "pred",
+    "dx",
+    "dy",
+    "conserved",
+    "fixed",
+    "private",
+    "init",
+    "noise",
+    "scale",
+    "outside",
+    "every",
+    "relief",
+    "ground",
+    "feature",
+    "layer",
+    "flies",
+    "walkable",
+    "drink",
+    "blocks",
+    "reach",
+    "climb",
+    "along",
+    "over",
+    "eye",
+    "on",
+    "sum",
+    "avg",
+    "count",
+    "min",
+    "max",
+    "glyph",
+    "color",
+];
+
+/// [`compile_files_with`] for files that may belong to players (a file's
+/// owner, `None` for the arena). Each player's top-level names (kinds,
+/// traits, subs, consts, fields) are renamed `PLAYER.NAME` across its own
+/// files, so two players may both have an `ant` and neither can name the
+/// other's; it may declare kinds, traits, subs, consts and `private` fields
+/// only, and no name the arena has. A world without players is as before.
+pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) -> Result<Kinds> {
+    if let Some((name, _, _)) = files.get(MAX_FILES) {
         return Err(CompileError {
             file: name.to_string(),
             line: 1,
@@ -89,11 +159,9 @@ pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result
             msg: format!("at most {MAX_FILES} rules files in a rule set"),
         });
     }
-    let mut items = Items::default();
-    for (name, text) in files {
-        let tokens = Lexer::new(name, text).lex()?;
-        let mut p = Parser {
-            file: name,
+    let parse = |file: &str, tokens: Vec<Token>, items: &mut Items| -> Result<()> {
+        Parser {
+            file,
             tokens,
             at: 0,
             depth: 0,
@@ -101,10 +169,135 @@ pub fn compile_files_with(files: &[(&str, &str)], consts: &[ConstSet]) -> Result
             top: None,
             conjuncts: Vec::new(),
             law: false,
-        };
-        p.file(&mut items)?;
+        }
+        .file(items)
+    };
+    let mut lexed = Vec::with_capacity(files.len());
+    for &(name, text, owner) in files {
+        lexed.push((name, Lexer::new(name, text).lex()?, owner));
     }
-    Gen::new(&items, files, consts).generate()
+    let mut items = Items::default();
+    for (name, tokens, _) in lexed.iter().filter(|(_, _, o)| o.is_none()) {
+        parse(name, tokens.clone(), &mut items)?;
+    }
+    if let Some(f) = items.fields.iter().find(|f| f.private) {
+        return Err(pos_err(
+            &f.at,
+            "only a player's pack declares a `private` field",
+        ));
+    }
+    let mut players: Vec<&str> = Vec::new();
+    for &(_, _, o) in &lexed {
+        if let Some(p) = o
+            && !players.contains(&p)
+        {
+            players.push(p);
+        }
+    }
+    for player in players {
+        let mine = || lexed.iter().filter(move |(_, _, o)| *o == Some(player));
+        let mut own = Items::default();
+        for (name, tokens, _) in mine() {
+            parse(name, tokens.clone(), &mut own)?;
+        }
+        let names = player_names(player, &own, &items)?;
+        for (name, tokens, _) in mine() {
+            let mut tokens = tokens.clone();
+            for t in &mut tokens {
+                if let Tok::Name(n) = &t.tok
+                    && names.contains(n)
+                {
+                    t.tok = Tok::Name(format!("{player}.{n}"));
+                }
+            }
+            parse(name, tokens, &mut items)?;
+        }
+    }
+    let pairs: Vec<(&str, &str)> = files.iter().map(|&(n, t, _)| (n, t)).collect();
+    Gen::new(&items, &pairs, consts).generate()
+}
+
+fn pos_err(at: &Pos, msg: impl Into<String>) -> CompileError {
+    CompileError {
+        file: at.file.clone(),
+        line: at.line,
+        col: at.col,
+        msg: msg.into(),
+    }
+}
+
+/// What player `player`'s files (`own`, parsed apart) declare at the top
+/// level, after checking it keeps to a player's part: no ground, feature,
+/// layer or shared field, no name the arena (`arena`) has or the language
+/// reads.
+fn player_names(player: &str, own: &Items, arena: &Items) -> Result<Vec<String>> {
+    if let Some(m) = own.materials.first() {
+        let what = if m.ground { "ground" } else { "feature" };
+        return Err(pos_err(
+            &m.at,
+            format!(
+                "`{}`: a player's pack declares no {what}: the arena shapes the world",
+                m.name
+            ),
+        ));
+    }
+    if let Some((l, at)) = own.layers.first() {
+        return Err(pos_err(
+            at,
+            format!(
+                "`{}`: a player's pack declares no layer: the arena shapes the world",
+                l.name
+            ),
+        ));
+    }
+    if let Some(f) = own.fields.iter().find(|f| !f.private) {
+        return Err(pos_err(
+            &f.at,
+            format!(
+                "`{}`: a player's field is `private` (its own); the arena declares the shared ones",
+                f.name
+            ),
+        ));
+    }
+    let mut arena_names: Vec<&str> = vec!["soil", "water", "rock"];
+    for i in &arena.items {
+        arena_names.push(&i.name);
+        arena_names.extend(i.members.iter().map(|s| s.name.as_str()));
+        arena_names.extend(i.decls.tags.iter().map(String::as_str));
+    }
+    arena_names.extend(arena.subs.iter().map(|s| s.name.as_str()));
+    arena_names.extend(arena.consts.iter().map(|c| c.name.as_str()));
+    arena_names.extend(arena.fields.iter().map(|f| f.name.as_str()));
+    arena_names.extend(arena.materials.iter().map(|m| m.name.as_str()));
+    arena_names.extend(arena.layers.iter().map(|(l, _)| l.name.as_str()));
+    let declared = own
+        .items
+        .iter()
+        .map(|i| (&i.name, &i.at))
+        .chain(own.subs.iter().map(|s| (&s.name, &s.at)))
+        .chain(own.consts.iter().map(|c| (&c.name, &c.at)))
+        .chain(own.fields.iter().map(|f| (&f.name, &f.at)));
+    let mut names = Vec::new();
+    for (name, at) in declared {
+        if arena_names.contains(&name.as_str()) {
+            return Err(pos_err(
+                at,
+                format!("`{name}` is the arena's: player `{player}` names its own otherwise"),
+            ));
+        }
+        if NOT_PLAYER_NAMES.contains(&name.as_str()) {
+            return Err(pos_err(
+                at,
+                format!(
+                    "`{name}` is a word the language reads: a player's item takes another name"
+                ),
+            ));
+        }
+        if !names.contains(name) {
+            names.push(name.clone());
+        }
+    }
+    Ok(names)
 }
 
 /// Compile rule packs as one rule set. A pack is a directory (its `*.rules`
@@ -129,18 +322,27 @@ pub fn compile_packs_with(
     consts: &[ConstSet],
 ) -> std::result::Result<Kinds, Box<dyn std::error::Error>> {
     // Each pack once, where first given: a scenario's `rules` line and the
-    // same `--rules` are one pack.
-    let mut full_paths: Vec<(&std::path::Path, std::path::PathBuf)> = Vec::new();
+    // same `--rules` are one pack. `NAME=PATH` is player NAME's.
+    let mut full_paths: Vec<(&std::path::Path, std::path::PathBuf, Option<&str>)> = Vec::new();
     for pack in packs {
+        let (owner, path) = match pack.to_str() {
+            Some(s) => player_of(s),
+            None => (None, ""),
+        };
+        let pack = if path.is_empty() {
+            *pack
+        } else {
+            std::path::Path::new(path)
+        };
         let full = std::fs::canonicalize(pack).map_err(|e| format!("{}: {e}", pack.display()))?;
-        if !full_paths.iter().any(|(_, f)| *f == full) {
-            full_paths.push((pack, full));
+        if !full_paths.iter().any(|(_, f, _)| *f == full) {
+            full_paths.push((pack, full, owner));
         }
     }
     // Every file once, where first loaded, with how many trailing path
-    // components label it.
-    let mut files: Vec<(std::path::PathBuf, usize)> = Vec::new();
-    for (pack, full) in &full_paths {
+    // components label it, and its owner.
+    let mut files: Vec<(std::path::PathBuf, usize, Option<&str>)> = Vec::new();
+    for (pack, full, owner) in &full_paths {
         if full.is_dir() {
             let mut v: Vec<_> = std::fs::read_dir(full)
                 .map_err(|e| format!("{}: {e}", pack.display()))?
@@ -153,12 +355,12 @@ pub fn compile_packs_with(
             v.sort();
             let k = if full_paths.len() > 1 { 2 } else { 1 };
             for p in v {
-                if !files.iter().any(|(q, _)| *q == p) {
-                    files.push((p, k));
+                if !files.iter().any(|(q, _, _)| *q == p) {
+                    files.push((p, k, *owner));
                 }
             }
-        } else if !files.iter().any(|(q, _)| q == full) {
-            files.push((full.clone(), 1));
+        } else if !files.iter().any(|(q, _, _)| q == full) {
+            files.push((full.clone(), 1, *owner));
         }
     }
     // A label names one file: while two are equal, each takes one more
@@ -176,9 +378,9 @@ pub fn compile_packs_with(
         c[c.len().saturating_sub(k)..].join("/")
     };
     loop {
-        let labels: Vec<String> = files.iter().map(|(p, k)| label(p, *k)).collect();
+        let labels: Vec<String> = files.iter().map(|(p, k, _)| label(p, *k)).collect();
         let mut grew = false;
-        for (i, (p, k)) in files.iter_mut().enumerate() {
+        for (i, (p, k, _)) in files.iter_mut().enumerate() {
             if labels.iter().filter(|l| **l == labels[i]).count() > 1 && *k < parts(p).len() {
                 *k += 1;
                 grew = true;
@@ -188,19 +390,22 @@ pub fn compile_packs_with(
             break;
         }
     }
-    let mut texts: Vec<(String, String)> = Vec::with_capacity(files.len());
-    for (p, k) in &files {
+    let mut texts: Vec<(String, String, Option<&str>)> = Vec::with_capacity(files.len());
+    for (p, k, owner) in &files {
         let text = std::fs::read_to_string(p).map_err(|e| format!("{}: {e}", p.display()))?;
-        texts.push((label(p, *k), text));
+        texts.push((label(p, *k), text, *owner));
     }
-    let files: Vec<(&str, &str)> = texts
+    let files: Vec<(&str, &str, Option<&str>)> = texts
         .iter()
-        .map(|(n, t)| (n.as_str(), t.as_str()))
+        .map(|(n, t, o)| (n.as_str(), t.as_str(), *o))
         .collect();
-    let mut kinds = compile_files_with(&files, consts)?;
+    let mut kinds = compile_owned(&files, consts)?;
     kinds.debug.packs = full_paths
         .iter()
-        .map(|(_, f)| f.to_string_lossy().into_owned())
+        .map(|(_, f, owner)| {
+            let f = f.to_string_lossy();
+            owner.map_or_else(|| f.clone().into_owned(), |o| format!("{o}={f}"))
+        })
         .collect();
     Ok(kinds)
 }
@@ -534,6 +739,8 @@ struct FieldAst {
     law: Option<(Expr, Vec<Stmt>, Pos)>,
     /// `relief`: drawn with its slopes shaded.
     relief: bool,
+    /// `private`: a player's own field (`docs/WORLD.md` §12).
+    private: bool,
 }
 
 /// `const NAME = expr`: a file-scope integer, folded at compile time.
@@ -1269,6 +1476,7 @@ impl Parser<'_> {
         } else {
             Policy::Free
         };
+        let private = self.eat_kw("private");
         let (mut init, mut color, mut outside, mut law) = (None, None, None, None);
         let mut relief = false;
         if self.eat_sym("{") {
@@ -1341,6 +1549,7 @@ impl Parser<'_> {
             outside,
             law,
             relief,
+            private,
         })
     }
 

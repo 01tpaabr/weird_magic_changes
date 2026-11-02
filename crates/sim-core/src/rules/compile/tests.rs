@@ -2626,3 +2626,100 @@ fn layers_are_declared_named_and_inherited() {
         .collect();
     assert!(compile_err(&many).contains("at most 8 layers"));
 }
+
+/// Players (`docs/WORLD.md` §12): each one's top-level names are its own,
+/// `PLAYER.NAME`; it uses the arena's fields, traits and consts, declares
+/// kinds, traits, subs, consts and `private` fields only, and names nothing
+/// the arena has.
+#[test]
+fn players_have_their_own_names_and_only_a_players_part() {
+    let arena = "field crumbs max 9 { init 9 }
+                 const BIG = 9
+                 trait walker { need food max 1d vital  sub go() { move random free } }";
+    let red = "const LOAD = 3
+               field trail max 99 private { every 16 { trail = trail / 2 } }
+               kind ant extends walker { when crumbs(here) > LOAD and trail(here) < BIG => { add trail 9  idle }
+                                         when true => go() }
+               kind queen extends ant { }";
+    let blue = "const LOAD = 5
+                field trail max 50 private
+                kind ant extends walker { when trail(here) > LOAD => idle  when true => go() }";
+    let files = [
+        ("arena.rules", arena, None),
+        ("red.rules", red, Some("red")),
+        ("blue.rules", blue, Some("blue")),
+    ];
+    let k = compile_owned(&files, &[]).unwrap();
+    let mut names: Vec<&str> = k.names().collect();
+    names.sort_unstable();
+    assert_eq!(names, ["blue.ant", "red.ant", "red.queen"]);
+    let fields: Vec<&str> = k.fields.iter().map(|f| f.name.as_str()).collect();
+    assert_eq!(fields, ["crumbs", "red.trail", "blue.trail"]);
+    assert_eq!(k.fields[1].max, 99);
+    assert_eq!(k.fields[2].max, 50);
+    assert_eq!(
+        k.by_name("red.queen").unwrap().id,
+        k.by_name("red.ant").unwrap().id + 1,
+        "a player's kind extends its own"
+    );
+    // Without players, nothing is renamed.
+    assert!(compile_owned(&[("arena.rules", arena, None)], &[]).is_ok());
+
+    let player = |text: &str| {
+        compile_owned(
+            &[("arena.rules", arena, None), ("p.rules", text, Some("p"))],
+            &[],
+        )
+        .unwrap_err()
+        .to_string()
+    };
+    let errs = [
+        ("ground mud { walkable }", "declares no ground"),
+        ("feature wall { blocks }", "declares no feature"),
+        ("layer air", "declares no layer"),
+        ("field heat max 9", "a player's field is `private`"),
+        ("kind crumbs { }", "`crumbs` is the arena's"),
+        ("const BIG = 1", "`BIG` is the arena's"),
+        ("sub go() { idle }", "`go` is the arena's"),
+        ("kind walker { }", "`walker` is the arena's"),
+        ("kind food { }", "a word the language reads"),
+        (
+            "kind k { when trail(here) > 0 => idle }",
+            "unknown sub `trail`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = player(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    let e = compile_owned(&[("arena.rules", "field f max 9 private", None)], &[])
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("only a player's pack declares a `private` field"),
+        "{e}"
+    );
+    // The arena can't name a player's kind.
+    let e = compile_owned(
+        &[
+            (
+                "arena.rules",
+                "kind nest { when nearest ant within 3 as a => idle }",
+                None,
+            ),
+            ("p.rules", "kind ant { }", Some("p")),
+        ],
+        &[],
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(e.contains("`ant`"), "{e}");
+
+    assert_eq!(
+        crate::rules::player_of("red=packs/red"),
+        (Some("red"), "packs/red")
+    );
+    assert_eq!(crate::rules::player_of("packs/red"), (None, "packs/red"));
+    assert_eq!(crate::rules::player_of("Red=x"), (None, "Red=x"));
+    assert_eq!(crate::rules::player_of("a/b=c"), (None, "a/b=c"));
+}

@@ -1,0 +1,28 @@
+# The red colony, a player of packs/colony: ants that lay a trail home from
+# what they found, and follow it back out. The trail is `private`: only red
+# ants smell it.
+
+const LOAD = 6
+
+field trail max 255 private {
+  color "#c84040"
+  every 16 { trail = trail - (trail + 31) / 32 }   # fades by a 32nd
+}
+
+kind ant extends forager {
+  glyph "a"
+  color "#e04848"
+  cadence 2
+  sight 6
+  mem nest_x, nest_y, born
+
+  when born == 0 => { born = 1  nest_x = x  nest_y = y  crumbs = 0  idle }
+  when food < 12h and crumbs > 0 => { food = min(food + 6h, 1d)  crumbs -= 1  idle }
+  when crumbs >= LOAD and dist(at(nest_x, nest_y)) <= 2 and crumbs(here) < 9 => drop crumbs 3
+  when crumbs >= LOAD and dist(at(nest_x, nest_y)) <= 2 => move random free
+  when crumbs >= LOAD => { add trail 60  move toward at(nest_x, nest_y) }
+  when dist(at(nest_x, nest_y)) > 2 and crumbs(here) > 0 => harvest crumbs 2
+  when best crumbs on free within 6 as c => move toward c
+  when chance(70) and best trail on free within 6 as t => move toward t
+  when true => move random free
+}

@@ -398,3 +398,31 @@ fn pathological_texts_are_refused_quickly() {
         assert!(took < SLOW, "{took:?} compiling {head}...");
     }
 }
+
+/// A program compiled as a player's pack (`docs/WORLD.md` §12) is the same
+/// program: the same code and constants, every kind named `p.NAME`. Its
+/// names are renamed, nothing else.
+#[test]
+fn a_players_program_is_the_same_program() {
+    check(runner(CASES).run(&gen_rules::program(Mode::Valid), |p| {
+        let fail = |e: String| TestCaseError::fail(format!("{e}\n--- program ---\n{}", p.text));
+        // A player declares kinds, traits, subs, consts and private fields only.
+        if p.text.contains("field ") || p.text.contains("ground ") || p.text.contains("layer g") {
+            return Ok(());
+        }
+        let k = compile("g.rules", &p.text).map_err(|e| fail(e.to_string()))?;
+        let player = compile_owned(&[("g.rules", &p.text, Some("p"))], &[])
+            .map_err(|e| fail(format!("as a player: {e}")))?;
+        if player.code != k.code || player.consts != k.consts {
+            return Err(fail("as a player, other code".into()));
+        }
+        let names: Vec<String> = k.names().map(|n| format!("p.{n}")).collect();
+        if player.names().collect::<Vec<_>>() != names {
+            return Err(fail(format!(
+                "as a player, kinds {:?}",
+                player.names().collect::<Vec<_>>()
+            )));
+        }
+        Ok(())
+    }));
+}

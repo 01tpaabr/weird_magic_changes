@@ -69,7 +69,7 @@ IDENT = NAME that is not a reserved word
 | `water`, `soil`, `rock`, `bare` | a predicate (`pred`), and a `pred` argument of a call | a need, mem, local... name; never a kind or a tag |
 | `target`, `pred` | a sub parameter's type, after `:` | any name |
 | `dx`, `dy` | a binding's offset, after `.` | any name |
-| `conserved`, `fixed`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
+| `conserved`, `fixed`, `private`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
 | `ground`, `feature`, `layer` | start a material or a layer at the top of a file | any name |
 | `reach`, `climb`, `layer` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
@@ -87,7 +87,7 @@ layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
           | "feature" IDENT "{" { "blocks" | "glyph" STRING | "color" STRING } "}"
 const     = "const" IDENT "=" expr [ ";" ]
-field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "{" { field_part } "}" ]
+field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "private" ] [ "{" { field_part } "}" ]
 field_part = "init" ( "noise" "scale" additive | additive ) | "color" STRING
            | "outside" additive | "every" additive block      (the block: a law, §6)
 item      = kind | trait
@@ -115,7 +115,12 @@ param     = IDENT [ ":" ( "target" | "pred" ) ]
 - *A field's numbers are constant expressions: `max` 1 to 65535, `init` 0 to the max, a
   noise `scale` above 0. Its block gives `init` and `color` once each. A field's name is
   never a kind's, a trait's, a sub's (a member sub's too), a tag's or a const's; a need may
-  share it. At most 64 fields per rule set.*
+  share it. At most 64 fields per rule set. `private` only in a player's pack, where every
+  field is (`RULES.md` §15).*
+- *A player's file (`NAME=PATH`) is lexed as written, then every NAME token that is one of
+  the player's top-level names (kinds, traits, file subs, consts, fields) reads
+  `PLAYER.NAME`: its names are its own namespace. Its items are `kind`, `trait`, `sub`,
+  `const` and `field` only.*
 
 ## 3. Declarations
 

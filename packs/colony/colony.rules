@@ -1,0 +1,22 @@
+# colony: an arena and its players (docs/RULES.md §15, Arenas and players).
+# This pack is the arena: the world's crumbs and how they grow back, and a
+# trait every player's ants may take. The players, packs/colony/red and
+# packs/colony/blue, declare kinds and `private` fields only; both name
+# theirs `ant` and `trail`, and neither can read the other's trail.
+# scenarios/tests/colony.scenario plays them.
+
+field room max 9 fixed { init noise scale 8 }       # what a cell holds, grown back
+
+field crumbs max 9 conserved {
+  init 9                          # cut to `room` within the first two hours
+  color "#c8a050"
+  every 2h { crumbs = min(crumbs + 1, room) }
+}
+
+# What every colony's ants share: a tag the others can find them by, and a
+# day's food that crumbs refill.
+trait forager {
+  tags insect
+  need food max 1d vital
+  need crumbs max 20 decay 0      # what it carries: the ground's crumbs
+}

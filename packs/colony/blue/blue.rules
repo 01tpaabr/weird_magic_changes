@@ -1,0 +1,28 @@
+# The blue colony, a player of packs/colony: the same names as red's (`ant`,
+# `trail`, `LOAD`), its own. Blue ants mark where they found crumbs and
+# wander back to them; they never smell red's trail, nor red theirs.
+
+const LOAD = 4
+
+field trail max 255 private {
+  color "#4060d0"
+  every 32 { trail = trail - (trail + 15) / 16 }
+}
+
+kind ant extends forager {
+  glyph "b"
+  color "#5878f0"
+  cadence 2
+  sight 6
+  mem nest_x, nest_y, born
+
+  when born == 0 => { born = 1  nest_x = x  nest_y = y  crumbs = 0  idle }
+  when food < 12h and crumbs > 0 => { food = min(food + 6h, 1d)  crumbs -= 1  idle }
+  when crumbs >= LOAD and dist(at(nest_x, nest_y)) <= 2 and crumbs(here) < 9 => drop crumbs 2
+  when crumbs >= LOAD and dist(at(nest_x, nest_y)) <= 2 => move random free
+  when crumbs >= LOAD => move toward at(nest_x, nest_y)
+  when dist(at(nest_x, nest_y)) > 2 and crumbs(here) > 0 => { add trail 120  harvest crumbs 2 }
+  when best crumbs on free within 6 as c => move toward c
+  when best trail on free within 6 as t => move toward t
+  when true => move random free
+}
