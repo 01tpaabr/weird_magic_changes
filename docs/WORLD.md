@@ -178,7 +178,8 @@ from the map. A scenario's `terrain` knobs become noise thresholds onto declared
 
 Built 2026-11-02 (decision 60): `along`, `sees`, `reach`, `climb` and `relief`, as in the
 table below; height is any field a pack declares. Then `flow` (decision 63, below, and
-`packs/lakes`). Left: `dig` moving earth in a height field, and `opaque` materials.
+`packs/lakes`), and `opaque` features that stop `sees` (decision 64). Left: `dig` moving
+earth in a height field.
 
 Height is a field (`field height max 4000 { init noise scale 60 relief }`): mountains,
 valleys and cliffs are shapes in it, `dig`/`build` move earth, and materials can follow from

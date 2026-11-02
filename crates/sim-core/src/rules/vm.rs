@@ -1109,7 +1109,8 @@ impl Machine<'_> {
         Ok(acc)
     }
 
-    /// [`OpCode::Sees`].
+    /// [`OpCode::Sees`]: no cell between rises above the line from the eye,
+    /// and none holds an opaque feature.
     fn sees(&mut self, f: u8, dx: i32, dy: i32, eye: i32) -> Result<bool, Trap> {
         let n = dx.unsigned_abs().max(dy.unsigned_abs());
         if n == 0 {
@@ -1129,8 +1130,10 @@ impl Machine<'_> {
         let n64 = i64::from(n);
         for k in 1..n {
             let (cx, cy) = Self::line_cell(dx, dy, k, n64);
-            if self.ctx.halo.at(lx, ly, cx, cy).is_none() {
-                return Ok(false);
+            // Unloaded, or a wall, a tree: an opaque feature in the way.
+            match self.ctx.halo.at(lx, ly, cx, cy) {
+                Some((cells, _, i)) if !self.ctx.halo.materials.opaque(cells.feature[i]) => {}
+                _ => return Ok(false),
             }
             // The cell's top against the sight line there, both times n.
             if h(cx, cy) * n64 > h0 * (n64 - i64::from(k)) + h1 * i64::from(k) {

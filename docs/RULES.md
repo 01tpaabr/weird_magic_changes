@@ -426,7 +426,8 @@ three: a redeclaration gives the material its properties as written.
 ```rules
 ground mud { walkable  glyph ","  color "#6b4f2a" }
 ground water { walkable  drink }           # shallow: walked through, and drunk
-feature wall { blocks  glyph "="  color "#9a9a9a" }
+feature wall { blocks  opaque  glyph "="  color "#9a9a9a" }
+feature hedge { blocks }                   # in the way, but seen over
 
 kind wader {
   glyph "w"
@@ -441,6 +442,7 @@ kind wader {
 | `walkable` (a ground) | not | an actor can stand on it |
 | `drink` (a ground) | not | `drink t` at an adjacent cell of it refills the need named `water` |
 | `blocks` (a feature) | not | nobody enters a cell holding it |
+| `opaque` (a feature) | not | `sees(t)` is false past a cell holding it (the target's own cell may hold one: a wall is seen) |
 | `glyph "c"` | `.` a ground, `#` a feature | drawn on a bare cell of it |
 | `color "#rrggbb"` | the palette's (the three) | a ground's background, a feature's glyph |
 

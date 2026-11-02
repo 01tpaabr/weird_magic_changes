@@ -102,7 +102,7 @@ pub fn player_of(pack: &str) -> (Option<&str>, &str) {
 
 /// Words a player's item can't take: renamed into the player's namespace,
 /// they would stop meaning what the language reads them as.
-const NOT_PLAYER_NAMES: [&str; 39] = [
+const NOT_PLAYER_NAMES: [&str; 40] = [
     "food",
     "health",
     "water",
@@ -129,6 +129,7 @@ const NOT_PLAYER_NAMES: [&str; 39] = [
     "walkable",
     "drink",
     "blocks",
+    "opaque",
     "reach",
     "climb",
     "along",
@@ -707,7 +708,7 @@ struct Items {
 }
 
 /// `ground NAME { walkable  drink  glyph "c"  color "#rrggbb" }` or
-/// `feature NAME { blocks  glyph "c"  color "#rrggbb" }` (`docs/WORLD.md`
+/// `feature NAME { blocks  opaque  glyph "c"  color "#rrggbb" }` (`docs/WORLD.md`
 /// §5): a new material, or the engine's soil, water or rock redeclared.
 #[derive(Debug, Clone)]
 struct MaterialAst {
@@ -717,6 +718,8 @@ struct MaterialAst {
     /// A ground: `walkable`. A feature: `blocks`.
     solid: bool,
     drink: bool,
+    /// A feature: `opaque`, it stops a line of sight.
+    opaque: bool,
     glyph: Option<u8>,
     color: Option<u32>,
 }
@@ -1426,6 +1429,7 @@ impl Parser<'_> {
             name,
             solid: false,
             drink: false,
+            opaque: false,
             glyph: None,
             color: None,
         };
@@ -1437,6 +1441,8 @@ impl Parser<'_> {
                 m.solid = true;
             } else if ground && self.eat_kw("drink") {
                 m.drink = true;
+            } else if !ground && self.eat_kw("opaque") {
+                m.opaque = true;
             } else if self.eat_kw("glyph") {
                 m.glyph = Some(match self.bump() {
                     Tok::Str(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_graphic() => {
@@ -1460,7 +1466,7 @@ impl Parser<'_> {
                 let more = if ground {
                     "`walkable`, `drink`"
                 } else {
-                    "`blocks`"
+                    "`blocks`, `opaque`"
                 };
                 return Err(self.err(format!(
                     "expected {more}, `glyph`, `color` or `}}` in a {}, found {}",
@@ -3287,6 +3293,7 @@ impl<'a> Gen<'a> {
                 color: a.color,
                 solid: a.solid,
                 drink: a.drink,
+                opaque: a.opaque,
             };
             let (list, most) = if a.ground {
                 (&mut m.grounds, MAX_GROUNDS)

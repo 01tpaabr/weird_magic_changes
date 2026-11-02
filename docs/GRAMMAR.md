@@ -74,7 +74,7 @@ IDENT = NAME that is not a reserved word
 | `reach`, `climb`, `layer` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
 | `relief` | in a `field` block | any name |
-| `walkable`, `blocks` | in a material's block | any name |
+| `walkable`, `blocks`, `opaque` | in a material's block | any name |
 | `flies` | in a layer's block | any name |
 | `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
@@ -85,7 +85,7 @@ IDENT = NAME that is not a reserved word
 file      = { item | sub | const | field | material | layer } EOF
 layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
-          | "feature" IDENT "{" { "blocks" | "glyph" STRING | "color" STRING } "}"
+          | "feature" IDENT "{" { "blocks" | "opaque" | "glyph" STRING | "color" STRING } "}"
 const     = "const" IDENT "=" expr [ ";" ]
 field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "private" ] [ "{" { field_part } "}" ]
 field_part = "init" ( "noise" "scale" additive | additive ) | "color" STRING

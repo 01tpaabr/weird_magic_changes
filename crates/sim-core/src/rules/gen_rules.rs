@@ -585,8 +585,9 @@ impl<'a> G<'a> {
             } else {
                 ""
             };
+            let opaque = if self.maybe(50) { " opaque" } else { "" };
             out += &format!(
-                "ground gmud {{ walkable glyph \",\" }}{sep}feature gwall {{ blocks color \"#999999\" }}{sep}{water}\n"
+                "ground gmud {{ walkable glyph \",\" }}{sep}feature gwall {{ blocks{opaque} color \"#999999\" }}{sep}{water}\n"
             );
         }
         for &(name, policy) in &FIELDS[..self.fields] {
@@ -1740,7 +1741,7 @@ impl<'a> G<'a> {
                     let word = if w == "ground" {
                         "walkable drink"
                     } else {
-                        "blocks"
+                        self.one(&["blocks", "blocks opaque", "opaque"])
                     };
                     out += &format!("{w} {} {{ {word} glyph \"x\" }}", self.pool(&[]));
                 }

@@ -130,6 +130,9 @@ pub struct MaterialTable {
     /// This feature stops an actor from entering (index: `Feature`, 0
     /// none); past the rules' features, true.
     pub blocks: [bool; 256],
+    /// This feature stops a line of sight (`sees`); none of the built-in
+    /// three does.
+    pub opaque: [bool; 256],
 }
 
 impl MaterialTable {
@@ -140,6 +143,7 @@ impl MaterialTable {
             walk: [false; 256],
             drink: [false; 256],
             blocks: [true; 256],
+            opaque: [false; 256],
         };
         t.walk[0] = true;
         t.drink[1] = true;
@@ -162,6 +166,11 @@ impl MaterialTable {
     #[inline]
     pub fn blocks(&self, f: Feature) -> bool {
         self.blocks[usize::from(f.0)]
+    }
+
+    #[inline]
+    pub fn opaque(&self, f: Feature) -> bool {
+        self.opaque[usize::from(f.0)]
     }
 }
 

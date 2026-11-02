@@ -2482,7 +2482,11 @@ fn materials_are_declared_redeclared_and_named() {
         ),
         (
             "feature wall { drink }",
-            "expected `blocks`, `glyph`, `color` or `}` in a feature",
+            "expected `blocks`, `opaque`, `glyph`, `color` or `}` in a feature",
+        ),
+        (
+            "ground mud { opaque }",
+            "expected `walkable`, `drink`, `glyph`, `color` or `}` in a ground",
         ),
         ("ground mud { glyph \"ab\" }", "one printable character"),
         (

@@ -2901,6 +2901,65 @@ mod tests {
         assert!(by(0xF4).2.x > 40, "the gentle step does not");
     }
 
+    /// An `opaque` feature on the line stops `sees`; one that only blocks
+    /// the way does not, and nor does the target's own cell.
+    #[test]
+    fn an_opaque_feature_stops_a_line_of_sight() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field height max 100
+             feature wall { blocks opaque }
+             feature hedge { blocks }
+             kind looker { glyph \"l\"  cadence 1  sight 8
+               mem done, s1, s2, s3, s4
+               when done == 0 => {
+                 done = 1
+                 s1 = sees(at(x + 4, y)) over height
+                 s2 = sees(at(x, y + 4)) over height
+                 s3 = sees(at(x - 2, y)) over height
+                 s4 = sees(at(x, y - 4)) over height
+                 idle
+               }
+               when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(22)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let wall = kinds.materials.feature("wall").unwrap();
+        let hedge = kinds.materials.feature("hedge").unwrap();
+        for (p, f) in [
+            (Pos::new(22, 20), wall),  // between it and (24, 20)
+            (Pos::new(20, 22), hedge), // between it and (20, 24)
+            (Pos::new(18, 20), wall),  // the target itself
+        ] {
+            let (cc, i) = p.split();
+            stage::chunk_mut(&mut w, cc).unwrap().feature[i] = f;
+        }
+        let now = tick(&w);
+        assert!(place_actor(
+            &mut w,
+            Pos::new(20, 20),
+            0,
+            newborn(&kinds, 0, 0xA1, now)
+        ));
+        for _ in 0..2 {
+            step(&mut w);
+        }
+        let all = rows(&mut w);
+        assert_eq!(
+            &all[0].3.mem[..5],
+            &[1, 0, 1, 1, 1],
+            "behind a wall, past a hedge, the wall itself, open ground"
+        );
+    }
+
     /// Fields are saved by name and come back as they were; rules that drop
     /// one, lower another's max and add a third remap every chunk, loaded
     /// and saved: kept values clamped, the new field at its `init`.

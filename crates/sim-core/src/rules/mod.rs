@@ -94,6 +94,8 @@ pub struct MaterialDef {
     pub solid: bool,
     /// A ground: `drink` refills `water` from it.
     pub drink: bool,
+    /// A feature: `opaque`, it stops a line of sight.
+    pub opaque: bool,
 }
 
 /// Every ground and feature of a rule set, the engine's three first (soil
@@ -114,6 +116,7 @@ impl Default for Materials {
             color: None,
             solid,
             drink,
+            opaque: false,
         };
         Self {
             grounds: vec![m("soil", b'.', true, false), m("water", b'~', false, true)],
@@ -130,13 +133,14 @@ impl Materials {
             walk: [false; 256],
             drink: [false; 256],
             blocks: [true; 256],
+            opaque: [false; 256],
         };
         t.blocks[0] = false;
         for (i, g) in grounds.iter().enumerate().take(MAX_GROUNDS) {
             (t.walk[i], t.drink[i]) = (g.solid, g.drink);
         }
         for (i, f) in features.iter().enumerate().take(MAX_FEATURES) {
-            t.blocks[i + 1] = f.solid;
+            (t.blocks[i + 1], t.opaque[i + 1]) = (f.solid, f.opaque);
         }
         t
     }
@@ -569,6 +573,7 @@ impl Kinds {
                     m.color.map_or(u64::MAX, u64::from),
                     u64::from(m.solid),
                     u64::from(m.drink),
+                    u64::from(m.opaque),
                 ] {
                     h = splitmix64(h ^ v);
                 }
