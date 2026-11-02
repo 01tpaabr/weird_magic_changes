@@ -162,6 +162,16 @@ pub enum OpCode {
     /// neighbour (`random free`): ring 1 as `Nearest` scans it, start
     /// rotated by one draw, whatever the kind's `sight`
     RandomFree,
+    /// `dx dy -> v` of field `a` at that cell (0 where not loaded)
+    FieldAt,
+    /// `f pred r -> found`; on success `locals[a], locals[a+1] = dx, dy` of
+    /// the cell with the most of field `f` in rings `1..=r` among those
+    /// matching `pred` ([`pred::ANY`]: every cell), as `Sniff` scans; not
+    /// found if every such cell holds 0
+    Best,
+    /// `v ->`: add `v` to field `a` on the actor's cell (an effect, applied
+    /// in Apply; several to one field add up)
+    FieldAdd,
 }
 
 impl OpCode {
@@ -174,14 +184,15 @@ impl OpCode {
             O::Push | O::PushK | O::Load | O::Need | O::Mem | O::Sense | O::ForEach => (0, 1),
             O::RandomFree => (0, 1),
             O::Pop | O::Store | O::SetNeed | O::SetMem | O::Jz => (1, 0),
-            O::SetLook | O::SetSignal | O::Mark => (1, 0),
+            O::SetLook | O::SetSignal | O::Mark | O::FieldAdd => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
             O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
             O::Min | O::Max | O::Pack => (2, 1),
             O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
             O::Count | O::Nearest | O::Sniff | O::Dist | O::FreeAt => (2, 1),
-            O::LookAt | O::SignalAt | O::ScentAt => (2, 1),
+            O::LookAt | O::SignalAt | O::ScentAt | O::FieldAt => (2, 1),
+            O::Best => (3, 1),
             O::DirOf => (1, 2),
             O::SpawnWith => (2, 0),
             O::Jmp | O::Next | O::EndRule | O::Halt => (0, 0),
@@ -191,6 +202,7 @@ impl OpCode {
                 Some(Action::Become) => (1, 0),
                 Some(Action::Spawn) => (3, 0),
                 Some(Action::Take | Action::Give) => (4, 0),
+                Some(Action::Harvest | Action::Drop) => (3, 0),
                 Some(Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze) => {
                     (2, 0)
                 }
@@ -286,6 +298,12 @@ pub enum Action {
     /// `dx dy need amount`: move up to `amount` of own need `need` into the
     /// adjacent actor's need of the same name
     Give,
+    /// `field need amount`: move up to `amount` of field `field` on the
+    /// actor's cell into own need `need`
+    Harvest,
+    /// `field need amount`: move up to `amount` of own need `need` into
+    /// field `field` on the actor's cell
+    Drop,
 }
 
 impl Action {
@@ -302,6 +320,8 @@ impl Action {
             8 => Some(Self::Graze),
             9 => Some(Self::Take),
             10 => Some(Self::Give),
+            11 => Some(Self::Harvest),
+            12 => Some(Self::Drop),
             _ => None,
         }
     }
@@ -341,10 +361,17 @@ pub enum Trap {
     BadSub,
     CallDepth,
     SecondAction,
+    /// `add` to more than [`ADDS`] fields in one think.
+    Adds,
 }
 
+/// Distinct fields one think may `add` to; one more traps.
+pub const ADDS: usize = 4;
+/// An unused `add` slot.
+pub const NO_FIELD: u8 = u8::MAX;
+
 /// What a think decided.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Outcome {
     pub action: Action,
     /// Operand kind for `Become` / `Spawn`.
@@ -353,10 +380,15 @@ pub struct Outcome {
     /// `Eat`, `Hit`, `Graze`, `Take`, `Give`).
     pub dx: i8,
     pub dy: i8,
-    /// Own need slot of `Take` / `Give`.
+    /// Own need slot of `Take` / `Give` / `Harvest` / `Drop`.
     pub need: u8,
-    /// Amount of `Take` / `Give`.
+    /// Amount of `Take` / `Give` / `Harvest` / `Drop`.
     pub amount: i32,
+    /// Field of `Harvest` / `Drop`.
+    pub field: u8,
+    /// `add f v` effects: up to [`ADDS`] fields, each with what the think
+    /// added to it (`NO_FIELD`: unused).
+    pub adds: [(u8, i32); ADDS],
     /// First two `mem` values of a `Spawn`'s child (`with (a, b)`).
     pub with: [i32; 2],
     /// `mark ch v` effects: what to add to each scent channel (several
@@ -370,6 +402,28 @@ pub struct Outcome {
     pub trap: Option<Trap>,
     /// Ops executed, for `wmc why` and the fuel counters.
     pub used: u32,
+}
+
+impl Default for Outcome {
+    fn default() -> Self {
+        Self {
+            action: Action::Idle,
+            kind: 0,
+            dx: 0,
+            dy: 0,
+            need: 0,
+            amount: 0,
+            field: 0,
+            adds: [(NO_FIELD, 0); ADDS],
+            with: [0; 2],
+            mark: [0; SCENT_CHANNELS],
+            next: None,
+            look: None,
+            signal: None,
+            trap: None,
+            used: 0,
+        }
+    }
 }
 
 /// One executed op of a traced think (`wmc why`).
@@ -401,6 +455,8 @@ pub mod pred {
     /// Added to a kind or `kind:look` value: that kind exactly (`only
     /// chicken`), not its family.
     pub const ONLY: i32 = 0x0200_0000;
+    /// Every cell (`best` without `on`).
+    pub const ANY: i32 = i32::MIN;
 
     /// `kind:look`: that kind, showing that look byte.
     pub const fn kind_look(kind: u16, look: u8) -> i32 {
@@ -615,6 +671,14 @@ impl<'a> Halo<'a> {
     pub fn scent(&self, lx: i32, ly: i32, dx: i32, dy: i32, ch: usize) -> u8 {
         self.at(lx, ly, dx, dy)
             .and_then(|(cells, _, i)| cells.scent.get(ch).map(|s| s[i]))
+            .unwrap_or(0)
+    }
+
+    /// Field `f` at the cell; 0 where not loaded.
+    #[inline]
+    pub fn field(&self, lx: i32, ly: i32, dx: i32, dy: i32, f: usize) -> i32 {
+        self.at(lx, ly, dx, dy)
+            .and_then(|(cells, _, i)| cells.fields.get(f).map(|l| i32::from(l[i])))
             .unwrap_or(0)
     }
 
@@ -838,6 +902,30 @@ impl Machine<'_> {
         Ok((best.0 > 0).then_some((best.1, best.2)))
     }
 
+    /// The cell with the most of field `f` in rings `1..=r` among those
+    /// matching `pred`: scanned as [`Self::sniff`] scans.
+    fn best(&mut self, f: i32, pred: i32, r: i32) -> Result<Option<(i32, i32)>, Trap> {
+        let r = r.clamp(0, i32::from(self.ctx.kind.sight));
+        let side = (2 * r + 1) as u32;
+        self.spend(side * side / SEARCH_DIV)?;
+        let f = usize::try_from(f).map_err(|_| Trap::BadSense)?;
+        let want = (pred != pred::ANY).then(|| self.ctx.halo.want(pred));
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let mut best = (0, 0, 0);
+        for ring in 1..=r {
+            let n = 8 * ring;
+            let start = self.draw_below(n);
+            for k in 0..n {
+                let (dx, dy) = ring_cell(ring, (start + k) % n);
+                let v = self.ctx.halo.field(lx, ly, dx, dy, f);
+                if v > best.0 && want.is_none_or(|w| self.ctx.halo.test(lx, ly, dx, dy, w)) {
+                    best = (v, dx, dy);
+                }
+            }
+        }
+        Ok((best.0 > 0).then_some((best.1, best.2)))
+    }
+
     /// One `for each` step (see [`OpCode::ForEach`]): locals `a..a+5`.
     fn for_each(&mut self, a: u8) -> Result<bool, Trap> {
         if usize::from(a) + usize::from(FOR_EACH_LOCALS) > FRAME_LOCALS {
@@ -914,6 +1002,18 @@ impl Machine<'_> {
                 self.out.amount = amount.max(0);
                 self.out.dx = clamp_i8(dx);
                 self.out.dy = clamp_i8(dy);
+            }
+            Action::Harvest | Action::Drop => {
+                let amount = self.pop()?;
+                let need = self.pop()?;
+                let field = self.pop()?;
+                let need = u8::try_from(need).map_err(|_| Trap::BadNeed)?;
+                if usize::from(need) >= self.ctx.kind.needs.len() {
+                    return Err(Trap::BadNeed);
+                }
+                self.out.field = u8::try_from(field).map_err(|_| Trap::BadSense)?;
+                self.out.need = need;
+                self.out.amount = amount.max(0);
             }
             Action::Move | Action::Drink | Action::Eat | Action::Hit | Action::Graze => {
                 let dy = self.pop()?;
@@ -1258,6 +1358,42 @@ impl Machine<'_> {
                         let v = self.ctx.halo.scent(lx, ly, dx, dy, usize::from(op.a));
                         self.push(i32::from(v))?;
                     }
+                    O::FieldAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        let v = self.ctx.halo.field(lx, ly, dx, dy, usize::from(op.a));
+                        self.push(v)?;
+                    }
+                    O::Best => {
+                        let r = self.pop()?;
+                        let pred = self.pop()?;
+                        let f = self.pop()?;
+                        let i = self.local(op.a)?;
+                        if usize::from(op.a) + 1 >= FRAME_LOCALS {
+                            return Err(Trap::BadLocal);
+                        }
+                        match self.best(f, pred, r)? {
+                            Some((dx, dy)) => {
+                                self.locals[i] = dx;
+                                self.locals[i + 1] = dy;
+                                self.push(1)?;
+                            }
+                            None => self.push(0)?,
+                        }
+                    }
+                    O::FieldAdd => {
+                        let v = self.pop()?;
+                        let adds = &mut self.out.adds;
+                        let slot = match adds.iter().position(|&(f, _)| f == op.a) {
+                            Some(j) => j,
+                            None => adds
+                                .iter()
+                                .position(|&(f, _)| f == NO_FIELD)
+                                .ok_or(Trap::Adds)?,
+                        };
+                        adds[slot] = (op.a, adds[slot].1.saturating_add(v));
+                    }
                 }
                 false
             };
@@ -1403,6 +1539,7 @@ fn think_with<const TRACE: bool>(
         m.out.look = None;
         m.out.signal = None;
         m.out.mark = [0; SCENT_CHANNELS];
+        m.out.adds = [(NO_FIELD, 0); ADDS];
     }
     m.out
 }
@@ -1502,6 +1639,29 @@ mod tests {
     }
 
     /// One think of kind 0 at (11, 10) on [`stage`].
+    /// `add`s to one field add up; a think adds to four fields at most,
+    /// and a fifth traps, dropping every add.
+    #[test]
+    fn adds_add_up_in_four_fields_and_a_fifth_traps() {
+        let fields = "field a max 9 field b max 9 field c max 9 field d max 9 field e max 9";
+        let four = crate::rules::compile(
+            "t.rules",
+            &format!("{fields} kind k {{ when true => {{ add a 1  add b 2  add c 3  add d 4  add a 5  idle }} }}"),
+        )
+        .unwrap();
+        let out = run_kinds(&four, &mut ActorMind::zeroed());
+        assert_eq!(out.trap, None);
+        assert_eq!(out.adds, [(0, 6), (1, 2), (2, 3), (3, 4)]);
+        let five = crate::rules::compile(
+            "t.rules",
+            &format!("{fields} kind k {{ when true => {{ add a 1  add b 1  add c 1  add d 1  add e 1  idle }} }}"),
+        )
+        .unwrap();
+        let out = run_kinds(&five, &mut ActorMind::zeroed());
+        assert_eq!(out.trap, Some(Trap::Adds));
+        assert_eq!(out.adds, [(NO_FIELD, 0); ADDS]);
+    }
+
     fn run_kinds(kinds: &Kinds, mind: &mut ActorMind) -> Outcome {
         run_at(kinds, mind, 1000)
     }

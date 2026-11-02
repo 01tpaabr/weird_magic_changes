@@ -37,6 +37,41 @@ pub struct NeedDef {
     pub vital: bool,
 }
 
+/// Who may write a field (`docs/WORLD.md` §4): any write (`add`,
+/// `harvest`, `drop`), only conserved transfers, or none from actors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Policy {
+    #[default]
+    Free,
+    /// No `add`: nothing is made or destroyed but by moving it.
+    Conserved,
+    /// No writes from actors at all.
+    Fixed,
+}
+
+/// Where a field's cells start when a chunk is made: a pure function of
+/// the seed and the cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldInit {
+    /// Every cell at this value.
+    Value(u16),
+    /// Value noise of this scale (in cells), mapped onto `0..=max`.
+    Noise(u32),
+}
+
+/// One field: a number in every cell (`field NAME max M`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FieldDef {
+    pub name: String,
+    /// Values run `0..=max`.
+    pub max: u16,
+    pub policy: Policy,
+    pub init: FieldInit,
+    /// `0xRRGGBB` the renderer tints a cell toward, by value; `None`: not
+    /// drawn.
+    pub color: Option<u32>,
+}
+
 /// One kind's properties and where its program starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KindDef {
@@ -293,6 +328,9 @@ pub struct Kinds {
     pub subs: Vec<u32>,
     /// Scent channel names, in channel order (`mark`, `sniff`).
     pub scents: Vec<String>,
+    /// The fields, in declaration order: `ChunkCells::fields[i]` is
+    /// `fields[i]`'s layer.
+    pub fields: Vec<FieldDef>,
     /// Source positions and names, for `wmc why`.
     pub debug: DebugInfo,
     /// Hash of everything above: the rules as an input to the checksum.
@@ -354,6 +392,7 @@ impl Kinds {
             consts,
             subs,
             scents: Vec::new(),
+            fields: Vec::new(),
             debug: DebugInfo::default(),
             hash,
             remaps,
@@ -378,6 +417,38 @@ impl Kinds {
         }
         self.scents = scents;
         self
+    }
+
+    /// The same rules with these fields (folded into the hash; none leaves
+    /// it as it was).
+    pub fn with_fields(mut self, fields: Vec<FieldDef>) -> Self {
+        for f in &fields {
+            let mut h = self.hash ^ 0xF1E1D;
+            for b in f.name.bytes() {
+                h = splitmix64(h ^ u64::from(b));
+            }
+            let (init, scale) = match f.init {
+                FieldInit::Value(v) => (0, u64::from(v)),
+                FieldInit::Noise(s) => (1, u64::from(s)),
+            };
+            for v in [
+                u64::from(f.max),
+                f.policy as u64,
+                init,
+                scale,
+                f.color.map_or(u64::MAX, u64::from),
+            ] {
+                h = splitmix64(h ^ v);
+            }
+            self.hash = splitmix64(h);
+        }
+        self.fields = fields;
+        self
+    }
+
+    /// The index of field `name`.
+    pub fn field_named(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f.name == name)
     }
 
     /// The kinds this build knows.

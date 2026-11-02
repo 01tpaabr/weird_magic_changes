@@ -278,10 +278,13 @@ first). Those names are not words of the language; the last three read as the sh
 | `graze t` | like `eat`, on the ground cover at t, adjacent or `here` |
 | `take t NEED n` | moves up to `n` of the adjacent standing actor's need named NEED into own NEED, never past own max; never ground cover. The target sees `taken` and wakes, if anything moved. `BLOCKED` if nothing moved (own NEED full, the target's empty, or `n` is 0) |
 | `give t NEED n` | moves up to `n` of own NEED into the adjacent standing actor's NEED, never past its max; never ground cover. `BLOCKED` if nothing moved |
+| `harvest F n` | moves up to `n` of field F on the actor's own cell into its need of the same name, never past the need's max (§12, Fields). `BLOCKED` if nothing moved; a `fixed` field can't be harvested |
+| `drop F n` | moves up to `n` of the need named F into field F on the actor's own cell, never past the field's max. `BLOCKED` if nothing moved |
 
 Bites land before anyone moves, on either side of a chunk border, in key order. Several
 eaters of one victim each get the share they took. Transfers are settled after bites, also
-in key order. A bite, `take` or `give` finds a decaying need as it stands that tick, not as
+in key order; `harvest` and `drop` with the other actions, in key order (a standing actor and
+the cover under it share a cell). A bite, `take` or `give` finds a decaying need as it stands that tick, not as
 it was at its owner's last think.
 
 ## 9. Effects
@@ -293,6 +296,7 @@ Effects combine with the action and don't end the think.
 | `look = v` | a public byte, 0 to 255, that other actors read (`kind:look` predicates, `look_of(t)`) and `wmc why` shows; it is not drawn |
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
 | `mark CH v` | adds `v` (0 to 255, saturating) to scent channel CH on the actor's cell. Several marks in one think add up, per channel, even from rules that fall through. Scent fades by 1/32 every 16 ticks: gone in about 1.5 game hours. At most 4 channels in a rule set, numbered by first use |
+| `add F v` | adds `v` (negative takes away) to field F on the actor's cell, clamped to the field's `0..max`, in key order with the other actors on the cell. Several adds in one think add up; one think adds to at most 4 fields (a fifth traps). Not on a `conserved` or `fixed` field (§12, Fields) |
 
 ## 10. Senses
 
@@ -316,7 +320,14 @@ Effects combine with the action and don't end the think.
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
 
-Searches (`count`, `nearest`, `sniff`, `for each`) are capped by `sight` and see into the
+Fields (§12) are read like this too: `F(t)` is field F at target t (`sugar(here)`), 0 where
+nothing is loaded or beyond reach. A condition finds the richest cell:
+
+| condition | |
+|---|---|
+| `best F [on pred] within r as v` | binds `v` to the cell in rings 1 to r (not its own) with the most of field F, among the cells matching `pred` if `on` names one (`best sugar on free within 6 as s`); false if every such cell holds 0. Scanned as `sniff` scans, so ties go to a random start |
+
+Searches (`count`, `nearest`, `sniff`, `best`, `for each`) are capped by `sight` and see into the
 neighbouring chunks. An unloaded chunk reads as rock with nobody on it, and so does any
 cell out of reach (§11). `nearest` scans
 rings 1 to r (not its own cell), and each ring starts at a random point so a flock doesn't
@@ -386,6 +397,54 @@ constant `NAME` takes the value `V` (a number or a time) for that session, and t
 declared after it fold with the new value. A name the rules don't declare is an error that
 lists the ones they do. That makes constants the knobs of a pack: put a number you may want
 to tune in a `const`, and `wmc lab --set NAME=a,b,c` tries several (§17).
+
+### Fields
+
+A **field** is a number in every cell of the world, declared by a pack beside its kinds:
+sugar on the ground, a trail, a claim, heat. Every cell holds every field the rules declare.
+
+```rules
+field sugar max 4 conserved {
+  init noise scale 12            # patches, 0 to 4, from the world's seed
+  color "#e0c040"                # a gold wash, stronger where there is more
+}
+field trail max 255 { color "#80d0ff" }
+
+kind gatherer {
+  glyph "g"
+  sight 6
+  need sugar max 40 decay 0      # what it carries: the field's own name
+  when sugar(here) > 0 and sugar < 40 => harvest sugar 4
+  when best sugar on free within 6 as s => { add trail 20  move toward s }
+  when true => move random free
+}
+```
+
+| part | default | meaning |
+|---|---|---|
+| `max M` | | values run 0 to M, 1 to 65535 |
+| `conserved` / `fixed` | neither | who may write it: `conserved` takes no `add`, so what it holds only moves (`harvest`, `drop`); `fixed` takes no writes from actors at all. The compiler refuses the rest |
+| `init V`, `init noise scale S` | `init 0` | where its cells start when a chunk is made: V everywhere, or value noise S cells across mapped onto 0 to M (most cells near the middle), from the seed |
+| `color "#rrggbb"` | not drawn | tints each cell toward the colour, by its value against the max |
+
+Actors read a field with `F(t)` and `best` (§10), and change it on their own cell only:
+`add` (§9), `harvest` and `drop` (§8). A field's name is global, like a kind's: never a
+kind's, a trait's, a sub's, a tag's or a constant's, but a need may share it, and that is
+the need `harvest` and `drop` move into and out of. A sub can't `harvest` or `drop`: needs
+belong to kinds. Fields have no laws yet (`docs/WORLD.md` §3): a cell changes only when an
+actor changes it.
+
+```rules error
+field ore max 9 conserved
+kind miner {
+  glyph "m"
+  need ore max 9 decay 0
+  when true => add ore 1   # error: the field is conserved
+}
+```
+
+A save keeps every field by name. Reopened or reloaded (`r`) under rules that add a field,
+its cells start at its `init`; a field the rules drop is gone; a lower max clamps.
 
 ## 13. Cost
 
@@ -853,6 +912,8 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 |---|---|
 | needs, mem slots per kind | 4, 12 |
 | tags, scent channels per rule set | 64, 4 |
+| fields per rule set | 64 |
+| fields one think adds to | 4 (a fifth traps) |
 | states per kind | 64 |
 | sight | 16 |
 | fuel per think | 4096 |

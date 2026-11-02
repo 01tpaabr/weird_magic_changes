@@ -45,8 +45,9 @@ SYMBOL   = "=>" | "==" | "!=" | "<=" | ">=" | "+=" | "-="
 kind trait sub const extends inherit state when
 glyph color cover solid tags cadence sight fuel bite place need max decay vital mem
 if else while repeat for each choose let return
-and or not true false nearest sniff count within as only is free
+and or not true false nearest sniff best count within as only is free
 idle die become spawn with move drink eat hit graze take give next look signal mark
+field add harvest drop
 here attacker toward away random at dir north east south west
 min abs sign clamp rand chance dist look_of signal_of scent pack hi lo
 blocked missed refused
@@ -67,13 +68,17 @@ IDENT = NAME that is not a reserved word
 | `food` | starts a declaration at the top of a kind or trait body | a need, mem, local, kind... name |
 | `water`, `soil`, `rock`, `bare` | a predicate (`pred`), and a `pred` argument of a call | a need, mem, local... name; never a kind or a tag |
 | `target`, `pred` | a sub parameter's type, after `:` | any name |
-| `dx`, `dy` | a field, after `.` | any name |
+| `dx`, `dy` | a binding's offset, after `.` | any name |
+| `conserved`, `fixed`, `init`, `noise`, `scale` | in a `field` declaration | any name |
+| `on` | after `best IDENT` | any name |
 
 ## 2. Files and items
 
 ```
-file      = { item | sub | const } EOF
+file      = { item | sub | const | field } EOF
 const     = "const" IDENT "=" expr [ ";" ]
+field     = "field" IDENT "max" additive [ "conserved" | "fixed" ] [ "{" { field_part } "}" ]
+field_part = "init" ( "noise" "scale" additive | additive ) | "color" STRING
 item      = kind | trait
 kind      = "kind" IDENT [ extends ] body_
 trait     = "trait" IDENT [ "(" [ IDENT { "," IDENT } ] ")" ] [ extends ] body_
@@ -96,6 +101,10 @@ param     = IDENT [ ":" ( "target" | "pred" ) ]
 - `inherit` takes the IDENT that follows it, if any, even on the next line: what follows an
   `inherit` in a valid list is `when`, `inherit`, `state` or `}`, all reserved.
 - There are no trailing commas anywhere.
+- *A field's numbers are constant expressions: `max` 1 to 65535, `init` 0 to the max, a
+  noise `scale` above 0. Its block gives `init` and `color` once each. A field's name is
+  never a kind's, a trait's, a sub's (a member sub's too), a tag's or a const's; a need may
+  share it. At most 64 fields per rule set.*
 
 ## 3. Declarations
 
@@ -142,6 +151,8 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | "look" "=" expr
       | "signal" "=" expr
       | "mark" IDENT expr
+      | "add" IDENT expr
+      | ( "harvest" | "drop" ) IDENT expr
       | "next" IDENT
       | IDENT args
       | IDENT ( "=" | "+=" | "-=" ) expr
@@ -173,11 +184,12 @@ and_cond = not_cond { "and" not_cond }
 not_cond = "not" not_cond
          | "nearest" pred "within" additive "as" IDENT
          | "sniff" IDENT "within" additive "as" IDENT
+         | "best" IDENT [ "on" pred ] "within" additive "as" IDENT
          | "(" cond ")"                (when no binary operator follows the ")")
          | expr
 ```
 
-Conditions are the only place `and`, `or`, `not`, `nearest` and `sniff` appear: after `when`,
+Conditions are the only place `and`, `or`, `not`, `nearest`, `sniff` and `best` appear: after `when`,
 `if` and `while`. An expression is a condition (nonzero is true), but a condition is not an
 expression: `let b = x > 0 and y > 0` is an error.
 
@@ -223,7 +235,9 @@ arg      = target        (if it starts with here, attacker, toward, away, random
   `clamp` 3.*
 - `blocked`, `missed` and `refused` read as `result == BLOCKED` (and so on).
 - `count`'s radius is one `unary`: `count fox within 3 - 1` is the count minus one. The
-  radii of `nearest`, `sniff` and `for each` are an `additive`.
+  radii of `nearest`, `sniff`, `best` and `for each` are an `additive`.
+- *`IDENT args` with a field's name reads that field: one argument, a target (`sugar(here)`,
+  `sugar(s)` for a binding `s`).*
 - A bare IDENT argument is an int, a target or a predicate as the called sub's parameter
   says; `water`, `soil`, `rock` and `bare` passed to a `pred` parameter are the predicates
   unless a local of that name is in scope.
@@ -308,15 +322,18 @@ A program that parses compiles only if it also keeps these. Each points at the s
   see traps at run time.
 - A `when` condition may call only subs that never act or `next`, through every sub they
   call (8 deep). `if` and `while` conditions in a body have no such rule.
-- `take`, `give` and `next` belong to a kind: allowed in its rules and member subs, not in
-  a file sub. `next` names a state of the code's owner; `take` and `give` one of its needs.
+- `take`, `give`, `harvest`, `drop` and `next` belong to a kind: allowed in its rules and
+  member subs, not in a file sub. `next` names a state of the code's owner; `take` and
+  `give` one of its needs; `harvest F` and `drop F` a field F and the owner's need named F.
+- `add`, `harvest` and `drop` name a declared field. `add` refuses a `conserved` or `fixed`
+  field; `harvest` and `drop` a `fixed` one.
 - `spawn` and `become` name a kind, never a trait; `spawn ... with` names mems of that kind,
   and all the spawns of one kind name at most two distinct ones.
-- `nearest ... as` and `sniff ... as` bind only as a top-level conjunct of a `when`, `if` or
+- `nearest ... as`, `sniff ... as` and `best ... as` bind only as a top-level conjunct of a `when`, `if` or
   `while` condition (under `and` or parentheses, not under `or` or `not`), and the binding
   is visible in that rule's or statement's body only.
 
 **Limits** are in `RULES.md` §18: needs 4 and mems 12 per kind after merging, 64 tags and 4
-scents per rule set, 64 states, `sight` 0 to 16, `fuel` 1 to 4096, `cadence` a power of two,
+scents per rule set, 64 fields per rule set and 4 a think adds to, 64 states, `sight` 0 to 16, `fuel` 1 to 4096, `cadence` a power of two,
 `bite` 0 to 255, 16 local slots and a 64-value stack per rule or sub, 8 nested calls,
 32767 ops per rule, state or sub, a chain of `extends` 128 deep.

@@ -28,9 +28,10 @@ use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, flags,
     slot_u16,
 };
-use crate::rules::Kinds;
+use crate::rules::{FieldDef, Kinds};
 use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
+use crate::stage::worldgen::field_layer;
 use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, SCENT_CHANNELS, Stage};
 use crate::store::{SavedKind, Store};
 
@@ -72,6 +73,13 @@ pub struct Plan {
     kinds: Vec<Option<Target>>,
     /// Per new channel: the old channel of that name.
     scents: [Option<usize>; SCENT_CHANNELS],
+    /// Per new field: the old layer of that name (clamped to the new max),
+    /// else none and the field starts at its `init`.
+    fields: Vec<(Option<usize>, FieldDef)>,
+    /// Field layers a chunk written under the old rules holds.
+    old_fields: usize,
+    /// The world's seed: a new field's `init` noise.
+    seed: u64,
 }
 
 /// A save opened with rules that number things differently: the plan every
@@ -84,7 +92,13 @@ impl Plan {
     /// From the rules a world was written with (`old`, as a save keeps
     /// them) to `new`. A kind that moved between standing and ground cover
     /// is an error.
-    pub fn between(old: &[SavedKind], old_scents: &[String], new: &Kinds) -> Result<Plan, String> {
+    pub fn between(
+        old: &[SavedKind],
+        old_scents: &[String],
+        old_fields: &[String],
+        new: &Kinds,
+        seed: u64,
+    ) -> Result<Plan, String> {
         let mut kinds = Vec::with_capacity(old.len());
         for od in old {
             let Some(nd) = new.by_name(&od.name) else {
@@ -132,7 +146,18 @@ impl Plan {
         for (j, name) in new.scents.iter().enumerate() {
             scents[j] = old_scents.iter().position(|o| o == name);
         }
-        Ok(Plan { kinds, scents })
+        let fields = new
+            .fields
+            .iter()
+            .map(|f| (old_fields.iter().position(|o| *o == f.name), f.clone()))
+            .collect();
+        Ok(Plan {
+            kinds,
+            scents,
+            fields,
+            old_fields: old_fields.len(),
+            seed,
+        })
     }
 
     /// How many kinds the old table has: saved rows are checked against it
@@ -141,10 +166,16 @@ impl Plan {
         self.kinds.len()
     }
 
-    /// Remap one chunk's rows and scent. Returns whether anything changed;
-    /// counts dropped rows per old kind.
+    /// How many field layers the old rules had: saved chunks hold that many.
+    pub fn old_fields(&self) -> usize {
+        self.old_fields
+    }
+
+    /// Remap one chunk's rows, scent and fields. Returns whether anything
+    /// changed; counts dropped rows per old kind.
     pub fn apply(
         &self,
+        coord: ChunkCoord,
         cells: &mut ChunkCells,
         pubs: &mut Vec<ActorPub>,
         minds: &mut Vec<ActorMind>,
@@ -197,8 +228,21 @@ impl Plan {
             changed |= *ch != next;
             *ch = next;
         }
-        changed
+        let old = std::mem::take(&mut cells.fields);
+        for (src, def) in &self.fields {
+            let layer = match src.and_then(|i| old.get(i)) {
+                Some(l) => l.map(|v| v.min(def.max)),
+                None => field_layer(self.seed, def, coord),
+            };
+            cells.fields.push(layer);
+        }
+        changed | (cells.fields != old)
     }
+}
+
+/// The rules' field names, in layer order: what a save keeps of them.
+pub fn field_names(kinds: &Kinds) -> Vec<String> {
+    kinds.fields.iter().map(|f| f.name.clone()).collect()
 }
 
 /// Rewrite every chunk file in `store` through `plan`, in coordinate order.
@@ -240,7 +284,13 @@ pub fn rewrite_saved(
         } else {
             &mut *dropped
         };
-        plan.apply(&mut d.cells, &mut d.actors.rows, &mut d.minds.rows, counts);
+        plan.apply(
+            c,
+            &mut d.cells,
+            &mut d.actors.rows,
+            &mut d.minds.rows,
+            counts,
+        );
         store
             .write_chunk(c, &d.cells, &d.actors, &d.minds, saved.last_ticked)
             .map_err(|e| format!("rewriting saved chunk {c:?}: {e}"))?;
@@ -268,7 +318,14 @@ pub fn reload_rules(
         crate::sim::settle(world, store).map_err(|e| format!("migrating the save: {e}"))?;
     }
     let old = world.resource::<Kinds>().clone();
-    let plan = Plan::between(&SavedKind::table(&old), &old.scents, &new)?;
+    let seed = world.resource::<SimConfig>().seed;
+    let plan = Plan::between(
+        &SavedKind::table(&old),
+        &old.scents,
+        &field_names(&old),
+        &new,
+        seed,
+    )?;
     let (starts, placement) = {
         let c = world.resource::<SimConfig>();
         let starts = present(&c.starts, &new);
@@ -281,8 +338,9 @@ pub fn reload_rules(
         Some(store) => rewrite_saved(store, &plan, &loaded, &mut dropped)?,
         None => 0,
     };
-    for (mut cells, mut pubs, mut minds, mut meta) in world
+    for (&coord, mut cells, mut pubs, mut minds, mut meta) in world
         .query::<(
+            &ChunkCoord,
             &mut ChunkCells,
             &mut ChunkActors,
             &mut ChunkMinds,
@@ -290,7 +348,13 @@ pub fn reload_rules(
         )>()
         .iter_mut(world)
     {
-        if plan.apply(&mut cells, &mut pubs.rows, &mut minds.rows, &mut dropped) {
+        if plan.apply(
+            coord,
+            &mut cells,
+            &mut pubs.rows,
+            &mut minds.rows,
+            &mut dropped,
+        ) {
             meta.dirty = true;
         }
     }

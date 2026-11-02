@@ -46,19 +46,34 @@ const ONE: LoadPolicy = LoadPolicy { load: 0, unload: 0 };
 const COORD: ChunkCoord = ChunkCoord::new(0, 0);
 
 /// Where a chunk file's rows start: header, coord, `last_ticked`, the
-/// cell layers, the row count.
-const ROWS_AT: usize = 28 + CHUNK_CELLS * (10 + SCENT_CHANNELS) + 4;
+/// cell layers, the field count and [`FIELDS`]' two layers, the row count.
+const ROWS_AT: usize = 28 + CHUNK_CELLS * (10 + SCENT_CHANNELS) + 4 + 2 * 2 * CHUNK_CELLS + 4;
+
+/// Two fields beside the built-in kinds, so a save holds field layers; in
+/// the other order for [`REVERSED`], so opening remaps them too.
+const FIELDS: [&str; 2] = [
+    "field fz max 9 { init noise scale 3 }",
+    "field fy max 300 conserved { init 7 }",
+];
 /// Where a world file's starts start: header, seed, tick, ticks/day,
 /// size, terrain, the start count.
 const STARTS_AT: usize = 12 + 3 * 8 + 2 * 4 + 4 * 4 + 4;
 
-static BUILTIN: LazyLock<Kinds> = LazyLock::new(Kinds::builtin);
+static BUILTIN: LazyLock<Kinds> = LazyLock::new(|| {
+    let fields = FIELDS.join("\n");
+    let mut files = crate::rules::builtin::FILES.to_vec();
+    files.push(("fields.rules", &fields));
+    crate::rules::compile_files(&files).expect("the built-in rules and two fields compile")
+});
 
-/// The built-in rules with their files in reverse order: the same kinds,
-/// numbered otherwise, so a save opens through a remap.
+/// The built-in rules with their files in reverse order, and the fields
+/// too: the same kinds and fields, numbered otherwise, so a save opens
+/// through a remap.
 static REVERSED: LazyLock<Kinds> = LazyLock::new(|| {
-    let mut files = crate::rules::builtin::FILES;
+    let fields = FIELDS.iter().rev().copied().collect::<Vec<_>>().join("\n");
+    let mut files = crate::rules::builtin::FILES.to_vec();
     files.reverse();
+    files.push(("fields.rules", &fields));
     crate::rules::compile_files(&files).expect("the built-in rules compile in any order")
 });
 
@@ -728,6 +743,22 @@ fn a_bad_world_header_never_panics() {
             "too many scent channels",
             WorldMeta {
                 scents: vec!["x".into(); SCENT_CHANNELS + 1],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "fields renamed, reordered and gone",
+            WorldMeta {
+                fields: vec!["fy".into(), "other".into()],
+                ..meta.clone()
+            },
+            false,
+        ),
+        (
+            "too many fields",
+            WorldMeta {
+                fields: vec!["f".into(); crate::rules::compile::MAX_FIELDS + 1],
                 ..meta.clone()
             },
             true,

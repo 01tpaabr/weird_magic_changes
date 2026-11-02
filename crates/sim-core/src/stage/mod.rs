@@ -285,6 +285,10 @@ pub struct ChunkCells {
     pub cover: [ActorId; CHUNK_CELLS],
     /// Scent per channel: raised by `mark`, decayed by `scent_decay`.
     pub scent: [[u8; CHUNK_CELLS]; SCENT_CHANNELS],
+    /// One layer per field the rules declare (`Kinds::fields`, same
+    /// order), each value in `0..=max`. Sized when the chunk is made or
+    /// read, never inside a tick; empty when the rules declare none.
+    pub fields: Vec<[u16; CHUNK_CELLS]>,
 }
 
 impl Default for ChunkCells {
@@ -295,6 +299,7 @@ impl Default for ChunkCells {
             occupant: [ActorId::NONE; CHUNK_CELLS],
             cover: [ActorId::NONE; CHUNK_CELLS],
             scent: [[0; CHUNK_CELLS]; SCENT_CHANNELS],
+            fields: Vec::new(),
         }
     }
 }
@@ -328,7 +333,11 @@ impl ChunkCells {
         let h = fnv1a(h, bytemuck::cast_slice(&self.feature));
         let h = fnv1a(h, bytemuck::cast_slice(&self.occupant));
         let h = fnv1a(h, bytemuck::cast_slice(&self.cover));
-        fnv1a(h, bytemuck::cast_slice(&self.scent))
+        let h = fnv1a(h, bytemuck::cast_slice(&self.scent));
+        // No fields, no change: a world without them keeps its checksums.
+        self.fields
+            .iter()
+            .fold(h, |h, f| fnv1a(h, bytemuck::cast_slice(f)))
     }
 }
 

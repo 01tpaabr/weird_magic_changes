@@ -293,6 +293,8 @@ fn action_name(a: Action) -> &'static str {
         Action::Graze => "graze",
         Action::Take => "take",
         Action::Give => "give",
+        Action::Harvest => "harvest",
+        Action::Drop => "drop",
     }
 }
 

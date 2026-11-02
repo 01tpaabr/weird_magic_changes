@@ -5,10 +5,11 @@
 //! ```text
 //! <dir>/world.wmc              magic, version, chunk bits, seed, tick, ticks/day, initial size,
 //!                              gen params, starts, drawn map, kinds (names, cover, slot
-//!                              names), scent channels, packs, rules hash
+//!                              names), scent channels, fields, packs, rules hash
 //! <dir>/chunks/<x>_<y>.wmcc    magic, version, chunk bits, coord, last_ticked, each cell layer
 //!                              as raw bytes (ground, feature, occupant, cover, scent channels),
-//!                              then n, n public actor rows, n private actor rows, as raw bytes
+//!                              then f and f field layers (u16 each), then n, n public actor
+//!                              rows, n private actor rows, as raw bytes
 //! ```
 //!
 //! Everything is little-endian, fixed layout, written to a temp file and
@@ -37,6 +38,7 @@ use bevy_ecs::resource::Resource;
 
 use crate::actors::{ActorMind, ActorPub, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS};
 use crate::rules::Kinds;
+use crate::rules::compile::MAX_FIELDS;
 use crate::scenario::{DrawnMap, Region, Start, in_world};
 use crate::stage::worldgen::GenParams;
 use crate::stage::{
@@ -45,7 +47,7 @@ use crate::stage::{
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 9;
+pub const FORMAT_VERSION: u32 = 10;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -67,6 +69,8 @@ pub struct WorldMeta {
     pub kinds: Vec<SavedKind>,
     /// Scent channel names of those rules, in channel order.
     pub scents: Vec<String>,
+    /// Field names of those rules, in layer order.
+    pub fields: Vec<String>,
     /// The rule packs the world is played with, as given (step 8c).
     pub packs: Vec<String>,
     /// `Kinds::hash` of the rules the save was last played with. Recorded,
@@ -322,6 +326,13 @@ impl Store {
                 scents.len()
             )));
         }
+        let fields = r.strs()?;
+        if fields.len() > MAX_FIELDS {
+            return Err(bad(format!(
+                "{} fields, this build holds {MAX_FIELDS}",
+                fields.len()
+            )));
+        }
         let packs = r.strs()?;
         let rules_hash = r.u64()?;
         r.finish()?;
@@ -335,6 +346,7 @@ impl Store {
             map,
             kinds,
             scents,
+            fields,
             packs,
             rules_hash,
         }))
@@ -416,6 +428,7 @@ impl Store {
             w.strs(&k.states);
         }
         w.strs(&m.scents);
+        w.strs(&m.fields);
         w.strs(&m.packs);
         w.u64(m.rules_hash);
         write_atomic(&self.meta_path(), &w.buf)
@@ -465,6 +478,20 @@ impl Store {
         for (o, b) in cells.cover.iter_mut().zip(cover.as_chunks::<4>().0) {
             o.0 = u32::from_le_bytes(*b);
         }
+        let f = r.u32()? as usize;
+        if f > MAX_FIELDS {
+            return Err(bad(format!(
+                "{f} field layers, this build holds {MAX_FIELDS}"
+            )));
+        }
+        for _ in 0..f {
+            let bytes = r.bytes(CHUNK_CELLS * 2)?;
+            let mut layer = [0u16; CHUNK_CELLS];
+            for (v, b) in layer.iter_mut().zip(bytes.as_chunks::<2>().0) {
+                *v = u16::from_le_bytes(*b);
+            }
+            cells.fields.push(layer);
+        }
         let n = r.u32()? as usize;
         if n > 2 * CHUNK_CELLS {
             return Err(bad(format!("{n} actor rows for {CHUNK_CELLS} cells")));
@@ -512,6 +539,12 @@ impl Store {
         }
         for ch in &cells.scent {
             w.buf.extend_from_slice(ch);
+        }
+        w.u32(u32::try_from(cells.fields.len()).expect("at most MAX_FIELDS fields"));
+        for layer in &cells.fields {
+            for v in layer {
+                w.buf.extend_from_slice(&v.to_le_bytes());
+            }
         }
         w.u32(u32::try_from(actors.rows.len()).expect("row count fits u32"));
         // Rows are `#[repr(C)]` Pod with explicit padding, LE on every target
@@ -780,6 +813,7 @@ mod tests {
                 },
             ],
             scents: names(&["trail"]),
+            fields: names(&["sugar", "höhe"]),
             packs: names(&["/rules/base", "rules/mod"]),
             rules_hash: 0xABCD,
         };
@@ -793,6 +827,7 @@ mod tests {
             }),
             kinds: Vec::new(),
             scents: Vec::new(),
+            fields: Vec::new(),
             packs: Vec::new(),
             ..m.clone()
         };
@@ -1002,8 +1037,23 @@ mod tests {
         bytes[28] = 200; // an invalid Ground discriminant (after magic, version, bits, coord, tick)
         fs::write(s.chunk_path(c), &bytes).unwrap();
         assert!(s.read_chunk(c).is_err());
-        // Row count that the file does not hold.
-        let n_at = 28 + CHUNK_CELLS * (10 + crate::stage::SCENT_CHANNELS);
+        // A field count past the most, then one the file does not hold.
+        let f_at = 28 + CHUNK_CELLS * (10 + crate::stage::SCENT_CHANNELS);
+        let mut bytes = good.clone();
+        bytes[f_at..f_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(
+            s.read_chunk(c)
+                .unwrap_err()
+                .to_string()
+                .contains("field layers")
+        );
+        let mut bytes = good.clone();
+        bytes[f_at..f_at + 4].copy_from_slice(&3u32.to_le_bytes());
+        fs::write(s.chunk_path(c), &bytes).unwrap();
+        assert!(s.read_chunk(c).is_err());
+        // Row count that the file does not hold (after no field layers).
+        let n_at = f_at + 4;
         let mut bytes = good.clone();
         bytes[n_at..n_at + 4].copy_from_slice(&u32::MAX.to_le_bytes());
         fs::write(s.chunk_path(c), &bytes).unwrap();
@@ -1068,6 +1118,7 @@ mod tests {
             map: None,
             kinds: Vec::new(),
             scents: Vec::new(),
+            fields: Vec::new(),
             packs: Vec::new(),
             rules_hash: 0,
         };

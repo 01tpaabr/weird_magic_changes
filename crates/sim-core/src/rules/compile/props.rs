@@ -145,6 +145,51 @@ fn valid_programs_compile_and_lint() {
     }));
 }
 
+/// Valid and lively programs reach every use of a field, and those compile:
+/// the fuzzers run fields, not only the parser.
+#[test]
+fn generated_programs_use_fields() {
+    let uses = [
+        "field f",
+        "add fa ",
+        "harvest f",
+        "drop f",
+        "best f",
+        "fa(",
+        "fb(",
+        "fc(",
+    ];
+    let mut seen = [0usize; 8];
+    let mut h = 7u64;
+    for i in 0..3000 {
+        let choices: Vec<u32> = (0..1500)
+            .map(|_| {
+                h = crate::rng::splitmix64(h);
+                (h >> 32) as u32
+            })
+            .collect();
+        let mode = if i % 2 == 0 {
+            Mode::Valid
+        } else {
+            Mode::Lively
+        };
+        let p = gen_rules::generate(mode, &choices);
+        let mut any = false;
+        for (n, u) in seen.iter_mut().zip(uses) {
+            if p.text.contains(u) {
+                *n += 1;
+                any = true;
+            }
+        }
+        if any && let Err(e) = compile("g.rules", &p.text) {
+            panic!("{e}\n--- program ---\n{}", p.text);
+        }
+    }
+    for (n, u) in seen.iter().zip(uses) {
+        assert!(*n > 0, "no generated program uses `{u}`: {seen:?}");
+    }
+}
+
 /// A text as pieces: a run of name characters, a run of whitespace, or one
 /// other character.
 fn pieces(text: &str) -> Vec<String> {

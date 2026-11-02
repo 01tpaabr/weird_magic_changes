@@ -4,6 +4,7 @@
 //! (`Kinds::glyphs`, `Kinds::colors`: declared in its rules file, carried
 //! by the sim, never read by it).
 
+use sim_core::rules::FieldDef;
 use sim_core::{Feature, Ground, SCENT_CHANNELS};
 
 /// Packed `0x00RRGGBB` sRGB, one `u32` per cell: 4 bytes in the frame
@@ -128,6 +129,31 @@ pub fn scented(bg: Color, scent: [u8; SCENT_CHANNELS]) -> Color {
     })
 }
 
+/// How far a field at its max tints a cell toward the field's colour.
+pub const FIELD_TINT: u8 = 0xb0;
+
+/// `bg` tinted toward each drawn field's colour by its value at local cell
+/// `i` (a fraction of its max): sugar shows as hills of colour.
+pub fn fielded(
+    bg: Color,
+    defs: &[FieldDef],
+    layers: &[[u16; sim_core::CHUNK_CELLS]],
+    i: usize,
+) -> Color {
+    defs.iter()
+        .zip(layers)
+        .fold(bg, |c, (def, layer)| match def.color {
+            Some(col) if layer[i] > 0 => {
+                let t = u32::from(layer[i]) * u32::from(FIELD_TINT) / u32::from(def.max.max(1));
+                c.mix(
+                    Color(col),
+                    u8::try_from(t.min(255)).expect("clamped to a byte"),
+                )
+            }
+            _ => c,
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Style {
     /// Printable ASCII byte.
@@ -208,6 +234,8 @@ pub struct Looks<'a> {
     /// Cells too small to read a glyph in: whoever stands on one is drawn
     /// solid, a square of its colour ([`Looks::occupant`]).
     pub tiny: bool,
+    /// The rules' fields: those with a colour tint the cells they fill.
+    pub fields: &'a [FieldDef],
 }
 
 /// The smallest cell, in physical pixels, a glyph is drawn in; below it
@@ -222,6 +250,7 @@ impl Default for Looks<'_> {
             solids: &[],
             soil: SOIL,
             tiny: false,
+            fields: &[],
         }
     }
 }
@@ -234,6 +263,7 @@ impl<'a> Looks<'a> {
             solids: &kinds.solids,
             soil: SOIL,
             tiny: false,
+            fields: &kinds.fields,
         }
     }
 
@@ -346,6 +376,26 @@ mod tests {
         );
         assert_ne!(scented(SOIL_BG, [0, 40, 0, 0]), SOIL_BG);
         assert_ne!(scented(SOIL_BG, [0, 0, 0, 40]), SOIL_BG);
+        // Fields: a coloured one tints by its value against its max, an
+        // empty cell or a field without a colour leaves the cell alone.
+        let def = |color| FieldDef {
+            name: "f".into(),
+            max: 10,
+            policy: sim_core::rules::Policy::Free,
+            init: sim_core::rules::FieldInit::Value(0),
+            color,
+        };
+        let defs = [def(Some(0x00ff_0000)), def(None)];
+        let mut layers = vec![[0u16; sim_core::CHUNK_CELLS]; 2];
+        assert_eq!(fielded(SOIL_BG, &defs, &layers, 3), SOIL_BG);
+        layers[1][3] = 10;
+        assert_eq!(fielded(SOIL_BG, &defs, &layers, 3), SOIL_BG, "no colour");
+        layers[0][3] = 10;
+        let full = SOIL_BG.mix(Color(0x00ff_0000), FIELD_TINT);
+        assert_eq!(fielded(SOIL_BG, &defs, &layers, 3), full);
+        layers[0][3] = 5;
+        let half = SOIL_BG.mix(Color(0x00ff_0000), FIELD_TINT / 2);
+        assert_eq!(fielded(SOIL_BG, &defs, &layers, 3), half);
         assert_eq!(
             style(
                 Ground::Soil,

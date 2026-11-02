@@ -1,0 +1,8 @@
+# gather: the pack in packs/gather, fields on a flat board.
+#
+#   make run ARGS="play saves/gather --scenario scenarios/gather.scenario"
+rules ../packs/gather
+seed 5
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start gatherer 1 / 300

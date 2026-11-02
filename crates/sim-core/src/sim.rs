@@ -34,7 +34,7 @@ use crate::rules::Kinds;
 use crate::scenario::{DrawnMap, MAX_SIZE_CHUNKS, Placement, Scenario, Start, StartError, present};
 pub use crate::scenario::{Event, check_expect, expect, run_checks, run_checks_until};
 use crate::stage::scent::{SCENT_CADENCE, chunk_due, fade_chunk};
-use crate::stage::worldgen::{GenParams, Terrain, generate_many};
+use crate::stage::worldgen::{GenParams, Terrain, fill_fields_many, generate_many};
 use crate::stage::{
     self, CHUNK_EXTENT, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Pos, Stage,
 };
@@ -322,10 +322,13 @@ pub fn open(world: &mut World, store: &Store) -> io::Result<bool> {
             missing.join(", ")
         )));
     }
-    let remap = if SavedKind::table(kinds) == m.kinds && kinds.scents == m.scents {
+    let remap = if SavedKind::table(kinds) == m.kinds
+        && kinds.scents == m.scents
+        && reload::field_names(kinds) == m.fields
+    {
         None
     } else {
-        Some(Plan::between(&m.kinds, &m.scents, kinds).map_err(bad)?)
+        Some(Plan::between(&m.kinds, &m.scents, &m.fields, kinds, m.seed).map_err(bad)?)
     };
     let terrain = Terrain {
         seed: m.seed,
@@ -397,6 +400,7 @@ pub fn meta(world: &World) -> WorldMeta {
         map: c.map.clone(),
         kinds: SavedKind::table(kinds),
         scents: kinds.scents.clone(),
+        fields: reload::field_names(kinds),
         packs: kinds.debug.packs.clone(),
         rules_hash: kinds.hash,
     }
@@ -553,6 +557,9 @@ fn load_chunks(
     let nkinds = remap
         .as_ref()
         .map_or(world.resource::<Kinds>().len(), Plan::old_kinds);
+    let nfields = remap
+        .as_ref()
+        .map_or(world.resource::<Kinds>().fields.len(), Plan::old_fields);
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
     let mut bad = Vec::new();
@@ -563,6 +570,13 @@ fn load_chunks(
                 d.data
                     .validate(nkinds)
                     .map_err(|e| format!("{}: {e}", s.chunk_path(c).display()))?;
+                if d.data.cells.fields.len() != nfields {
+                    return Err(format!(
+                        "{}: {} field layers, the save's rules declare {nfields}",
+                        s.chunk_path(c).display(),
+                        d.data.cells.fields.len()
+                    ));
+                }
             }
             Ok::<_, String>(saved)
         });
@@ -576,12 +590,24 @@ fn load_chunks(
             Ok(Some(mut saved)) => {
                 if let Some(plan) = &remap {
                     let d = &mut saved.data;
-                    plan.apply(&mut d.cells, &mut d.actors.rows, &mut d.minds.rows, &mut []);
+                    plan.apply(
+                        c,
+                        &mut d.cells,
+                        &mut d.actors.rows,
+                        &mut d.minds.rows,
+                        &mut [],
+                    );
                 }
-                // The save records need names, not maxes: rules that only
-                // lowered a max need no plan, so clamp here as a plan would.
+                // The save records need and field names, not maxes: rules
+                // that only lowered a max need no plan, so clamp here as a
+                // plan would.
                 let kinds = world.resource::<Kinds>();
                 let d = &mut saved.data;
+                for (layer, f) in d.cells.fields.iter_mut().zip(&kinds.fields) {
+                    for v in layer.iter_mut() {
+                        *v = (*v).min(f.max);
+                    }
+                }
                 for (p, m) in d.actors.rows.iter().zip(&mut d.minds.rows) {
                     for (i, n) in kinds.def(p.kind).needs.iter().enumerate() {
                         m.needs[i] = m.needs[i].clamp(0, n.max);
@@ -606,6 +632,7 @@ fn load_chunks(
     let chunks: Vec<ChunkData> = {
         let (c, kinds) = (world.resource::<SimConfig>(), world.resource::<Kinds>());
         let mut chunks = generate_many(&c.terrain(), &c.placement, &to_gen);
+        fill_fields_many(c.seed, &kinds.fields, &to_gen, &mut chunks);
         for (&coord, data) in to_gen.iter().zip(&mut chunks) {
             for (p, m) in data.actors.rows.iter().zip(&mut data.minds.rows) {
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
@@ -769,8 +796,9 @@ pub fn checksum(world: &mut World) -> u64 {
 /// layer, each pointing back); every row stands on a walkable cell, in the
 /// layer its kind says, with only the flags a row may keep between ticks,
 /// the stagger of its uid, its needs in `0..=max` (unused slots 0), unused
-/// mem slots 0, a state of its kind, and clocks not past now. The first
-/// broken one, said. [`unique_uids`] is the other half.
+/// mem slots 0, a state of its kind, and clocks not past now; every chunk
+/// holds a layer per field, each value in `0..=max`. The first broken one,
+/// said. [`unique_uids`] is the other half.
 #[cfg(test)]
 pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
     use crate::actors::{MEM_SLOTS, NEED_SLOTS, flags};
@@ -786,6 +814,22 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
         }
         crate::actors::validate(cells, &a.rows, &m.rows, kinds.len())
             .map_err(|e| format!("chunk {c:?}: {e}"))?;
+        if cells.fields.len() != kinds.fields.len() {
+            return Err(format!(
+                "chunk {c:?}: {} field layers for {} fields",
+                cells.fields.len(),
+                kinds.fields.len()
+            ));
+        }
+        for (layer, f) in cells.fields.iter().zip(&kinds.fields) {
+            if let Some(i) = layer.iter().position(|&v| v > f.max) {
+                let p = c.cell(i);
+                return Err(format!(
+                    "field {} is {} at ({}, {}), past its max {}",
+                    f.name, layer[i], p.x, p.y, f.max
+                ));
+            }
+        }
         for (slot, (r, mind)) in a.rows.iter().zip(&m.rows).enumerate() {
             let def = kinds.def(r.kind);
             let at = c.cell(usize::from(r.cell));
@@ -1721,6 +1765,9 @@ mod tests {
             amount: 0,
             with: [0; 2],
             mark: [0; crate::stage::SCENT_CHANNELS],
+            field: 0,
+            add_fields: [crate::rules::vm::NO_FIELD; crate::rules::vm::ADDS],
+            add_values: [0; crate::rules::vm::ADDS],
             used: 0,
             trapped: false,
         };
@@ -2220,6 +2267,169 @@ mod tests {
         let (e, t) = (born(egg), born(tuft));
         assert_eq!((e.1, t.1), (Pos::new(11, 10), Pos::new(11, 10)));
         assert_ne!(e.0, t.0, "twin uids");
+    }
+
+    /// Field `f` at `p`.
+    fn field(w: &World, f: usize, p: Pos) -> u16 {
+        let (c, i) = p.split();
+        stage::chunk(w, c).unwrap().fields[f][i]
+    }
+
+    fn set_field(w: &mut World, f: usize, p: Pos, v: u16) {
+        let (c, i) = p.split();
+        stage::chunk_mut(w, c).unwrap().fields[f][i] = v;
+    }
+
+    /// Every cell's value of field `f`, summed over the loaded chunks.
+    fn field_total(w: &mut World, f: usize) -> u64 {
+        let mut q = w.query::<&ChunkCells>();
+        q.iter(w)
+            .map(|c| c.fields[f].iter().map(|&v| u64::from(v)).sum::<u64>())
+            .sum()
+    }
+
+    /// A field: chunks are made with it at its `init`; `drop` and `harvest`
+    /// move units between the actor's cell and its need of the field's
+    /// name, never past either max, so a `conserved` field and those needs
+    /// keep their total; `add`s in one think add up and clamp; `f(t)` reads
+    /// a cell; `best` finds the richest cell, and `on free` the richest
+    /// empty one.
+    #[test]
+    fn fields_are_dropped_harvested_added_read_and_found() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field sugar max 9 conserved { init 5 }
+             field glow max 100
+             kind ant { glyph \"a\"  cadence 1  sight 4
+               need sugar max 20 decay 0
+               mem mode, seen, bx, by, fx, fy
+               when mode == 0 => { mode = 1  drop sugar 7 }
+               when mode == 1 => { mode = 2  harvest sugar 2 }
+               when mode == 2 => { mode = 3  add glow 50  add glow 30  seen = sugar(here)  idle }
+               when mode == 3 => { mode = 4  add glow 50  idle }
+               when mode == 4 and best sugar within 4 as b => { mode = 5  bx = b.dx  by = b.dy  idle }
+               when mode == 5 and best sugar on free within 4 as f => { mode = 6  fx = f.dx  fy = f.dy  idle }
+               when true => idle }
+             kind stone { glyph \"#\"  cadence 64  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(13)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        assert_eq!(field(&w, 0, Pos::new(100, 40)), 5, "made at its init");
+        assert_eq!(field(&w, 1, Pos::new(100, 40)), 0);
+        let (ant, here) = (Pos::new(20, 30), Pos::new(20, 30));
+        set_field(&mut w, 0, Pos::new(22, 30), 9); // the richest, under a stone
+        set_field(&mut w, 0, Pos::new(18, 31), 8); // the richest free one
+        let now = tick(&w);
+        assert!(place_actor(&mut w, ant, 0, newborn(&kinds, 0, 0xA1, now)));
+        assert!(place_actor(
+            &mut w,
+            Pos::new(22, 30),
+            1,
+            newborn(&kinds, 1, 0xA2, now)
+        ));
+        let carried = |w: &mut World| -> u64 {
+            rows(w)
+                .iter()
+                .filter(|r| r.1 == 0)
+                .map(|r| u64::try_from(r.3.needs[0]).unwrap())
+                .sum()
+        };
+        let total = field_total(&mut w, 0) + carried(&mut w);
+        for _ in 0..8 {
+            step(&mut w);
+            check_invariants(&mut w);
+            assert_eq!(field_total(&mut w, 0) + carried(&mut w), total, "conserved");
+        }
+        let a = rows(&mut w).into_iter().find(|r| r.0 == 0xA1).unwrap();
+        // Dropped 4 of 7 (the cell's room), harvested 2.
+        assert_eq!(a.3.needs[0], 18);
+        assert_eq!(field(&w, 0, here), 7);
+        assert_eq!(
+            &a.3.mem[..6],
+            &[6, 7, 2, 0, -2, 1],
+            "mode, read, best, best free"
+        );
+        assert_eq!(field(&w, 1, here), 100, "80, then 50 more, clamped");
+        assert_eq!(field(&w, 1, Pos::new(21, 30)), 0, "only its own cell");
+    }
+
+    /// Fields are saved by name and come back as they were; rules that drop
+    /// one, lower another's max and add a third remap every chunk, loaded
+    /// and saved: kept values clamped, the new field at its `init`.
+    #[test]
+    fn fields_are_saved_and_remapped_by_name() {
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let a = compile(
+            "a.rules",
+            "field p max 50 { init 9 }
+             field q max 10 { init noise scale 4 }
+             kind k { glyph \"k\"  when true => idle }",
+        )
+        .unwrap();
+        let b = compile(
+            "b.rules",
+            "field r max 7 { init 6 }
+             field q max 3 { init noise scale 4 }
+             kind k { glyph \"k\"  when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(14)
+        };
+        let store = tmp_store("fields");
+        let mut w = new_world_with(&cfg, a.clone()).unwrap();
+        let (near, far) = (Pos::new(5, 5), Pos::new(70, 5));
+        set_field(&mut w, 0, near, 40);
+        set_field(&mut w, 1, far, 10);
+        let qs: Vec<u16> = (0..64).map(|x| field(&w, 1, Pos::new(x, 9))).collect();
+        assert!(
+            qs.iter().any(|&v| v > 3) && qs.iter().any(|&v| v != qs[0]),
+            "noise: {qs:?}"
+        );
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, a.clone()).unwrap().unwrap();
+        ensure_loaded(
+            &mut back,
+            near,
+            LoadPolicy { load: 1, unload: 2 },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!((field(&back, 0, near), field(&back, 1, far)), (40, 10));
+        for c in [ChunkCoord::new(0, 0), ChunkCoord::new(1, 0)] {
+            assert_eq!(stage::chunk(&back, c), stage::chunk(&w, c), "{c:?}");
+        }
+        // Reloaded: `p` gone, `q` clamped to 3, `r` at its init.
+        reload_rules(&mut w, Some(&store), b.clone()).unwrap();
+        check_invariants(&mut w);
+        assert_eq!(field(&w, 1, far), 3);
+        assert_eq!(field(&w, 0, near), 6);
+        let clamped: Vec<u16> = qs.iter().map(|&v| v.min(3)).collect();
+        let now: Vec<u16> = (0..64).map(|x| field(&w, 1, Pos::new(x, 9))).collect();
+        assert_eq!(now, clamped);
+        // The rewritten save opens under the new rules as they are.
+        let mut again = open_world_with(&store, b).unwrap().unwrap();
+        ensure_loaded(
+            &mut again,
+            near,
+            LoadPolicy { load: 1, unload: 2 },
+            Some(&store),
+        )
+        .unwrap();
+        check_invariants(&mut again);
+        assert_eq!((field(&again, 0, near), field(&again, 1, far)), (6, 3));
+        std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
     /// `mark` raises scent on the actor's cell, `scent(ch)` reads it, a

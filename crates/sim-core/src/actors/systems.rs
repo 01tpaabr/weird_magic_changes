@@ -37,7 +37,7 @@ use crate::actors::{
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, pred, result};
-use crate::rules::{Kinds, Remap};
+use crate::rules::{Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER};
 use crate::stage::{
@@ -70,6 +70,13 @@ pub struct Intent {
     /// `mark ch v` effects, per channel: added to the actor's (tick-start)
     /// cell in Apply.
     pub mark: [u8; SCENT_CHANNELS],
+    /// Field of `Harvest` / `Drop` (whose own need slot is in `kind`).
+    pub field: u8,
+    /// `add f v` effects: the fields (`vm::NO_FIELD`: unused) and what to
+    /// add to each on the actor's (tick-start) cell in Apply. Two arrays,
+    /// not pairs: no padding in a row every think writes.
+    pub add_fields: [u8; vm::ADDS],
+    pub add_values: [i32; vm::ADDS],
     /// The think trapped (fuel or a fault) and was turned into `Idle`.
     pub trapped: bool,
     /// Ops the think executed (saturating), for the per-kind counters.
@@ -452,6 +459,9 @@ fn think_one<const TRACE: bool>(
         amount: 0,
         with: [0; 2],
         mark: [0; SCENT_CHANNELS],
+        field: 0,
+        add_fields: [vm::NO_FIELD; vm::ADDS],
+        add_values: [0; vm::ADDS],
         trapped: false,
         used: 0,
     };
@@ -492,7 +502,13 @@ fn think_one<const TRACE: bool>(
     intent.amount = out.amount;
     intent.with = out.with;
     intent.mark = out.mark;
-    if matches!(out.action, Action::Take | Action::Give) {
+    intent.field = out.field;
+    intent.add_fields = out.adds.map(|(f, _)| f);
+    intent.add_values = out.adds.map(|(_, v)| v);
+    if matches!(
+        out.action,
+        Action::Take | Action::Give | Action::Harvest | Action::Drop
+    ) {
         intent.kind = u16::from(out.need);
     }
     intent.trapped = out.trap.is_some();
@@ -1065,6 +1081,9 @@ pub fn apply(
                             _ => result::REFUSED,
                         })
                     }
+                    Action::Harvest | Action::Drop => {
+                        Some(harvest(kinds, &mut actors, slot, from, it))
+                    }
                     // Ground cover is rooted.
                     Action::Move if cover => Some(result::REFUSED),
                     Action::Move => Some(match target_of(*coord, from, it.dx, it.dy) {
@@ -1167,9 +1186,63 @@ pub fn apply(
                         *s = s.saturating_add(v);
                     }
                 }
+                for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
+                    let f = usize::from(f);
+                    if let (Some(def), Some(layer)) = (kinds.fields.get(f), cells.fields.get_mut(f))
+                        && def.policy == Policy::Free
+                    {
+                        let c = &mut layer[from];
+                        *c = clamp_field(i32::from(*c).saturating_add(v), def.max);
+                    }
+                }
             }
         },
     );
+}
+
+/// A value clamped into a field's `0..=max`.
+#[inline]
+fn clamp_field(v: i32, max: u16) -> u16 {
+    u16::try_from(v.clamp(0, i32::from(max))).expect("clamped into 0..=u16::MAX")
+}
+
+/// Settle a `harvest` (field into need) or `drop` (need into field) on the
+/// actor's own cell `from`: up to the amount, never more than the source
+/// holds or past the receiver's max. The need was stamped to now by this
+/// tick's think. REFUSED for a field the rules don't have or a `fixed` one
+/// (the compiler refuses both); BLOCKED if nothing moved; else OK.
+fn harvest(kinds: &Kinds, actors: &mut ActorsMut<'_>, slot: usize, from: usize, it: &Intent) -> u8 {
+    let f = usize::from(it.field);
+    let (Some(def), Some(layer)) = (kinds.fields.get(f), actors.cells.fields.get_mut(f)) else {
+        return result::REFUSED;
+    };
+    let kind = kinds.def(actors.pubs[slot].kind);
+    let n = usize::from(it.kind);
+    let Some(need) = kind.needs.get(n) else {
+        return result::REFUSED;
+    };
+    if def.policy == Policy::Fixed {
+        return result::REFUSED;
+    }
+    let own = &mut actors.minds[slot].needs[n];
+    let cell = i32::from(layer[from]);
+    let moved = if it.action == Action::Harvest {
+        it.amount.min(cell).min(need.max - *own)
+    } else {
+        it.amount.min(*own).min(i32::from(def.max) - cell)
+    }
+    .max(0);
+    if moved == 0 {
+        return result::BLOCKED;
+    }
+    let (cell, own_now) = if it.action == Action::Harvest {
+        (cell - moved, *own + moved)
+    } else {
+        (cell + moved, *own - moved)
+    };
+    layer[from] = clamp_field(cell, def.max);
+    *own = own_now;
+    result::OK
 }
 
 #[inline]

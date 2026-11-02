@@ -108,7 +108,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   in ~1.5 hours). A channel is a name in the rules, numbered in first-appearance order in
   the code; a fifth name is a compile error. The renderer washes a scented cell toward the
   channel's colour.
-- **Save**: chunk file v9 = cell layers (`occupant`, `cover`, the scent channels), `n`, `ActorPub[n]`,
+- **Save**: chunk file v10 = cell layers (`occupant`, `cover`, the scent channels, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
@@ -148,7 +148,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
 
-Per actor: 104 B persistent (12 + 88 + 4 occupant) + 40 B intent scratch.
+Per actor: 104 B persistent (12 + 88 + 4 occupant) + 64 B intent scratch.
 
 ## 3. Senses
 

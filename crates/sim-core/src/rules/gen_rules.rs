@@ -71,6 +71,9 @@ const SENSES: [&str; 15] = [
     "result", "taken", "trapped",
 ];
 const SCENTS: [&str; 3] = ["sc0", "sc1", "sc2"];
+/// The fields a valid program may declare, with their policy: free,
+/// conserved, fixed. Kinds may carry a need of a field's name.
+const FIELDS: [(&str, &str); 3] = [("fa", ""), ("fb", " conserved"), ("fc", " fixed")];
 const CMP: [&str; 6] = ["<", "<=", "==", "!=", ">=", ">"];
 /// Persistent local slots in one rule or sub: 16, less 4 for `toward`,
 /// `away` and `random free` while they are evaluated.
@@ -150,6 +153,8 @@ struct G<'a> {
     files: Vec<Sig>,
     /// Per kind named by a `spawn ... with`: the mems those spawns set.
     withs: Vec<(String, Vec<String>)>,
+    /// The fields declared: a prefix of [`FIELDS`].
+    fields: usize,
     // The scope of the code being written.
     owner: Option<usize>,
     locals: Vec<(String, Ty)>,
@@ -176,6 +181,7 @@ impl<'a> G<'a> {
             owners: Vec::new(),
             files: Vec::new(),
             withs: Vec::new(),
+            fields: 0,
             owner: None,
             locals: Vec::new(),
             slots: 0,
@@ -394,6 +400,7 @@ impl<'a> G<'a> {
     }
 
     fn plan(&mut self) {
+        self.fields = self.n(FIELDS.len() + 1);
         let consts = self.n(4);
         self.consts = (0..consts).map(|i| format!("C{i}")).collect();
         let tag_pool: Vec<String> = (0..self.n(5)).map(|i| format!("tg{i}")).collect();
@@ -464,8 +471,11 @@ impl<'a> G<'a> {
             }
             // Needs: the engine's names (a redeclaration costs no slot), or its own.
             for j in 0..self.n(4) {
+                let carried = FIELDS[..self.fields.min(2)].to_vec();
                 let name = if self.maybe(40) {
                     self.one(&["water", "health", "food"]).to_string()
+                } else if !carried.is_empty() && self.maybe(40) {
+                    self.one(&carried).0.to_string()
                 } else {
                     format!("k{i}n{j}")
                 };
@@ -537,6 +547,27 @@ impl<'a> G<'a> {
 
     fn emit(&mut self) -> String {
         let mut out = String::new();
+        for &(name, policy) in &FIELDS[..self.fields] {
+            let max = 1 + self.n(300);
+            let mut parts = Vec::new();
+            if self.maybe(50) {
+                parts.push(if self.maybe(50) {
+                    format!("init {}", self.n(max + 1))
+                } else {
+                    format!("init noise scale {}", 1 + self.n(40))
+                });
+            }
+            if self.maybe(50) {
+                parts.push("color \"#c08040\"".to_string());
+            }
+            let block = if parts.is_empty() && self.maybe(50) {
+                String::new()
+            } else {
+                format!(" {{ {} }}", parts.join(self.sep()))
+            };
+            let sep = self.sep();
+            out += &format!("field {name} max {max}{policy}{block}{sep}");
+        }
         for i in 0..self.consts.len() {
             let v = self.const_expr_upto(3, i);
             let semi = self.semi();
@@ -1024,9 +1055,11 @@ impl<'a> G<'a> {
     }
 
     fn effect(&mut self, d: u32) -> String {
-        match self.n(3) {
+        match self.n(4) {
             0 => format!("look = {}", self.expr(d)),
             1 => format!("signal = {}", self.expr(d)),
+            2 if !self.strict => format!("add {} {}", self.pool(&[]), self.expr(d)),
+            2 if self.fields > 0 => format!("add fa {}", self.expr(d)),
             _ => {
                 let ch = self.scent_name();
                 format!("mark {ch} {}", self.expr(d))
@@ -1142,9 +1175,24 @@ impl<'a> G<'a> {
     fn action(&mut self, d: u32) -> String {
         let d = d.max(1);
         let needs = self.needs_here();
-        match self.n(10) {
+        let carried: Vec<String> = FIELDS[..self.fields.min(2)]
+            .iter()
+            .map(|(f, _)| f.to_string())
+            .filter(|f| needs.contains(f))
+            .collect();
+        match self.n(11) {
             0 => "idle".into(),
             1 => "die".into(),
+            10 if !self.strict || !carried.is_empty() => {
+                let verb = self.one(&["harvest", "drop"]);
+                let f = if self.strict {
+                    self.one(&carried)
+                } else {
+                    self.pool(&[])
+                };
+                format!("{verb} {f} {}", self.expr(d - 1))
+            }
+            10 => "idle".into(),
             2 => format!("become {}", self.kind_name()),
             3 => {
                 let k = self.kind_name();
@@ -1263,7 +1311,29 @@ impl<'a> G<'a> {
                 format!("sniff {ch} within {r} as {v}")
             }
             4 => format!("({})", self.cond(top, d - 1)),
+            5 if bind && (!self.strict || self.fields > 0) => {
+                let f = self.field_name();
+                let on = if self.maybe(50) {
+                    format!(" on {}", self.pred())
+                } else {
+                    String::new()
+                };
+                let r = self.additive(d - 1);
+                let v = self.fresh("v");
+                self.local(v.clone(), Ty::Target, 2);
+                format!("best {f}{on} within {r} as {v}")
+            }
             _ => self.expr(d),
+        }
+    }
+
+    /// A declared field's name (any pool name in the syntax mode).
+    fn field_name(&mut self) -> String {
+        if self.strict {
+            let k = self.n(self.fields.max(1));
+            FIELDS[k].0.to_string()
+        } else {
+            self.pool(&[])
         }
     }
 
@@ -1366,6 +1436,10 @@ impl<'a> G<'a> {
                     let f = self.one(&fs);
                     self.call(&f, d)
                 }
+            }
+            10 if self.strict && self.fields > 0 => {
+                let f = self.field_name();
+                format!("{f}({})", self.target(d - 1))
             }
             _ => self.leaf(),
         }
@@ -1471,10 +1545,23 @@ impl<'a> G<'a> {
     fn syntax_file(&mut self) -> String {
         let mut out = String::new();
         for _ in 0..self.n(7) {
-            match self.n(4) {
+            match self.n(5) {
                 0 => out += &self.syntax_item(false),
                 1 => out += &self.syntax_item(true),
                 2 => out += &self.syntax_sub(),
+                3 => {
+                    let (name, max) = (self.pool(&[]), self.additive(2));
+                    let policy = self.one(&["", " conserved", " fixed"]);
+                    let init = match self.n(3) {
+                        0 => String::new(),
+                        1 => format!(" {{ init {} }}", self.additive(1)),
+                        _ => format!(
+                            " {{ init noise scale {} color \"#102030\" }}",
+                            self.additive(1)
+                        ),
+                    };
+                    out += &format!("field {name} max {max}{policy}{init}");
+                }
                 _ => {
                     let (name, value) = (self.pool(&[]), self.expr(3));
                     out += &format!("const {name} = {value}{}", self.semi());

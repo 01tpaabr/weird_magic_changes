@@ -401,6 +401,18 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
             need(it.kind),
             at(it.dx, it.dy)
         ),
+        Action::Harvest | Action::Drop => {
+            let field = kinds
+                .fields
+                .get(usize::from(it.field))
+                .map_or("?", |f| f.name.as_str());
+            let verb = if it.action == Action::Harvest {
+                "harvest"
+            } else {
+                "drop"
+            };
+            format!("{verb} {field} {} here", it.amount)
+        }
     };
     if let Some(l) = it.look {
         let _ = write!(d, "; look = {l}");
@@ -412,6 +424,11 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
         if v > 0 {
             let name = kinds.scents.get(ch).map_or("?", String::as_str);
             let _ = write!(d, "; mark {name} {v}");
+        }
+    }
+    for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
+        if let Some(def) = kinds.fields.get(usize::from(f)) {
+            let _ = write!(d, "; add {} {v}", def.name);
         }
     }
     if let Some(n) = out.next {

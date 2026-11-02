@@ -1,0 +1,35 @@
+# gather: fields, a number in every cell (docs/RULES.md §12, Fields). Sugar
+# lies on the ground in patches; gatherers walk to the richest free cell they
+# see, harvest it into what they carry, eat from that, and with a full load
+# walk home and drop it round the cell they were born on, leaving a path of
+# footsteps. Sugar is `conserved`: nothing in the rules adds to the ground, so
+# what lies there only moves, from the patches to the piles and the
+# gatherers' bellies. Fields have no laws yet: nothing grows back, and the
+# path never fades. scenarios/tests/gather.scenario plays it.
+
+const LOAD = 20                  # what a gatherer carries home
+const HOME = 3                   # how near home it drops its load
+
+field sugar max 20 conserved {
+  init noise scale 10
+  color "#d9a520"
+}
+field path max 255 { color "#5a78c8" }
+
+kind gatherer {
+  glyph "g"
+  color "#f4f4f4"
+  cadence 4
+  sight 6
+  need sugar max 40 decay 0      # what it carries: the ground's sugar
+  need food max 1d vital
+  mem home_x, home_y, born
+  when born == 0 => { born = 1  home_x = x  home_y = y  sugar = 0  idle }
+  when food < 12h and sugar > 0 => { food = min(food + 4h, 1d)  sugar -= 1  idle }
+  when sugar >= LOAD and dist(at(home_x, home_y)) <= HOME and sugar(here) < 20 => drop sugar 10
+  when sugar >= LOAD and dist(at(home_x, home_y)) <= HOME => move random free
+  when sugar >= LOAD => { add path 16  move toward at(home_x, home_y) }
+  when dist(at(home_x, home_y)) > HOME and sugar(here) > 0 => harvest sugar 3
+  when dist(at(home_x, home_y)) > HOME and best sugar on free within 6 as s => move toward s
+  when true => move random free
+}

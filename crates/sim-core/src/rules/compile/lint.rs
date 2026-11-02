@@ -142,6 +142,14 @@ impl Seen<'_> {
                 self.names.marks.insert(ch.clone());
                 self.expr(e);
             }
+            Stmt::Add(f, e, _) => {
+                self.names.all.insert(f.clone());
+                self.expr(e);
+            }
+            Stmt::Harvest { field, amount, .. } => {
+                self.names.all.insert(field.clone());
+                self.expr(amount);
+            }
             Stmt::Next(name, _) => {
                 self.names.nexts.insert(name.clone());
             }
@@ -164,6 +172,11 @@ impl Seen<'_> {
                 self.names
                     .smells
                     .push((ch.clone(), at.clone(), self.who.clone()));
+                self.expr(r);
+            }
+            Cond::Best { field, pred, r, .. } => {
+                self.names.all.insert(field.clone());
+                pred.iter().for_each(|p| self.pred(p));
                 self.expr(r);
             }
             Cond::And(a, b) | Cond::Or(a, b) => {
@@ -859,7 +872,9 @@ impl<'a> Gen<'a> {
             Stmt::Set { value, .. }
             | Stmt::Assign { value, .. }
             | Stmt::Signal(value)
-            | Stmt::Mark(_, value, _) => self.walk_expr(kinds, w, value, out),
+            | Stmt::Mark(_, value, _)
+            | Stmt::Add(_, value, _)
+            | Stmt::Harvest { amount: value, .. } => self.walk_expr(kinds, w, value, out),
             Stmt::If { cond, then, els } => {
                 let mark = w.binds.len();
                 self.walk_cond(kinds, w, cond, out);
@@ -944,6 +959,13 @@ impl<'a> Gen<'a> {
             Cond::Sniff { r, bind, at, .. } => {
                 self.radius(w, r, at, out);
                 w.binds.push((bind.clone(), None));
+            }
+            Cond::Best {
+                pred, r, bind, at, ..
+            } => {
+                self.radius(w, r, at, out);
+                let m = pred.as_ref().and_then(|p| self.matcher(kinds, w, p));
+                w.binds.push((bind.clone(), m));
             }
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.walk_cond(kinds, w, a, out);

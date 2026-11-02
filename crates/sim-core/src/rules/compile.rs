@@ -28,7 +28,8 @@ use super::vm::{
     Action, FOR_EACH_LOCALS, FRAME_LOCALS, FRAMES, OpCode, STACK, Sense, pred, result,
 };
 use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, KindDef, Kinds, Level, NeedDef, RuleInfo, RuleShape, Term,
+    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, Level, NeedDef,
+    Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, SCENT_CHANNELS};
@@ -486,6 +487,21 @@ struct Items {
     items: Vec<ItemAst>,
     subs: Vec<SubAst>,
     consts: Vec<ConstAst>,
+    fields: Vec<FieldAst>,
+}
+
+/// `field NAME max M [conserved|fixed] { init V | init noise scale S; color "#rrggbb" }`:
+/// a number in every cell (`docs/WORLD.md` §2). Numbers are constant
+/// expressions, folded after the constants.
+#[derive(Debug, Clone)]
+struct FieldAst {
+    at: Pos,
+    name: String,
+    max: Expr,
+    policy: Policy,
+    /// `init V`, or `init noise scale S` (`true`); none: 0.
+    init: Option<(bool, Expr, Pos)>,
+    color: Option<u32>,
 }
 
 /// `const NAME = expr`: a file-scope integer, folded at compile time.
@@ -539,6 +555,15 @@ enum Cond {
     /// `sniff ch within r as v`: the strongest cell of scent `ch`.
     Sniff {
         ch: String,
+        r: Expr,
+        bind: String,
+        at: Pos,
+    },
+    /// `best f [on pred] within r as v`: the cell with the most of field
+    /// `f` (among those matching `pred`).
+    Best {
+        field: String,
+        pred: Option<Pred>,
         r: Expr,
         bind: String,
         at: Pos,
@@ -648,6 +673,16 @@ enum Stmt {
     Signal(Expr),
     /// `mark ch v`: an effect, adds `v` of scent `ch` to the actor's cell.
     Mark(String, Expr, Pos),
+    /// `add f v`: an effect, adds `v` to field `f` on the actor's cell.
+    Add(String, Expr, Pos),
+    /// `harvest f n` / `drop f n`: up to `n` of field `f` on the actor's
+    /// cell into its need `f`, or back.
+    Harvest {
+        drop: bool,
+        field: String,
+        amount: Expr,
+        at: Pos,
+    },
     /// `next NAME`: this state for the following think; ends the think
     /// like an action.
     Next(String, Pos),
@@ -747,6 +782,8 @@ pub const MAX_SIGHT: u8 = 16;
 pub const MAX_FUEL: u32 = 4096;
 /// `state` blocks per kind.
 pub const MAX_STATES: usize = 64;
+/// Fields in a rule set (`field`): a byte indexes them in the bytecode.
+pub const MAX_FIELDS: usize = 64;
 /// Tags per rule set: a kind's tags are one `u64` bitset.
 pub const MAX_TAGS: usize = u64::BITS as usize;
 /// Kinds per rule set: ids are `u16`, and `Kinds` keeps `u16::MAX` free.
@@ -865,6 +902,11 @@ pub const KEYWORDS: &[&str] = &[
     "mark",
     "sniff",
     "scent",
+    "field",
+    "add",
+    "harvest",
+    "drop",
+    "best",
     "trait",
     "extends",
     "inherit",
@@ -1053,14 +1095,75 @@ impl Parser<'_> {
                 let value = self.expr()?;
                 self.eat_sym(";");
                 items.consts.push(ConstAst { at, name, value });
+            } else if self.eat_kw("field") {
+                items.fields.push(self.field()?);
             } else {
                 return Err(self.err(format!(
-                    "expected `kind`, `trait`, `sub` or `const`, found {}",
+                    "expected `kind`, `trait`, `sub`, `const` or `field`, found {}",
                     self.describe()
                 )));
             }
         }
         Ok(())
+    }
+
+    /// After `field`: its name, `max`, a policy word and an optional block
+    /// of `init` and `color`.
+    fn field(&mut self) -> Result<FieldAst> {
+        let (name, at) = self.ident("field name")?;
+        self.expect_kw("max")?;
+        let max = self.additive()?;
+        let policy = if self.eat_kw("conserved") {
+            Policy::Conserved
+        } else if self.eat_kw("fixed") {
+            Policy::Fixed
+        } else {
+            Policy::Free
+        };
+        let (mut init, mut color) = (None, None);
+        if self.eat_sym("{") {
+            while !self.eat_sym("}") {
+                let p = self.pos();
+                if self.eat_kw("init") {
+                    if init.is_some() {
+                        return Err(self.err_at(&p, "`init` declared twice"));
+                    }
+                    let noise = self.eat_kw("noise");
+                    if noise {
+                        self.expect_kw("scale")?;
+                    }
+                    init = Some((noise, self.additive()?, p));
+                } else if self.eat_kw("color") {
+                    if color.is_some() {
+                        return Err(self.err_at(&p, "`color` declared twice"));
+                    }
+                    let c = match self.bump() {
+                        Tok::Str(s)
+                            if s.len() == 7
+                                && s.starts_with('#')
+                                && s[1..].bytes().all(|b| b.is_ascii_hexdigit()) =>
+                        {
+                            u32::from_str_radix(&s[1..], 16).ok()
+                        }
+                        _ => None,
+                    };
+                    color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
+                } else {
+                    return Err(self.err(format!(
+                        "expected `init`, `color` or `}}` in a field, found {}",
+                        self.describe()
+                    )));
+                }
+            }
+        }
+        Ok(FieldAst {
+            at,
+            name,
+            max,
+            policy,
+            init,
+            color,
+        })
     }
 
     fn sub(&mut self) -> Result<SubAst> {
@@ -1597,6 +1700,22 @@ impl Parser<'_> {
             let (ch, at) = self.ident("scent name")?;
             return Ok(Stmt::Mark(ch, self.expr()?, at));
         }
+        if self.eat_kw("add") {
+            let (field, at) = self.ident("field name")?;
+            return Ok(Stmt::Add(field, self.expr()?, at));
+        }
+        if self.is_kw("harvest") || self.is_kw("drop") {
+            let drop = self.is_kw("drop");
+            self.bump();
+            let (field, _) = self.ident("field name")?;
+            let amount = self.expr()?;
+            return Ok(Stmt::Harvest {
+                drop,
+                field,
+                amount,
+                at,
+            });
+        }
         if self.eat_kw("for") {
             self.expect_kw("each")?;
             let pred = self.pred()?;
@@ -1779,6 +1898,25 @@ impl Parser<'_> {
             self.expect_kw("as")?;
             let (bind, ..) = self.ident("binding name")?;
             return Ok(Cond::Sniff { ch, r, bind, at });
+        }
+        if self.eat_kw("best") {
+            let (field, _) = self.ident("field name")?;
+            let pred = if self.eat_kw("on") {
+                Some(self.pred()?)
+            } else {
+                None
+            };
+            self.expect_kw("within")?;
+            let r = self.additive()?; // a radius, never a comparison
+            self.expect_kw("as")?;
+            let (bind, ..) = self.ident("binding name")?;
+            return Ok(Cond::Best {
+                field,
+                pred,
+                r,
+                bind,
+                at,
+            });
         }
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
@@ -2079,6 +2217,7 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Become { .. }
         | Stmt::Spawn { .. }
         | Stmt::Transfer { .. }
+        | Stmt::Harvest { .. }
         | Stmt::Move(..)
         | Stmt::Drink(..)
         | Stmt::Eat(..)
@@ -2087,6 +2226,7 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Look(_)
         | Stmt::Signal(_)
         | Stmt::Mark(..)
+        | Stmt::Add(..)
         | Stmt::Next(..) => false,
     })
 }
@@ -2114,6 +2254,7 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Die(_)
             | Stmt::Become { .. }
             | Stmt::Transfer { .. }
+            | Stmt::Harvest { .. }
             | Stmt::Move(..)
             | Stmt::Drink(..)
             | Stmt::Eat(..)
@@ -2122,6 +2263,7 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Look(_)
             | Stmt::Signal(_)
             | Stmt::Mark(..)
+            | Stmt::Add(..)
             | Stmt::Next(..) => {}
         }
     }
@@ -2317,6 +2459,9 @@ struct Gen<'a> {
     tags: Vec<String>,
     /// Scent channel names, in first-appearance order in the code.
     scents: Vec<String>,
+    /// The `field` declarations, and what they resolve to (same order).
+    fields_ast: &'a [FieldAst],
+    field_defs: Vec<FieldDef>,
     /// Per kind named by a `spawn ... with`: the memory slots those spawns
     /// set, in first-appearance order (at most two), each with where it
     /// was first named. They take the kind's first slots, which is where
@@ -2344,6 +2489,7 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Become { at, .. }
         | Stmt::Spawn { pos: at, .. }
         | Stmt::Transfer { at, .. }
+        | Stmt::Harvest { at, .. }
         | Stmt::Move(_, at)
         | Stmt::Drink(_, at)
         | Stmt::Eat(_, at)
@@ -2361,6 +2507,7 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Look(_)
         | Stmt::Signal(_)
         | Stmt::Mark(..)
+        | Stmt::Add(..)
         | Stmt::Next(..)
         | Stmt::ForEach { .. } => None,
     }
@@ -2385,6 +2532,7 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Become { .. }
         | Stmt::Spawn { .. }
         | Stmt::Transfer { .. }
+        | Stmt::Harvest { .. }
         | Stmt::Move(..)
         | Stmt::Drink(..)
         | Stmt::Eat(..)
@@ -2393,6 +2541,7 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Look(_)
         | Stmt::Signal(_)
         | Stmt::Mark(..)
+        | Stmt::Add(..)
         | Stmt::Next(..) => false,
     }
 }
@@ -2432,6 +2581,8 @@ impl<'a> Gen<'a> {
             items: &items.items,
             subs: &items.subs,
             consts: &items.consts,
+            fields_ast: &items.fields,
+            field_defs: Vec::new(),
             const_vals: Vec::new(),
             insts: Vec::new(),
             kind_insts: Vec::new(),
@@ -2506,6 +2657,102 @@ impl<'a> Gen<'a> {
             .map(|(n, _)| n.clone())
             .zip(inst.args.iter().copied())
             .collect()
+    }
+
+    /// Fields: global names (never a kind's, a trait's, a sub's, a tag's or
+    /// a constant's; a need may share one), their numbers folded.
+    fn resolve_fields(&mut self) -> Result<()> {
+        if let Some(f) = self.fields_ast.get(MAX_FIELDS) {
+            return Err(self.err(&f.at, format!("at most {MAX_FIELDS} fields in a rule set")));
+        }
+        for (i, f) in self.fields_ast.iter().enumerate() {
+            let first = |at: &Pos| format!(" (first at {}:{})", at.file, at.line);
+            let taken = if let Some(o) = self.fields_ast[..i].iter().find(|o| o.name == f.name) {
+                Some(format!("field `{}` declared twice{}", f.name, first(&o.at)))
+            } else if let Some(o) = self.item_named(&f.name) {
+                let what = if self.items[o].is_trait {
+                    "trait"
+                } else {
+                    "kind"
+                };
+                Some(format!(
+                    "`{}` is already a {what}{}",
+                    f.name,
+                    first(&self.items[o].at)
+                ))
+            } else if let Some(o) = self.subs.iter().find(|s| s.name == f.name) {
+                Some(format!("`{}` is already a sub{}", f.name, first(&o.at)))
+            } else if self.tags.contains(&f.name) {
+                Some(format!("`{}` is already a tag", f.name))
+            } else if let Some(o) = self.consts.iter().find(|c| c.name == f.name) {
+                Some(format!("`{}` is already a const{}", f.name, first(&o.at)))
+            } else {
+                self.items
+                    .iter()
+                    .find(|it| it.members.iter().any(|m| m.name == f.name))
+                    .map(|it| format!("`{}` is already a sub of `{}`", f.name, it.name))
+            };
+            if let Some(msg) = taken {
+                return Err(self.err(&f.at, msg));
+            }
+            let max = self.fold(&f.max, &f.at)?;
+            let max = u16::try_from(max).ok().filter(|&m| m > 0).ok_or_else(|| {
+                self.err(
+                    &f.at,
+                    format!("field `{}`: max {max} is not in 1..=65535", f.name),
+                )
+            })?;
+            let init =
+                match &f.init {
+                    None => FieldInit::Value(0),
+                    Some((false, e, at)) => {
+                        let v = self.fold(e, at)?;
+                        FieldInit::Value(
+                            u16::try_from(v).ok().filter(|&v| v <= max).ok_or_else(|| {
+                                self.err(at, format!("init {v} is not in 0..={max}"))
+                            })?,
+                        )
+                    }
+                    Some((true, e, at)) => {
+                        let v = self.fold(e, at)?;
+                        FieldInit::Noise(u32::try_from(v).ok().filter(|&v| v > 0).ok_or_else(
+                            || self.err(at, format!("noise scale {v} is not above 0")),
+                        )?)
+                    }
+                };
+            self.field_defs.push(FieldDef {
+                name: f.name.clone(),
+                max,
+                policy: f.policy,
+                init,
+                color: f.color,
+            });
+        }
+        Ok(())
+    }
+
+    /// Field `name`'s index and definition.
+    fn field_named(&self, name: &str) -> Option<(u8, FieldDef)> {
+        let i = self.field_defs.iter().position(|f| f.name == name)?;
+        Some((
+            u8::try_from(i).expect("at most MAX_FIELDS fields"),
+            self.field_defs[i].clone(),
+        ))
+    }
+
+    /// [`Self::field_named`], or an error naming the fields there are.
+    fn field(&self, name: &str, at: &Pos) -> Result<(u8, FieldDef)> {
+        self.field_named(name).ok_or_else(|| {
+            let names: Vec<&str> = self.field_defs.iter().map(|f| f.name.as_str()).collect();
+            self.err(
+                at,
+                if names.is_empty() {
+                    format!("no field `{name}`: the rules declare no field")
+                } else {
+                    format!("no field `{name}` (the fields: {})", names.join(", "))
+                },
+            )
+        })
     }
 
     fn generate(mut self) -> Result<Kinds> {
@@ -2706,6 +2953,7 @@ impl<'a> Gen<'a> {
                 ),
             });
         }
+        self.resolve_fields()?;
         for it in items {
             for (pn, pat) in &it.params {
                 if self.const_value(pn).is_some() {
@@ -2796,7 +3044,8 @@ impl<'a> Gen<'a> {
             })
             .collect();
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
-            .with_scents(std::mem::take(&mut self.scents));
+            .with_scents(std::mem::take(&mut self.scents))
+            .with_fields(std::mem::take(&mut self.field_defs));
         self.debug.diagnostics = self.lint(&kinds);
         Ok(kinds.with_debug(std::mem::take(&mut self.debug)))
     }
@@ -3714,7 +3963,9 @@ impl<'a> Gen<'a> {
             Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
                 self.expr_acts(value, depth)
             }
-            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Mark(_, e, _) => self.expr_acts(e, depth),
+            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Mark(_, e, _) | Stmt::Add(_, e, _) => {
+                self.expr_acts(e, depth)
+            }
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
             Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
             Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
@@ -3732,9 +3983,10 @@ impl<'a> Gen<'a> {
 
     fn cond_acts(&self, c: &Cond, depth: u32) -> bool {
         match c {
-            Cond::Expr(e) | Cond::Nearest { r: e, .. } | Cond::Sniff { r: e, .. } => {
-                self.expr_acts(e, depth)
-            }
+            Cond::Expr(e)
+            | Cond::Nearest { r: e, .. }
+            | Cond::Sniff { r: e, .. }
+            | Cond::Best { r: e, .. } => self.expr_acts(e, depth),
             Cond::And(a, b) | Cond::Or(a, b) => {
                 self.cond_acts(a, depth) || self.cond_acts(b, depth)
             }
@@ -4194,6 +4446,38 @@ impl<'a> Gen<'a> {
                     ty: Ty::Target,
                 });
             }
+            Cond::Best {
+                field,
+                pred,
+                r,
+                bind,
+                at,
+            } => {
+                if !top {
+                    return Err(self.err(
+                        at,
+                        "`best ... as` must be a top-level conjunct (not under `or` or `not`)",
+                    ));
+                }
+                if self.local(bind).is_some() {
+                    return Err(self.err(at, format!("`{bind}` is already bound")));
+                }
+                self.hides(bind, &format!("binding `{bind}`"), at)?;
+                let slot = self.alloc_local(at, 2)?;
+                let f = self.field(field, at)?.0;
+                self.push_int(i32::from(f))?;
+                match pred {
+                    Some(p) => self.pred(p)?,
+                    None => self.push_int(pred::ANY)?,
+                }
+                self.expr(r)?;
+                self.asm.best(slot).jz(on_false);
+                self.locals.push(Local {
+                    name: bind.clone(),
+                    slot,
+                    ty: Ty::Target,
+                });
+            }
             Cond::Sniff { ch, r, bind, at } => {
                 if !top {
                     return Err(self.err(
@@ -4454,6 +4738,21 @@ impl<'a> Gen<'a> {
                     self.expr(a)?;
                 }
                 self.asm.op(*op);
+            }
+            Expr::Call { name, args, at } if self.field_named(name).is_some() => {
+                // `f(t)`: field `f` at a target.
+                let f = self.field(name, at)?.0;
+                match args.as_slice() {
+                    [Arg::Target(t)] => self.target(t)?,
+                    [Arg::Name(n, p)] => self.target(&Target::Named(n.clone(), p.clone()))?,
+                    _ => {
+                        return Err(self.err(
+                            at,
+                            format!("`{name}(t)` reads the field at one target (`{name}(here)`)"),
+                        ));
+                    }
+                }
+                self.asm.field_at(f);
             }
             Expr::Call { name, args, at } => {
                 let returns = self.call(name, args, at)?;
@@ -4810,6 +5109,53 @@ impl<'a> Gen<'a> {
                 let c = self.scent(ch, at)?;
                 self.expr(e)?;
                 self.asm.mark(c);
+            }
+            Stmt::Add(field, e, at) => {
+                let (f, def) = self.field(field, at)?;
+                if def.policy != Policy::Free {
+                    let word = if def.policy == Policy::Fixed {
+                        "fixed"
+                    } else {
+                        "conserved"
+                    };
+                    return Err(self.err(
+                        at,
+                        format!("`add {field}`: the field is {word}, so no rule makes or destroys what it holds"),
+                    ));
+                }
+                self.expr(e)?;
+                self.asm.field_add(f);
+            }
+            Stmt::Harvest {
+                drop,
+                field,
+                amount,
+                at,
+            } => {
+                let verb = if *drop { "drop" } else { "harvest" };
+                if self.cur.is_none() {
+                    return Err(
+                        self.err(at, format!("`{verb}` inside a sub: needs belong to a kind"))
+                    );
+                }
+                let (f, def) = self.field(field, at)?;
+                if def.policy == Policy::Fixed {
+                    return Err(self.err(
+                        at,
+                        format!("`{verb} {field}`: the field is fixed, no actor writes it"),
+                    ));
+                }
+                let slot = self.need_slot(field).ok_or_else(|| {
+                    self.err(
+                        at,
+                        format!("`{verb} {field}`: this kind has no need `{field}` to carry it in"),
+                    )
+                })?;
+                self.push_int(i32::from(f))?;
+                self.push_int(i32::from(slot))?;
+                self.expr(amount)?;
+                self.asm
+                    .act(if *drop { Action::Drop } else { Action::Harvest });
             }
             Stmt::Next(name, at) => {
                 let (Some(cur), Some(owner)) = (self.cur, self.owner) else {

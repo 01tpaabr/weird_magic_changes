@@ -3,7 +3,7 @@
 //! holds must work (the convention is at the top of RULES.md).
 //!
 //! - ```` ```rules ````: compiled with the built-in rules, an item it
-//!   declares (kind, trait, sub, const) replacing the built-in one of that
+//!   declares (kind, trait, sub, const, field) replacing the built-in one of that
 //!   name, and with no warning of its own. A block of bare rules is
 //!   compiled as the rules of a kind that extends `drinker(6, 2h, 3)` with
 //!   `sight 8`.
@@ -103,7 +103,7 @@ fn marked_error(b: &Block) -> (u32, String) {
 
 /// Items start at column 0 with one of these words; an item runs until the
 /// next one (or the end of the file).
-const ITEM_WORDS: [&str; 4] = ["kind", "trait", "sub", "const"];
+const ITEM_WORDS: [&str; 5] = ["kind", "trait", "sub", "const", "field"];
 
 /// The item a line at column 0 starts, by name.
 fn item_name(line: &str) -> Option<&str> {
@@ -439,6 +439,11 @@ fn the_limits_table_is_the_codes() {
         (
             "tags, scent channels per rule set".into(),
             vec![n(MAX_TAGS), n(sim_core::SCENT_CHANNELS)],
+        ),
+        ("fields per rule set".into(), vec![n(MAX_FIELDS)]),
+        (
+            "fields one think adds to".into(),
+            vec![n(sim_core::rules::vm::ADDS)],
         ),
         ("states per kind".into(), vec![n(MAX_STATES)]),
         ("sight".into(), vec![i64::from(MAX_SIGHT)]),

@@ -2155,3 +2155,84 @@ fn a_rule_keeps_the_terms_of_its_condition() {
         assert!(r.terms[r.terms.len() - 1].pc < r.body_pc);
     }
 }
+
+/// A field's declaration and every use of one say what is wrong, and where.
+#[test]
+fn field_errors_name_the_problem() {
+    let errs = [
+        ("field f max 0", "max 0 is not in 1..=65535"),
+        ("field f max 70000", "max 70000 is not in 1..=65535"),
+        ("field f max 4 { init 5 }", "init 5 is not in 0..=4"),
+        (
+            "field f max 4 { init noise scale 0 }",
+            "noise scale 0 is not above 0",
+        ),
+        ("field f max 4 { init 1 init 2 }", "`init` declared twice"),
+        ("field f max 4 { color \"red\" }", "color takes"),
+        (
+            "field f max 4 { glyph \"x\" }",
+            "expected `init`, `color` or `}`",
+        ),
+        ("field f max 4 field f max 5", "field `f` declared twice"),
+        ("field k max 4 kind k { }", "`k` is already a kind"),
+        ("field s max 4 sub s() { }", "`s` is already a sub"),
+        ("field C max 4 const C = 1", "`C` is already a const"),
+        ("field t max 4 kind k { tags t }", "`t` is already a tag"),
+        (
+            "field m max 4 kind k { sub m() { } }",
+            "`m` is already a sub of `k`",
+        ),
+        (
+            "field add max 4",
+            "`add` is a reserved word, not a field name",
+        ),
+        (
+            "kind k { when true => add f 1 }",
+            "no field `f`: the rules declare no field",
+        ),
+        (
+            "field g max 4 kind k { when true => add f 1 }",
+            "no field `f` (the fields: g)",
+        ),
+        (
+            "field f max 4 conserved kind k { when true => add f 1 }",
+            "the field is conserved",
+        ),
+        (
+            "field f max 4 fixed kind k { when true => add f 1 }",
+            "the field is fixed",
+        ),
+        (
+            "field f max 4 fixed kind k { need f max 4 decay 0  when true => harvest f 1 }",
+            "the field is fixed, no actor writes it",
+        ),
+        (
+            "field f max 4 kind k { when true => harvest f 1 }",
+            "this kind has no need `f`",
+        ),
+        (
+            "field f max 4 sub s() { drop f 1 } kind k { need f max 4  when true => s() }",
+            "`drop` inside a sub",
+        ),
+        (
+            "field f max 4 kind k { when f(1) > 0 => idle }",
+            "reads the field at one target",
+        ),
+        (
+            "field f max 4 kind k { when f(here, here) > 0 => idle }",
+            "reads the field at one target",
+        ),
+        (
+            "field f max 4 kind k { when not best f within 2 as b => idle }",
+            "must be a top-level conjunct",
+        ),
+        (
+            "kind k { when true => { add a 1  add b 1 } }",
+            "no field `a`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+}

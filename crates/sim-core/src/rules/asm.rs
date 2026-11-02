@@ -167,6 +167,22 @@ impl Asm {
         self.emit(OpCode::ScentAt, ch, 0)
     }
 
+    /// `dx dy -> v`: field `f` there.
+    pub fn field_at(&mut self, f: u8) -> &mut Self {
+        self.emit(OpCode::FieldAt, f, 0)
+    }
+
+    /// `f pred r -> found`, binding the cell with the most of field `f`
+    /// into `slot`, `slot + 1`.
+    pub fn best(&mut self, slot: u8) -> &mut Self {
+        self.emit(OpCode::Best, slot, 0)
+    }
+
+    /// `v ->`: add to field `f` on the actor's cell.
+    pub fn field_add(&mut self, f: u8) -> &mut Self {
+        self.emit(OpCode::FieldAdd, f, 0)
+    }
+
     /// One `for each` step over locals `slot..slot + 5` (`-> found`).
     pub fn for_each(&mut self, slot: u8) -> &mut Self {
         self.emit(OpCode::ForEach, slot, 0)

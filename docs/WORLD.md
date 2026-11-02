@@ -1,8 +1,9 @@
 # The world
 
-Status: **design, nothing built** (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
-measurement in §8 is done; the build order is §10. Syntax below is a proposal: it lands in
-`GRAMMAR.md` and `RULES.md` with each step, and may change there.
+Status: **step 1, fields, is built** (2026-11-01: §2, §4, `RULES.md` §12 "Fields", decision
+54); laws and the rest are design (owner, 2026-11-01; ARCHITECTURE decisions 49-53). The cost
+measurement in §8 is done; the build order is §10. Syntax below is a proposal until its step
+lands in `GRAMMAR.md` and `RULES.md`, and may change there.
 
 ## 1. The principle
 
@@ -43,21 +44,25 @@ field fox_scent max 255 { every 16 { fox_scent -= (fox_scent + 31) / 32 } }   # 
   chunk is made, never inside a tick. Folded into the chunk hash, saved by name (`store`,
   `FORMAT_VERSION` bumped), matched by name on reload like needs. Only fields some pack
   declares exist; a world without fields stores none.
-- **Values** are integers `0..=max`; laws and actors compute in `i32` and a store clamps.
+- **Values** are integers `0..=max`, 16 bits a cell (`max` 1 to 65535); laws and actors
+  compute in `i32` and a store clamps. A byte form for small maxes waits for a measurement
+  that says the memory matters.
 - **Names** are global, like every name in a rule set. A field may share its name with a need:
   `sugar(t)` is the field at a target, bare `sugar` the actor's own need (Sugarscape's agents
   carry the sugar the cells grow).
-- **Initial values** are a pure function of the seed and the cell (a number, another field,
-  noise), because chunks are made lazily as the camera reaches them.
+- **Initial values** are a pure function of the seed and the cell (`init V`, `init noise
+  scale S`; another field's value is not built), because chunks are made lazily as the camera
+  reaches them.
 - **Drawn** by a declared colour ramp (`color "#e0c040"`: intensity by value), and `relief` for
   a height field: hillshade from the neighbours.
-- **Scent becomes fields.** `mark` and `scent(CH)` are re-expressed as a field the built-in
-  pack declares, with the decay law above; the 4-channel limit and the fixed fade go away.
+- **Scent becomes fields** with step 2: `mark` and `scent(CH)` re-expressed as a field the
+  built-in pack declares, with the decay law above; the 4-channel limit and the fixed fade go
+  away. It needs laws, so scent stays as it is until then.
 
-**Reads by actors** (inside `sight`, as every search): `sugar(t)`; predicates on a field in
-searches, `count (sugar >= 3) within 4`, `nearest (sugar >= 3) within 6 as s`; and the best
-cell, `best sugar within 6 as s` (the largest value, ties broken by the same random ring start
-`nearest` uses).
+**Reads by actors** (inside `sight`, as every search): `sugar(t)`, and the best cell, `best
+sugar [on PRED] within 6 as s` (the largest value among the cells matching `PRED`, ties broken
+by the same random ring start `sniff` uses). Built. Predicates on a field in searches,
+`count (sugar >= 3) within 4`, wait for a world that needs them.
 
 ## 3. Laws
 
@@ -95,12 +100,12 @@ field fire max 9 {
 
 Two kinds, because they are two things:
 
-| | `add FIELD t n` (an effect) | `harvest FIELD t n` / `drop FIELD t n` (actions) |
+| | `add FIELD n` (an effect) | `harvest FIELD n` / `drop FIELD n` (actions) |
 |---|---|---|
 | means | emit or erase: pheromone, footsteps, heat, a claim | move units between the cell and the actor's need of that name |
 | conserved | no | yes: what the cell loses, the actor gains |
-| target | `here` or adjacent | `here` or adjacent |
-| settled | every delta to a cell summed in `i64`, clamped once: no order | key order when contested, like `take` and `give` |
+| target | the actor's own cell | the actor's own cell |
+| settled | in Apply, in key order, each clamped to `0..=max` | in Apply, in key order (a standing actor and its cover share a cell) |
 | like today | `mark` (combines with the action, doesn't end the think) | `take`, `give` (one action a think; `BLOCKED` if nothing moved) |
 
 **A write policy per field.** By default a field takes both. `conserved` allows only `harvest`
@@ -117,6 +122,11 @@ field climate max 100 fixed { init noise scale 400 }
 
 A simulation wants this as much as a game: it turns "nothing is created" from a convention the
 author keeps into a property the compiler checks and `sim::invariants` tests.
+
+**Own cell only** (built so, 2026-11-01). The design had `here` or adjacent; every write
+lands on the writer's own cell instead, so no write crosses a chunk border: Apply settles them
+per chunk, in parallel, with no outbox. A cell is written by who stands on it and by its law;
+a world that needs to throw something next door moves first. Revisit when one can't.
 
 The tick: actors think -> bites -> transfers (`take`, `give`, `harvest`, `drop`, key order) ->
 deltas -> laws due this tick (compute, commit). Each a phase, chained. Cross-chunk writes use
@@ -221,12 +231,13 @@ Each step is general (any pack can use it), lands with its tests, fuzzers and do
 workflow rules: `GRAMMAR.md` + `gen_rules.rs` Lively mode, store round trip + `store/fuzz.rs`,
 `sim::invariants`, a scenario test, a doc example), and `make fuzz` before it closes.
 
-1. **Fields**: declaration, storage, hash, store, ramp rendering; reads and field predicates in
-   searches; `add`, `harvest`, `drop`; the write policy (`conserved`, `fixed`); scent
-   re-expressed as fields. Invariant: a `conserved` field's total plus its needs' total
-   changes only by its law.
+1. **Fields** (built, 2026-11-01): declaration, storage, hash, store, ramp rendering; `F(t)`
+   and `best F [on PRED]`; `add`, `harvest`, `drop` on the actor's own cell; the write policy
+   (`conserved`, `fixed`); `packs/gather` and its scenario test. Tested: a `conserved`
+   field's total plus its needs' total stays put under `harvest` and `drop`.
 2. **Laws**: the column compiler and interpreter, cadence, compute/commit phases, the neighbour
-   halo, the edge rule (§11), the quiet-chunk skip. Life as a field law, with a PERF row.
+   halo, the edge rule (§11), the quiet-chunk skip; scent re-expressed as fields. Life as a
+   field law, with a PERF row.
 3. **Declared terrain**: materials, `dig`, `build`, the built-in pack declaring today's three.
 4. **Height**: `along`, `sees`, `reach`, `climb`, hillshade; then `flow` for water.
 5. **Layers.**
@@ -272,7 +283,7 @@ player's array; an arena may cap how many a player declares (`private fields 2`)
 field trail max 255 private { every 16 { trail -= (trail + 31) / 32 } }
 kind ant {
   ...
-  when carrying > 0 => add trail here 40  move toward nest
+  when carrying > 0 => { add trail 40  move toward nest }
   when best trail within 4 as t => move toward t
 }
 ```

@@ -17,7 +17,8 @@
 use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
 use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
-use crate::rng::{hash_cell, unit_f32};
+use crate::rng::{hash_cell, splitmix64, unit_f32};
+use crate::rules::{FieldDef, FieldInit};
 use crate::scenario::{DrawnMap, Placed, Placement};
 use bytemuck::Zeroable;
 
@@ -29,6 +30,9 @@ pub const STREAM_UID: u64 = 0x0004;
 pub const STREAM_PLACE: u64 = 0x0006;
 /// Run-time ground-cover births; never reuse.
 pub const STREAM_UID_COVER: u64 = 0x0007;
+/// Field noise: this, with a hash of the field's name above bit 16, so a
+/// field keeps its values whatever else the rules declare.
+pub const STREAM_FIELD: u64 = 0x0008;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -152,6 +156,50 @@ pub fn generate_many(
         generate_chunk(terrain, placement, c, data);
     });
     out
+}
+
+/// Give every chunk in `out` (made at `coords`) a layer per field, from
+/// each field's `init`. In parallel, like [`generate_many`]; pure.
+pub fn fill_fields_many(
+    seed: u64,
+    fields: &[FieldDef],
+    coords: &[ChunkCoord],
+    out: &mut [ChunkData],
+) {
+    if fields.is_empty() {
+        return;
+    }
+    par_zip_mut(coords, out, GEN_BATCH, |&c, data| {
+        data.cells.fields.clear();
+        data.cells
+            .fields
+            .extend(fields.iter().map(|f| field_layer(seed, f, c)));
+    });
+}
+
+/// Field `def`'s layer for chunk `coord`: its `init` value everywhere, or
+/// value noise of its scale mapped onto `0..=max`. Pure.
+pub fn field_layer(seed: u64, def: &FieldDef, coord: ChunkCoord) -> [u16; CHUNK_CELLS] {
+    match def.init {
+        FieldInit::Value(v) => [v.min(def.max); CHUNK_CELLS],
+        FieldInit::Noise(scale) => {
+            let name = def
+                .name
+                .bytes()
+                .fold(0x0F1E_1D00_u64, |h, b| splitmix64(h ^ u64::from(b)));
+            let stream = STREAM_FIELD ^ (name << 16);
+            #[allow(clippy::cast_precision_loss)] // a scale of cells, far below 2^24
+            let (scale, max) = (scale.max(1) as f32, f32::from(def.max));
+            std::array::from_fn(|i| {
+                let p = coord.cell(i);
+                let n = fbm2(seed, stream, p.x as f32 / scale, p.y as f32 / scale);
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                // clamped to 0..=max, which fits u16
+                let v = (n * max).round().clamp(0.0, max) as u16;
+                v
+            })
+        }
+    }
 }
 
 /// Chunks per generation task. Measured (`make bench`, `generate_many`):

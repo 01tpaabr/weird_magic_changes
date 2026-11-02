@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos, SCENT_CHANNELS};
 
-use super::palette::{Color, Looks, VOID, scented, style};
+use super::palette::{Color, Looks, VOID, fielded, scented, style};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -218,6 +218,7 @@ fn render_row<'c>(
                     } else {
                         s.bg
                     };
+                    let bg = fielded(bg, looks.fields, &c.fields, local + k);
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = bg.scaled(light).0;
@@ -290,7 +291,12 @@ mod tests {
                             looks.soil,
                         );
                         crate::render::palette::Style {
-                            bg: scented(s.bg, std::array::from_fn(|j| ch.scent[j][i])),
+                            bg: fielded(
+                                scented(s.bg, std::array::from_fn(|j| ch.scent[j][i])),
+                                looks.fields,
+                                &ch.fields,
+                                i,
+                            ),
                             ..s
                         }
                     }
