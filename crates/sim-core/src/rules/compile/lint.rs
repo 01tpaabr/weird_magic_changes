@@ -211,6 +211,17 @@ impl Seen<'_> {
                 self.names.all.insert(name.clone());
                 args.iter().for_each(|a| self.arg(a));
             }
+            Expr::Along { field, target, .. } => {
+                self.names.all.insert(field.clone());
+                self.target(target);
+            }
+            Expr::Sees {
+                target, field, eye, ..
+            } => {
+                self.names.all.insert(field.clone());
+                self.target(target);
+                eye.iter().for_each(|e| self.expr(e));
+            }
             Expr::Agg { of, r, .. } => {
                 match &**of {
                     AggOf::Field(f, _) => {
@@ -1001,6 +1012,13 @@ impl<'a> Gen<'a> {
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
             | Expr::SignalOf(t, _) => self.walk_target(kinds, w, t, out),
+            Expr::Along { target, .. } => self.walk_target(kinds, w, target, out),
+            Expr::Sees { target, eye, .. } => {
+                self.walk_target(kinds, w, target, out);
+                if let Some(e) = eye {
+                    self.walk_expr(kinds, w, e, out);
+                }
+            }
             Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) | Expr::Agg { .. } => {
             }
         }

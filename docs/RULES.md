@@ -95,6 +95,8 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `fuel N` | 512 | ops per think, 1 to 4096 |
 | `food T` | 0 | what eating a whole one gives an eater (see `eat`), 0 or more |
 | `bite N` | 1 | health taken per `eat`/`hit`/`graze`, 0 to 255 |
+| `reach N` | 1 | how far `eat`, `hit` and `graze` land: a target up to N cells away, 1 to 16. The rules check what is in the way (`sees`) |
+| `climb N on F` | none | `move` takes no step that rises more than N in field F (a height): it slides past one, as past a taken cell, and is `BLOCKED` if every way is too steep |
 | `need NAME max M [decay 0\|1] [vital]` | `decay 1` | a counter, at most 4 per kind; `decay 1` loses one per tick (ticks until empty), `decay 0` never decays (points). `decay` is a switch, not a rate: any other number is an error |
 | `mem a, b, ...` | | memory slots, at most 12 per kind, all 0 at birth |
 
@@ -325,6 +327,8 @@ nothing is loaded or beyond reach. A condition finds the richest cell:
 
 | condition | |
 |---|---|
+| `sum F along t`, `min F along t`, `max F along t` | field F over the cells of the line from the actor (not its own cell) to t, at most `sight` of them: smoke in the way, the highest point between. 0 for no cell |
+| `sees(t) over F [eye N]` | 1 if no cell between the actor and t rises above the straight line from the actor's F plus N to t's F plus N (N defaults to 0): line of sight over a height. 0 past `sight`, or with a cell between not loaded |
 | `best F [on pred] within r as v` | binds `v` to the cell in rings 1 to r (not its own) with the most of field F, among the cells matching `pred` if `on` names one (`best sugar on free within 6 as s`); false if every such cell holds 0. Scanned as `sniff` scans, so ties go to a random start |
 
 Searches (`count`, `nearest`, `best`, `for each`) are capped by `sight` and see into the
@@ -477,6 +481,7 @@ kind gatherer {
 | `color "#rrggbb"` | not drawn | tints each cell toward the colour, by its value against the max |
 | `every N { ... }` | no law | its law: run in every cell every N ticks (below) |
 | `outside V` | the chunk's edge | what its law reads beyond the loaded world |
+| `relief` | flat | drawn with its slopes shaded, lit from the north-west: for a height |
 
 Actors read a field with `F(t)` and `best` (§10), and change it on their own cell only:
 `add` (§9), `harvest` and `drop` (§8). A field's name is global, like a kind's: never a

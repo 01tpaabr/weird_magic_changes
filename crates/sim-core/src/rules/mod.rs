@@ -75,6 +75,8 @@ pub struct FieldDef {
     /// What its law reads where nothing is loaded; `None`: the chunk's own
     /// edge.
     pub outside: Option<u16>,
+    /// `relief`: the renderer shades its slopes (a height).
+    pub relief: bool,
     /// Its law, if it has one.
     pub law: Option<law::Law>,
 }
@@ -176,6 +178,11 @@ pub struct KindDef {
     /// What an eater gains, in ticks of food.
     pub food: i32,
     pub bite: u8,
+    /// How far `eat`, `hit` and `graze` reach, in cells (1: a neighbour).
+    pub reach: u8,
+    /// `climb N on F`: `move` refuses a step that rises more than N in
+    /// field F (its index).
+    pub climb: Option<(u8, i32)>,
     /// At most [`NEED_SLOTS`].
     pub needs: Vec<NeedDef>,
     /// Memory slot names, at most [`MEM_SLOTS`].
@@ -508,6 +515,7 @@ impl Kinds {
                 scale,
                 f.color.map_or(u64::MAX, u64::from),
                 f.outside.map_or(u64::MAX, u64::from),
+                u64::from(f.relief),
             ] {
                 h = splitmix64(h ^ v);
             }
@@ -597,7 +605,11 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
         mix(u64::from(d.glyph)
             | u64::from(d.cadence_shift) << 8
             | u64::from(d.sight) << 16
-            | u64::from(d.bite) << 24);
+            | u64::from(d.bite) << 24
+            | u64::from(d.reach) << 32);
+        if let Some((f, n)) = d.climb {
+            mix(u64::from(f) << 32 | u64::from(n as u32));
+        }
         mix(d.tags);
         mix(u64::from(d.color) | 1 << 43);
         mix(u64::from(d.cover) | 1 << 44);

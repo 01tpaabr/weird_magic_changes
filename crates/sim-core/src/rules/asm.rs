@@ -152,6 +152,17 @@ impl Asm {
         self.emit(OpCode::RandomFree, slot, 0)
     }
 
+    /// `dx dy -> v`: field `f` along the line there (`op`: 0 sum, 1 least,
+    /// 2 most).
+    pub fn along(&mut self, f: u8, op: u8) -> &mut Self {
+        self.emit(OpCode::Along, op << 6 | f, 0)
+    }
+
+    /// `dx dy eye -> seen`: line of sight there over field `f`.
+    pub fn sees(&mut self, f: u8) -> &mut Self {
+        self.emit(OpCode::Sees, f, 0)
+    }
+
     /// `dx dy -> v`: field `f` there.
     pub fn field_at(&mut self, f: u8) -> &mut Self {
         self.emit(OpCode::FieldAt, f, 0)

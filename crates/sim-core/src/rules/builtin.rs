@@ -204,6 +204,8 @@ pub fn hand_assembled() -> Kinds {
             fuel: 512,
             food: hours(3) as i32,
             bite: 1,
+            reach: 1,
+            climb: None,
             needs: vec![
                 need("water", days(1) as i32, true),
                 need("health", 1, false),
@@ -226,6 +228,8 @@ pub fn hand_assembled() -> Kinds {
             fuel: 512,
             food: 0,
             bite: 1,
+            reach: 1,
+            climb: None,
             needs: vec![
                 need("water", days(3) as i32, true),
                 need("health", 100, false),

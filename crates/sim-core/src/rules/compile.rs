@@ -459,6 +459,10 @@ struct Decls {
     fuel: Option<(Expr, Pos)>,
     food: Option<(Expr, Pos)>,
     bite: Option<(Expr, Pos)>,
+    /// `reach N`: how far `eat`, `hit` and `graze` reach.
+    reach: Option<(Expr, Pos)>,
+    /// `climb N on F`: the most a step may rise in field F.
+    climb: Option<(Expr, String, Pos)>,
     tags: Vec<String>,
     needs: Vec<NeedAst>,
     mems: Vec<(String, Pos)>,
@@ -524,6 +528,8 @@ struct FieldAst {
     outside: Option<(Expr, Pos)>,
     /// `every N { body }`: its law.
     law: Option<(Expr, Vec<Stmt>, Pos)>,
+    /// `relief`: drawn with its slopes shaded.
+    relief: bool,
 }
 
 /// `const NAME = expr`: a file-scope integer, folded at compile time.
@@ -773,6 +779,20 @@ enum Expr {
         args: Vec<Arg>,
         at: Pos,
     },
+    /// `sum|min|max F along t`: field F over the line to `t` (op 0, 1, 2).
+    Along {
+        op: u8,
+        field: String,
+        target: Box<Target>,
+        at: Pos,
+    },
+    /// `sees(t) over F [eye N]`: line of sight over a heightfield.
+    Sees {
+        target: Box<Target>,
+        field: String,
+        eye: Option<Box<Expr>>,
+        at: Pos,
+    },
     /// In a field's law only: `sum|avg|min|max F within r` over the 3 x 3
     /// square, or `count (cond) within r` (the cells where it holds).
     Agg {
@@ -953,6 +973,7 @@ pub const KEYWORDS: &[&str] = &[
     "harvest",
     "drop",
     "best",
+    "sees",
     "trait",
     "extends",
     "inherit",
@@ -968,9 +989,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 13] = [
+const DECL_WORDS: [&str; 15] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
-    "place", "need", "mem",
+    "place", "need", "mem", "reach", "climb",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -1230,9 +1251,17 @@ impl Parser<'_> {
             Policy::Free
         };
         let (mut init, mut color, mut outside, mut law) = (None, None, None, None);
+        let mut relief = false;
         if self.eat_sym("{") {
             while !self.eat_sym("}") {
                 let p = self.pos();
+                if self.eat_kw("relief") {
+                    if relief {
+                        return Err(self.err_at(&p, "`relief` declared twice"));
+                    }
+                    relief = true;
+                    continue;
+                }
                 if self.eat_kw("outside") {
                     if outside.is_some() {
                         return Err(self.err_at(&p, "`outside` declared twice"));
@@ -1277,7 +1306,7 @@ impl Parser<'_> {
                     color = Some(c.ok_or_else(|| self.err_at(&p, "color takes \"#rrggbb\""))?);
                 } else {
                     return Err(self.err(format!(
-                        "expected `init`, `color`, `outside`, `every` or `}}` in a field, found {}",
+                        "expected `init`, `color`, `outside`, `every`, `relief` or `}}` in a field, found {}",
                         self.describe()
                     )));
                 }
@@ -1292,6 +1321,7 @@ impl Parser<'_> {
             color,
             outside,
             law,
+            relief,
         })
     }
 
@@ -1519,6 +1549,8 @@ impl Parser<'_> {
                 ("fuel", d.fuel.is_some()),
                 ("food", d.food.is_some()),
                 ("bite", d.bite.is_some()),
+                ("reach", d.reach.is_some()),
+                ("climb", d.climb.is_some()),
             ];
             if let Some((w, _)) = given.iter().find(|(w, set)| *set && self.is_kw(w)) {
                 return Err(self.err_at(&p, format!("`{w}` declared twice")));
@@ -1563,6 +1595,13 @@ impl Parser<'_> {
                 d.food = Some((self.additive()?, p));
             } else if self.eat_kw("bite") {
                 d.bite = Some((self.additive()?, p));
+            } else if self.eat_kw("reach") {
+                d.reach = Some((self.additive()?, p));
+            } else if self.eat_kw("climb") {
+                let n = self.additive()?;
+                self.expect_kw("on")?;
+                let (f, _) = self.ident("field name")?;
+                d.climb = Some((n, f, p));
             } else if self.eat_kw("cover") {
                 d.cover = true;
             } else if self.eat_kw("solid") {
@@ -2286,6 +2325,44 @@ impl Parser<'_> {
                 {
                     return self.agg(op, at);
                 }
+                if !self.law
+                    && matches!(n.as_str(), "sum" | "min" | "max")
+                    && matches!(self.peek(), Tok::Name(_))
+                    && matches!(self.peek2(), Tok::Name(w) if w == "along")
+                {
+                    let (field, _) = self.ident("field name")?;
+                    self.bump();
+                    let target = Box::new(self.target()?);
+                    let op = match n.as_str() {
+                        "sum" => 0,
+                        "min" => 1,
+                        _ => 2,
+                    };
+                    return Ok(Expr::Along {
+                        op,
+                        field,
+                        target,
+                        at,
+                    });
+                }
+                if n == "sees" {
+                    self.expect_sym("(")?;
+                    let target = Box::new(self.target()?);
+                    self.expect_sym(")")?;
+                    self.expect_kw("over")?;
+                    let (field, _) = self.ident("field name")?;
+                    let eye = if self.eat_kw("eye") {
+                        Some(Box::new(self.unary()?))
+                    } else {
+                        None
+                    };
+                    return Ok(Expr::Sees {
+                        target,
+                        field,
+                        eye,
+                        at,
+                    });
+                }
                 if let Some(s) = sense_named(&n) {
                     return Ok(Expr::Sense(s));
                 }
@@ -2527,6 +2604,9 @@ struct Inst<'a> {
     fuel: Option<u32>,
     food: Option<i32>,
     bite: Option<u8>,
+    reach: Option<u8>,
+    /// The most a step may rise, and in which field.
+    climb: Option<(i32, u8)>,
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
@@ -3022,6 +3102,7 @@ impl<'a> Gen<'a> {
                 color: f.color,
                 outside,
                 law: None,
+                relief: f.relief,
             });
         }
         // Laws last: a law reads any field, declared before it or after.
@@ -3621,6 +3702,25 @@ impl<'a> Gen<'a> {
         let fuel = self.pick(fuel, &parents, |i| i.fuel, "fuel budgets", item)?;
         let food = self.pick(food, &parents, |i| i.food, "food values", item)?;
         let bite = self.pick(bite, &parents, |i| i.bite, "bites", item)?;
+        let reach = self
+            .decl_num(
+                &d.reach,
+                |r| (1..=i32::from(MAX_SIGHT)).contains(&r),
+                &format!("reach is 1 to {MAX_SIGHT} cells"),
+            )?
+            .map(|r| u8::try_from(r).expect("1..=MAX_SIGHT, checked above"));
+        let reach = self.pick(reach, &parents, |i| i.reach, "reaches", item)?;
+        let climb = match &d.climb {
+            None => None,
+            Some((n, f, at)) => {
+                let n = self.fold(n, at)?;
+                if n < 0 {
+                    return Err(self.err(at, format!("climb {n}: a step rises 0 or more")));
+                }
+                Some((n, self.field(f, at)?.0))
+            }
+        };
+        let climb = self.pick(climb, &parents, |i| i.climb, "climbs", item)?;
         let cover = d.cover || parents.iter().any(|&p| self.insts[p].cover);
         let solid = d.solid || parents.iter().any(|&p| self.insts[p].solid);
 
@@ -3843,6 +3943,8 @@ impl<'a> Gen<'a> {
             fuel,
             food,
             bite,
+            reach,
+            climb,
             tags,
             needs,
             mems,
@@ -4049,6 +4151,8 @@ impl<'a> Gen<'a> {
             fuel: inst.fuel.unwrap_or(512),
             food: inst.food.unwrap_or(0),
             bite: inst.bite.unwrap_or(1),
+            reach: inst.reach.unwrap_or(1),
+            climb: inst.climb.map(|(n, f)| (f, n)),
             needs: inst.needs.clone(),
             mems: inst.mems.clone(),
             states: u8::try_from(inst.states.len().max(1)).expect("at most MAX_STATES states"),
@@ -4301,6 +4405,11 @@ impl<'a> Gen<'a> {
             }
             // Only in a law, which never acts.
             Expr::Agg { .. } => false,
+            Expr::Along { target, .. } => self.target_acts(target, depth),
+            Expr::Sees { target, eye, .. } => {
+                self.target_acts(target, depth)
+                    || eye.as_ref().is_some_and(|e| self.expr_acts(e, depth))
+            }
             Expr::Bin(_, a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
             Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
             Expr::Dist(t)
@@ -4926,6 +5035,30 @@ impl<'a> Gen<'a> {
         match e {
             Expr::Agg { at, .. } => {
                 return Err(self.err(at, "an aggregate belongs in a field's law"));
+            }
+            Expr::Along {
+                op,
+                field,
+                target,
+                at,
+            } => {
+                let f = self.field(field, at)?.0;
+                self.target(target)?;
+                self.asm.along(f, *op);
+            }
+            Expr::Sees {
+                target,
+                field,
+                eye,
+                at,
+            } => {
+                let f = self.field(field, at)?.0;
+                self.target(target)?;
+                match eye {
+                    Some(e) => self.expr(e)?,
+                    None => self.push_int(0)?,
+                }
+                self.asm.sees(f);
             }
             Expr::Int(v) => self.push_int(*v)?,
             Expr::Sense(s) => {

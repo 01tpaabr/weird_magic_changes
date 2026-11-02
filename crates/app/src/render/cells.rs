@@ -11,7 +11,7 @@ use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
 use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
-use super::palette::{Color, Looks, VOID, feature_look, fielded, ground_look, style_of};
+use super::palette::{Color, Looks, VOID, feature_look, fielded, ground_look, relieved, style_of};
 
 /// Frame rows per task. 160 columns x 8 rows is ~10 KB of output per task;
 /// small frames run on one task and skip the pool entirely.
@@ -190,6 +190,12 @@ fn render_row<'c>(
     let x_end = view.origin.x.saturating_add(w);
     let mut x = view.origin.x;
     let mut i = 0usize;
+    // The first field drawn in relief, if any: its index and max.
+    let relief = looks
+        .fields
+        .iter()
+        .position(|f| f.relief)
+        .map(|f| (f, looks.fields[f].max));
     while x < x_end {
         let (cc, local) = Pos::new(x, y).split();
         let span_end = (cc.origin().x + CHUNK_SIZE).min(x_end);
@@ -214,7 +220,20 @@ fn render_row<'c>(
                         looks.occupant(o),
                         looks.actor(cover),
                     );
-                    let bg = fielded(s.bg, looks.fields, &c.fields, local + k);
+                    let mut bg = fielded(s.bg, looks.fields, &c.fields, local + k);
+                    if let Some((f, max)) = relief {
+                        // The neighbours north-west and south-east, in any
+                        // chunk; a cell where none is loaded reads as this one.
+                        let x = x + i32::try_from(k).expect("a span of a chunk");
+                        let own = i32::from(c.fields[f][local + k]);
+                        let at = |dx: i32, dy: i32| {
+                            let (cc, i) = Pos::new(x + dx, y + dy).split();
+                            chunk(cc)
+                                .and_then(|c| c.fields.get(f))
+                                .map_or(own, |l| i32::from(l[i]))
+                        };
+                        bg = relieved(bg, at(-1, -1), at(1, 1), max);
+                    }
                     *go = s.glyph;
                     *fo = s.fg.scaled(light).0;
                     *bo = bg.scaled(light).0;

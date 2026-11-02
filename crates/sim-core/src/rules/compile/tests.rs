@@ -2172,7 +2172,7 @@ fn field_errors_name_the_problem() {
         ("field f max 4 { color \"red\" }", "color takes"),
         (
             "field f max 4 { glyph \"x\" }",
-            "expected `init`, `color`, `outside`, `every` or `}`",
+            "expected `init`, `color`, `outside`, `every`, `relief` or `}`",
         ),
         ("field f max 4 field f max 5", "field `f` declared twice"),
         ("field k max 4 kind k { }", "`k` is already a kind"),
@@ -2493,4 +2493,54 @@ fn build_and_dig_errors_name_the_problem() {
         "kind k { when true => build rock at north  when true => dig south }",
     )
     .unwrap();
+}
+
+/// Height's words say what is wrong.
+#[test]
+fn height_errors_name_the_problem() {
+    let errs = [
+        ("kind k { reach 0 }", "reach is 1 to 16 cells"),
+        ("kind k { reach 17 }", "reach is 1 to 16 cells"),
+        ("kind k { climb 2 on height }", "no field `height`"),
+        (
+            "field h max 9 kind k { climb -1 on h }",
+            "a step rises 0 or more",
+        ),
+        ("field h max 9 kind k { climb 2 h }", "expected `on`"),
+        (
+            "kind k { mem m  when true => m = sees(north) over h }",
+            "no field `h`",
+        ),
+        (
+            "field h max 9 kind k { mem m  when true => m = sees(north) h }",
+            "expected `over`",
+        ),
+        (
+            "kind k { mem m  when true => m = max h along north }",
+            "no field `h`",
+        ),
+        ("field h max 9 { relief relief }", "`relief` declared twice"),
+        (
+            "field h max 9 { every 1 { h = max h along north } }",
+            "expected `within`",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    let k = compile(
+        "t.rules",
+        "field h max 9 { relief }
+         trait tall { reach 3  climb 2 on h }
+         kind k extends tall { mem m
+           when true => m = sees(at(x + 2, y)) over h eye 1 + sum h along north + min h along east }",
+    )
+    .unwrap();
+    assert_eq!(
+        (k.defs[0].reach, k.defs[0].climb),
+        (3, Some((0, 2))),
+        "inherited"
+    );
+    assert!(k.fields[0].relief);
 }

@@ -163,6 +163,15 @@ pub enum OpCode {
     /// `v ->`: add `v` to field `a` on the actor's cell (an effect, applied
     /// in Apply; several to one field add up)
     FieldAdd,
+    /// `dx dy -> v`: field `a & 63` over the cells of the line from the
+    /// actor (not its own cell) to the target, at most `sight` of them:
+    /// their sum (`a >> 6 == 0`), least (1) or most (2); 0 for no cell
+    Along,
+    /// `dx dy eye -> seen`: no cell between the actor and the target rises
+    /// above the straight line from the actor's field `a` plus `eye` to
+    /// the target's plus `eye` (line of sight over a heightfield); an
+    /// unloaded cell between, or a target past `sight`, is not seen
+    Sees,
     /// `base (fo v)*n -> pred`, `n = a >> 4`: a search's field condition
     /// (`(sugar < 20 and free)`). Stores `base` (a predicate, or
     /// [`pred::ANY`]) and each term, `fo = field << 8 | comparison`, in
@@ -189,7 +198,8 @@ impl OpCode {
             O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
             O::Count | O::Nearest | O::Dist | O::FreeAt => (2, 1),
-            O::LookAt | O::SignalAt | O::FieldAt => (2, 1),
+            O::LookAt | O::SignalAt | O::FieldAt | O::Along => (2, 1),
+            O::Sees => (3, 1),
             O::Best => (3, 1),
             O::FieldPred => (1 + 2 * (a >> 4), 1),
             O::DirOf => (1, 2),
@@ -980,6 +990,69 @@ impl Machine<'_> {
         Ok((best.0 > 0).then_some((best.1, best.2)))
     }
 
+    /// The cells of the line from the actor to `(dx, dy)`: `k` of `n`
+    /// steps, rounded (half up), the same whichever thread runs it.
+    #[inline]
+    fn line_cell(dx: i32, dy: i32, k: i32, n: i32) -> (i32, i32) {
+        let r = |d: i32| (2 * d * k + n).div_euclid(2 * n);
+        (r(dx), r(dy))
+    }
+
+    /// [`OpCode::Along`].
+    fn along(&mut self, a: u8, dx: i32, dy: i32) -> Result<i32, Trap> {
+        let (f, op) = (usize::from(a & 63), a >> 6);
+        let n = dx.abs().max(dy.abs()).min(i32::from(self.ctx.kind.sight));
+        if n == 0 {
+            return Ok(0);
+        }
+        self.spend(n.unsigned_abs() / SEARCH_DIV)?;
+        let full = dx.abs().max(dy.abs());
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let mut acc = match op {
+            0 => 0,
+            1 => i32::MAX,
+            _ => i32::MIN,
+        };
+        for k in 1..=n {
+            let (cx, cy) = Self::line_cell(dx, dy, k, full);
+            let v = self.ctx.halo.field(lx, ly, cx, cy, f);
+            acc = match op {
+                0 => acc.wrapping_add(v),
+                1 => acc.min(v),
+                _ => acc.max(v),
+            };
+        }
+        Ok(acc)
+    }
+
+    /// [`OpCode::Sees`].
+    fn sees(&mut self, f: u8, dx: i32, dy: i32, eye: i32) -> Result<bool, Trap> {
+        let n = dx.abs().max(dy.abs());
+        if n == 0 {
+            return Ok(true);
+        }
+        if n > i32::from(self.ctx.kind.sight) {
+            return Ok(false);
+        }
+        self.spend(n.unsigned_abs() / SEARCH_DIV)?;
+        let f = usize::from(f);
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        let h = |cx: i32, cy: i32| i64::from(self.ctx.halo.field(lx, ly, cx, cy, f));
+        let (h0, h1) = (h(0, 0) + i64::from(eye), h(dx, dy) + i64::from(eye));
+        let n64 = i64::from(n);
+        for k in 1..n {
+            let (cx, cy) = Self::line_cell(dx, dy, k, n);
+            if self.ctx.halo.at(lx, ly, cx, cy).is_none() {
+                return Ok(false);
+            }
+            // The cell's top against the sight line there, both times n.
+            if h(cx, cy) * n64 > h0 * (n64 - i64::from(k)) + h1 * i64::from(k) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// One `for each` step (see [`OpCode::ForEach`]): locals `a..a+5`.
     fn for_each(&mut self, a: u8) -> Result<bool, Trap> {
         if usize::from(a) + usize::from(FOR_EACH_LOCALS) > FRAME_LOCALS {
@@ -1404,6 +1477,19 @@ impl Machine<'_> {
                         let a = self.pop()?;
                         self.out.with = [a, b];
                     }
+                    O::Along => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let v = self.along(op.a, dx, dy)?;
+                        self.push(v)?;
+                    }
+                    O::Sees => {
+                        let eye = self.pop()?;
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let seen = self.sees(op.a, dx, dy, eye)?;
+                        self.push(i32::from(seen))?;
+                    }
                     O::FieldAt => {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
@@ -1655,6 +1741,8 @@ mod tests {
             fuel: 512,
             food: 0,
             bite: 1,
+            reach: 1,
+            climb: None,
             needs,
             mems: vec![],
             states: 1,

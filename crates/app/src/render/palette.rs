@@ -105,6 +105,28 @@ pub const TEXT_BG: Color = Color::rgb(0x1b, 0x1b, 0x20);
 /// How far a cell with ground cover is tinted toward the cover's colour: a
 /// meadow reads as a green patch, and whoever stands in it stays drawn.
 pub const COVER_TINT: u8 = 0x70;
+/// The most a slope lightens or darkens a cell (`relief`).
+pub const RELIEF_TINT: u8 = 0x70;
+
+/// `bg` shaded by the slope of a `relief` field: lit (toward white) where the
+/// ground falls away toward the north-west light, shadowed where it rises:
+/// `nw` and `se` are the heights of those neighbours, `max` the field's.
+pub fn relieved(bg: Color, nw: i32, se: i32, max: u16) -> Color {
+    let d = nw - se;
+    if d == 0 {
+        return bg;
+    }
+    // A slope of a sixteenth of the max across two cells is a full shade.
+    let t = (d.unsigned_abs() * 16 * u32::from(RELIEF_TINT) / u32::from(max.max(1)))
+        .min(u32::from(RELIEF_TINT));
+    let t = u8::try_from(t).expect("at most RELIEF_TINT");
+    if d < 0 {
+        bg.mix(Color::rgb(0xff, 0xff, 0xff), t)
+    } else {
+        bg.mix(Color::rgb(0, 0, 0), t)
+    }
+}
+
 /// How far a field at its max tints a cell toward the field's colour.
 pub const FIELD_TINT: u8 = 0xb0;
 
@@ -393,6 +415,7 @@ mod tests {
             color,
             outside: None,
             law: None,
+            relief: false,
         };
         let defs = [def(Some(0x00ff_0000)), def(None)];
         let mut layers = vec![[0u16; sim_core::CHUNK_CELLS]; 2];
@@ -405,6 +428,16 @@ mod tests {
         layers[0][3] = 5;
         let half = SOIL_BG.mix(Color(0x00ff_0000), FIELD_TINT / 2);
         assert_eq!(fielded(SOIL_BG, &defs, &layers, 3), half);
+        // Relief: flat leaves the cell alone; a rise toward the light
+        // darkens it, a fall lightens it, a full shade at most.
+        assert_eq!(relieved(SOIL_BG, 5, 5, 100), SOIL_BG);
+        let lit = relieved(SOIL_BG, 0, 50, 100);
+        assert_eq!(lit, SOIL_BG.mix(Color::rgb(0xff, 0xff, 0xff), RELIEF_TINT));
+        assert_ne!(relieved(SOIL_BG, 3, 0, 100), SOIL_BG);
+        assert_eq!(
+            relieved(SOIL_BG, 50, 0, 100),
+            SOIL_BG.mix(Color::rgb(0, 0, 0), RELIEF_TINT)
+        );
         assert_eq!(
             style(
                 Ground::Soil,

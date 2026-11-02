@@ -71,6 +71,9 @@ IDENT = NAME that is not a reserved word
 | `dx`, `dy` | a binding's offset, after `.` | any name |
 | `conserved`, `fixed`, `init`, `noise`, `scale`, `outside`, `every` | in a `field` declaration | any name |
 | `ground`, `feature` | start a material at the top of a file | any name |
+| `reach`, `climb` | start a declaration at the top of a kind or trait body | any name (a trait parameter `reach`) |
+| `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
+| `relief` | in a `field` block | any name |
 | `walkable`, `blocks` | in a material's block | any name |
 | `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
@@ -121,6 +124,7 @@ decl = "glyph" STRING
      | "solid"
      | "tags" { TAG }
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
+     | "reach" additive | "climb" additive "on" IDENT
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
      | "mem" IDENT { "," IDENT }
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
@@ -216,6 +220,8 @@ primary  = INT | TIME
          | "count" pred "within" unary
          | ( "rand" | "chance" ) "(" expr ")"
          | ( "dist" | "free" | "look_of" | "signal_of" ) "(" target ")"
+         | ( "sum" | "min" | "max" ) IDENT "along" target      (outside a law)
+         | "sees" "(" target ")" "over" IDENT [ "eye" unary ]
          | "is" "(" target "," pred ")"
          | ( "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" ) "(" expr { "," expr } ")"
          | IDENT args

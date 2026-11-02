@@ -516,7 +516,14 @@ fn think_one<const TRACE: bool>(
     let (lx, ly) = (vm::lx(cell), vm::ly(cell));
     match out.action {
         Action::Move => {
-            let (dx, dy) = step_toward(halo, lx, ly, i32::from(out.dx), i32::from(out.dy));
+            let (dx, dy) = step_toward_climbing(
+                halo,
+                lx,
+                ly,
+                i32::from(out.dx),
+                i32::from(out.dy),
+                kind.climb,
+            );
             #[allow(clippy::cast_possible_truncation)] // a unit step, -1..=1
             let step = (dx as i8, dy as i8);
             (intent.dx, intent.dy) = step;
@@ -548,25 +555,45 @@ fn clear_events(mind: &mut ActorMind) {
 /// counter-clockwise. None free: the straight step, which Apply will
 /// report as BLOCKED. `(0, 0)` stays `(0, 0)`.
 pub fn step_toward(halo: &Halo<'_>, lx: i32, ly: i32, dx: i32, dy: i32) -> (i32, i32) {
+    step_toward_climbing(halo, lx, ly, dx, dy, None)
+}
+
+/// [`step_toward`] for a kind that climbs at most `n` in field `f`
+/// (`climb n on f`): a step that rises more is not free, and if every one is
+/// too steep the step is `(0, 0)`, which Apply reports as BLOCKED.
+pub fn step_toward_climbing(
+    halo: &Halo<'_>,
+    lx: i32,
+    ly: i32,
+    dx: i32,
+    dy: i32,
+    climb: Option<(u8, i32)>,
+) -> (i32, i32) {
     let s = (dx.signum(), dy.signum());
     if s == (0, 0) {
         return s;
     }
+    let gentle = |cx: i32, cy: i32| {
+        climb.is_none_or(|(f, n)| {
+            let f = usize::from(f);
+            halo.field(lx, ly, cx, cy, f) - halo.field(lx, ly, 0, 0, f) <= n
+        })
+    };
     let dirs = &vm::DIRS8;
     let i = dirs.iter().position(|&d| d == s).expect("a unit step");
     for j in [i, (i + 1) % 8, (i + 7) % 8] {
         let (cx, cy) = dirs[j];
-        if halo.free(lx, ly, cx, cy) {
+        if halo.free(lx, ly, cx, cy) && gentle(cx, cy) {
             return (cx, cy);
         }
     }
-    s
+    if gentle(s.0, s.1) { s } else { (0, 0) }
 }
 
 // ---- Resolve ----------------------------------------------------------------------------
 
 /// Own chunk, in parallel: intents into key order, WAKE consumed by every
-/// actor that thought, bites recorded. A bite must be adjacent and land on
+/// actor that thought, bites recorded. A bite must be within the biter's `reach` (a neighbour by default) and land on
 /// an actor with a `health` need (else REFUSED); an empty cell is MISSED.
 /// Bites into another chunk go to the Outbox for Exchange.
 pub fn resolve(
@@ -636,13 +663,16 @@ pub fn resolve(
                 // `eat`/`hit` bite a neighbour; `graze` the cover next to or
                 // under the grazer.
                 let cover = it.action == Action::Graze;
-                let res = if dx.abs() > 1 || dy.abs() > 1 || ((dx, dy) == (0, 0) && !cover) {
+                let reach = i32::from(kinds.def(pubs.rows[slot].kind).reach);
+                let res = if dx.abs() > reach || dy.abs() > reach || ((dx, dy) == (0, 0) && !cover)
+                {
                     result::REFUSED
                 } else {
                     let row = pubs.rows[slot];
                     let bite = kinds.def(row.kind).bite;
                     let eat = it.action != Action::Hit;
-                    let dir = vm::dir_index(-dx, -dy);
+                    // From afar too: the direction the bite came from.
+                    let dir = vm::dir_index((-dx).signum(), (-dy).signum());
                     match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
                         Where::Here(cell) => match cells.layer(cover)[cell].unpack() {
                             None => result::MISSED,

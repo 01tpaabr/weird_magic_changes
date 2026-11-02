@@ -2739,6 +2739,88 @@ mod tests {
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    /// Height: `sees` is blocked by a ridge and clears it from a higher eye,
+    /// `max` and `sum ... along` read the line, `reach` lets a hit land six
+    /// cells away, and `climb` stops a step that rises too much (but not a
+    /// gentle one).
+    #[test]
+    fn height_sight_reach_and_climb() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "field height max 100
+             kind archer { glyph \"a\"  cadence 1  sight 8  reach 6
+               mem mode, s1, s2, a1, a2, r
+               when mode == 0 => {
+                 mode = 1
+                 s1 = sees(at(x + 6, y)) over height
+                 s2 = sees(at(x + 6, y)) over height eye 50
+                 a1 = max height along at(x + 6, y)
+                 a2 = sum height along at(x + 3, y)
+                 idle
+               }
+               when mode == 1 and nearest dummy within 6 as t => { mode = 2  hit t }
+               when mode == 2 => { mode = 3  r = result  idle }
+               when true => idle }
+             kind dummy { glyph \"d\"  cadence 64  need health max 9 decay 0 vital  when true => idle }
+             kind climber { glyph \"c\"  cadence 1  climb 5 on height  when true => move east }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(21)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        set_field(&mut w, 0, Pos::new(13, 10), 40); // the ridge
+        for y in 29..=31 {
+            set_field(&mut w, 0, Pos::new(41, y), 10); // a cliff east of the first climber
+        }
+        set_field(&mut w, 0, Pos::new(41, 40), 3); // a gentle step
+        let now = tick(&w);
+        let at = |x, y| Pos::new(x, y);
+        assert!(place_actor(
+            &mut w,
+            at(10, 10),
+            0,
+            newborn(&kinds, 0, 0xF1, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            at(16, 10),
+            1,
+            newborn(&kinds, 1, 0xF2, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            at(40, 30),
+            2,
+            newborn(&kinds, 2, 0xF3, now)
+        ));
+        assert!(place_actor(
+            &mut w,
+            at(40, 40),
+            2,
+            newborn(&kinds, 2, 0xF4, now)
+        ));
+        for _ in 0..4 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let all = rows(&mut w);
+        let by = |uid: u64| all.iter().find(|r| r.0 == uid).unwrap();
+        assert_eq!(
+            &by(0xF1).3.mem[..6],
+            &[3, 0, 1, 40, 40, 1],
+            "blocked, seen over, max, sum, hit"
+        );
+        assert_eq!(by(0xF2).3.needs[0], 8, "hit from six cells away");
+        assert_eq!(by(0xF3).2, at(40, 30), "the cliff stops it");
+        assert!(by(0xF4).2.x > 40, "the gentle step does not");
+    }
+
     /// Fields are saved by name and come back as they were; rules that drop
     /// one, lower another's max and add a third remap every chunk, loaded
     /// and saved: kept values clamped, the new field at its `init`.

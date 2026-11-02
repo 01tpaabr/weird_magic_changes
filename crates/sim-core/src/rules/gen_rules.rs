@@ -707,6 +707,12 @@ impl<'a> G<'a> {
             if self.maybe(20) {
                 d.push(format!("bite {}", self.n(256)));
             }
+            if self.maybe(20) {
+                d.push(format!("reach {}", 1 + self.n(4)));
+            }
+            if self.fields > 0 && self.maybe(20) {
+                d.push(format!("climb {} on fa", self.n(5)));
+            }
         }
         if !o.tags.is_empty() {
             d.push(format!("tags {}", o.tags.join(" ")));
@@ -1549,6 +1555,20 @@ impl<'a> G<'a> {
             10 if self.strict && self.fields > 0 => {
                 let f = self.field_name();
                 format!("{f}({})", self.target(d - 1))
+            }
+            11 if self.strict && self.fields > 0 => {
+                let f = self.field_name();
+                let t = self.target(d - 1);
+                if self.maybe(50) {
+                    let eye = if self.maybe(50) {
+                        format!(" eye {}", self.n(9))
+                    } else {
+                        String::new()
+                    };
+                    format!("sees({t}) over {f}{eye}")
+                } else {
+                    format!("({} {f} along {t})", self.one(&["sum", "min", "max"]))
+                }
             }
             _ => self.leaf(),
         }
