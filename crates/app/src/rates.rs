@@ -123,6 +123,10 @@ pub fn report(kinds: &Kinds, only: &[String]) -> String {
             if let Some(age) = sh.after_age {
                 let age = span(age.unsigned_abs().into());
                 match sh.acts.as_deref() {
+                    // `chance(0)` (or less) never fires: no days left.
+                    Some("die") if sh.dice != (1, 1) && p * thinks <= 0.0 => {
+                        let _ = write!(note, "   (past {age}: never by this rule)");
+                    }
                     Some("die") if sh.dice != (1, 1) => {
                         let _ = write!(
                             note,
@@ -214,5 +218,23 @@ mod tests {
         );
         assert!(!report(&Kinds::builtin(), &[]).is_empty());
         assert!(report(&Kinds::builtin(), &["nobody".into()]).is_empty());
+    }
+
+    /// Odds of nothing never kill: not "inf days left".
+    #[test]
+    fn a_death_at_odds_of_nothing_is_never() {
+        for odds in ["0", "-5"] {
+            let kinds = sim_core::rules::compile_files(&[(
+                "s.rules",
+                &format!(
+                    "kind stone {{ glyph \"o\"\n  when age > 1d and chance({odds}) => die\n}}"
+                ),
+            )])
+            .unwrap();
+            let text = report(&kinds, &[]);
+            let line = text.lines().find(|l| l.contains("=> die")).unwrap();
+            assert!(line.contains("(past 1d: never by this rule)"), "{line}");
+            assert!(!text.contains("inf"), "{text}");
+        }
     }
 }
