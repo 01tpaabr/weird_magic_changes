@@ -3710,3 +3710,21 @@ fn a_search_that_acts_through_a_sub_says_so() {
     assert!(e.contains("a search doesn't act"), "{e}");
     assert!(!e.contains("a sub called in a `when`"), "{e}");
 }
+
+#[test]
+fn a_rules_text_ends_at_its_last_token() {
+    let k = compile_ok(
+        "kind a { mem m\n when m > 1 => idle  when true => move north }\n\
+         kind b { mem n  when n > 0 => { idle }  when true => idle  # last\n }",
+    );
+    let texts: Vec<&str> = k.debug.rules.iter().map(|r| r.text.as_str()).collect();
+    assert_eq!(
+        texts,
+        [
+            "when m > 1 => idle",
+            "when true => move north",
+            "when n > 0 => { idle }",
+            "when true => idle"
+        ]
+    );
+}

@@ -1051,6 +1051,8 @@ struct Rule {
     /// Where its `when` is, and the line of its `=>`.
     at: Pos,
     arrow_line: u32,
+    /// Where the token after its last one is, as (line, column).
+    end: (u32, u32),
     cond: Cond,
     body: Vec<Stmt>,
     /// Each term of the condition's top-level `and`: where it starts and
@@ -2514,12 +2516,14 @@ impl Parser<'_> {
             // One statement may end in `;`, as in a block; a block may not.
             let single = !self.is_sym("{");
             let body = self.body()?;
+            let end = self.pos();
             if single {
                 self.eat_sym(";");
             }
             rules.push(RuleItem::When(Box::new(Rule {
                 at,
                 arrow_line,
+                end: (end.line, end.col),
                 cond,
                 body,
                 terms,
@@ -5939,25 +5943,11 @@ impl<'a> Gen<'a> {
             .iter()
             .position(|(n, _)| *n == rule.at.file)
             .unwrap_or(0);
-        // From `when` to the line of `=>`, comments dropped, one line.
-        let from = rule.at.col.saturating_sub(1) as usize;
-        let text = self.files.get(file).map_or(String::new(), |(_, t)| {
-            t.lines()
-                .skip(rule.at.line.saturating_sub(1) as usize)
-                .take((rule.arrow_line.max(rule.at.line) - rule.at.line + 1) as usize)
-                .enumerate()
-                .map(|(i, l)| {
-                    let l = if i == 0 {
-                        l.get(from..).unwrap_or(l)
-                    } else {
-                        l
-                    };
-                    l.split('#').next().unwrap_or("").trim()
-                })
-                .collect::<Vec<_>>()
-                .join(" ")
-        });
+        // From `when` to its last token, or to the end of the line of `=>`
+        // if that is sooner; comments dropped, one line.
         let source = self.files.get(file).map_or("", |(_, t)| *t);
+        let line_end = (rule.arrow_line.max(rule.at.line), u32::MAX);
+        let text = source_between(source, (rule.at.line, rule.at.col), rule.end.min(line_end));
         let spans: Vec<((u32, u32), (u32, u32))> = if term_pcs.len() == rule.terms.len() {
             rule.terms.clone()
         } else {
