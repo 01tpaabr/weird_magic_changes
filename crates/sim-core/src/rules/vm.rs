@@ -889,11 +889,6 @@ impl<'a> Halo<'a> {
         Some((cells, actors, local))
     }
 
-    #[inline]
-    pub fn matches(&self, lx: i32, ly: i32, dx: i32, dy: i32, pred: i32) -> bool {
-        self.test(lx, ly, dx, dy, self.want(pred))
-    }
-
     /// Decode a predicate for [`Halo::test`].
     #[inline]
     pub fn want(&self, pred: i32) -> Want {
@@ -1055,7 +1050,6 @@ struct Node {
 /// allocation once grown). States are found again through `table`, an
 /// open-addressed index marked with the search's `generation`, so it is
 /// never cleared.
-#[derive(Default)]
 struct SearchScratch {
     nodes: Vec<Node>,
     /// `(f, order, node, g)`, least first.
@@ -1070,6 +1064,26 @@ struct SearchScratch {
     cur: u32,
     goal: u32,
     held: ([i32; SEARCH_STATE], i32, i32),
+}
+
+impl Default for SearchScratch {
+    /// No search yet: no node, no goal.
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            open: std::collections::BinaryHeap::new(),
+            table: Vec::new(),
+            generation: 0,
+            width: 0,
+            limit: 0,
+            expanded: 0,
+            cap: 0,
+            order: 0,
+            cur: NO_NODE,
+            goal: NO_NODE,
+            held: ([0; SEARCH_STATE], 0, 0),
+        }
+    }
 }
 
 thread_local! {
@@ -1187,10 +1201,9 @@ impl SearchScratch {
 
     /// The found plan: its first `via`, its cost, its steps.
     fn plan(&self) -> [i32; 3] {
-        if self.goal == NO_NODE {
-            return [0; 3];
-        }
-        let goal = &self.nodes[self.goal as usize];
+        let Some(goal) = self.nodes.get(self.goal as usize) else {
+            return [0; 3]; // none found, or no search yet
+        };
         let mut n = self.goal;
         let mut first = 0;
         while self.nodes[n as usize].parent != NO_NODE {
@@ -1205,8 +1218,8 @@ impl SearchScratch {
     /// The plan's `via`s, first first, into `out` (0 past its end).
     fn path(&self, out: &mut [i32]) {
         out.fill(0);
-        if self.goal == NO_NODE {
-            return;
+        if self.nodes.get(self.goal as usize).is_none() {
+            return; // none found, or no search yet
         }
         let mut n = self.goal;
         let mut k = self.steps_to(n);
@@ -1323,7 +1336,7 @@ impl Machine<'_> {
         let base = terms[0];
         // A field condition's base is never one itself (the compiler).
         if base != pred::ANY
-            && (base >= pred::FIELDS || !self.ctx.halo.matches(lx, ly, dx, dy, base))
+            && (base >= pred::FIELDS || !self.ctx.halo.test(lx, ly, dx, dy, self.want(base)))
         {
             return false;
         }
@@ -1367,17 +1380,76 @@ impl Machine<'_> {
         self.spend(side * side / SEARCH_DIV)?;
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
         let want = self.want(pred);
+        let big = self.ctx.kind.size != (1, 1);
         for ring in 1..=r {
             let n = 8 * ring;
             let start = self.draw_below(n);
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
-                if self.cell_ok(lx, ly, dx, dy, want) {
+                if self.cell_ok(lx, ly, dx, dy, want) && !self.own_part(big, dx, dy) {
                     return Ok(Some((dx, dy)));
                 }
             }
         }
         Ok(None)
+    }
+
+    /// [`OpCode::FitsAt`]: would the thinker fit with its anchor at `(dx,
+    /// dy)`? Paid for like a search, by its cells. A one-cell kind fits
+    /// where it is `free` (its own `free`, over what its layer rests on),
+    /// and where it is.
+    #[inline(never)]
+    fn fits(&mut self, dx: i32, dy: i32) -> Result<bool, Trap> {
+        let (w, h) = self.ctx.kind.size;
+        self.spend(u32::from(w) * u32::from(h) / SEARCH_DIV)?;
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        if (w, h) == (1, 1) {
+            return Ok((dx, dy) == (0, 0) || self.ctx.halo.test(lx, ly, dx, dy, self.free()));
+        }
+        Ok(self.ctx.halo.fits(lx, ly, dx, dy, self.ctx.kind))
+    }
+
+    /// [`OpCode::HeadsAt`]: the heads of the first group at the cell, in
+    /// any layer (a herd in a canopy over a tree), else of whoever
+    /// [`Halo::row_at`] reads. Out of line: rare.
+    #[inline(never)]
+    fn heads_at(&self, defs: &[KindDef], dx: i32, dy: i32) -> i32 {
+        let halo = self.ctx.halo;
+        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+        if let Some((cells, actors, i)) = halo.at(lx, ly, dx, dy) {
+            for l in 0..2 + cells.extra.len() {
+                let l = u8::try_from(l).expect("a few layers");
+                let id = cells.layer(l)[i];
+                let group = id
+                    .unpack()
+                    .is_some_and(|(k, _)| defs.get(usize::from(k)).is_some_and(|d| d.group.0 > 0));
+                if !group {
+                    continue;
+                }
+                // A part of a big group: its row is at its anchor.
+                let row = match id.part_of() {
+                    Some((_, ox, oy)) => halo.at(lx, ly, dx - ox, dy - oy).and_then(|(c, a, j)| {
+                        let (_, slot) = c.layer(l)[j].row()?;
+                        a.rows.get(usize::from(slot))
+                    }),
+                    None => id
+                        .row()
+                        .and_then(|(_, slot)| actors.rows.get(usize::from(slot))),
+                };
+                return row.map_or(0, |r| i32::from(r.heads));
+            }
+        }
+        halo.row_at(lx, ly, dx, dy)
+            .map_or(0, |r| i32::from(r.heads))
+    }
+
+    /// Is `(dx, dy)` one of the thinker's own cells, for a big actor (`big`:
+    /// its `size` is not 1 x 1)? Its searches skip them, as a one-cell
+    /// actor's rings skip its own cell. Asked only of a match.
+    #[inline]
+    fn own_part(&self, big: bool, dx: i32, dy: i32) -> bool {
+        let (w, h) = self.ctx.kind.size;
+        big && (0..i32::from(w)).contains(&dx) && (0..i32::from(h)).contains(&dy)
     }
 
     /// Decode a predicate as this think reads it: `free` in its own layer.
@@ -1422,13 +1494,17 @@ impl Machine<'_> {
         let want = (pred != pred::ANY).then(|| self.want(pred));
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
         let mut best = (0, 0, 0);
+        let big = self.ctx.kind.size != (1, 1);
         for ring in 1..=r {
             let n = 8 * ring;
             let start = self.draw_below(n);
             for k in 0..n {
                 let (dx, dy) = ring_cell(ring, (start + k) % n);
                 let v = self.ctx.halo.field(lx, ly, dx, dy, f);
-                if v > best.0 && want.is_none_or(|w| self.cell_ok(lx, ly, dx, dy, w)) {
+                if v > best.0
+                    && want.is_none_or(|w| self.cell_ok(lx, ly, dx, dy, w))
+                    && !self.own_part(big, dx, dy)
+                {
                     best = (v, dx, dy);
                 }
             }
@@ -1549,6 +1625,7 @@ impl Machine<'_> {
         }
         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
         let want = self.want(pred);
+        let big = self.ctx.kind.size != (1, 1);
         // Cells before ring `ring` (rings from 1): 4 * ring * (ring - 1).
         let mut ring = 1;
         while ring <= r && 4 * ring * (ring + 1) <= cursor {
@@ -1561,7 +1638,7 @@ impl Machine<'_> {
             while k < first + n {
                 let (dx, dy) = ring_cell(ring, k - first);
                 k += 1;
-                if self.cell_ok(lx, ly, dx, dy, want) {
+                if self.cell_ok(lx, ly, dx, dy, want) && !self.own_part(big, dx, dy) {
                     self.locals[base] = dx;
                     self.locals[base + 1] = dy;
                     self.locals[base + 2] = k;
@@ -1668,6 +1745,7 @@ impl Machine<'_> {
         code: &[Op],
         consts: &[i32],
         subs: &[u32],
+        defs: &[KindDef],
         trace: &mut Vec<Step>,
     ) -> Result<(), Trap> {
         use OpCode as O;
@@ -1792,9 +1870,12 @@ impl Machine<'_> {
                         SEARCH.with_borrow_mut(|s| {
                             let (state, cost, via) = s.held;
                             let from = s.cur;
-                            let g = s.nodes[from as usize].g + i64::from(cost.max(0));
+                            // Nothing popped yet: no state to reach it from.
+                            let from_g = s.nodes.get(from as usize).ok_or(Trap::Search)?.g;
+                            let g = from_g + i64::from(cost.max(0));
                             s.offer(&state[..s.width], from, via, g, i64::from(h.max(0)));
-                        });
+                            Ok(())
+                        })?;
                     }
                     O::SearchDone => {
                         if !self.searching {
@@ -1984,7 +2065,8 @@ impl Machine<'_> {
                     O::Dist => {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
-                        self.push(dx.wrapping_abs().max(dy.wrapping_abs()))?;
+                        let d = dx.unsigned_abs().max(dy.unsigned_abs());
+                        self.push(i32::try_from(d).unwrap_or(i32::MAX))?;
                     }
                     O::FreeAt => {
                         let dy = self.pop()?;
@@ -1996,8 +2078,7 @@ impl Machine<'_> {
                     O::FitsAt => {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
-                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
-                        let fits = self.ctx.halo.fits(lx, ly, dx, dy, self.ctx.kind);
+                        let fits = self.fits(dx, dy)?;
                         self.push(i32::from(fits))?;
                     }
                     O::IsAt => {
@@ -2044,16 +2125,21 @@ impl Machine<'_> {
                         let v = v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
                         self.out.signal = Some(v);
                     }
-                    O::LookAt | O::SignalAt | O::HeadsAt => {
+                    O::LookAt | O::SignalAt => {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
                         let v = match self.ctx.halo.row_at(lx, ly, dx, dy) {
                             None => 0,
                             Some(r) if op.code == O::LookAt => i32::from(r.look),
-                            Some(r) if op.code == O::HeadsAt => i32::from(r.heads),
                             Some(r) => i32::from(r.signal),
                         };
+                        self.push(v)?;
+                    }
+                    O::HeadsAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let v = self.heads_at(defs, dx, dy);
                         self.push(v)?;
                     }
                     O::Pack => {
@@ -2270,7 +2356,13 @@ fn think_with<const TRACE: bool>(
         mind,
         searching: false,
     };
-    if let Err(trap) = m.run::<TRACE>(&program.code, &program.consts, &program.subs, trace) {
+    if let Err(trap) = m.run::<TRACE>(
+        &program.code,
+        &program.consts,
+        &program.subs,
+        &program.defs,
+        trace,
+    ) {
         // Needs and mem written before the trap stay (RULES.md §13).
         // The op that trapped (none for a bad pc), so `wmc why` shows where.
         if TRACE && let Some(&op) = program.code.get(m.at) {
@@ -2287,6 +2379,7 @@ fn think_with<const TRACE: bool>(
         m.out.look = None;
         m.out.signal = None;
         m.out.adds = [(NO_FIELD, 0); ADDS];
+        m.out.grow = 0;
     }
     m.out
 }
@@ -3017,5 +3110,259 @@ mod tests {
         // No family table: every kind is its own family.
         assert!(!Want::of(0, &[]).test(&cells, &actors, 5, &[], &MaterialTable::DEFAULT));
         assert!(Want::of(2, &[]).test(&cells, &actors, 5, &[], &MaterialTable::DEFAULT));
+    }
+
+    fn compiled(text: &str) -> Kinds {
+        crate::rules::compile("t.rules", text).unwrap_or_else(|e| panic!("{e}"))
+    }
+
+    /// A bare chunk of soil with `k`'s declared layers and fields.
+    fn bare(k: &Kinds) -> (ChunkCells, ChunkActors) {
+        let cells = ChunkCells {
+            extra: vec![[ActorId::NONE; CHUNK_CELLS]; k.layers.len()],
+            fields: vec![[0; CHUNK_CELLS]; k.fields.len()],
+            ..ChunkCells::default()
+        };
+        (cells, ChunkActors::default())
+    }
+
+    /// Put an actor of kind `name` in layer `l` at local `(x, y)`, its row
+    /// next in `actors`, holding `heads`.
+    fn place(
+        k: &Kinds,
+        (cells, actors): &mut (ChunkCells, ChunkActors),
+        name: &str,
+        l: u8,
+        (x, y): (usize, usize),
+        heads: u16,
+    ) {
+        let kind = k.by_name(name).unwrap().id;
+        let slot = u16::try_from(actors.rows.len()).unwrap();
+        let cell = y * 64 + x;
+        cells.layer_mut(l)[cell] = ActorId::pack(kind, slot);
+        actors.rows.push(crate::actors::ActorPub {
+            cell: u16::try_from(cell).unwrap(),
+            kind,
+            layer: l,
+            heads,
+            ..crate::actors::ActorPub::zeroed()
+        });
+    }
+
+    /// One think of kind `name` standing at local `(x, y)` of one chunk.
+    fn think_in(
+        k: &Kinds,
+        name: &str,
+        (cells, actors): &(ChunkCells, ChunkActors),
+        (x, y): (usize, usize),
+        mind: &mut ActorMind,
+    ) -> Outcome {
+        let origin = ChunkCoord::new(0, 0);
+        let halo = Halo::around(origin, k, |c| (c == origin).then_some((cells, actors)));
+        let ctx = Ctx {
+            halo: &halo,
+            kind: k.by_name(name).unwrap(),
+            cell: y * 64 + x,
+            pos: Pos::new(i32::try_from(x).unwrap(), i32::try_from(y).unwrap()),
+            tick: 1000,
+            rng: rng_base(1, 1000, 7),
+            look: 0,
+            signal: 0,
+            heads: 1,
+        };
+        think(k, ctx, mind)
+    }
+
+    /// A trap drops a `grow` with the rest of the think's effects.
+    #[test]
+    fn a_trap_drops_grow() {
+        let mut a = Asm::new();
+        a.push(3)
+            .op(OpCode::Grow)
+            .act(Action::Die)
+            .act(Action::Die)
+            .halt();
+        let out = run(a.finish(), vec![], vec![], &mut mind());
+        assert_eq!(out.trap, Some(Trap::SecondAction));
+        assert_eq!(out.grow, 0);
+    }
+
+    /// A field condition's `free` is the thinker's own `free`: in its
+    /// declared layer for a kind there, as everywhere else.
+    #[test]
+    fn a_field_conditions_free_is_the_thinkers_free() {
+        let k = compiled(
+            "field f max 9 layer air { flies }
+             kind walker { when true => idle }
+             kind bird {
+               layer air
+               mem a, b
+               when is(east, free) => { a = 1 }
+               when is(east, (f > 0 and free)) => { b = 1 }
+               when true => idle
+             }",
+        );
+        let mut w = bare(&k);
+        place(&k, &mut w, "bird", 2, (11, 10), 1);
+        place(&k, &mut w, "walker", 0, (12, 10), 1); // under the air, east
+        w.0.fields[0][10 * 64 + 12] = 5;
+        let mut m = mind();
+        let out = think_in(&k, "bird", &w, (11, 10), &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(
+            (m.mem[0], m.mem[1]),
+            (1, 1),
+            "the air east is free to a bird"
+        );
+    }
+
+    /// A big actor's searches skip its own cells, as a one-cell actor's
+    /// skip its own; `count` and `is` still see them.
+    #[test]
+    fn a_big_actors_searches_skip_its_own_cells() {
+        let k = compiled(
+            "field f max 9
+             kind big {
+               size 2 2  sight 8
+               mem a, b, c, d, e
+               when nearest big within 5 as t => { a = t.dx }
+               when count big within 1 == 4 => { b = 1 }
+               when best f on big within 5 as t => { c = t.dx }
+               when is(east, big) => { e = 1 }
+               when true => { for each big within 5 as t { d += 1 }  idle }
+             }",
+        );
+        let big = k.by_name("big").unwrap().id;
+        let mut w = bare(&k);
+        for x0 in [11, 15] {
+            place(&k, &mut w, "big", 0, (x0, 10), 1);
+            for (dx, dy) in [(1, 0), (0, 1), (1, 1)] {
+                w.0.occupant[(10 + dy) * 64 + x0 + dx] = ActorId::part(big, dx as u8, dy as u8);
+            }
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                w.0.fields[0][(10 + dy) * 64 + x0 + dx] = 5;
+            }
+        }
+        let mut m = mind();
+        let out = think_in(&k, "big", &w, (11, 10), &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(m.mem[0], 4, "nearest: the other one, four cells east");
+        assert_eq!(m.mem[1], 1, "count: its own four cells");
+        assert!(m.mem[2] >= 4, "best: on the other one");
+        assert_eq!(m.mem[3], 4, "for each: the other one's four cells");
+        assert_eq!(m.mem[4], 1, "is: its own part east");
+    }
+
+    /// `fits(t)` is `free(t)` for a one-cell kind (and true `here`): over
+    /// what its layer rests on, and standing-free for ground cover.
+    #[test]
+    fn fits_is_free_for_a_one_cell_kind() {
+        let k = compiled(
+            "layer canopy { on tree }
+             kind tree { when true => idle }
+             kind walker { when true => idle }
+             kind monkey {
+               layer canopy
+               mem a, b, c, d, e
+               when fits(east) => { a = 1 }
+               when free(east) => { b = 1 }
+               when fits(west) => { c = 1 }
+               when free(west) => { d = 1 }
+               when fits(here) => { e = 1 }
+               when true => idle
+             }
+             kind moss {
+               cover
+               mem a, b, c, d, e
+               when fits(east) => { a = 1 }
+               when free(east) => { b = 1 }
+               when fits(west) => { c = 1 }
+               when free(west) => { d = 1 }
+               when fits(here) => { e = 1 }
+               when true => idle
+             }",
+        );
+        // A monkey over a tree, a tree west, nothing east.
+        let mut w = bare(&k);
+        place(&k, &mut w, "tree", 0, (11, 10), 1);
+        place(&k, &mut w, "monkey", 2, (11, 10), 1);
+        place(&k, &mut w, "tree", 0, (10, 10), 1);
+        let mut m = mind();
+        let out = think_in(&k, "monkey", &w, (11, 10), &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(&m.mem[..5], &[0, 0, 1, 1, 1], "monkey: no tree east");
+        // Moss, a walker standing east, nothing west.
+        let mut w = bare(&k);
+        place(&k, &mut w, "moss", 1, (11, 10), 1);
+        place(&k, &mut w, "walker", 0, (12, 10), 1);
+        let mut m = mind();
+        let out = think_in(&k, "moss", &w, (11, 10), &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(&m.mem[..5], &[0, 0, 1, 1, 1], "moss: someone stands east");
+    }
+
+    /// `fits(t)` pays for its cells as a search does: a 16 x 16 kind's
+    /// costs 1 + 256 / SEARCH_DIV.
+    #[test]
+    fn fits_pays_for_its_cells() {
+        let text = |fuel: u32| {
+            format!(
+                "kind big {{ size 16 16  fuel {fuel}  when fits(east) => idle  when true => idle }}"
+            )
+        };
+        let cost = 256 / SEARCH_DIV;
+        for (fuel, trap) in [(cost, Some(Trap::Fuel)), (cost + 16, None)] {
+            let k = compiled(&text(fuel));
+            let mut w = bare(&k);
+            place(&k, &mut w, "big", 0, (11, 10), 1);
+            let out = think_in(&k, "big", &w, (11, 10), &mut mind());
+            assert_eq!(out.trap, trap, "fuel {fuel}");
+        }
+    }
+
+    /// A fresh scratch holds no plan: reading one gives zeros.
+    #[test]
+    fn a_fresh_search_scratch_holds_no_plan() {
+        let s = SearchScratch::default();
+        assert_eq!(s.plan(), [0; 3]);
+        let mut route = [9; 3];
+        s.path(&mut route);
+        assert_eq!(route, [0; 3]);
+    }
+
+    /// `dist(t)` to a target 2^31 away is the largest distance, not a
+    /// negative one.
+    #[test]
+    fn dist_saturates() {
+        let mut a = Asm::new();
+        a.push_k(0).push(0).op(OpCode::Dist).set_mem(0);
+        a.push(3).push_k(0).op(OpCode::Dist).set_mem(1);
+        a.push(-3).push(2).op(OpCode::Dist).set_mem(2);
+        a.halt();
+        let mut m = mind();
+        let out = run(a.finish(), vec![i32::MIN], vec![], &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!(&m.mem[..3], &[i32::MAX, i32::MAX, 3]);
+    }
+
+    /// `heads_of(t)` reads the group at t, in whatever layer, not the one
+    /// it rests on.
+    #[test]
+    fn heads_of_reads_the_group_over_a_tree() {
+        let k = compiled(
+            "layer canopy { on tree }
+             kind tree { when true => idle }
+             kind herd { layer canopy  group max 50  when true => idle }
+             kind watcher { mem a, b  when true => { a = heads_of(east)  b = heads_of(west)  idle } }",
+        );
+        let mut w = bare(&k);
+        place(&k, &mut w, "watcher", 0, (11, 10), 1);
+        place(&k, &mut w, "tree", 0, (12, 10), 1);
+        place(&k, &mut w, "herd", 2, (12, 10), 7);
+        place(&k, &mut w, "tree", 0, (10, 10), 1);
+        let mut m = mind();
+        let out = think_in(&k, "watcher", &w, (11, 10), &mut m);
+        assert_eq!(out.trap, None);
+        assert_eq!((m.mem[0], m.mem[1]), (7, 1));
     }
 }
