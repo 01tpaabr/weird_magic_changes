@@ -457,6 +457,50 @@ mod tests {
         assert!(s.checks.iter().any(|c| matches!(c, Check::Run(1))));
     }
 
+    /// An element of a memory array reads like a memory: `max route[2] of
+    /// K`, as a start's `with (route[2] = 7)` sets it. As a field it is no
+    /// form; one the kind lacks is an error at its line.
+    #[test]
+    fn an_element_of_a_memory_array_is_a_metric() {
+        let kinds = crate::rules::compile_files(&[(
+            "w.rules",
+            "kind walker { glyph \"w\"  mem route[3]  when true => idle }",
+        )])
+        .unwrap();
+        let s = Scenario::parse(
+            "t",
+            "size 16 16
+             terrain water_level 0 rock_on_soil 0 rock_on_water 0
+             start walker at (2, 2) with (route[2] = 7)
+             start walker at (4, 4)
+             expect max route[2] of walker == 7
+             expect sum route[0] of walker == 0
+             expect min route[2] of walker == 0
+             expect max route[3] of walker == 0",
+        )
+        .unwrap();
+        let mut w = crate::sim::new_world_with(&s, kinds).unwrap();
+        let got: Vec<_> = s
+            .checks
+            .iter()
+            .map(|c| match c {
+                crate::scenario::Check::Expect { what, .. } => expect(&mut w, what),
+                crate::scenario::Check::Run(_) => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                Ok((true, "7".into())),
+                Ok((true, "0".into())),
+                Ok((true, "0".into())),
+                Err("`walker` has no need or memory `route[3]`".into()),
+            ]
+        );
+        let e = Scenario::parse("t", "expect max route[0] > 1").unwrap_err();
+        assert!(e.to_string().contains("expected `expect count|rows"), "{e}");
+    }
+
     /// `check_expect` finds what an `expect` names that the rules lack,
     /// with no world: the errors `expect` gives when it reaches the line.
     #[test]

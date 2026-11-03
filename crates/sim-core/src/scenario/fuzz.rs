@@ -249,6 +249,13 @@ fn check() -> impl Strategy<Value = String> {
                     } else {
                         b.get(&names)
                     };
+                    // An element of a memory array now and then (the kind
+                    // may have no such array: an error at its line).
+                    let name = if wb % 3 == 0 {
+                        format!("{}[{}]", name.split('[').next().unwrap_or(name), wa % 3)
+                    } else {
+                        name.to_string()
+                    };
                     let agg = ["min", "max", "sum", "avg"][b.index(4)];
                     // A field over the world now and then: one the rules
                     // have, or one they lack.
@@ -575,6 +582,10 @@ const LINES: &[&str] = &[
     "expect sum trail per day > 1",
     "expect mean sum trail per day > 1",
     "expect max red. > 1",
+    "expect max route[0] > 1",
+    "expect max route[ of fox > 1",
+    "expect max route[x] of fox > 1",
+    "expect max route[0] of fox > 1",
     "expect checksum zz",
     "expect always",
     "expect always count fox > 1 from",

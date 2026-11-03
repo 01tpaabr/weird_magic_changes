@@ -440,7 +440,7 @@ fn who_at(words: &[&str], i: usize) -> Option<(Who, usize)> {
     }
 }
 
-const FORMS: &str = "expected `expect count [only] KIND [in STATE] OP N`, `expect born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect min|max|sum|avg NAME of [only] KIND [in STATE] OP V`, `expect min|max|sum|avg FIELD OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first four after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
+const FORMS: &str = "expected `expect count|rows [only] KIND [in STATE] OP N`, `expect born|became|eaten|died|thinks|traps [only] KIND OP N`, `expect eaten [only] KIND by [only] KIND OP N`, `expect died [only] KIND of NEED OP N`, `expect min|max|sum|avg NAME|NAME[I] of [only] KIND [in STATE] OP V`, `expect min|max|sum|avg FIELD OP V`, `expect at (X, Y) [only] KIND|nobody`, `expect checksum|state HEX`, or one of the first four after `always`, `never` or `eventually` (then `[from T] [to T]`), or `expect mean ...`";
 const MEAN_FORMS: &str = "expected `expect mean count|min|max|sum|avg ... OP V` or `expect mean born|became|eaten|died|thinks|traps [only] KIND per day OP V`, then `[from T] [to T]`";
 
 /// `[only] K [in STATE]` at `words[i..]`: who, and the next index.
@@ -523,13 +523,16 @@ fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
     if let Some(agg) = agg(first) {
         let name = words
             .get(1)
-            .filter(|w| is_name(w) || is_kind_name(w))
+            .filter(|w| is_name(w) || is_kind_name(w) || is_element(w))
             .ok_or(FORMS)?;
         if words.get(2) != Some(&"of") {
+            if is_element(name) {
+                return Err(FORMS.into());
+            }
             let name = name.to_string();
             return Ok((Metric::Field { agg, name }, 2));
         }
-        if !is_name(name) {
+        if !is_name(name) && !is_element(name) {
             return Err(FORMS.into());
         }
         let (who, i) = who_in(words, 3).ok_or(FORMS)?;
@@ -537,6 +540,14 @@ fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
         return Ok((Metric::Value { agg, name, who }, i));
     }
     Err(FORMS.into())
+}
+
+/// `route[2]`: an element of a memory array, as `with` and `expect` name
+/// one.
+fn is_element(w: &str) -> bool {
+    w.strip_suffix(']')
+        .and_then(|n| n.split_once('['))
+        .is_some_and(|(a, i)| is_name(a) && !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// `OP V` ending the line at `words[i..]`.
@@ -951,14 +962,7 @@ fn with_list(text: &str) -> Result<Vec<(String, i32)>, String> {
     for part in inner.split(',') {
         let (name, v) = part.split_once('=').ok_or(FORM)?;
         let (name, v) = (name.trim(), v.trim());
-        // `route[2]`: an element of a memory array.
-        let element = name
-            .strip_suffix(']')
-            .and_then(|n| n.split_once('['))
-            .is_some_and(|(a, i)| {
-                is_name(a) && !i.is_empty() && i.bytes().all(|b| b.is_ascii_digit())
-            });
-        if !is_name(name) && !element {
+        if !is_name(name) && !is_element(name) {
             return Err(format!("`{name}` is not a need or memory name"));
         }
         let v = value(v)
@@ -1552,7 +1556,9 @@ impl Scenario {
                 format!("the shares at ({x}, {y}) add up to more than 1"),
             ));
         }
-        if let (Some(m), Some(line)) = (s.pass, pass_line)
+        // Only against a `seeds` line: without one, `--seeds N` may cover it
+        // (the tools check again after their overrides).
+        if let (Some(m), Some(line), Some(_)) = (s.pass, pass_line, seeds_line)
             && m > s.seeds
         {
             return Err(err(
@@ -1660,6 +1666,13 @@ impl Scenario {
         if size_line.is_none() {
             (s.width, s.height) = (w, h);
         }
+        // The starts in line order, the map's among the `start` lines: of two
+        // that clash, the later line is the one blamed. Shares keep their
+        // order (it sets their cells); explicit starts are placed by cell.
+        let mut order: Vec<usize> = (0..s.starts.len()).collect();
+        order.sort_by_key(|&i| s.start_lines[i]);
+        s.starts = order.iter().map(|&i| s.starts[i].clone()).collect();
+        s.start_lines = order.iter().map(|&i| s.start_lines[i]).collect();
         s.map = Some(DrawnMap {
             width: w,
             height: h,
@@ -2473,6 +2486,9 @@ mod tests {
             assert!(e.contains(want), "{text}: {e}");
         }
         assert_eq!(Scenario::parse("t", "seed 3").unwrap().seeds, 1);
+        // `pass` without `seeds`: `--seeds N` may cover it; the tools check.
+        let alone = Scenario::parse("t", "pass 3").unwrap();
+        assert_eq!((alone.seeds, alone.pass), (1, Some(3)));
         assert_eq!(span(0), "0");
         assert_eq!(span(7), "7 ticks");
         assert_eq!(span(days(2) + hours(3) + 45), "2d 3h 3min");
@@ -3419,7 +3435,8 @@ legend {
                 "`fox` has no need or memory `sleep`",
                 last,
             ),
-            ("start chicken at (2, 2)", "two starts at (2, 2)", 6),
+            // A clash with a drawn start: the later line, here the `start`.
+            ("start chicken at (2, 2)", "two starts at (2, 2)", last),
         ] {
             let s = Scenario::parse("t", &format!("{PEN}{extra}\n")).unwrap();
             let e = Placement::resolve(&s.starts, &k, &s.terrain()).unwrap_err();
@@ -3429,6 +3446,13 @@ legend {
                 "{extra}"
             );
         }
+        // A `start` line before the map: the map row is the later line.
+        let s = Scenario::parse("t", &format!("start chicken at (2, 2)\n{PEN}")).unwrap();
+        let e = Placement::resolve(&s.starts, &k, &s.terrain()).unwrap_err();
+        assert_eq!(
+            (e.msg.as_str(), s.line_of(&e)),
+            ("two starts at (2, 2)", Some(7))
+        );
         // A drawn start is not quoted as a `start` line the file lacks.
         let s = Scenario::parse("t", &PEN.replace("food = 2h", "food = 30h")).unwrap();
         let e = Placement::resolve(&s.starts, &k, &s.terrain()).unwrap_err();
