@@ -83,9 +83,21 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
     let def = kinds.def(e.row.kind);
     let b = &e.before;
     let mut s = String::new();
+    // A group's heads, a big actor's footprint: what one row stands for.
+    let mut stands = String::new();
+    if def.group.0 > 0 {
+        let _ = write!(
+            stands,
+            ", heads {} (group max {})",
+            e.row.heads, def.group.0
+        );
+    }
+    if def.is_big() {
+        let _ = write!(stands, ", size {}x{}", def.size.0, def.size.1);
+    }
     let _ = writeln!(
         s,
-        "{} at ({}, {}), chunk ({}, {}) slot {}, uid {:016x}",
+        "{} at ({}, {}), chunk ({}, {}) slot {}, uid {:016x}{stands}",
         def.name, p.x, p.y, e.coord.x, e.coord.y, e.slot, b.uid
     );
     let _ = writeln!(
@@ -252,6 +264,8 @@ fn format(kinds: &Kinds, tick: u64, p: Pos, e: &Explained, ops: bool) -> String 
 #[derive(Debug, Clone, Copy)]
 pub struct Checked<'k> {
     pub rule: &'k RuleInfo,
+    /// Its index in `kinds.debug.rules`: two rules on one line differ here.
+    pub index: usize,
     /// The rules file it was written in.
     pub file: &'k str,
     /// `FIRED` (its body ran), `no` (its condition was false), `TRAPPED`
@@ -267,24 +281,25 @@ pub struct Checked<'k> {
 /// kind (no source positions).
 pub fn checked_rules<'k>(kinds: &'k Kinds, e: &Explained) -> Vec<Checked<'k>> {
     let visited = |pc: u32| e.trace.iter().any(|st| st.pc == pc);
-    let rules: Vec<&RuleInfo> = kinds
+    let rules: Vec<(usize, &RuleInfo)> = kinds
         .debug
         .rules
         .iter()
-        .filter(|r| r.kind == e.row.kind)
+        .enumerate()
+        .filter(|(_, r)| r.kind == e.row.kind)
         .collect();
     // A trap outside a body is in the condition of the last rule entered.
     let trapped = e.outcome.trap.and_then(|_| {
         e.trace
             .iter()
             .rev()
-            .find_map(|st| rules.iter().position(|r| r.cond_pc == st.pc))
+            .find_map(|st| rules.iter().position(|(_, r)| r.cond_pc == st.pc))
     });
     rules
         .iter()
         .enumerate()
-        .filter(|(_, r)| r.state.is_none_or(|st| st == e.before.state))
-        .map(|(i, &r)| {
+        .filter(|(_, (_, r))| r.state.is_none_or(|st| st == e.before.state))
+        .map(|(i, &(index, r))| {
             let verdict = if visited(r.body_pc) {
                 "FIRED"
             } else if trapped == Some(i) {
@@ -308,6 +323,7 @@ pub fn checked_rules<'k>(kinds: &'k Kinds, e: &Explained) -> Vec<Checked<'k>> {
                 .flatten();
             Checked {
                 rule: r,
+                index,
                 file: kinds
                     .debug
                     .files
