@@ -109,6 +109,21 @@ impl<'a> Watch<'a> {
             ) && self.first.is_some()
     }
 
+    /// Is its verdict final once the run stops at `t`: already failed, an
+    /// `eventually` already true, or a window that closed by then (every
+    /// check it makes was made)?
+    fn decided(&self, t: u64) -> bool {
+        self.failed()
+            || matches!(
+                self.what,
+                Expect::Over {
+                    over: Over::Eventually,
+                    ..
+                }
+            ) && self.first.is_some()
+            || self.window.to <= t
+    }
+
     /// A rate's growth per day, once both ends of its window were read.
     fn rate(&self) -> Option<(f64, f64)> {
         let (a, b) = (self.at_from?, self.at_to?);
@@ -242,10 +257,26 @@ impl<'a> Watch<'a> {
                     };
                     return Ok((false, format!("no `{who}` alive at any check")));
                 }
+                // The checks averaged; those with none to read are left out.
+                let read = match self.read {
+                    1 => "1 check".to_string(),
+                    n => format!("{n} checks"),
+                };
+                let skipped = match self.checks - self.read {
+                    0 => String::new(),
+                    m => format!(
+                        " ({m} more with {})",
+                        if matches!(metric, super::Metric::Field { .. }) {
+                            "no cells"
+                        } else {
+                            "none alive"
+                        }
+                    ),
+                };
                 let mean = self.sum / self.read as f64;
                 (
                     op.holds_f(mean, *v),
-                    format!("mean {} over {n}{range}", decimal(mean)),
+                    format!("mean {} over {read}{skipped}{range}", decimal(mean)),
                 )
             }
             Expect::Mean {
@@ -285,7 +316,8 @@ pub fn run_checks(world: &mut World, checks: &[Check], on: impl FnMut(Event<'_>)
 /// [`run_checks`]; with `stop`, the run ends at the first failure it can be
 /// sure of (an `always` false, a `never` true, an `expect` of a moment that
 /// fails, what the rules lack), and every `expect` after it is reported at
-/// once: a window it decided with its verdict, the rest as not reached.
+/// once: a window already decided (failed, an `eventually` already true, a
+/// window closed by then) with its verdict, the rest as not reached.
 /// Returns whether it cut anything short (a `run`, or lines after the
 /// failure). `wmc lab` stops a seed this way.
 pub fn run_checks_until(
@@ -335,7 +367,7 @@ pub fn run_checks_until(
             cut = true;
             if let Check::Expect { line, text, .. } = c {
                 let (result, value) = match watches.iter().find(|(j, _)| *j == i) {
-                    Some((_, w)) if w.failed() => (w.result(), w.value()),
+                    Some((_, w)) if w.decided(at) => (w.result(), w.value()),
                     _ => (
                         Err(format!(
                             "not reached: the run stopped at {} when line {failing} failed",
@@ -574,6 +606,58 @@ mod tests {
             assert_eq!(*value, None);
         }
         assert!(matches!(&got[6].0, Err(e) if e.starts_with("not reached")));
+    }
+
+    /// A mean over a kind says how many checks it averaged: those with
+    /// none alive are left out of the mean, and counted apart.
+    #[test]
+    fn a_mean_counts_only_the_checks_it_averaged() {
+        let got = verdicts("run 2h\nexpect mean max food of chicken > 0");
+        let Ok((true, saw)) = &got[0] else {
+            panic!("{got:?}")
+        };
+        // The hen is eaten before the first minute's check: one check of
+        // 121 (every minute of 2h, both ends) read her, not 121.
+        assert_eq!(
+            saw,
+            "mean 21600 over 1 check (120 more with none alive); it was 21600"
+        );
+    }
+
+    /// A run that stops at a failure reports what was already decided by
+    /// then with its verdict: an `eventually` already true, a window that
+    /// closed; only the rest is not reached.
+    #[test]
+    fn a_stopped_run_reports_what_was_already_decided() {
+        let s = Scenario::parse(
+            "pen",
+            &format!(
+                "{PEN}run 2h
+                 expect eventually count chicken == 0
+                 expect never count fox > 1 from 0 to 1min
+                 expect always count chicken == 1
+                 expect count fox == 1"
+            ),
+        )
+        .unwrap();
+        let mut world = sim::new_world_with(&s, Kinds::builtin()).unwrap();
+        let mut got = Vec::new();
+        let stopped = run_checks_until(&mut world, &s.checks, true, |e| {
+            if let Event::Expected { result, .. } = e {
+                got.push(result);
+            }
+        });
+        assert!(stopped);
+        assert!(
+            matches!(&got[0], Ok((true, saw)) if saw.starts_with("first true at ")),
+            "{got:?}"
+        );
+        assert_eq!(got[1], Ok((true, "false at all 2 checks; it was 1".into())));
+        assert!(matches!(&got[2], Ok((false, _))), "{got:?}");
+        assert!(
+            matches!(&got[3], Err(e) if e.starts_with("not reached")),
+            "{got:?}"
+        );
     }
 
     /// Checks no longer than the windows they name, as a fuzzer may cut
