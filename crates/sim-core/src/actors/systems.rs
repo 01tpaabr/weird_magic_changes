@@ -33,7 +33,8 @@ use std::collections::BTreeMap;
 use bevy_ecs::prelude::*;
 
 use crate::actors::{
-    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, flags, slot_u16,
+    ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MAX_ROWS, MEM_SLOTS, NEED_SLOTS,
+    flags, slot_u16,
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
@@ -197,6 +198,9 @@ pub struct Scratch {
     /// make this tick (Apply spends them in key order).
     players: Vec<(u32, u32)>,
     quota: Vec<u32>,
+    /// This tick's spawns and splits the budget refused, by their index in
+    /// the chunk's intents (Apply's claims loop decides, in key order).
+    denied: Vec<usize>,
 }
 
 /// Life events and work counted per kind: `Tally::counts[kind][event]`.
@@ -271,6 +275,7 @@ impl Default for Scratch {
             causes: Vec::new(),
             players: Vec::new(),
             quota: Vec::new(),
+            denied: Vec::new(),
         }
     }
 }
@@ -784,6 +789,8 @@ pub fn resolve(
                     match at {
                         Where::Here(cell) => match cells.layer(u8::from(cover))[cell].row() {
                             None => result::MISSED,
+                            // A big actor's own part: never itself.
+                            Some((_, vs)) if vs == it.slot => result::REFUSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
                                 scratch.hits.push(Hit {
@@ -891,10 +898,13 @@ pub fn exchange(
             usize::from(fx.cell),
             u8::from(cover),
         );
-        let res = match stage.entity(to).map(|e| chunks.get_mut(e)) {
+        let to_e = stage.entity(to);
+        let res = match to_e.map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
                 match cells.layer(u8::from(cover))[cell].row() {
                     None => result::MISSED,
+                    // A big actor's own part, across a border: never itself.
+                    Some((_, vs)) if to_e == Some(src_e) && vs == fx.slot => result::REFUSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
                         scratch.hits.push(Hit {
@@ -1107,6 +1117,9 @@ fn transfer(
         return Some(result::MISSED);
     };
     let ds = usize::from(ds);
+    if dst_e == src_e && ds == slot {
+        return Some(result::REFUSED); // a big actor's own part: never itself
+    }
     if dst_pubs.rows[ds].flags & flags::DEAD != 0 {
         return Some(result::MISSED);
     }
@@ -1200,20 +1213,46 @@ pub fn apply(
             // Claims: in-chunk targets free at tick start and untouched, lowest
             // key wins. Intents are in key order since Resolve; a winner
             // touches the cell, so a tied key (twin uids) after it is blocked.
+            // An intent that will be REFUSED claims nothing, so it blocks
+            // nobody: a group its own `grow` empties, a `build` or `split`
+            // out of reach, a `split` of no heads or all of them, a spawn
+            // or split the arena's budget has no room for (its verdict,
+            // spent here in key order, is kept for the loop below).
             scratch.layer_claims.clear();
-            for it in &intents.list {
+            scratch.denied.clear();
+            for (n, it) in intents.list.iter().enumerate() {
                 if !matches!(
                     it.action,
                     Action::Move | Action::Spawn | Action::Build | Action::Split
                 ) {
                     continue;
                 }
-                if it.action == Action::Spawn && is_cover(kinds, it.kind) {
-                    continue; // ground cover takes no standing room
-                }
                 let row = pubs.rows[usize::from(it.slot)];
                 if row.flags & flags::DEAD != 0 {
                     continue;
+                }
+                let heads = grown(kinds.def(row.kind), row.heads, it.grow);
+                if heads == 0 {
+                    continue;
+                }
+                let near = it.dx.unsigned_abs() <= 1
+                    && it.dy.unsigned_abs() <= 1
+                    && (it.dx, it.dy) != (0, 0);
+                let rationed = match it.action {
+                    Action::Build if !near => continue,
+                    Action::Split if !near || !splits(it.amount, heads) => continue,
+                    Action::Split => Some(row.kind),
+                    Action::Spawn => Some(it.kind),
+                    _ => None,
+                };
+                if let Some(k) = rationed
+                    && !scratch.ration(kinds, k)
+                {
+                    scratch.denied.push(n);
+                    continue;
+                }
+                if it.action == Action::Spawn && is_cover(kinds, it.kind) {
+                    continue; // ground cover takes no standing room
                 }
                 // A big actor's move or birth is Migrate's: it claims nothing here.
                 let big = match it.action {
@@ -1255,7 +1294,7 @@ pub fn apply(
             }
 
             scratch.layer_claims.sort_unstable();
-            for it in &intents.list {
+            for (n, it) in intents.list.iter().enumerate() {
                 let slot = usize::from(it.slot);
                 let kind = pubs.rows[slot].kind;
                 scratch.count(kind, life::THINKS);
@@ -1266,6 +1305,20 @@ pub fn apply(
                 if pubs.rows[slot].flags & flags::DEAD != 0 {
                     continue; // died in Exchange: its intent is void
                 }
+                // `grow` before the action, as Migrate's joins and splits
+                // see it: a group it empties is gone and does nothing.
+                if it.grow != 0 {
+                    grow(
+                        kinds,
+                        &mut cells,
+                        &mut pubs,
+                        &mut minds,
+                        &mut scratch,
+                        slot,
+                        it.grow,
+                    );
+                }
+                let gone = pubs.rows[slot].flags & flags::DEAD != 0;
                 let from = usize::from(pubs.rows[slot].cell);
                 let cover = pubs.rows[slot].flags & flags::COVER != 0;
                 let mut actors = ActorsMut {
@@ -1274,6 +1327,7 @@ pub fn apply(
                     cells: &mut cells,
                 };
                 let res = match it.action {
+                    _ if gone => None,
                     Action::Idle => Some(result::OK),
                     // Resolve and Exchange already wrote the result.
                     Action::Eat | Action::Hit | Action::Graze | Action::Take | Action::Give => None,
@@ -1308,9 +1362,12 @@ pub fn apply(
                             scratch.causes.push((kind, cause, 1));
                             Some(result::OK)
                         } else {
+                            let layer = actors.pubs[slot].layer;
                             actors.kill(slot);
                             scratch.deaths += 1;
-                            if !cover {
+                            // Only a standing row's cell: the claims are
+                            // the standing layer's.
+                            if layer == 0 {
                                 scratch.touch(from);
                             }
                             scratch.add(kind, life::DIED, u32::from(heads));
@@ -1321,7 +1378,8 @@ pub fn apply(
                     Action::Become => {
                         let res = change_kind(kinds, tick, &mut actors, slot, it.kind);
                         if res == result::OK {
-                            scratch.count(it.kind, life::BECAME);
+                            let heads = u32::from(actors.pubs[slot].heads);
+                            scratch.add(it.kind, life::BECAME, heads);
                         }
                         Some(res)
                     }
@@ -1339,7 +1397,7 @@ pub fn apply(
                         Some(harvest(kinds, &mut actors, slot, from, it))
                     }
                     Action::Build | Action::Dig => {
-                        let near = it.dx.abs() <= 1 && it.dy.abs() <= 1;
+                        let near = it.dx.unsigned_abs() <= 1 && it.dy.unsigned_abs() <= 1;
                         let build = it.action == Action::Build;
                         Some(match target_of(*coord, from, it.dx, it.dy) {
                             _ if !near || (build && it.dx == 0 && it.dy == 0) => result::REFUSED,
@@ -1457,7 +1515,7 @@ pub fn apply(
                         &mut scratch,
                         &mut outbox,
                         &mut actors,
-                        it,
+                        (n, it),
                     )),
                     Action::Join => Some(join(
                         kinds,
@@ -1468,7 +1526,7 @@ pub fn apply(
                         it,
                     )),
                     // The arena's budget: this player has no room left.
-                    Action::Spawn if !scratch.ration(kinds, it.kind) => Some(result::REFUSED),
+                    Action::Spawn if scratch.denied.contains(&n) => Some(result::REFUSED),
                     // Past the halo, even into a loaded chunk: as unloaded.
                     Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
                     // A big child: Migrate places its footprint.
@@ -1498,7 +1556,8 @@ pub fn apply(
                                         || actors.cells.walkable(cell, &kinds.materials.table))
                                     && kinds
                                         .rest(l)
-                                        .holds(actors.cells.occupant[cell], &kinds.tag_bits) =>
+                                        .holds(actors.cells.occupant[cell], &kinds.tag_bits)
+                                    && !actors.full() =>
                             {
                                 let child = spawn_mind(
                                     kinds,
@@ -1508,8 +1567,7 @@ pub fn apply(
                                     it.kind,
                                     it.with,
                                 );
-                                actors.push_in(cell, it.kind, child, l);
-                                scratch.count(it.kind, life::BORN);
+                                born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                                 result::OK
                             }
                             Where::Here(_) => result::BLOCKED,
@@ -1534,7 +1592,8 @@ pub fn apply(
                         Some(match target_of(*coord, from, it.dx, it.dy) {
                             Where::Here(cell)
                                 if actors.cells.walkable(cell, &kinds.materials.table)
-                                    && actors.cells.cover[cell].is_none() =>
+                                    && actors.cells.cover[cell].is_none()
+                                    && !actors.full() =>
                             {
                                 let child = spawn_mind(
                                     kinds,
@@ -1544,8 +1603,7 @@ pub fn apply(
                                     it.kind,
                                     it.with,
                                 );
-                                actors.push_cover(cell, it.kind, child);
-                                scratch.count(it.kind, life::BORN);
+                                born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                                 result::OK
                             }
                             Where::Here(_) => result::BLOCKED,
@@ -1565,12 +1623,11 @@ pub fn apply(
                         })
                     }
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
-                        Where::Here(cell) if scratch.claim[cell] == it.key => {
+                        Where::Here(cell) if scratch.claim[cell] == it.key && !actors.full() => {
                             let child =
                                 spawn_mind(kinds, seed, tick, coord.cell(cell), it.kind, it.with);
-                            actors.push(cell, it.kind, child);
+                            born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                             scratch.touch(cell);
-                            scratch.count(it.kind, life::BORN);
                             result::OK
                         }
                         Where::Here(_) => result::BLOCKED,
@@ -1597,17 +1654,6 @@ pub fn apply(
                 }
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
-                }
-                if it.grow != 0 && pubs.rows[slot].flags & flags::DEAD == 0 {
-                    grow(
-                        kinds,
-                        &mut cells,
-                        &mut pubs,
-                        &mut minds,
-                        &mut scratch,
-                        slot,
-                        it.grow,
-                    );
                 }
                 for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
                     let f = usize::from(f);
@@ -1637,17 +1683,16 @@ fn split(
     scratch: &mut Scratch,
     outbox: &mut Outbox,
     actors: &mut ActorsMut<'_>,
-    it: &Intent,
+    (n, it): (usize, &Intent),
 ) -> u8 {
     let slot = usize::from(it.slot);
     let row = actors.pubs[slot];
-    let near = it.dx.abs() <= 1 && it.dy.abs() <= 1 && (it.dx, it.dy) != (0, 0);
-    let Ok(heads) = u16::try_from(it.amount) else {
-        return result::REFUSED;
-    };
-    if !near || heads == 0 || heads >= row.heads || !scratch.ration(kinds, row.kind) {
+    let near = it.dx.unsigned_abs() <= 1 && it.dy.unsigned_abs() <= 1 && (it.dx, it.dy) != (0, 0);
+    // The claims loop spent the budget's verdict.
+    if !near || !splits(it.amount, row.heads) || scratch.denied.contains(&n) {
         return result::REFUSED;
     }
+    let heads = u16::try_from(it.amount).expect("splits checked it");
     let l = row.layer;
     match target_of(coord, usize::from(row.cell), it.dx, it.dy) {
         Where::Here(cell) => {
@@ -1660,7 +1705,7 @@ fn split(
             } else {
                 scratch.claim[cell] == it.key
             };
-            if !won {
+            if !won || actors.full() {
                 return result::BLOCKED;
             }
             let child = split_mind(
@@ -1706,7 +1751,7 @@ fn join(
 ) -> u8 {
     let slot = usize::from(it.slot);
     let row = actors.pubs[slot];
-    let near = it.dx.abs() <= 1 && it.dy.abs() <= 1 && (it.dx, it.dy) != (0, 0);
+    let near = it.dx.unsigned_abs() <= 1 && it.dy.unsigned_abs() <= 1 && (it.dx, it.dy) != (0, 0);
     if !near {
         return result::REFUSED;
     }
@@ -1762,7 +1807,7 @@ fn grow(
     if def.group.0 == 0 {
         return;
     }
-    let new = (i32::from(row.heads).saturating_add(n)).clamp(0, i32::from(def.max_heads()));
+    let new = i32::from(grown(def, row.heads, n));
     let delta = new - i32::from(row.heads);
     if delta > 0 {
         scratch.add(row.kind, life::BORN, delta.unsigned_abs());
@@ -1786,6 +1831,45 @@ fn grow(
     } else {
         pubs.rows[slot].heads = u16::try_from(new).expect("1..=max, clamped above");
     }
+}
+
+/// A row's heads after `grow n`: clamped to 0 and its kind's `group max`;
+/// unchanged for a kind that is not a group.
+fn grown(def: &KindDef, heads: u16, n: i32) -> u16 {
+    if n == 0 || def.group.0 == 0 {
+        return heads;
+    }
+    let new = i32::from(heads)
+        .saturating_add(n)
+        .clamp(0, i32::from(def.max_heads()));
+    u16::try_from(new).expect("clamped into 0..=max")
+}
+
+/// May `split n` take `amount` of a group's `heads`: at least one, and
+/// fewer than it has?
+fn splits(amount: i32, heads: u16) -> bool {
+    u16::try_from(amount).is_ok_and(|h| h > 0 && h < heads)
+}
+
+/// A child of `kind` born on `cell` of its layer this tick (the caller
+/// checked the cell is free and the chunk not [`full`]): a group with its
+/// `init` heads, each a birth.
+///
+/// [`full`]: ActorsMut::full
+fn born(
+    kinds: &Kinds,
+    actors: &mut ActorsMut<'_>,
+    scratch: &mut Scratch,
+    cell: usize,
+    kind: u16,
+    child: ActorMind,
+) -> u16 {
+    let def = kinds.def(kind);
+    let new = actors.push_in(cell, kind, child, def.layer);
+    let heads = def.start_heads();
+    actors.pubs[usize::from(new)].heads = heads;
+    scratch.add(kind, life::BORN, u32::from(heads));
+    new
 }
 
 /// The mind of a group `split` off another onto `pos` this tick: the
@@ -2181,7 +2265,8 @@ pub fn migrate(
                         .holds(dst_cells.occupant[cell], &kinds.tag_bits)
             }
         };
-        if !ok {
+        // A full chunk takes no row in, even onto a free cell.
+        if !ok || dst_pubs.rows.len() >= MAX_ROWS {
             set_result_in(&mut src.2, slot, result::BLOCKED);
             continue;
         }
@@ -2215,8 +2300,7 @@ pub fn migrate(
             }
             EffectKind::Spawn { kind, with } => {
                 let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with);
-                to.push_in(cell, kind, child, layer);
-                dst_scratch.count(kind, life::BORN);
+                born(&kinds, &mut to, dst_scratch, cell, kind, child);
                 set_result_in(src_minds, slot, result::OK);
             }
             EffectKind::Split { heads } => {
@@ -2280,6 +2364,9 @@ fn place_big(
     let (w, h) = (i32::from(def.size.0), i32::from(def.size.1));
     let old = from.cell(usize::from(row.cell));
     let new = fx.to.cell(usize::from(fx.cell));
+    if mover && new == old {
+        return Some(result::BLOCKED); // a step of nothing, as a one-cell actor's
+    }
     let cells_of = |a: Pos| {
         (0..h).flat_map(move |dy| (0..w).map(move |dx| (dx, dy, Pos::new(a.x + dx, a.y + dy))))
     };
@@ -2304,6 +2391,16 @@ fn place_big(
             return Some(result::BLOCKED);
         }
     }
+    // A new row (a birth, or a move into another chunk): not into a full one.
+    let (to, cell) = new.split();
+    let dst_e = stage.entity(to).expect("checked loaded above");
+    if (!mover || dst_e != src_e)
+        && chunks
+            .get(dst_e)
+            .is_ok_and(|(_, pubs, ..)| pubs.rows.len() >= MAX_ROWS)
+    {
+        return Some(result::BLOCKED);
+    }
     // Clear the old footprint (a move), then write the new one.
     if mover {
         for (dx, dy, p) in cells_of(old).filter(|&(dx, dy, _)| (dx, dy) != (0, 0)) {
@@ -2320,8 +2417,6 @@ fn place_big(
             }
         }
     }
-    let (to, cell) = new.split();
-    let dst_e = stage.entity(to).expect("checked loaded above");
     if mover && dst_e == src_e {
         let (mut cells, mut pubs, _, mut scratch, mut meta) = chunks.get_mut(src_e).ok()?;
         cells.layer_mut(l)[usize::from(row.cell)] = ActorId::NONE;
@@ -2374,7 +2469,7 @@ fn place_big(
             moved.flags = row.flags & flags::WAKE;
         } else {
             to_rows.pubs[n].heads = def.start_heads();
-            scratch.count(kind, life::BORN);
+            scratch.add(kind, life::BORN, u32::from(def.start_heads()));
         }
         if l == 0 {
             scratch.touch(cell);
@@ -2434,6 +2529,15 @@ pub fn unpart(
         }
     }
     for &(a, l, k, (w, h)) in work.iter() {
+        // Another of its kind came onto its anchor this tick (layers above
+        // the standing one have no touched cells): those parts are its own.
+        let (c, i) = a.split();
+        if let Some(e) = stage.entity(c)
+            && let Ok((_, cells, _, _)) = chunks.get(e)
+            && cells.layer(l)[i].row().is_some_and(|(rk, _)| rk == k)
+        {
+            continue;
+        }
         for dy in 0..i32::from(h) {
             for dx in 0..i32::from(w) {
                 if (dx, dy) == (0, 0) {

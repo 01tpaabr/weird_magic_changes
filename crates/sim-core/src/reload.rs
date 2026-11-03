@@ -33,7 +33,7 @@ use crate::rules::{FieldDef, Kinds};
 use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
 use crate::stage::worldgen::field_layer;
-use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkMeta, Stage};
+use crate::stage::{ActorId, ChunkCells, ChunkCoord, ChunkData, ChunkMeta, Stage};
 use crate::store::{SavedKind, Store};
 
 /// What a reload changed.
@@ -67,8 +67,6 @@ struct Target {
     states: Vec<u8>,
     /// The most heads a row of the new kind holds (1: not a group).
     max_heads: u16,
-    /// It covers more than one cell: its parts carry its kind.
-    big: bool,
 }
 
 /// How rows and fields written under one rule set map onto another.
@@ -79,8 +77,8 @@ pub struct Plan {
     /// Per new field: the old layer of that name (clamped to the new max),
     /// else none and the field starts at its `init`.
     fields: Vec<(Option<usize>, FieldDef)>,
-    /// Field layers a chunk written under the old rules holds.
-    old_fields: usize,
+    /// What a chunk written under the old rules holds.
+    old: Shape,
     /// Per old ground, the new one of its name (else the first); per old
     /// feature (0 none), the new one (else none).
     grounds: Vec<u8>,
@@ -88,10 +86,92 @@ pub struct Plan {
     /// Per new declared layer, the old one of its name (else it starts
     /// empty).
     layers: Vec<Option<usize>>,
-    /// Declared layers a chunk written under the old rules holds.
-    old_layers: usize,
     /// The world's seed: a new field's `init` noise.
     seed: u64,
+}
+
+/// What a chunk file written under one rule set holds, to be checked
+/// against before it is read into a world or remapped ([`Shape::check`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shape {
+    /// Per kind: its layer and its size.
+    pub kinds: Vec<(u8, (u8, u8))>,
+    pub fields: usize,
+    /// Declared layers.
+    pub layers: usize,
+    pub grounds: usize,
+    /// Features past none.
+    pub features: usize,
+}
+
+impl Shape {
+    /// What a chunk written under `kinds` holds.
+    pub fn of(kinds: &Kinds) -> Shape {
+        Shape {
+            kinds: kinds.defs.iter().map(|d| (d.layer, d.size)).collect(),
+            fields: kinds.fields.len(),
+            layers: kinds.layers.len(),
+            grounds: kinds.materials.grounds.len(),
+            features: kinds.materials.features.len(),
+        }
+    }
+
+    /// Does a chunk read from a file hold what rules of this shape write?
+    /// Its rows and cells agree ([`crate::actors::validate`]), every row
+    /// in its kind's layer, every part of a big kind inside its footprint
+    /// ([`crate::actors::validate_parts`]), every ground and feature known,
+    /// a layer per field and per declared layer. Whatever reads a chunk
+    /// file checks this first: a bad file is an error, never a panic.
+    pub fn check(&self, d: &ChunkData) -> Result<(), String> {
+        d.validate(self.kinds.len())?;
+        if let Some((slot, r)) = d
+            .actors
+            .rows
+            .iter()
+            .enumerate()
+            .find(|(_, r)| r.layer != self.kinds[usize::from(r.kind)].0)
+        {
+            return Err(format!(
+                "row {slot} is in layer {}, its kind's is {}",
+                r.layer,
+                self.kinds[usize::from(r.kind)].0
+            ));
+        }
+        crate::actors::validate_parts(&d.cells, &self.kinds)?;
+        let cells = &d.cells;
+        if let Some(g) = cells
+            .ground
+            .iter()
+            .find(|g| usize::from(g.0) >= self.grounds)
+        {
+            return Err(format!("ground {} past the {} grounds", g.0, self.grounds));
+        }
+        if let Some(f) = cells
+            .feature
+            .iter()
+            .find(|f| usize::from(f.0) > self.features)
+        {
+            return Err(format!(
+                "feature {} past the {} features",
+                f.0, self.features
+            ));
+        }
+        if cells.extra.len() != self.layers {
+            return Err(format!(
+                "{} declared layers, the rules declare {}",
+                cells.extra.len(),
+                self.layers
+            ));
+        }
+        if cells.fields.len() != self.fields {
+            return Err(format!(
+                "{} field layers, the rules declare {}",
+                cells.fields.len(),
+                self.fields
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// A save opened with rules that number things differently: the plan every
@@ -154,7 +234,6 @@ impl Plan {
                 mems: [None; MEM_SLOTS],
                 states: Vec::new(),
                 max_heads: nd.max_heads(),
-                big: nd.is_big(),
             };
             for (i, n) in nd.needs.iter().enumerate() {
                 t.needs[i] = od.needs.iter().position(|o| *o == n.name);
@@ -187,7 +266,13 @@ impl Plan {
         Ok(Plan {
             kinds,
             fields,
-            old_fields: old_fields.len(),
+            old: Shape {
+                kinds: old.iter().map(|k| (k.layer, k.size)).collect(),
+                fields: old_fields.len(),
+                layers: old_layers.len(),
+                grounds: old_grounds.len(),
+                features: old_features.len(),
+            },
             grounds: old_grounds
                 .iter()
                 .map(|g| new.materials.ground(g).map_or(0, |g| g.0))
@@ -204,31 +289,14 @@ impl Plan {
                 .iter()
                 .map(|l| old_layers.iter().position(|o| *o == l.name))
                 .collect(),
-            old_layers: old_layers.len(),
             seed,
         })
     }
 
-    /// How many kinds the old table has: saved rows are checked against it
-    /// before they are remapped.
-    pub fn old_kinds(&self) -> usize {
-        self.kinds.len()
-    }
-
-    /// The old rules' ground and feature counts: saved chunks index them.
-    pub fn old_materials(&self) -> (usize, usize) {
-        (self.grounds.len(), self.features.len() - 1)
-    }
-
-    /// How many field layers the old rules had: saved chunks hold that many.
-    pub fn old_fields(&self) -> usize {
-        self.old_fields
-    }
-
-    /// How many declared layers the old rules had: saved chunks hold that
-    /// many.
-    pub fn old_layers(&self) -> usize {
-        self.old_layers
+    /// What a chunk written under the old rules holds: saved chunks are
+    /// checked against it before they are remapped.
+    pub fn old_shape(&self) -> &Shape {
+        &self.old
     }
 
     /// Remap one chunk's rows and fields. Returns whether anything
@@ -283,8 +351,8 @@ impl Plan {
             actors.compact();
         }
         // Parts of big actors carry their kind: renumbered as rows are, or
-        // gone with their kind.
-        if self.kinds.iter().flatten().any(|t| t.big) {
+        // gone with their kind (the only big kind, maybe).
+        if self.old.kinds.iter().any(|&(_, size)| size != (1, 1)) {
             for l in 0..2 + actors.cells.extra.len() {
                 let l = u8::try_from(l).expect("a few layers");
                 for id in actors.cells.layer_mut(l).iter_mut() {
@@ -301,7 +369,7 @@ impl Plan {
         }
         // Declared layers by name: the rows left are in layers the new
         // rules declare (`between` checked their kinds).
-        let identity = self.layers.len() == self.old_layers
+        let identity = self.layers.len() == self.old.layers
             && self.layers.iter().enumerate().all(|(i, &o)| o == Some(i));
         if !identity {
             let old = std::mem::take(&mut actors.cells.extra);
@@ -391,16 +459,16 @@ pub fn rewrite_saved(
     let read = |c: ChunkCoord| {
         let saved = store.read_chunk(c).map_err(|e| e.to_string())?;
         if let Some(s) = &saved {
-            s.data
-                .validate(plan.old_kinds())
-                .map_err(|e| format!("saved chunk {c:?}: {e}"))?;
+            plan.old
+                .check(&s.data)
+                .map_err(|e| format!("{}: {e}", store.chunk_path(c).display()))?;
         }
         Ok::<_, String>(saved)
     };
     for &c in &coords {
         read(c)?;
     }
-    let mut scratch = vec![0usize; plan.old_kinds()];
+    let mut scratch = vec![0usize; plan.old.kinds.len()];
     let mut rewritten = 0;
     for c in coords {
         let Some(mut saved) = read(c)? else {

@@ -21,6 +21,7 @@ pub mod systems;
 use bevy_ecs::prelude::*;
 use bytemuck::{Pod, Zeroable};
 
+use crate::rules::MAX_LAYERS;
 use crate::stage::{ActorId, CHUNK_CELLS, ChunkCells, cell_u16};
 
 pub use systems::{
@@ -35,15 +36,22 @@ pub const MEM_SLOTS: usize = 32;
 /// and amortised (a `Vec` doubling), never a per-actor allocation.
 pub const RESERVE: usize = 256;
 
+/// The most rows a chunk holds at once, dead ones not yet compacted
+/// included: one a cell in each layer it can have (standing, cover and
+/// [`MAX_LAYERS`] declared). A birth or a move in that would pass it is
+/// BLOCKED ([`ActorsMut::full`]). Every slot is below [`ActorId::PART`],
+/// the bit that marks a big actor's part.
+pub const MAX_ROWS: usize = (2 + MAX_LAYERS) * CHUNK_CELLS;
+const _: () = assert!(MAX_ROWS <= ActorId::PART as usize);
+
 /// A row index as the `u16` slot an [`ActorId`] and an effect keep: a chunk
-/// has at most one row per cell in each layer.
+/// has fewer than [`MAX_ROWS`] rows.
 #[inline]
-#[allow(clippy::cast_possible_truncation)] // below 2 * CHUNK_CELLS, which fits
+#[allow(clippy::cast_possible_truncation)] // below MAX_ROWS, which fits
 pub fn slot_u16(slot: usize) -> u16 {
-    debug_assert!(slot < 2 * CHUNK_CELLS, "row {slot}: more than two per cell");
+    debug_assert!(slot < MAX_ROWS, "row {slot}: more than {MAX_ROWS} rows");
     slot as u16
 }
-const _: () = assert!(2 * CHUNK_CELLS <= 1 << u16::BITS);
 
 /// Bits of [`ActorPub::flags`].
 pub mod flags {
@@ -170,10 +178,12 @@ impl ActorsMut<'_> {
 
     /// Append a live row in layer `layer` (0 standing, 1 cover, 2 and up
     /// declared) on a cell that layer leaves empty.
+    /// Panics if the chunk is [`full`](ActorsMut::full): callers check.
     pub fn push_in(&mut self, cell: usize, kind: u16, mind: ActorMind, layer_no: u8) -> u16 {
+        assert!(!self.full(), "{MAX_ROWS} rows in a chunk");
         let layer = self.cells.layer_mut(layer_no);
         assert!(layer[cell].is_none(), "cell {cell} is occupied");
-        let slot = u16::try_from(self.pubs.len()).expect("fewer rows than cells");
+        let slot = slot_u16(self.pubs.len());
         layer[cell] = ActorId::pack(kind, slot);
         #[allow(clippy::cast_possible_truncation)] // the uid's low bits: truncation is the point
         let stagger = mind.uid as u16;
@@ -191,6 +201,14 @@ impl ActorsMut<'_> {
         });
         self.minds.push(mind);
         slot
+    }
+
+    /// Does the chunk hold [`MAX_ROWS`] rows, dead ones included? Then no
+    /// row is added until `compact` (a cell of a layer above the standing
+    /// one may be vacated and filled again in one tick).
+    #[inline]
+    pub fn full(&self) -> bool {
+        self.pubs.len() >= MAX_ROWS
     }
 
     /// Flag a row dead and free its cell. The row stays until [`compact`].
@@ -241,8 +259,13 @@ pub fn validate(
             minds.len()
         ));
     }
-    if pubs.len() > 2 * CHUNK_CELLS {
-        return Err(format!("{} rows for {CHUNK_CELLS} cells", pubs.len()));
+    let room = (2 + cells.extra.len()).min(2 + MAX_LAYERS) * CHUNK_CELLS;
+    if pubs.len() > room {
+        return Err(format!(
+            "{} rows for {CHUNK_CELLS} cells in {} layers",
+            pubs.len(),
+            2 + cells.extra.len()
+        ));
     }
     for (slot, p) in pubs.iter().enumerate() {
         if p.flags & flags::DEAD != 0 {
@@ -286,6 +309,36 @@ pub fn validate(
     }
     if let Some(i) = cells.cover.iter().position(|o| o.part_of().is_some()) {
         return Err(format!("cell {i} of the cover holds a part"));
+    }
+    Ok(())
+}
+
+/// Check a chunk's parts (a big actor's cells but its anchor) against the
+/// kinds of its rules, by index their layer and size: each of a known big
+/// kind, in that kind's layer, an offset inside its footprint, not its
+/// anchor. Whether its anchor is there is the world's to say, not the
+/// chunk's (it may lie in another chunk).
+pub fn validate_parts(cells: &ChunkCells, kinds: &[(u8, (u8, u8))]) -> Result<(), String> {
+    for l in 0..2 + cells.extra.len() {
+        let l = u8::try_from(l).expect("a few layers");
+        for (i, id) in cells.layer(l).iter().enumerate() {
+            let Some((k, dx, dy)) = id.part_of() else {
+                continue;
+            };
+            let Some(&(kl, (w, h))) = kinds.get(usize::from(k)) else {
+                return Err(format!("cell {i} holds a part of unknown kind {k}"));
+            };
+            if kl != l || (w, h) == (1, 1) {
+                return Err(format!(
+                    "cell {i} of layer {l} holds a part of kind {k}, a {w} x {h} of layer {kl}"
+                ));
+            }
+            if (dx, dy) == (0, 0) || dx >= i32::from(w) || dy >= i32::from(h) {
+                return Err(format!(
+                    "cell {i} holds part ({dx}, {dy}) of kind {k}, which is {w} x {h}"
+                ));
+            }
+        }
     }
     Ok(())
 }
@@ -431,6 +484,42 @@ mod tests {
             validate(&bad_c, p, m, KINDS)
                 .unwrap_err()
                 .contains("occupied cells")
+        );
+        // More rows than a cell a layer, before anything else is looked at.
+        let many = vec![p[0]; 2 * CHUNK_CELLS + 1];
+        let minds = vec![m[0]; many.len()];
+        assert!(
+            validate(o, &many, &minds, KINDS)
+                .unwrap_err()
+                .contains("rows for 4096 cells in 2 layers")
+        );
+    }
+
+    #[test]
+    fn validate_parts_wants_a_big_kind_its_layer_and_its_footprint() {
+        let mut c = ChunkData::default().cells;
+        // Kind 0 a 3 x 2 standing, kind 1 one cell.
+        let kinds = [(0, (3, 2)), (0, (1, 1))];
+        c.occupant[1] = ActorId::part(0, 2, 1);
+        assert_eq!(validate_parts(&c, &kinds), Ok(()));
+        for (id, want) in [
+            (ActorId::part(5, 1, 0), "unknown kind"),
+            (ActorId::part(1, 1, 0), "a 1 x 1"),
+            (ActorId::part(0, 3, 0), "which is 3 x 2"),
+            (ActorId::part(0, 0, 2), "which is 3 x 2"),
+            (ActorId::pack(0, ActorId::PART), "part (0, 0)"),
+        ] {
+            c.occupant[1] = id;
+            let e = validate_parts(&c, &kinds).unwrap_err();
+            assert!(e.contains(want), "{id:?}: {e}");
+        }
+        c.occupant[1] = ActorId::NONE;
+        c.extra.push([ActorId::NONE; CHUNK_CELLS]);
+        c.extra[0][1] = ActorId::part(0, 1, 0);
+        assert!(
+            validate_parts(&c, &kinds)
+                .unwrap_err()
+                .contains("of layer 0")
         );
     }
 

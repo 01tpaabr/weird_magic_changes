@@ -2668,7 +2668,8 @@ fn layers_are_declared_named_and_inherited() {
     let many: String = (0..=crate::rules::MAX_LAYERS)
         .map(|i| format!("layer l{i} "))
         .collect();
-    assert!(compile_err(&many).contains("at most 8 layers"));
+    let want = format!("at most {} layers", crate::rules::MAX_LAYERS);
+    assert!(compile_err(&many).contains(&want));
 }
 
 /// Groups (`group max N [init M]`): inherited like any declaration; a

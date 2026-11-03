@@ -204,7 +204,7 @@ impl Players {
 
 /// Declared layers in a rule set: rows keep the layer in a byte, after the
 /// two the engine has.
-pub const MAX_LAYERS: usize = 8;
+pub const MAX_LAYERS: usize = 6;
 
 /// One kind's properties and where its program starts.
 #[derive(Debug, Clone, PartialEq, Eq)]

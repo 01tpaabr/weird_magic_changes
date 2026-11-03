@@ -577,21 +577,9 @@ fn load_chunks(
     // A save opened under other rules: its rows are checked against the
     // kind table they were written with, then remapped.
     let remap = world.resource::<PendingRemap>().0.clone();
-    let nkinds = remap
-        .as_ref()
-        .map_or(world.resource::<Kinds>().len(), Plan::old_kinds);
-    let nfields = remap
-        .as_ref()
-        .map_or(world.resource::<Kinds>().fields.len(), Plan::old_fields);
-    let nlayers = remap
-        .as_ref()
-        .map_or(world.resource::<Kinds>().layers.len(), Plan::old_layers);
-    let (ngrounds, nfeatures) = remap.as_ref().map_or_else(
-        || {
-            let m = &world.resource::<Kinds>().materials;
-            (m.grounds.len(), m.features.len())
-        },
-        Plan::old_materials,
+    let shape = remap.as_ref().map_or_else(
+        || reload::Shape::of(world.resource::<Kinds>()),
+        |p| p.old_shape().clone(),
     );
     let mut to_gen = Vec::with_capacity(coords.len());
     let mut read = 0;
@@ -600,38 +588,9 @@ fn load_chunks(
         let saved = store.map(|s| {
             let saved = s.read_chunk(c).map_err(|e| e.to_string())?;
             if let Some(d) = &saved {
-                d.data
-                    .validate(nkinds)
+                shape
+                    .check(&d.data)
                     .map_err(|e| format!("{}: {e}", s.chunk_path(c).display()))?;
-                let cells = &d.data.cells;
-                if let Some(g) = cells.ground.iter().find(|g| usize::from(g.0) >= ngrounds) {
-                    return Err(format!(
-                        "{}: ground {} past the save's {ngrounds} grounds",
-                        s.chunk_path(c).display(),
-                        g.0
-                    ));
-                }
-                if let Some(f) = cells.feature.iter().find(|f| usize::from(f.0) > nfeatures) {
-                    return Err(format!(
-                        "{}: feature {} past the save's {nfeatures} features",
-                        s.chunk_path(c).display(),
-                        f.0
-                    ));
-                }
-                if d.data.cells.extra.len() != nlayers {
-                    return Err(format!(
-                        "{}: {} declared layers, the save's rules declare {nlayers}",
-                        s.chunk_path(c).display(),
-                        d.data.cells.extra.len()
-                    ));
-                }
-                if d.data.cells.fields.len() != nfields {
-                    return Err(format!(
-                        "{}: {} field layers, the save's rules declare {nfields}",
-                        s.chunk_path(c).display(),
-                        d.data.cells.fields.len()
-                    ));
-                }
             }
             Ok::<_, String>(saved)
         });
@@ -798,9 +757,12 @@ fn restamp(world: &mut World, loaded: &[ChunkCoord]) {
             }
         }
     }
+    // A chunk whose cells change here is dirty: a part written into a
+    // clean chunk must not be lost when it is dropped and generated again.
     for (e, l, i) in clear {
         if let Some(mut cells) = world.get_mut::<ChunkCells>(e) {
             cells.layer_mut(l)[i] = crate::ActorId::NONE;
+            world.get_mut::<ChunkMeta>(e).expect("a chunk").dirty = true;
         }
     }
     for (e, i, l, k, dx, dy) in write {
@@ -810,6 +772,7 @@ fn restamp(world: &mut World, loaded: &[ChunkCoord]) {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..16
             let part = crate::ActorId::part(k, dx as u8, dy as u8);
             cells.layer_mut(l)[i] = part;
+            world.get_mut::<ChunkMeta>(e).expect("a chunk").dirty = true;
         }
     }
 }
@@ -5504,6 +5467,570 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
         assert!(place_actor(w, Pos::new(x, y), k, m), "{kind} at ({x}, {y})");
     }
 
+    /// The row anchored on (x, y) in `layer` (through a part, its anchor's).
+    fn row_on(
+        w: &World,
+        (x, y): (i32, i32),
+        layer: u8,
+    ) -> Option<(crate::actors::ActorPub, ActorMind)> {
+        let (c, slot) = row_at(w, Pos::new(x, y), layer)?;
+        let e = w.resource::<Stage>().entity(c)?;
+        let s = usize::from(slot);
+        Some((
+            w.get::<ChunkActors>(e)?.rows[s],
+            w.get::<ChunkMinds>(e)?.rows[s],
+        ))
+    }
+
+    /// The result code of the last action of the actor anchored on (x, y).
+    fn result_on(w: &World, at: (i32, i32), layer: u8) -> u8 {
+        row_on(w, at, layer).unwrap().1.events & crate::rules::vm::result::MASK
+    }
+
+    /// Rows of the chunk at `c`, dead ones included.
+    fn rows_in(w: &World, c: ChunkCoord) -> usize {
+        let e = w.resource::<Stage>().entity(c).unwrap();
+        w.get::<ChunkActors>(e).unwrap().rows.len()
+    }
+
+    /// A chunk can hold a row on every cell of every layer (8 x 4096, more
+    /// than two a cell, past the old bound): it runs, saves and reopens.
+    /// Full, a cell a dying row left in a declared layer takes no row from
+    /// across a border that tick (a slot of 32768 would read as a part).
+    #[test]
+    fn review_tick_a_chunk_full_in_every_layer_takes_no_more_rows() {
+        use crate::actors::MAX_ROWS;
+        let layers = ["l1", "l2", "l3", "l4", "l5", "l6"];
+        assert_eq!(layers.len(), crate::rules::MAX_LAYERS);
+        let mut rules = String::new();
+        for l in layers {
+            rules += &format!("layer {l} {{ flies }}\n");
+        }
+        rules += "kind stone { glyph \"s\" }\nkind moss { glyph \",\"  cover }\n";
+        for l in &layers[1..] {
+            rules += &format!("kind b{l} {{ glyph \"b\"  layer {l} }}\n");
+        }
+        rules += "kind bird { glyph \"v\"  layer l1  cadence 1  mem role
+                        when role == 1 => die
+                        when role == 2 => move east
+                        when true => idle }";
+        let (kinds, mut w) = flat_world(&rules, 128, 64, 31);
+        let mut uid = 0x1000;
+        let mut put = |w: &mut World, at, kind: &str, mems: &[i32]| {
+            uid += 1;
+            put_at(w, &kinds, at, kind, mems, uid);
+        };
+        for y in 0..64 {
+            for x in 64..128 {
+                put(&mut w, (x, y), "stone", &[]);
+                put(&mut w, (x, y), "moss", &[]);
+                let role = i32::from((x, y) == (64, 5));
+                put(&mut w, (x, y), "bird", &[role]);
+                for l in &layers[1..] {
+                    put(&mut w, (x, y), &format!("b{l}"), &[]);
+                }
+            }
+        }
+        put(&mut w, (63, 5), "bird", &[2]);
+        let full = ChunkCoord::new(1, 0);
+        assert_eq!(rows_in(&w, full), MAX_ROWS);
+        check_invariants(&mut w);
+        step(&mut w);
+        check_invariants(&mut w);
+        assert_eq!(rows_in(&w, full), MAX_ROWS - 1, "one died");
+        assert_eq!(
+            result_on(&w, (63, 5), 2),
+            crate::rules::vm::result::BLOCKED,
+            "the full chunk took no row in"
+        );
+        assert!(row_on(&w, (64, 5), 2).is_none());
+        step(&mut w);
+        check_invariants(&mut w);
+        assert!(row_on(&w, (63, 5), 2).is_none(), "in, a tick later");
+        assert_eq!(rows_in(&w, full), MAX_ROWS);
+        let store = tmp_store("review-full-chunk");
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, kinds.clone()).unwrap().unwrap();
+        // The two chunks the world has, no more.
+        for x in [96, 32] {
+            let near = LoadPolicy { load: 0, unload: 1 };
+            ensure_loaded(&mut back, Pos::new(x, 32), near, Some(&store)).unwrap();
+        }
+        assert_eq!(back.resource::<Stage>().loaded_count(), 2);
+        check_invariants(&mut back);
+        assert_eq!(rows_in(&back, full), MAX_ROWS);
+        step(&mut w);
+        step(&mut back);
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A big actor's `take`, `eat` and `hit` on its own part (in its chunk
+    /// or across a border) are refused: they would make food from nothing.
+    #[test]
+    fn review_tick_a_big_actor_never_takes_from_or_bites_itself() {
+        use crate::actors::{Tally, life};
+        use crate::rules::vm::result;
+        let (kinds, mut w) = flat_world(
+            "kind blob { glyph \"B\"  size 2 2  cadence 1  bite 3  food 1h  mem n
+                   need food max 1d vital
+                   need health max 10 decay 0 vital
+                   when n == 0 => { n = 1  food = 100  idle }
+                   when n == 1 => { n = 2  take east food 50 }
+                   when n == 2 => { n = 3  eat east }
+                   when n == 3 => { n = 4  hit at(x, y + 1) }
+                   when true => idle }",
+            128,
+            64,
+            32,
+        );
+        let blob = kinds.by_name("blob").unwrap().id;
+        let (food, health) = (slot(&kinds, blob, "food"), slot(&kinds, blob, "health"));
+        // In its chunk; across a border (its east part is in the next one).
+        let at = [(10, 10), (63, 20)];
+        for (i, &p) in at.iter().enumerate() {
+            put_at(&mut w, &kinds, p, "blob", &[], 0x600 + i as u64);
+        }
+        step(&mut w);
+        step(&mut w); // the take
+        for p in at {
+            assert_eq!(result_on(&w, p, 0), result::REFUSED, "take at {p:?}");
+            let m = row_on(&w, p, 0).unwrap().1;
+            assert!(
+                m.needs[food] <= 100,
+                "food from nothing at {p:?}: {}",
+                m.needs[food]
+            );
+        }
+        step(&mut w); // the eat
+        for p in at {
+            assert_eq!(result_on(&w, p, 0), result::REFUSED, "eat at {p:?}");
+            assert_eq!(row_on(&w, p, 0).unwrap().1.needs[health], 10);
+        }
+        step(&mut w); // the hit, on its lower part
+        for p in at {
+            assert_eq!(result_on(&w, p, 0), result::REFUSED, "hit at {p:?}");
+            assert_eq!(row_on(&w, p, 0).unwrap().1.needs[health], 10);
+        }
+        assert_eq!(w.resource::<Tally>().get(blob, life::EATEN), 0);
+        check_invariants(&mut w);
+    }
+
+    /// A big flier moving out of its chunk dies there; another of its
+    /// kind moving onto its old anchor in the same Migrate keeps the parts
+    /// it just wrote (a declared layer has no touched cells), whichever of
+    /// the two goes first.
+    #[test]
+    fn review_tick_a_dead_big_actors_parts_spare_a_newcomers() {
+        let rules = "layer air { flies }
+                         kind bird { glyph \"A\"  layer air  size 2 1  cadence 1  mem n, role
+                           when n == 0 => { n = 1  move east }
+                           when role == 1 and n == 1 => { n = 2  move dir(2) }
+                           when role == 0 and y > 10 => move north
+                           when true => idle }";
+        let mut both_moved = 0;
+        for k in 0..12u64 {
+            let (kinds, mut w) = flat_world(rules, 128, 64, 33);
+            put_at(&mut w, &kinds, (62, 10), "bird", &[0, 1], 0x700 + 2 * k);
+            put_at(&mut w, &kinds, (62, 11), "bird", &[0, 0], 0x701 + 2 * k);
+            for _ in 0..4 {
+                step(&mut w);
+                check_invariants(&mut w);
+            }
+            let anchored = |w: &World, (x, y): (i32, i32)| {
+                let (c, i) = Pos::new(x, y).split();
+                stage::chunk(w, c).is_some_and(|cells| cells.layer(2)[i].row().is_some())
+            };
+            if anchored(&w, (64, 9)) && anchored(&w, (63, 10)) {
+                both_moved += 1;
+            }
+        }
+        assert!(both_moved > 0, "the case never came up");
+    }
+
+    /// A `build` or `split` that is refused (out of reach; a split of all
+    /// its heads), or a spawn the arena's budget refuses, claims no cell:
+    /// whoever else steps there gets it, whatever the keys.
+    #[test]
+    fn review_tick_a_refused_build_split_or_spawn_claims_no_cell() {
+        use crate::rules::compile_owned;
+        let arena = "budget { rows 1 }
+                         kind builder { glyph \"b\"  cadence 1  sight 4
+                           when true => build rock at at(x + 2, y) }
+                         kind herd { glyph \"h\"  cadence 1  sight 4  group max 10 init 5  mem far
+                           when far == 1 => split 1 at at(x + 2, y)
+                           when true => split 5 at east }
+                         kind walker { glyph \"w\"  cadence 1  mem stop
+                           when x > stop => move west
+                           when true => idle }";
+        let red = "kind ant { glyph \"a\"  cadence 1  when true => spawn ant at east }";
+        let kinds = compile_owned(
+            &[
+                ("arena.rules", arena, None),
+                ("red.rules", red, Some("red")),
+            ],
+            &[],
+        )
+        .unwrap();
+        for k in 0..8u64 {
+            let cfg = Scenario {
+                width: 64,
+                height: 64,
+                ..cfg(34)
+            };
+            let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+            flatten(&mut w);
+            let u = 0x800 + 16 * k;
+            put_at(&mut w, &kinds, (10, 10), "builder", &[], u);
+            put_at(&mut w, &kinds, (13, 10), "walker", &[12], u + 1);
+            put_at(&mut w, &kinds, (10, 20), "herd", &[1], u + 2);
+            put_at(&mut w, &kinds, (13, 20), "walker", &[12], u + 3);
+            put_at(&mut w, &kinds, (10, 30), "herd", &[0], u + 4);
+            put_at(&mut w, &kinds, (12, 30), "walker", &[11], u + 5);
+            put_at(&mut w, &kinds, (10, 40), "red.ant", &[], u + 6);
+            put_at(&mut w, &kinds, (12, 40), "walker", &[11], u + 7);
+            step(&mut w);
+            check_invariants(&mut w);
+            let walker = kinds.by_name("walker").unwrap().id;
+            for at in [(12, 10), (12, 20), (11, 30), (11, 40)] {
+                assert_eq!(
+                    row_on(&w, at, 0).map(|r| r.0.kind),
+                    Some(walker),
+                    "uids {u:#x}: the walker stepped onto {at:?}"
+                );
+            }
+        }
+    }
+
+    /// The arena's budget counts a player's `split` as the birth of a row
+    /// of the splitter's kind: with room left, it goes ahead; with none,
+    /// it is refused.
+    #[test]
+    fn review_tick_a_players_split_is_counted_against_its_budget() {
+        use crate::rules::compile_owned;
+        let red = "kind herd { glyph \"h\"  cadence 1  group max 10 init 5  mem done
+                     when done == 0 => { done = 1  split 1 at east }
+                     when true => idle }";
+        for (cap, splits) in [(3, true), (1, false)] {
+            let arena = format!("budget {{ rows {cap} }}  kind stone {{ glyph \"s\" }}");
+            let kinds = compile_owned(
+                &[
+                    ("arena.rules", &arena, None),
+                    ("red.rules", red, Some("red")),
+                ],
+                &[],
+            )
+            .unwrap();
+            let cfg = Scenario {
+                width: 64,
+                height: 64,
+                ..cfg(44)
+            };
+            let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+            flatten(&mut w);
+            put_at(&mut w, &kinds, (10, 10), "red.herd", &[], 0x1100);
+            step(&mut w);
+            check_invariants(&mut w);
+            let heads = |at| row_on(&w, at, 0).map(|r| r.0.heads);
+            if splits {
+                assert_eq!((heads((10, 10)), heads((11, 10))), (Some(4), Some(1)));
+            } else {
+                assert_eq!((heads((10, 10)), heads((11, 10))), (Some(5), None));
+                assert_eq!(
+                    result_on(&w, (10, 10), 0),
+                    crate::rules::vm::result::REFUSED
+                );
+            }
+        }
+    }
+
+    /// A row of a declared layer that dies leaves the standing cell under
+    /// it free to enter: whatever the keys, the crab steps under the gull.
+    #[test]
+    fn review_tick_a_dying_flier_does_not_block_the_cell_below() {
+        let rules = "layer air { flies }
+                         kind gull { glyph \"v\"  layer air  cadence 1  when true => die }
+                         kind crab { glyph \"c\"  cadence 1  when x > 5 => move west  when true => idle }";
+        for k in 0..8u64 {
+            let (kinds, mut w) = flat_world(rules, 64, 64, 35);
+            put_at(&mut w, &kinds, (5, 5), "gull", &[], 0x900 + 2 * k);
+            put_at(&mut w, &kinds, (6, 5), "crab", &[], 0x901 + 2 * k);
+            step(&mut w);
+            check_invariants(&mut w);
+            let crab = kinds.by_name("crab").unwrap().id;
+            assert_eq!(
+                row_on(&w, (5, 5), 0).map(|r| r.0.kind),
+                Some(crab),
+                "uids {k}"
+            );
+        }
+    }
+
+    /// `grow` goes before the action, in a chunk as across a border: grown
+    /// past what a `join` fits, the join is refused; shrunk below what a
+    /// `split` takes, the split is.
+    #[test]
+    fn review_tick_grow_comes_before_the_action_on_either_side_of_a_border() {
+        let (kinds, mut w) = flat_world(
+            "kind herd { glyph \"H\"  cadence 1  group max 10 init 3  mem mode
+                   when mode == 1 => { mode = 0  grow 5  join east }
+                   when mode == 2 => { mode = 0  grow -3  split 2 at east }
+                   when true => idle }",
+            128,
+            64,
+            36,
+        );
+        // (x of the first, y): in a chunk, then across a border.
+        let pairs = [(62, 10), (63, 20)];
+        for (i, &(x, y)) in pairs.iter().enumerate() {
+            let u = 0xA00 + 8 * i as u64;
+            put_at(&mut w, &kinds, (x, y), "herd", &[1], u);
+            put_at(&mut w, &kinds, (x + 1, y), "herd", &[0], u + 1);
+            put_at(&mut w, &kinds, (x, y + 5), "herd", &[2], u + 2);
+            let e = w
+                .resource::<Stage>()
+                .entity(Pos::new(x, y + 5).split().0)
+                .unwrap();
+            let (_, s) = row_at(&w, Pos::new(x, y + 5), 0).unwrap();
+            w.get_mut::<ChunkActors>(e).unwrap().rows[usize::from(s)].heads = 4;
+        }
+        step(&mut w);
+        check_invariants(&mut w);
+        let heads = |w: &World, at| row_on(w, at, 0).map(|r| r.0.heads);
+        for (x, y) in pairs {
+            assert_eq!(heads(&w, (x, y)), Some(8), "grown, the join refused: {x}");
+            assert_eq!(heads(&w, (x + 1, y)), Some(3), "{x}");
+            assert_eq!(
+                heads(&w, (x, y + 5)),
+                Some(1),
+                "shrunk, the split refused: {x}"
+            );
+            assert_eq!(heads(&w, (x + 1, y + 5)), None, "{x}");
+        }
+    }
+
+    /// A group born of `spawn` starts with its `init` heads, standing or
+    /// in a declared layer, in its chunk or across a border, big; each
+    /// head is a birth. A `become` is counted a head at a time too.
+    #[test]
+    fn review_tick_a_spawned_group_starts_with_its_init_heads() {
+        use crate::actors::{Tally, life};
+        let (kinds, mut w) = flat_world(
+            "layer air { flies }
+                 kind nest { glyph \"N\"  cadence 1  mem what, done
+                   when done == 0 and what == 0 => { done = 1  spawn herd at east }
+                   when done == 0 and what == 2 => { done = 1  spawn flock at east }
+                   when done == 0 and what == 3 => { done = 1  spawn pod at east }
+                   when true => idle }
+                 kind herd { glyph \"h\"  group max 50 init 20 }
+                 kind flock { glyph \"f\"  layer air  group max 9 init 3 }
+                 kind pod { glyph \"p\"  size 2 1  group max 9 init 6 }
+                 kind egg { glyph \"e\"  cadence 1  group max 9 init 7  mem t
+                   when t == 0 => { t = 1  become chick }
+                   when true => idle }
+                 kind chick { glyph \"c\"  group max 9 init 1 }",
+            128,
+            64,
+            37,
+        );
+        for (i, (at, what)) in [
+            ((10, 10), 0),
+            ((63, 20), 0),
+            ((63, 30), 2),
+            ((10, 40), 2),
+            ((10, 50), 3),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_at(&mut w, &kinds, at, "nest", &[what], 0xB00 + i as u64);
+        }
+        put_at(&mut w, &kinds, (30, 10), "egg", &[], 0xB10);
+        step(&mut w);
+        check_invariants(&mut w);
+        let heads = |w: &World, at, l| row_on(w, at, l).map(|r| r.0.heads);
+        assert_eq!(heads(&w, (11, 10), 0), Some(20), "in its chunk");
+        assert_eq!(heads(&w, (64, 20), 0), Some(20), "across a border");
+        assert_eq!(heads(&w, (64, 30), 2), Some(3), "a layer, across a border");
+        assert_eq!(heads(&w, (11, 40), 2), Some(3), "a declared layer");
+        assert_eq!(heads(&w, (11, 50), 0), Some(6), "big");
+        assert_eq!(
+            heads(&w, (30, 10), 0),
+            Some(7),
+            "the egg's heads, a chick's now"
+        );
+        let t = w.resource::<Tally>();
+        let id = |n: &str| kinds.by_name(n).unwrap().id;
+        assert_eq!(t.get(id("herd"), life::BORN), 40);
+        assert_eq!(t.get(id("flock"), life::BORN), 6);
+        assert_eq!(t.get(id("pod"), life::BORN), 6);
+        assert_eq!(t.get(id("chick"), life::BECAME), 7);
+    }
+
+    /// A reload (or a save opened) under rules without the only big kind
+    /// takes its parts away with its rows, in memory and on disk.
+    #[test]
+    fn review_tick_a_reload_that_drops_the_only_big_kind_drops_its_parts() {
+        use crate::reload::reload_rules;
+        let (kinds, mut w) = flat_world(
+            "kind whale { glyph \"W\"  size 3 2 }  kind fish { glyph \"f\" }",
+            192,
+            64,
+            38,
+        );
+        put_at(&mut w, &kinds, (10, 10), "whale", &[], 0xC00);
+        put_at(&mut w, &kinds, (62, 30), "whale", &[], 0xC01); // parts next door
+        put_at(&mut w, &kinds, (20, 20), "fish", &[], 0xC02);
+        put_at(&mut w, &kinds, (130, 20), "whale", &[], 0xC03);
+        let store = tmp_store("review-drop-big");
+        save(&mut w, &store).unwrap();
+        // The chunk with the third whale goes to disk only.
+        stage::remove(&mut w, ChunkCoord::new(2, 0));
+        let fish_only = crate::rules::compile("t.rules", "kind fish { glyph \"f\" }").unwrap();
+        reload_rules(&mut w, Some(&store), fish_only.clone()).unwrap();
+        check_invariants(&mut w);
+        step(&mut w);
+        let all = LoadPolicy { load: 2, unload: 2 };
+        ensure_loaded(&mut w, Pos::new(96, 32), all, Some(&store)).unwrap();
+        check_invariants(&mut w);
+        let parts = {
+            let mut q = w.query::<&ChunkCells>();
+            q.iter(&w)
+                .map(|c| c.occupant.iter().filter(|o| o.part_of().is_some()).count())
+                .sum::<usize>()
+        };
+        assert_eq!(parts, 0);
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// Chunk files that break what the rules say are refused with an
+    /// error, by a load and by a reload's rewrite alike, never a panic: a
+    /// part of no kind, of a kind that is not big, outside its kind's
+    /// footprint, on its anchor; a row in a layer its kind is not in; a
+    /// file with the wrong count of declared layers.
+    #[test]
+    fn review_tick_bad_chunk_files_are_errors_never_panics() {
+        use crate::reload::reload_rules;
+        use crate::stage::ActorId;
+        let a = "layer air { flies }
+                     kind whale { glyph \"W\"  size 3 2 }
+                     kind crab { glyph \"c\" }
+                     kind gull { glyph \"v\"  layer air }";
+        let (kinds, mut w) = flat_world(a, 64, 64, 39);
+        put_at(&mut w, &kinds, (10, 10), "whale", &[], 0xD00);
+        put_at(&mut w, &kinds, (20, 20), "crab", &[], 0xD01);
+        put_at(&mut w, &kinds, (30, 30), "gull", &[], 0xD02);
+        let store = tmp_store("review-bad-chunks");
+        save(&mut w, &store).unwrap();
+        let c = ChunkCoord::new(0, 0);
+        let good = store.read_chunk(c).unwrap().unwrap();
+        let whale = kinds.by_name("whale").unwrap().id;
+        let crab = kinds.by_name("crab").unwrap().id;
+        let part = Pos::new(11, 10).split().1;
+        let crab_row = usize::from(row_at(&w, Pos::new(20, 20), 0).unwrap().1);
+        let gull_row = usize::from(row_at(&w, Pos::new(30, 30), 2).unwrap().1);
+        type Break = Box<dyn Fn(&mut ChunkData)>;
+        let breaks: Vec<(Break, &str)> = vec![
+            (
+                Box::new(move |d| d.cells.occupant[part] = ActorId::part(99, 1, 0)),
+                "unknown kind",
+            ),
+            (
+                Box::new(move |d| d.cells.occupant[part] = ActorId::part(crab, 1, 0)),
+                "a 1 x 1",
+            ),
+            (
+                Box::new(move |d| d.cells.occupant[part] = ActorId::part(whale, 5, 0)),
+                "which is 3 x 2",
+            ),
+            (
+                Box::new(move |d| d.cells.occupant[part] = ActorId::pack(whale, ActorId::PART)),
+                "(0, 0)",
+            ),
+            (
+                Box::new(move |d| {
+                    // The crab moved into the air layer.
+                    let cell = usize::from(d.actors.rows[crab_row].cell);
+                    d.cells.occupant[cell] = ActorId::NONE;
+                    d.cells.extra[0][cell] = ActorId::pack(crab, slot_u16(crab_row));
+                    d.actors.rows[crab_row].layer = 2;
+                }),
+                "its kind's is 0",
+            ),
+            (
+                Box::new(move |d| {
+                    // No declared layer, and nobody who needs one.
+                    let mut a = d.actors_mut();
+                    a.kill(gull_row);
+                    a.compact();
+                    d.cells.extra.clear();
+                }),
+                "declared layers",
+            ),
+        ];
+        // The rules to reload to: no air (a row left there has nowhere to
+        // go), whales and crabs kept.
+        let b = crate::rules::compile(
+            "t.rules",
+            "layer deep  kind whale { glyph \"W\"  size 3 2 }  kind crab { glyph \"c\" }",
+        )
+        .unwrap();
+        for (i, (brk, want)) in breaks.iter().enumerate() {
+            let mut d = good.data.clone();
+            brk(&mut d);
+            store
+                .write_chunk(c, &d.cells, &d.actors, &d.minds, good.last_ticked)
+                .unwrap();
+            // A load: the chunk is left unloaded, with why.
+            let mut back = open_world_with(&store, kinds.clone()).unwrap().unwrap();
+            let one = LoadPolicy { load: 0, unload: 0 };
+            let e = ensure_loaded(&mut back, Pos::new(5, 5), one, Some(&store))
+                .unwrap_err()
+                .to_string();
+            assert!(e.contains(want), "break {i}, a load: {e}");
+            assert_eq!(back.resource::<Unreadable>().0, [c]);
+            // A reload's rewrite: refused, nothing written.
+            let mut live = open_world_with(&store, kinds.clone()).unwrap().unwrap();
+            let e = reload_rules(&mut live, Some(&store), b.clone()).unwrap_err();
+            assert!(e.contains(want), "break {i}, a reload: {e}");
+            let back = store.read_chunk(c).unwrap().unwrap();
+            assert_eq!(back.data, d, "break {i}: nothing written");
+        }
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// The parts a big actor's footprint puts into a chunk with nobody
+    /// else in it make that chunk dirty: dropped clean, it would come back
+    /// generated without them.
+    #[test]
+    fn review_tick_parts_written_on_load_make_a_chunk_dirty() {
+        let (kinds, mut w) = flat_world(
+            "kind whale { glyph \"W\"  size 3 2 }  kind fish { glyph \"f\" }",
+            128,
+            64,
+            40,
+        );
+        put_at(&mut w, &kinds, (62, 10), "whale", &[], 0xE10);
+        // Its parts' chunk dropped (with no store: as it was generated), then
+        // generated again: the whale's parts are written back into it.
+        let c = ChunkCoord::new(1, 0);
+        stage::remove(&mut w, c);
+        let near = LoadPolicy { load: 0, unload: 1 };
+        ensure_loaded(&mut w, Pos::new(96, 10), near, None).unwrap();
+        check_invariants(&mut w);
+        let e = w.resource::<Stage>().entity(c).unwrap();
+        assert!(w.get::<ChunkActors>(e).unwrap().rows.is_empty());
+        assert!(
+            w.get::<ChunkCells>(e)
+                .unwrap()
+                .occupant
+                .iter()
+                .any(|o| o.part_of().is_some()),
+            "the whale's parts are next door"
+        );
+        assert!(w.get::<ChunkMeta>(e).unwrap().dirty);
+    }
+
     /// A reload to rules without laws leaves the fields to the actors: a
     /// world reloaded runs on as the same world saved and reopened does.
     #[test]
@@ -5574,6 +6101,26 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
             step(&mut w);
             assert_eq!(field_total(&mut w, 1), before, "no drop made or lost");
         }
+    }
+
+    /// A big actor's step that comes to nothing is BLOCKED, as a one-cell
+    /// actor's is.
+    #[test]
+    fn review_tick_a_big_actors_step_of_nothing_is_blocked() {
+        let (kinds, mut w) = flat_world(
+            "kind whale { glyph \"W\"  size 3 2  cadence 1  when true => move here }
+                 kind fish { glyph \"f\"  cadence 1  when true => move here }",
+            64,
+            64,
+            43,
+        );
+        put_at(&mut w, &kinds, (10, 10), "whale", &[], 0xF00);
+        put_at(&mut w, &kinds, (20, 20), "fish", &[], 0xF01);
+        step(&mut w);
+        check_invariants(&mut w);
+        let blocked = crate::rules::vm::result::BLOCKED;
+        assert_eq!(result_on(&w, (20, 20), 0), blocked);
+        assert_eq!(result_on(&w, (10, 10), 0), blocked);
     }
 
     #[test]

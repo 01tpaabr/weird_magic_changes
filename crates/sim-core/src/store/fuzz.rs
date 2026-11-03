@@ -40,6 +40,7 @@ start hive at (30, 30)
 start bee at (32, 30) with (home_x = 30, home_y = 30)
 start gull at (32, 30)
 start gull at (1, 0)
+start boulder at (40, 40)
 ";
 
 /// The one chunk, alone: nothing else streams in.
@@ -60,9 +61,11 @@ const FIELDS: [&str; 2] = [
 ];
 /// A declared layer beside the built-in kinds, with a kind in it that
 /// starts in the chunk, so a save holds a declared layer's array and rows in
-/// it; [`REVERSED`] declares another before it, so opening moves it.
+/// it; [`REVERSED`] declares another before it, so opening moves it. And a
+/// big kind, so it holds parts.
 const LAYER: &str =
-    "layer air { flies }\nkind gull { layer air cadence 2 when true => move random free }";
+    "layer air { flies }\nkind gull { layer air cadence 2 when true => move random free }
+kind boulder { size 2 2 cadence 4 when true => move random free }";
 
 /// Where a world file's starts start: header, seed, tick, ticks/day,
 /// size, terrain, the start count.
@@ -200,6 +203,7 @@ fn corrupt() -> impl Strategy<Value = Corrupt> {
         Just(1 << 24),
         Just(FORMAT_VERSION + 1),
         Just(2 * CHUNK_CELLS as u32 + 1),
+        Just(crate::actors::MAX_ROWS as u32 + 1),
         Just(crate::rules::MAX_LAYERS as u32 + 1),
         any::<u32>(),
     ];
