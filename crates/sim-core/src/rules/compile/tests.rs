@@ -3593,6 +3593,23 @@ fn a_need_or_mem_named_like_a_const_is_an_error() {
 }
 
 #[test]
+fn many_kinds_extending_a_trait_compile_quickly() {
+    // Numbering the kinds was cubic, the instance memo a linear scan.
+    let mut text = String::from("trait t { when true => idle }\n");
+    for i in 0..3000 {
+        text.push_str(&format!("kind k{i} extends t {{ glyph \"k\" }}\n"));
+    }
+    let start = std::time::Instant::now();
+    let k = compile_ok(&text);
+    assert_eq!(k.defs.len(), 3000);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn players_are_at_most_254() {
     let arena = "kind rock_pile { }";
     let names: Vec<(String, String)> = (0..255)

@@ -3699,7 +3699,11 @@ struct Gen<'a> {
     placeholder: bool,
     /// Instances that skipped such a conflict, or extend one that did: never
     /// reused for one whose arguments are real.
-    lenient: Vec<usize>,
+    lenient: std::collections::HashSet<usize>,
+    /// The instances of each (item, arguments), in the order made.
+    inst_memo: HashMap<(usize, Vec<i32>), Vec<usize>>,
+    /// Each item's index by name (the first, if two share one).
+    item_index: HashMap<&'a str, usize>,
     locals: Vec<Local>,
     next_local: u8,
     /// Position for errors without a better one.
@@ -3897,7 +3901,15 @@ impl<'a> Gen<'a> {
             params: Vec::new(),
             checking: false,
             placeholder: false,
-            lenient: Vec::new(),
+            lenient: std::collections::HashSet::new(),
+            inst_memo: HashMap::new(),
+            item_index: items
+                .items
+                .iter()
+                .enumerate()
+                .rev()
+                .map(|(i, it)| (it.name.as_str(), i))
+                .collect(),
             locals: Vec::new(),
             next_local: 0,
             here: Pos {
@@ -3918,7 +3930,7 @@ impl<'a> Gen<'a> {
     }
 
     fn item_named(&self, name: &str) -> Option<usize> {
-        self.items.iter().position(|i| i.name == name)
+        self.item_index.get(name).copied()
     }
 
     /// A concrete kind's id (after numbering).
@@ -4655,9 +4667,9 @@ impl<'a> Gen<'a> {
     /// its ancestors, merged declarations and rule lists. Memoized per
     /// (item, arguments).
     fn inst(&mut self, item: usize, args: Vec<i32>, stack: &mut Vec<usize>) -> Result<usize> {
-        if let Some(i) = (0..self.insts.len()).find(|&i| {
-            let x = &self.insts[i];
-            x.item == item && x.args == args && (self.placeholder || !self.lenient.contains(&i))
+        if let Some(&i) = self.inst_memo.get(&(item, args.clone())).and_then(|v| {
+            v.iter()
+                .find(|&&i| self.placeholder || !self.lenient.contains(&i))
         }) {
             return Ok(i);
         }
@@ -4804,9 +4816,13 @@ impl<'a> Gen<'a> {
         self.params = saved;
         let inst = inst?;
         debug_assert_eq!(self.insts.len(), me, "merge resolves nothing new");
+        self.inst_memo
+            .entry((item, inst.args.clone()))
+            .or_default()
+            .push(me);
         self.insts.push(inst);
         if skipped {
-            self.lenient.push(me);
+            self.lenient.insert(me);
         }
         Ok(me)
     }
@@ -5404,31 +5420,32 @@ impl<'a> Gen<'a> {
     /// after it in the same order. A family is then one id range.
     fn number_kinds(&mut self) {
         let items = self.items;
-        let concrete_parent = |i: usize| -> Option<usize> {
-            items[i].parents.iter().find_map(|p| {
-                items
+        // Each kind's concrete parent, then each kind's children, once.
+        let parent: Vec<Option<usize>> = (0..items.len())
+            .map(|i| {
+                items[i]
+                    .parents
                     .iter()
-                    .position(|o| o.name == p.name)
-                    .filter(|&pi| !items[pi].is_trait)
+                    .find_map(|p| self.item_named(&p.name).filter(|&pi| !items[pi].is_trait))
             })
-        };
+            .collect();
         let kinds: Vec<usize> = (0..items.len()).filter(|&i| !items[i].is_trait).collect();
+        let mut children: Vec<Vec<usize>> = vec![Vec::new(); items.len()];
+        for &k in kinds.iter().rev() {
+            if let Some(p) = parent[k] {
+                children[p].push(k);
+            }
+        }
         let mut order = Vec::with_capacity(kinds.len());
         let mut stack: Vec<usize> = kinds
             .iter()
             .rev()
             .copied()
-            .filter(|&k| concrete_parent(k).is_none())
+            .filter(|&k| parent[k].is_none())
             .collect();
         while let Some(k) = stack.pop() {
             order.push(k);
-            stack.extend(
-                kinds
-                    .iter()
-                    .rev()
-                    .copied()
-                    .filter(|&c| concrete_parent(c) == Some(k)),
-            );
+            stack.extend_from_slice(&children[k]);
         }
         self.item_ids = vec![None; items.len()];
         for (id, &k) in order.iter().enumerate() {
@@ -5437,9 +5454,9 @@ impl<'a> Gen<'a> {
         self.kind_insts = order
             .iter()
             .map(|&k| {
-                self.insts
-                    .iter()
-                    .position(|x| x.item == k && x.args.is_empty())
+                self.inst_memo
+                    .get(&(k, Vec::new()))
+                    .and_then(|v| v.first().copied())
                     .expect("every kind was resolved")
             })
             .collect();
