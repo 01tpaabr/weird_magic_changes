@@ -3493,7 +3493,6 @@ mod tests {
     /// search started inside another traps.
     #[test]
     fn searches_plan_over_memory_and_over_cells() {
-        use crate::actors::life;
         use crate::actors::systems::newborn;
         use crate::rules::compile;
         let kinds = compile(
@@ -3534,11 +3533,6 @@ mod tests {
                when done == 0 and to_water() as p into route => {
                  done = 1  via = p.via  cost = p.cost  steps = p.steps  idle
                }
-               when true => idle }
-             kind nester { glyph \"n\"  cadence 1  fuel 32768  mem done
-               search inner { state a = 0  next { try a + 1 }  goal a > 2 }
-               search outer { state b = 0  next { if inner() { try b + 1 } }  goal b > 2 }
-               when outer() => { done = 1  idle }
                when true => idle }",
         )
         .unwrap();
@@ -3571,11 +3565,6 @@ mod tests {
                 Pos::new(10, 10),
                 "walker",
                 newborn(&kinds, id("walker"), 0xD3, now),
-            ),
-            (
-                Pos::new(50, 50),
-                "nester",
-                newborn(&kinds, id("nester"), 0xD4, now),
             ),
         ] {
             assert!(place_actor(&mut w, p, id(k), mind));
@@ -3612,12 +3601,8 @@ mod tests {
         }
         assert_eq!((x, y), (14, 10), "the route ends at the water");
         assert_eq!(m[1], m[4], "the plan's first step is the route's first");
-        // A search inside a search traps the think.
-        assert_eq!(by(0xD4)[0], 0, "never found");
-        let traps = w
-            .resource::<crate::actors::Tally>()
-            .get(id("nester"), life::TRAPS);
-        assert!(traps > 0, "it trapped");
+        // A search inside a search would trap the think: refused when
+        // compiled (`compile/tests.rs`, a_search_starts_no_search_while_it_runs).
     }
 
     /// Inside an aggregate a field is read as it stood before the law ran,

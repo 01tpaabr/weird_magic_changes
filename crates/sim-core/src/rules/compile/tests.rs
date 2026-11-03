@@ -3535,6 +3535,53 @@ fn lexer_errors_point_at_the_start_and_strings_are_utf8() {
 }
 
 #[test]
+fn an_action_in_a_field_condition_is_seen() {
+    // `boom()` moves; a field condition's value calls it.
+    let sub = "field sugar max 9 { init 5 }  sub boom() { move north  return 1 }";
+    for probe in [
+        "return count (sugar > boom()) within 2",
+        "return is(here, (sugar > boom()))",
+        "if nearest (sugar > boom()) within 2 as c { return 1 }  return 0",
+        "if best sugar on (sugar > boom()) within 2 as c { return 1 }  return 0",
+        "for each (sugar > boom()) within 2 as c { }  return 0",
+    ] {
+        let text = format!(
+            "{sub}  sub probe() {{ {probe} }}
+             kind ox {{ when probe() > 1000 => idle  when true => idle }}"
+        );
+        let e = compile_err(&text);
+        assert!(e.contains("`probe` may act or `next`"), "{probe}: {e}");
+    }
+    // In a search too.
+    let e = compile_err(&format!(
+        "{sub}  search s {{ state a = 0  next {{ try a + count (sugar > boom()) within 1 }}  goal a > 2 }}
+         kind ox {{ when true => {{ if s() {{ idle }}  idle }} }}"
+    ));
+    assert!(e.contains("a search doesn't act"), "{e}");
+}
+
+#[test]
+fn a_search_starts_no_search_while_it_runs() {
+    for text in [
+        // Directly in `next`.
+        "search inner { state a = 0  next { try a + 1 } goal a > 2 }
+         search outer { state a = 0  next { if inner() { try a + 1 } } goal a > 2 }
+         kind k { when outer() as p => idle }",
+        // Through a sub, and in the goal.
+        "search inner { state a = 0  next { try a + 1 } goal a > 2 }
+         sub helper() { return inner() }
+         search outer { state a = 0  next { try a + helper() } goal a > 2 }
+         kind k { when outer() as p => idle }",
+        "search inner { state a = 0  next { try a + 1 } goal a > 2 }
+         search outer { state a = 0  next { try a + 1 } goal a > 2 and inner() }
+         kind k { when outer() as p => idle }",
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains("a search starts no search"), "{text}: {e}");
+    }
+}
+
+#[test]
 fn an_and_in_a_value_says_it_joins_conditions() {
     let e = compile_err("kind a { mem p, q  when true => { let b = p > 0 and q < 3  idle } }");
     assert!(
@@ -3543,4 +3590,17 @@ fn an_and_in_a_value_says_it_joins_conditions() {
     );
     let e = compile_err("kind a { mem p  when true => { p = 1 or 2  idle } }");
     assert!(e.contains("`or` joins conditions only"), "{e}");
+}
+
+#[test]
+fn a_search_that_acts_through_a_sub_says_so() {
+    // A `move` in a search's `next`, reached through a sub: the search is
+    // what may not act, not "a sub called in a `when`".
+    let e = compile_err(
+        "sub helper() { move north }
+         search s { state a = 0  next { helper()  try a + 1 } goal a > 2 }
+         kind k { when s() as p => idle }",
+    );
+    assert!(e.contains("a search doesn't act"), "{e}");
+    assert!(!e.contains("a sub called in a `when`"), "{e}");
 }

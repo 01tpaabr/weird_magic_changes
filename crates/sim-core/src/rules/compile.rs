@@ -3724,7 +3724,7 @@ struct Gen<'a> {
     /// only looked up, never iterated.
     ends_memo: RefCell<HashMap<(usize, Option<usize>, u32, bool), bool>>,
     /// [`Gen::call_acts`] of a call, by (sub address, tables, depth).
-    acts_memo: RefCell<HashMap<(usize, Option<usize>, u32), bool>>,
+    acts_memo: RefCell<HashMap<(usize, Option<usize>, u32, Reach), bool>>,
     /// Compiling a `when` condition: a sub called here must not act.
     in_when: bool,
     /// Compiling a search's `next`: its state's first local, width and
@@ -3733,6 +3733,15 @@ struct Gen<'a> {
 }
 
 /// Does this statement emit an action? Its position, if so.
+/// What [`Gen::call_acts`] and its kin look for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Reach {
+    /// An action or a `next`.
+    Act,
+    /// A search started.
+    Search,
+}
+
 fn action_at(s: &Stmt) -> Option<&Pos> {
     match s {
         Stmt::Idle(at)
@@ -5622,55 +5631,66 @@ impl<'a> Gen<'a> {
         subs.iter().find(|s| s.name == name)
     }
 
-    /// May a call of `name` here act or `next`, on any path? Follows every
-    /// call in its body, in statements and in expressions, eight deep.
-    fn call_acts(&self, name: &str, depth: u32) -> bool {
+    /// May a call of `name` here act or `next` (or, `m` = [`Reach::Search`],
+    /// start a search), on any path? Follows every call in its body, in
+    /// statements and in expressions, eight deep.
+    fn call_acts(&self, name: &str, depth: u32, m: Reach) -> bool {
         (depth as usize) < FRAMES
             && self.callee(name).is_some_and(|sub| {
-                let key = (std::ptr::from_ref(sub) as usize, self.cur, depth);
+                let key = (std::ptr::from_ref(sub) as usize, self.cur, depth, m);
                 if let Some(&v) = self.acts_memo.borrow().get(&key) {
                     return v;
                 }
-                let v = sub.body.iter().any(|s| self.stmt_acts(s, depth + 1));
+                let v = sub.body.iter().any(|s| self.stmt_acts(s, depth + 1, m));
                 self.acts_memo.borrow_mut().insert(key, v);
                 v
             })
     }
 
-    fn stmt_acts(&self, s: &Stmt, depth: u32) -> bool {
-        let body = |b: &[Stmt]| b.iter().any(|s| self.stmt_acts(s, depth));
+    fn stmt_acts(&self, s: &Stmt, depth: u32, m: Reach) -> bool {
+        let body = |b: &[Stmt]| b.iter().any(|s| self.stmt_acts(s, depth, m));
         match s {
-            Stmt::Next(..) => true,
-            _ if action_at(s).is_some() => true,
+            Stmt::Next(..) => m == Reach::Act,
+            _ if action_at(s).is_some() => m == Reach::Act,
+            Stmt::Search(_) if m == Reach::Search => true,
             Stmt::Set { value, .. } | Stmt::Assign { value, .. } | Stmt::Let { value, .. } => {
-                self.expr_acts(value, depth)
+                self.expr_acts(value, depth, m)
             }
             Stmt::SetAt { index, value, .. } => {
-                self.expr_acts(index, depth) || self.expr_acts(value, depth)
+                self.expr_acts(index, depth, m) || self.expr_acts(value, depth, m)
             }
             Stmt::Look(e) | Stmt::Signal(e) | Stmt::Grow(e, _) | Stmt::Add(_, e, _) => {
-                self.expr_acts(e, depth)
+                self.expr_acts(e, depth, m)
             }
-            Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
-            Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
-            Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
-            Stmt::Repeat { count, body: b } => self.expr_acts(count, depth) || body(b),
-            Stmt::ForEach { r, body: b, .. } => self.expr_acts(r, depth) || body(b),
+            Stmt::Return { value, .. } => {
+                value.as_ref().is_some_and(|e| self.expr_acts(e, depth, m))
+            }
+            Stmt::If { cond, then, els } => {
+                self.cond_acts(cond, depth, m) || body(then) || body(els)
+            }
+            Stmt::While { cond, body: b } => self.cond_acts(cond, depth, m) || body(b),
+            Stmt::Repeat { count, body: b } => self.expr_acts(count, depth, m) || body(b),
+            Stmt::ForEach {
+                pred, r, body: b, ..
+            } => self.pred_acts(pred, depth, m) || self.expr_acts(r, depth, m) || body(b),
             Stmt::Choose(arms) => arms
                 .iter()
-                .any(|(w, b)| self.expr_acts(w, depth) || body(b)),
+                .any(|(w, b)| self.expr_acts(w, depth, m) || body(b)),
             Stmt::Call { name, args, .. } => {
-                self.args_act(args, depth) || self.call_acts(name, depth)
+                self.args_act(args, depth, m) || self.call_acts(name, depth, m)
             }
             Stmt::Search(se) => {
-                se.start.iter().any(|e| self.expr_acts(e, depth))
+                se.start.iter().any(|e| self.expr_acts(e, depth, m))
                     || body(&se.next)
-                    || self.cond_acts(&se.goal, depth)
-                    || se.guess.as_ref().is_some_and(|e| self.expr_acts(e, depth))
+                    || self.cond_acts(&se.goal, depth, m)
+                    || se
+                        .guess
+                        .as_ref()
+                        .is_some_and(|e| self.expr_acts(e, depth, m))
                     || se
                         .limit
                         .as_ref()
-                        .is_some_and(|(e, _)| self.expr_acts(e, depth))
+                        .is_some_and(|(e, _)| self.expr_acts(e, depth, m))
             }
             Stmt::Try {
                 values, cost, via, ..
@@ -5678,70 +5698,86 @@ impl<'a> Gen<'a> {
                 .iter()
                 .chain(cost)
                 .chain(via)
-                .any(|e| self.expr_acts(e, depth)),
+                .any(|e| self.expr_acts(e, depth, m)),
             _ => false,
         }
     }
 
-    fn cond_acts(&self, c: &Cond, depth: u32) -> bool {
+    fn cond_acts(&self, c: &Cond, depth: u32, m: Reach) -> bool {
         match c {
-            Cond::Expr(e) | Cond::Nearest { r: e, .. } | Cond::Best { r: e, .. } => {
-                self.expr_acts(e, depth)
+            Cond::Expr(e) => self.expr_acts(e, depth, m),
+            Cond::Nearest { pred, r, .. } => {
+                self.pred_acts(pred, depth, m) || self.expr_acts(r, depth, m)
+            }
+            Cond::Best { pred, r, .. } => {
+                pred.as_ref().is_some_and(|p| self.pred_acts(p, depth, m))
+                    || self.expr_acts(r, depth, m)
             }
             Cond::And(a, b) | Cond::Or(a, b) => {
-                self.cond_acts(a, depth) || self.cond_acts(b, depth)
+                self.cond_acts(a, depth, m) || self.cond_acts(b, depth, m)
             }
-            Cond::Not(a) => self.cond_acts(a, depth),
+            Cond::Not(a) => self.cond_acts(a, depth, m),
             Cond::Search { name, args, .. } => {
-                self.args_act(args, depth) || self.call_acts(name, depth)
+                self.args_act(args, depth, m) || self.call_acts(name, depth, m)
             }
         }
     }
 
-    fn expr_acts(&self, e: &Expr, depth: u32) -> bool {
+    fn expr_acts(&self, e: &Expr, depth: u32, m: Reach) -> bool {
         match e {
-            Expr::Neg(a)
-            | Expr::Rand(a)
-            | Expr::Chance(a)
-            | Expr::Count(_, a)
-            | Expr::Index(_, a, _) => self.expr_acts(a, depth),
+            Expr::Neg(a) | Expr::Rand(a) | Expr::Chance(a) | Expr::Index(_, a, _) => {
+                self.expr_acts(a, depth, m)
+            }
+            Expr::Count(p, a) => self.pred_acts(p, depth, m) || self.expr_acts(a, depth, m),
+            Expr::IsAt(t, p) => self.target_acts(t, depth, m) || self.pred_acts(p, depth, m),
             // Only in a law, which never acts.
             Expr::Agg { .. } | Expr::Flow { .. } => false,
-            Expr::Along { target, .. } => self.target_acts(target, depth),
+            Expr::Along { target, .. } => self.target_acts(target, depth, m),
             Expr::Sees { target, eye, .. } => {
-                self.target_acts(target, depth)
-                    || eye.as_ref().is_some_and(|e| self.expr_acts(e, depth))
+                self.target_acts(target, depth, m)
+                    || eye.as_ref().is_some_and(|e| self.expr_acts(e, depth, m))
             }
-            Expr::Bin(_, a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
-            Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
+            Expr::Bin(_, a, b) => self.expr_acts(a, depth, m) || self.expr_acts(b, depth, m),
+            Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth, m)),
             Expr::Dist(t)
             | Expr::FreeAt(t)
             | Expr::FitsAt(t)
-            | Expr::IsAt(t, _)
             | Expr::LookOf(t)
             | Expr::HeadsOf(t)
-            | Expr::SignalOf(t, _) => self.target_acts(t, depth),
+            | Expr::SignalOf(t, _) => self.target_acts(t, depth, m),
             Expr::Call { name, args, .. } => {
-                self.args_act(args, depth) || self.call_acts(name, depth)
+                self.args_act(args, depth, m) || self.call_acts(name, depth, m)
             }
             Expr::Int(_) | Expr::Name(..) | Expr::Field(..) | Expr::Sense(_) => false,
         }
     }
 
-    fn target_acts(&self, t: &Target, depth: u32) -> bool {
-        match t {
-            Target::Heading(e) => self.expr_acts(e, depth),
-            Target::At(a, b) => self.expr_acts(a, depth) || self.expr_acts(b, depth),
-            Target::Toward(t) | Target::Away(t) => self.target_acts(t, depth),
+    /// A field condition's values are expressions, computed in the think.
+    fn pred_acts(&self, p: &Pred, depth: u32, m: Reach) -> bool {
+        match p {
+            Pred::Fields(terms, base, _) => {
+                terms.iter().any(|(_, _, e, _)| self.expr_acts(e, depth, m))
+                    || base.as_ref().is_some_and(|b| self.pred_acts(b, depth, m))
+            }
             _ => false,
         }
     }
 
-    fn args_act(&self, args: &[Arg], depth: u32) -> bool {
+    fn target_acts(&self, t: &Target, depth: u32, m: Reach) -> bool {
+        match t {
+            Target::Heading(e) => self.expr_acts(e, depth, m),
+            Target::At(a, b) => self.expr_acts(a, depth, m) || self.expr_acts(b, depth, m),
+            Target::Toward(t) | Target::Away(t) => self.target_acts(t, depth, m),
+            _ => false,
+        }
+    }
+
+    fn args_act(&self, args: &[Arg], depth: u32, m: Reach) -> bool {
         args.iter().any(|a| match a {
-            Arg::Expr(e) => self.expr_acts(e, depth),
-            Arg::Target(t) => self.target_acts(t, depth),
-            Arg::Pred(_) | Arg::Name(..) => false,
+            Arg::Expr(e) => self.expr_acts(e, depth, m),
+            Arg::Target(t) => self.target_acts(t, depth, m),
+            Arg::Pred(p) => self.pred_acts(p, depth, m),
+            Arg::Name(..) => false,
         })
     }
 
@@ -6654,11 +6690,15 @@ impl<'a> Gen<'a> {
             (u16::try_from(i).expect("checked in generate"), &subs[i])
         };
         // The action would survive a false condition (docs/RULES.md §4).
-        if self.in_when && self.call_acts(name, 0) {
-            return Err(self.err(
-                at,
-                format!("`{name}` may act or `next`: a sub called in a `when` condition must not"),
-            ));
+        if self.in_when && self.call_acts(name, 0, Reach::Act) {
+            let msg = if sub.is_search() {
+                format!(
+                    "`{name}` may act or `next`: a search doesn't act, `next` or call what does"
+                )
+            } else {
+                format!("`{name}` may act or `next`: a sub called in a `when` condition must not")
+            };
+            return Err(self.err(at, msg));
         }
         if args.len() != sub.params.len() {
             return Err(self.err(
@@ -6776,10 +6816,23 @@ impl<'a> Gen<'a> {
     /// else 0.
     fn search(&mut self, se: &SearchAst) -> Result<()> {
         let at = &se.at;
-        if self.stmt_acts(&Stmt::Search(Box::new(se.clone())), 0) {
+        if self.stmt_acts(&Stmt::Search(Box::new(se.clone())), 0, Reach::Act) {
             return Err(self.err(
                 at,
                 "a search doesn't act, `next` or call what does: it plans",
+            ));
+        }
+        // Its goal, guess and `next` run while it searches: one at a time.
+        let inner = se.next.iter().any(|s| self.stmt_acts(s, 0, Reach::Search))
+            || self.cond_acts(&se.goal, 0, Reach::Search)
+            || se
+                .guess
+                .as_ref()
+                .is_some_and(|e| self.expr_acts(e, 0, Reach::Search));
+        if inner {
+            return Err(self.err(
+                at,
+                "a search starts no search in its `next`, `goal` or `guess` (nor calls what does): one search at a time",
             ));
         }
         let k = u8::try_from(se.state.len()).expect("at most SEARCH_STATE, parsed");
