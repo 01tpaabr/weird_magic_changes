@@ -171,8 +171,11 @@ impl Store {
             let Some(stem) = name.to_str().and_then(|n| n.strip_suffix(".wmcc")) else {
                 continue;
             };
+            // Only the name `chunk_path` writes: `+8_2` or `08_2` would
+            // list chunk (8, 2) twice.
             if let Some((x, y)) = stem.split_once('_')
-                && let (Ok(x), Ok(y)) = (x.parse(), y.parse())
+                && let (Ok(x), Ok(y)) = (x.parse::<i32>(), y.parse::<i32>())
+                && stem == format!("{x}_{y}")
             {
                 let c = ChunkCoord::new(x, y);
                 outside(c).map_err(|e| {
@@ -1329,6 +1332,16 @@ mod tests {
         for c in edge {
             write(c);
             assert_eq!(s.read_chunk(c).unwrap().unwrap().data, data);
+        }
+        assert_eq!(s.saved_chunks().unwrap(), edge);
+        // Another spelling of a chunk's name is not that chunk (it would
+        // be listed, and rewritten, twice).
+        for name in ["+8_2", "08_2", "8_+2", "-0_0", "0_-0", "8_02"] {
+            fs::copy(
+                s.chunk_path(edge[0]),
+                s.dir().join(format!("chunks/{name}.wmcc")),
+            )
+            .unwrap();
         }
         assert_eq!(s.saved_chunks().unwrap(), edge);
         let past = ChunkCoord::new(CHUNK_EXTENT, 0);
