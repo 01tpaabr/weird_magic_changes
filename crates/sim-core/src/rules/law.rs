@@ -90,8 +90,10 @@ pub enum LawOp {
     /// `flow(w, l, k)`: what flows into a cell from its four neighbours, net.
     /// Each pair moves `(l' - l) / k` (towards zero) from the higher `l` to
     /// the lower, at most a quarter of the giver's `w`; both cells of a pair
-    /// work it out alike, so what one gains the other loses. Its border is
-    /// 0, as an aggregate's.
+    /// work it out alike, so what one gains the other loses. Nothing flows
+    /// across the chunk's edge where no chunk is loaded beyond it (that
+    /// border is made up and never kept). Its border is 0, as an
+    /// aggregate's.
     Flow(u16, u16, i32),
     /// `is(here, pred)`: 1 where the cell matches the predicate (a kind,
     /// a tag, a material, `free`), as an actor's search sees it; where
@@ -399,12 +401,21 @@ pub fn run(
             LawOp::Flow(w, l, k) => {
                 let (w, l) = (c(w), c(l));
                 dst.fill(0);
+                // Next to a chunk not loaded the border is made up (a
+                // mirror, or `outside`), and nothing it would gain or lose
+                // is ever kept: nothing flows across that edge.
+                let loaded = |k: usize| ctx.chunks[k].is_some();
+                let (west, east) = (loaded(3), loaded(5));
+                let (north, south) = (loaded(1), loaded(7));
                 // Each edge between two cells once: what the first takes
                 // from the second, given to one and taken from the other
                 // where they are inside the chunk. Four edges a cell, each
                 // at most a quarter of an i32: the sum fits.
                 for y in 1..SIDE - 1 {
                     for x in 0..SIDE - 1 {
+                        if (x == 0 && !west) || (x + 1 == SIDE - 1 && !east) {
+                            continue;
+                        }
                         let (i, j) = (y * SIDE + x, y * SIDE + x + 1);
                         let a = pair(w[i], l[i], w[j], l[j], k);
                         if x >= 1 {
@@ -416,6 +427,9 @@ pub fn run(
                     }
                 }
                 for y in 0..SIDE - 1 {
+                    if (y == 0 && !north) || (y + 1 == SIDE - 1 && !south) {
+                        continue;
+                    }
                     for x in 1..SIDE - 1 {
                         let (i, j) = (y * SIDE + x, (y + 1) * SIDE + x);
                         let a = pair(w[i], l[i], w[j], l[j], k);

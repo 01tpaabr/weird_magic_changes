@@ -5474,6 +5474,108 @@ kind grass { glyph \"'\"  cover  need health max 4 decay 0 vital }
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
+    // ---- Review fixes: one regression test each ----------------------------
+
+    /// A world `w` x `h` of flat soil under `rules`, nobody placed.
+    fn flat_world(rules: &str, w: u32, h: u32, seed: u64) -> (Kinds, World) {
+        let kinds = crate::rules::compile("t.rules", rules).unwrap();
+        let cfg = Scenario {
+            width: w,
+            height: h,
+            ..cfg(seed)
+        };
+        let mut world = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut world);
+        (kinds, world)
+    }
+
+    /// Put a `kind` with these first mems and `uid` at (x, y).
+    fn put_at(
+        w: &mut World,
+        kinds: &Kinds,
+        (x, y): (i32, i32),
+        kind: &str,
+        mems: &[i32],
+        uid: u64,
+    ) {
+        let k = kinds.by_name(kind).unwrap().id;
+        let mut m = systems::newborn(kinds, k, uid, tick(w));
+        m.mem[..mems.len()].copy_from_slice(mems);
+        assert!(place_actor(w, Pos::new(x, y), k, m), "{kind} at ({x}, {y})");
+    }
+
+    /// A reload to rules without laws leaves the fields to the actors: a
+    /// world reloaded runs on as the same world saved and reopened does.
+    #[test]
+    fn review_tick_a_reload_to_rules_without_laws_freezes_nothing() {
+        use crate::reload::reload_rules;
+        let (kinds, mut w) = flat_world(
+            "field glow max 1000 { every 1 { glow = avg glow within 1 } }
+                 kind lamp { glyph \"l\"  cadence 1  when true => { add glow 10  idle } }",
+            64,
+            64,
+            41,
+        );
+        put_at(&mut w, &kinds, (20, 20), "lamp", &[], 0xE00);
+        for _ in 0..5 {
+            step(&mut w);
+        }
+        let no_laws = crate::rules::compile(
+            "t.rules",
+            "field glow max 1000
+                 kind lamp { glyph \"l\"  cadence 1  when true => { add glow 10  idle } }",
+        )
+        .unwrap();
+        let store = tmp_store("review-no-laws");
+        reload_rules(&mut w, Some(&store), no_laws.clone()).unwrap();
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, no_laws).unwrap().unwrap();
+        ensure_loaded(
+            &mut back,
+            Pos::new(32, 32),
+            LoadPolicy { load: 0, unload: 0 },
+            Some(&store),
+        )
+        .unwrap();
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        let before = field(&w, 0, Pos::new(20, 20));
+        for _ in 0..5 {
+            step(&mut w);
+            step(&mut back);
+        }
+        assert_eq!(
+            field(&w, 0, Pos::new(20, 20)),
+            before + 50,
+            "the lamp adds, nothing undoes"
+        );
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// `flow` next to a chunk that is not loaded moves nothing across that
+    /// edge, whatever the level beyond it reads (another field's
+    /// `outside`): a world of one chunk keeps every drop.
+    #[test]
+    fn review_tick_flow_keeps_every_drop_at_an_unloaded_edge() {
+        let (_, mut w) = flat_world(
+            "field height max 255 fixed { init noise scale 10  outside 255 }
+                 field water max 60000 conserved {
+                   init 400
+                   every 1 { water = water + flow(water, height * 16 + water, 4) }
+                 }
+                 kind nobody { glyph \"n\"  when true => idle }",
+            64,
+            64,
+            42,
+        );
+        assert_eq!(w.resource::<Stage>().loaded_count(), 1);
+        let before = field_total(&mut w, 1);
+        for _ in 0..50 {
+            step(&mut w);
+            assert_eq!(field_total(&mut w, 1), before, "no drop made or lost");
+        }
+    }
+
     #[test]
     fn schedule_refuses_ambiguous_systems() {
         // Two systems writing `Tick` in the same phase with no order between

@@ -135,6 +135,13 @@ pub fn law_compute(
     let (tick, seed, kinds, stage) = (tick.0, cfg.seed, &*kinds, &*stage);
     let (cells, rows) = (&cells, &rows);
     if !kinds.fields.iter().any(|f| f.law.is_some()) {
+        // No law, but what one computed before a reload to rules without
+        // any must not be committed again, every tick.
+        for (_, mut scratch) in &mut own {
+            if !scratch.out.is_empty() {
+                scratch.out.clear();
+            }
+        }
         return;
     }
     own.par_iter_mut().for_each(|(coord, mut scratch)| {
