@@ -172,28 +172,23 @@ pub fn pick(world: &World, p: Pos, selected: Option<u64>) -> Option<(u64, ChunkC
     if !p.in_world() {
         return None;
     }
-    let (cc, i) = p.split();
+    let (cc, _) = p.split();
     let e = world.resource::<Stage>().entity(cc)?;
-    let cells = world.get::<ChunkCells>(e)?;
-    let minds = world.get::<ChunkMinds>(e)?;
-    let uid = |id: sim_core::ActorId| {
-        id.unpack()
-            .and_then(|(_, slot)| minds.rows.get(usize::from(slot)))
-            .map(|m| m.uid)
+    let layers = 2 + world.get::<ChunkCells>(e)?.extra.len();
+    // Whoever is on the cell in layer `l`, a big actor through any of its
+    // cells: its uid and the chunk its row is in.
+    let uid = |l: usize| {
+        let (c, slot) = sim::row_at(world, p, u8::try_from(l).ok()?)?;
+        let minds = world.get::<ChunkMinds>(world.resource::<Stage>().entity(c)?)?;
+        minds.rows.get(usize::from(slot)).map(|m| (m.uid, c))
     };
     // Top down: the declared layers, who stands, the cover; a click on the
     // selected one picks the next below it.
-    let here: Vec<u64> = cells
-        .extra
-        .iter()
-        .rev()
-        .chain([&cells.occupant, &cells.cover])
-        .filter_map(|l| uid(l[i]))
-        .collect();
+    let here: Vec<(u64, ChunkCoord)> = (2..layers).rev().chain([0, 1]).filter_map(uid).collect();
     let next = selected
-        .and_then(|s| here.iter().position(|&u| u == s))
+        .and_then(|s| here.iter().position(|&(u, _)| u == s))
         .and_then(|at| here.get(at + 1));
-    Some((*next.or(here.first())?, cc))
+    next.or(here.first()).copied()
 }
 
 /// Where the actor `uid` is: its cell, chunk and row. First in chunk `near`

@@ -237,7 +237,11 @@ impl Seen<'_> {
                 self.pred(p);
                 self.expr(r);
             }
-            Expr::Dist(t) | Expr::FreeAt(t) | Expr::LookOf(t) | Expr::HeadsOf(t) => self.target(t),
+            Expr::Dist(t)
+            | Expr::FreeAt(t)
+            | Expr::FitsAt(t)
+            | Expr::LookOf(t)
+            | Expr::HeadsOf(t) => self.target(t),
             Expr::IsAt(t, p) => {
                 self.target(t);
                 self.pred(p);
@@ -1100,6 +1104,7 @@ impl<'a> Gen<'a> {
             Expr::Call { name, args, at } => self.walk_call(kinds, w, name, args, at, out),
             Expr::Dist(t)
             | Expr::FreeAt(t)
+            | Expr::FitsAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
             | Expr::HeadsOf(t)

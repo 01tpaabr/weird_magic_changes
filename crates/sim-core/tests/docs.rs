@@ -430,6 +430,10 @@ fn the_limits_table_is_the_codes() {
         ),
         ("tags per rule set".into(), vec![n(MAX_TAGS)]),
         ("heads in a group".into(), vec![n(u16::MAX as usize)]),
+        (
+            "a big actor's size".into(),
+            vec![MAX_SIZE.into(), MAX_SIZE.into()],
+        ),
         ("fields per rule set".into(), vec![n(MAX_FIELDS)]),
         (
             "grounds, features per rule set".into(),

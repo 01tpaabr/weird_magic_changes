@@ -224,6 +224,37 @@ impl ActorId {
     pub fn is_none(self) -> bool {
         self == Self::NONE
     }
+
+    /// The slot bit that marks a **part**: a cell of a big actor's
+    /// footprint (`size W H`) other than its anchor, the top-left cell
+    /// that holds its row. A part keeps the actor's kind, so a scan sees
+    /// what is there, and in place of a slot the offset back to the
+    /// anchor, which works across a chunk border (a slot would not).
+    pub const PART: u16 = 0x8000;
+
+    /// The part `(dx, dy)` (each 0 to 15, not both 0) cells right of and
+    /// below the anchor of an actor of `kind`.
+    #[inline]
+    pub fn part(kind: u16, dx: u8, dy: u8) -> ActorId {
+        debug_assert!(dx < 16 && dy < 16 && (dx, dy) != (0, 0));
+        Self::pack(kind, Self::PART | u16::from(dx) << 4 | u16::from(dy))
+    }
+
+    /// `(kind, slot)` of an anchor (an actor's own cell): `None` for an
+    /// empty cell or a part.
+    #[inline]
+    pub fn row(self) -> Option<(u16, u16)> {
+        self.unpack().filter(|&(_, s)| s & Self::PART == 0)
+    }
+
+    /// `(kind, dx, dy)` of a part: how far right and down of its anchor
+    /// this cell is. `None` for an empty cell or an anchor.
+    #[inline]
+    pub fn part_of(self) -> Option<(u16, i32, i32)> {
+        self.unpack()
+            .filter(|&(_, s)| s & Self::PART != 0)
+            .map(|(k, s)| (k, i32::from(s >> 4 & 15), i32::from(s & 15)))
+    }
 }
 
 impl Default for ActorId {

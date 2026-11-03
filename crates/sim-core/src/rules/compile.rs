@@ -103,7 +103,9 @@ pub fn player_of(pack: &str) -> (Option<&str>, &str) {
 
 /// Words a player's item can't take: renamed into the player's namespace,
 /// they would stop meaning what the language reads them as.
-const NOT_PLAYER_NAMES: [&str; 50] = [
+const NOT_PLAYER_NAMES: [&str; 52] = [
+    "group",
+    "size",
     "food",
     "health",
     "water",
@@ -843,6 +845,8 @@ struct Decls {
     climb: Option<(Expr, String, Pos)>,
     /// `group max N [init M]`: a row stands for up to N heads.
     group: Option<(Expr, Option<Expr>, Pos)>,
+    /// `size W H`: the cells it covers.
+    size: Option<(Expr, Expr, Pos)>,
     tags: Vec<String>,
     needs: Vec<NeedAst>,
     mems: Vec<(String, Pos)>,
@@ -1226,6 +1230,8 @@ enum Expr {
     Count(Pred, Box<Expr>),
     Dist(Target),
     FreeAt(Target),
+    /// `fits(t)`: the thinker's footprint fits with its anchor at `t`.
+    FitsAt(Target),
     IsAt(Target, Pred),
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
@@ -1326,6 +1332,9 @@ pub const MAX_STATES: usize = 64;
 pub const MAX_FIELDS: usize = 64;
 /// Tags per rule set: a kind's tags are one `u64` bitset.
 pub const MAX_TAGS: usize = u64::BITS as usize;
+/// Cells a big actor covers each way (`size W H`): a part keeps its offset
+/// from the anchor in 4 bits (`ActorId::part`).
+pub const MAX_SIZE: i32 = 16;
 /// Kinds per rule set: ids are `u16`, and `Kinds` keeps `u16::MAX` free.
 pub const MAX_KINDS: usize = 65_534;
 /// Subs per rule set, a member sub once per kind that has it: `Call` takes
@@ -1437,6 +1446,7 @@ pub const KEYWORDS: &[&str] = &[
     "look_of",
     "signal_of",
     "heads_of",
+    "fits",
     "grow",
     "split",
     "join",
@@ -1470,9 +1480,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 17] = [
+const DECL_WORDS: [&str; 18] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
-    "place", "need", "mem", "reach", "climb", "layer", "group",
+    "place", "need", "mem", "reach", "climb", "layer", "group", "size",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -2283,6 +2293,10 @@ impl Parser<'_> {
                 self.expect_kw("on")?;
                 let (f, _) = self.ident("field name")?;
                 d.climb = Some((n, f, p));
+            } else if self.eat_kw("size") {
+                let w = self.additive()?;
+                let h = self.additive()?;
+                d.size = Some((w, h, p));
             } else if self.eat_kw("group") {
                 self.expect_kw("max")?;
                 let max = self.additive()?;
@@ -3218,6 +3232,12 @@ impl Parser<'_> {
                         self.expect_sym(")")?;
                         Ok(Expr::FreeAt(t))
                     }
+                    "fits" => {
+                        self.expect_sym("(")?;
+                        let t = self.target()?;
+                        self.expect_sym(")")?;
+                        Ok(Expr::FitsAt(t))
+                    }
                     "is" => {
                         self.expect_sym("(")?;
                         let t = self.target()?;
@@ -3440,6 +3460,8 @@ struct Inst<'a> {
     layer: Option<u8>,
     /// `group max N init M`: the most heads, and the heads a row starts with.
     group: Option<(u16, u16)>,
+    /// `size W H`.
+    size: Option<(u8, u8)>,
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
@@ -4834,6 +4856,42 @@ impl<'a> Gen<'a> {
             }
         };
         let group = self.pick(group, &parents, |i| i.group, "groups", item)?;
+        let size = match &d.size {
+            None => None,
+            Some((w, h, at)) => {
+                let (w, h) = (self.fold(w, at)?, self.fold(h, at)?);
+                if !(1..=MAX_SIZE).contains(&w) || !(1..=MAX_SIZE).contains(&h) {
+                    return Err(
+                        self.err(at, format!("size {w} {h}: 1 to {MAX_SIZE} cells each way"))
+                    );
+                }
+                Some((
+                    u8::try_from(w).expect("1..=16, checked above"),
+                    u8::try_from(h).expect("1..=16, checked above"),
+                ))
+            }
+        };
+        let size = self.pick(size, &parents, |i| i.size, "sizes", item)?;
+        if size.is_some_and(|s| s != (1, 1)) {
+            if cover {
+                return Err(self.err(
+                    &it.at,
+                    format!(
+                        "`{}` is ground cover and bigger than a cell: ground cover is one a cell",
+                        it.name
+                    ),
+                ));
+            }
+            if let Some(l) = layer
+                && self.items_ast_layers[usize::from(l) - 2].2.is_some()
+            {
+                let name = &self.items_ast_layers[usize::from(l) - 2].0.name;
+                return Err(self.err(
+                    &it.at,
+                    format!("`{}` is bigger than a cell and lives in `{name}`, which rests on a kind: one cell, one support", it.name),
+                ));
+            }
+        }
         if cover && group.is_some() {
             return Err(self.err(
                 &it.at,
@@ -5067,6 +5125,7 @@ impl<'a> Gen<'a> {
             climb,
             layer,
             group,
+            size,
             tags,
             needs,
             mems,
@@ -5289,6 +5348,7 @@ impl<'a> Gen<'a> {
             solid: inst.solid,
             parent,
             group: inst.group.unwrap_or((0, 0)),
+            size: inst.size.unwrap_or((1, 1)),
         })
     }
 
@@ -5569,6 +5629,7 @@ impl<'a> Gen<'a> {
             Expr::Fn(_, args) => args.iter().any(|a| self.expr_acts(a, depth)),
             Expr::Dist(t)
             | Expr::FreeAt(t)
+            | Expr::FitsAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
             | Expr::HeadsOf(t)
@@ -6121,6 +6182,15 @@ impl<'a> Gen<'a> {
         let Some(i) = self.cur else {
             return Err(self.err(at, format!("`{verb}` inside a sub: heads belong to a kind")));
         };
+        if verb != "grow" && self.insts[i].size.is_some_and(|s| s != (1, 1)) {
+            return Err(self.err(
+                at,
+                format!(
+                    "`{verb}`: `{}` is bigger than a cell, and a big group neither splits nor joins",
+                    self.inst_name(i)
+                ),
+            ));
+        }
         if self.insts[i].group.is_none() {
             return Err(self.err(
                 at,
@@ -6403,6 +6473,10 @@ impl<'a> Gen<'a> {
             Expr::FreeAt(t) => {
                 self.target(t)?;
                 self.asm.op(OpCode::FreeAt);
+            }
+            Expr::FitsAt(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::FitsAt);
             }
             Expr::IsAt(t, p) => {
                 self.target(t)?;

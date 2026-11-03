@@ -1,0 +1,50 @@
+# giants: big actors (docs/RULES.md §12, Big actors). A mammoth covers 3 x 3
+# cells: it moves only where all nine fit (`fits(t)`, and every `move`
+# picks such a step), so the gaps of a wood that deer slip through stop it.
+# Both graze the meadow; mammoths keep trying the wood.
+# scenarios/tests/giants.scenario plays it.
+
+field grass max 9 {
+  init 6
+  color "#5fae3a"
+  every 2h { grass = min(grass + 1, 9) }
+}
+
+kind tree {
+  glyph "T"
+  color "#2f6d32"
+  cadence 64
+  when true => idle
+}
+
+kind deer {
+  glyph "d"
+  color "#c89a5a"
+  cadence 4
+  sight 12
+  need food max 2d vital
+  mem woods
+
+  when woods == 0 and x < 56 => { woods = 1  idle }           # deep in the wood
+  when food < 1d and grass(here) > 0 => { add grass -1  food = min(food + 4h, 2d)  idle }
+  when food < 1d and best grass on free within 12 as g => move toward g
+  when chance(30) => move west
+  when true => move random free
+}
+
+kind mammoth {
+  glyph "M"
+  color "#7a5230"
+  size 3 3
+  cadence 4
+  sight 16
+  need food max 3d vital
+  mem woods, tries
+
+  when woods == 0 and x < 56 => { woods = 1  idle }
+  when food < 2d and grass(here) > 0 => { add grass -2  food = min(food + 3h, 3d)  idle }
+  when food < 2d and best grass on free within 16 as g => move toward g
+  when chance(30) and not fits(west) => { tries += 1  move random free }   # the wood's in the way
+  when chance(30) => move west
+  when true => move random free
+}

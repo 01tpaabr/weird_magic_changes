@@ -2762,6 +2762,79 @@ fn groups_are_declared_inherited_and_checked() {
     }
 }
 
+/// Big kinds (`size W H`): inherited, in the hash; never ground cover, nor
+/// in a layer that rests on a kind; a big group neither splits nor joins;
+/// `fits(t)` anywhere.
+#[test]
+fn sizes_are_declared_inherited_and_checked() {
+    let k = compile(
+        "t.rules",
+        "kind whale { size 3 2  when fits(east) => move east  when true => idle }
+         kind orca extends whale { size 2 1 }
+         kind calf extends whale { }
+         kind fish { when fits(here) => idle }",
+    )
+    .unwrap();
+    let z = |n: &str| k.by_name(n).unwrap().size;
+    assert_eq!(
+        [z("whale"), z("orca"), z("calf"), z("fish")],
+        [(3, 2), (2, 1), (3, 2), (1, 1)]
+    );
+    assert!(
+        k.any_big() && k.by_name("whale").unwrap().is_big() && !k.by_name("fish").unwrap().is_big()
+    );
+    assert_ne!(
+        k.hash,
+        compile(
+            "t.rules",
+            "kind whale { size 3 3  when fits(east) => move east  when true => idle }
+             kind orca extends whale { size 2 1 }
+             kind calf extends whale { }
+             kind fish { when fits(here) => idle }"
+        )
+        .unwrap()
+        .hash,
+        "a size is in the hash"
+    );
+    let errs = [
+        ("kind k { size 0 2 }", "1 to 16 cells each way"),
+        ("kind k { size 2 17 }", "1 to 16 cells each way"),
+        ("kind k { size 2 }", "expected"),
+        (
+            "kind k { cover  size 2 2 }",
+            "ground cover and bigger than a cell",
+        ),
+        (
+            "layer canopy { on t }  kind t { }  kind k { layer canopy  size 2 2 }",
+            "rests on a kind",
+        ),
+        (
+            "kind k { size 2 2  group max 9  when true => split 1 at east }",
+            "a big group neither splits nor joins",
+        ),
+        (
+            "kind k { size 2 2  group max 9  when true => join east }",
+            "a big group neither splits nor joins",
+        ),
+        (
+            "trait a { size 2 2 }  trait b { size 3 3 }  kind k extends a, b { }",
+            "sizes",
+        ),
+        ("kind k { mem fits }", "reserved"),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
+    assert!(
+        compile(
+            "t.rules",
+            "kind k { size 2 2  group max 9  when true => { grow 1  idle } }"
+        )
+        .is_ok()
+    );
+}
+
 /// A layer that rests on a kind (`layer canopy { on tree }`, `docs/WORLD.md`
 /// §7): on a kind's family or a tag that stands; never a material, cover or
 /// a kind in a declared layer.

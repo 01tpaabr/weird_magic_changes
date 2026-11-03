@@ -50,7 +50,7 @@ idle die become spawn with move dig build drink eat hit graze take give next loo
 grow split join
 field add harvest drop
 here attacker toward away random at dir north east south west
-min abs sign clamp rand chance dist look_of signal_of heads_of pack hi lo
+min abs sign clamp rand chance dist look_of signal_of heads_of fits pack hi lo
 blocked missed refused
 x y age light hour day kind look signal state hurt hurt_dir result taken trapped heads
 ```
@@ -150,6 +150,7 @@ decl = "glyph" STRING
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
      | "reach" additive | "climb" additive "on" IDENT | "layer" IDENT
      | "group" "max" additive [ "init" additive ]      (2 to 65535 heads; init 1 to max, default 1)
+     | "size" additive additive                         (cells across and down, 1 to 16 each)
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
      | "mem" mem_slot { "," mem_slot }        mem_slot = IDENT [ "[" INT "]" ]   (an array: INT slots, 1 to 32)
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
@@ -157,7 +158,7 @@ TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 
 - *`glyph`: a string of one printable ASCII character (`!` to `~`). `color`: `"#rrggbb"`,
   six hex digits. Neither in a trait.*
-- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food`, `bite`, `reach`, `climb`, `layer` and `group` are given at
+- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food`, `bite`, `reach`, `climb`, `layer`, `group` and `size` are given at
   most once per body; `tags`, `need` and `mem` repeat, each name once (a mem may not repeat
   a need of the same body).*
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*
@@ -251,7 +252,7 @@ primary  = INT | TIME
          | "(" expr ")"
          | "count" pred "within" unary
          | ( "rand" | "chance" ) "(" expr ")"
-         | ( "dist" | "free" | "look_of" | "signal_of" | "heads_of" ) "(" target ")"
+         | ( "dist" | "free" | "fits" | "look_of" | "signal_of" | "heads_of" ) "(" target ")"
          | ( "sum" | "min" | "max" ) IDENT "along" target      (outside a law)
          | "sees" "(" target ")" "over" IDENT [ "eye" unary ]
          | "is" "(" target "," pred ")"

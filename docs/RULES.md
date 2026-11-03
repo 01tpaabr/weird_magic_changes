@@ -272,7 +272,7 @@ first). Those names are not words of the language; the last three read as the sh
 |---|---|
 | `idle` | nothing; ends the rule |
 | `die` | the actor is removed |
-| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between layers (standing, cover, a declared one) |
+| `become K` | turns into kind K in place: needs carry by name (ticks-until-empty needs clamped to the new max, points needs reset to max), mem by name, look and signal kept, state reset, age from now; not between layers (standing, cover, a declared one), not for or into a big kind (§12, Big actors), nor into a kind that holds fewer heads (`REFUSED`) |
 | `spawn K at t [with (m = a, n = b)]` | a new K on cell t, needs full, memory zero except the (at most two) slots `with` names. A standing kind needs a free cell; a cover kind needs a walkable cell without cover; a kind in a declared layer a cell with nobody in that layer, walkable unless the layer flies. `BLOCKED` if the cell is taken, not loaded or out of reach (at least 64 cells each way, §11) |
 | `move t` | one step toward t; slides past a blocked cell by 45 degrees. Contested cells go to the actor with the lowest key this tick; a cell someone left or died on this tick can't be entered until the next. `BLOCKED` if it didn't move |
 | `drink t` | t must be adjacent water: the need named `water` refills to max; else `REFUSED` |
@@ -324,6 +324,7 @@ Effects combine with the action and don't end the think.
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
 | `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover, else of the first declared layer holding someone; 0 for nobody |
 | `heads_of(t)` | how many whoever is at t (as `look_of`) stands for: 1, or a group's heads; 0 for nobody |
+| `fits(t)` | would the reader fit with its top-left cell at t: every cell of its `size` walkable (unless its layer flies) and empty in its layer, or its own (§12, Big actors); `free(t)` for a one-cell kind, and true `here` |
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
 
@@ -650,6 +651,45 @@ kind herd {
 
 `packs/herds` plays it: herds that calve when fed, split at 60 and join under 10, under
 wolves, level at about 50 000 animals in a few hundred rows.
+
+### Big actors
+
+A kind declared `size W H` covers W cells across and H down (1 to 16 each) from its own
+cell, the top-left one, which is where it is (`x`, `y`, a target bound to it). It is one
+actor: one row, one think, one set of needs.
+
+```rules
+kind mammoth {
+  glyph "M"
+  size 3 3
+  need food max 3d vital
+  when chance(30) and fits(west) => move west
+  when true => move random free
+}
+```
+
+- **It moves whole.** A `move` steps only where every one of its cells fits: walkable
+  (unless its layer flies) and empty in its layer, or its own. Like any move it slides 45
+  degrees when the straight step doesn't fit, and is `BLOCKED` when none does. `fits(t)`
+  asks it of any target: would it fit with its top-left cell there? (For a one-cell kind,
+  `fits(t)` is `free(t)`, and also true `here`.) `free` and `random free` still mean one
+  free cell.
+- **Every cell is it.** A sense sees its kind on each of its cells (`nearest mammoth`
+  finds the nearest one, `count mammoth within r` counts cells); `eat`, `hit`, `take` and
+  `give` on any of its cells reach it, and `look_of`, `signal_of`, `heads_of` read it.
+  Nobody else enters its cells, and nothing is built on them.
+- Its moves and births are settled after everyone else's, one at a time in key order,
+  across chunk borders: a one-cell actor that claimed a cell this tick wins it.
+- A `spawn` of a big kind needs room for all of it. A big actor never `become`s another
+  kind, nor does anyone become a big kind (`REFUSED`): its cells carry its kind. It can be a group (`grow`, heads), but a big group neither splits nor joins. It is
+  never ground cover, nor in a layer that rests on a kind.
+- Scenarios: a share places it only where it fits inside one chunk; `start K at (X, Y)`
+  must fit in its chunk too (chunks generate apart), on cells it can stand on, overlapping
+  no other start. Saves keep its size: rules that change it are refused (restart).
+- While a chunk holding some of its cells is away (streaming), those cells stay its: an
+  actor that can't fit there can't move there. It keeps its room, and nothing is lost.
+
+`packs/giants` plays it: mammoths that never fit between the trees deer slip through.
 
 ### Fields
 
@@ -1321,6 +1361,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 |---|---|
 | needs, mem slots per kind | 4, 32 |
 | heads in a group | 65535 |
+| a big actor's size | 16 x 16 cells |
 | tags per rule set | 64, less one for each layer that rests on a kind |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |

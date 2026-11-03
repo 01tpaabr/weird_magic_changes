@@ -14,7 +14,7 @@
 //! stamps it, and marks an inhabited chunk dirty so it is saved rather
 //! than regenerated.
 
-use super::{CHUNK_CELLS, ChunkCoord, ChunkData, Feature, Ground};
+use super::{CHUNK_CELLS, CHUNK_SIZE, ChunkCells, ChunkCoord, ChunkData, Feature, Ground};
 use crate::actors::ActorMind;
 use crate::par::par_zip_mut;
 use crate::rng::{hash_cell, splitmix64, unit_f32};
@@ -125,6 +125,26 @@ pub fn generate_chunk(
         return;
     }
     let stacked = placement.has_stacked();
+    // The cells explicit starts take, a big one's whole footprint: no
+    // share starts there (`(layer, cell)`, sorted).
+    let mut taken: Vec<(u8, u16)> = Vec::new();
+    for e in explicit {
+        let (w, h) = placement.size_of(e.placed.kind);
+        let (x, y) = (
+            usize::from(e.cell) % CHUNK_SIZE as usize,
+            usize::from(e.cell) / CHUNK_SIZE as usize,
+        );
+        for dy in 0..usize::from(h) {
+            for dx in 0..usize::from(w) {
+                let j = (y + dy) * CHUNK_SIZE as usize + x + dx;
+                taken.push((
+                    e.placed.layer,
+                    u16::try_from(j).expect("in the chunk: resolve checked"),
+                ));
+            }
+        }
+    }
+    taken.sort_unstable();
     // Explicit starts are sorted by cell: merge them into the cell walk.
     let mut explicit = explicit.iter().peekable();
     for i in 0..CHUNK_CELLS {
@@ -147,14 +167,24 @@ pub fn generate_chunk(
             let mind = ActorMind { uid, ..mind };
             out.actors_mut()
                 .push_in(i, e.placed.kind, mind, e.placed.layer);
+            // A big one's footprint: in its chunk, checked by `resolve`.
+            stamp_parts(
+                &mut out.cells,
+                i,
+                e.placed,
+                placement.size_of(e.placed.kind),
+            );
             any = true;
         }
         if !any
             && out.cells.walkable(i, &placement.table)
-            && let Some(Placed { kind, layer }) =
-                placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
+            && let Some(placed) = placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
+            && out.cells.layer(placed.layer)[i].is_none()
+            && fits_here(&out.cells, placement, &taken, i, placed)
         {
+            let Placed { kind, layer } = placed;
             out.actors_mut().push_in(i, kind, mind, layer);
+            stamp_parts(&mut out.cells, i, placed, placement.size_of(kind));
             // The second draw: a share `on` the kind that just started.
             if stacked {
                 let u = (hash_cell(seed, STREAM_PLACE_STACKED, p.x, p.y) >> 40) as u32;
@@ -166,6 +196,52 @@ pub fn generate_chunk(
                     let mind = ActorMind { uid, ..mind };
                     out.actors_mut().push_in(i, up.kind, mind, up.layer);
                 }
+            }
+        }
+    }
+}
+
+/// Would a share's start `placed`, anchored on cell `i`, fit: its whole
+/// footprint inside the chunk, on walkable cells, empty in its layer and on
+/// no cell an explicit start takes (`taken`).
+fn fits_here(
+    cells: &ChunkCells,
+    placement: &Placement,
+    taken: &[(u8, u16)],
+    i: usize,
+    placed: Placed,
+) -> bool {
+    let free = |j: usize| {
+        taken
+            .binary_search(&(placed.layer, u16::try_from(j).expect("a cell")))
+            .is_err()
+    };
+    let (w, h) = placement.size_of(placed.kind);
+    if (w, h) == (1, 1) {
+        return taken.is_empty() || free(i);
+    }
+    let (x, y) = (i % CHUNK_SIZE as usize, i / CHUNK_SIZE as usize);
+    let (w, h) = (usize::from(w), usize::from(h));
+    if x + w > CHUNK_SIZE as usize || y + h > CHUNK_SIZE as usize {
+        return false;
+    }
+    (y..y + h).all(|cy| {
+        (x..x + w).all(|cx| {
+            let j = cy * CHUNK_SIZE as usize + cx;
+            cells.walkable(j, &placement.table) && cells.layer(placed.layer)[j].is_none() && free(j)
+        })
+    })
+}
+
+/// A big start's parts, on the cells of its footprint past its anchor `i`
+/// (all in the chunk).
+fn stamp_parts(cells: &mut ChunkCells, i: usize, placed: Placed, (w, h): (u8, u8)) {
+    let (x, y) = (i % CHUNK_SIZE as usize, i / CHUNK_SIZE as usize);
+    for dy in 0..h {
+        for dx in 0..w {
+            if (dx, dy) != (0, 0) {
+                let j = (y + usize::from(dy)) * CHUNK_SIZE as usize + x + usize::from(dx);
+                cells.layer_mut(placed.layer)[j] = super::ActorId::part(placed.kind, dx, dy);
             }
         }
     }

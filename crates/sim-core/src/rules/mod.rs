@@ -257,6 +257,9 @@ pub struct KindDef {
     /// `group max N init M`: a row stands for up to `N` heads (`heads`),
     /// starting with `M`; `(0, 0)` for a kind whose row is one actor.
     pub group: (u16, u16),
+    /// `size W H`: the cells it covers, right and down from its own (1 to
+    /// 16 each); `(1, 1)` for one cell.
+    pub size: (u8, u8),
 }
 
 /// Where a rule's code sits, for `wmc why`: not part of the program, not
@@ -408,6 +411,12 @@ pub const DEFAULT_COLOR: u32 = 0x00FF_F39C;
 impl KindDef {
     pub fn cadence(&self) -> u64 {
         1 << self.cadence_shift
+    }
+
+    /// Does it cover more than one cell (`size W H`)?
+    #[inline]
+    pub fn is_big(&self) -> bool {
+        self.size != (1, 1)
     }
 
     /// The most heads a row of it holds: 1 unless it is a group.
@@ -701,6 +710,11 @@ impl Kinds {
         }
     }
 
+    /// Does any kind cover more than one cell?
+    pub fn any_big(&self) -> bool {
+        self.defs.iter().any(KindDef::is_big)
+    }
+
     /// Does any declared layer rest on a kind?
     pub fn any_rest(&self) -> bool {
         self.layers.iter().any(|l| l.on.is_some())
@@ -756,6 +770,9 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.bite) << 24
             | u64::from(d.reach) << 32
             | u64::from(d.layer) << 40);
+        if d.size != (1, 1) {
+            mix(0x512E << 32 | u64::from(d.size.0) << 8 | u64::from(d.size.1));
+        }
         if d.group != (0, 0) {
             mix(0x6E0 << 32 | u64::from(d.group.0) << 16 | u64::from(d.group.1));
         }

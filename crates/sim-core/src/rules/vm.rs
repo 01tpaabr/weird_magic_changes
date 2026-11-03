@@ -216,6 +216,9 @@ pub enum OpCode {
     /// `n ->`; add `n` heads to own group (an effect, like `SetSignal`;
     /// several add up)
     Grow,
+    /// `dx dy -> fits`: own footprint fits with its anchor there
+    /// ([`Halo::fits`])
+    FitsAt,
 }
 
 impl OpCode {
@@ -242,7 +245,7 @@ impl OpCode {
             O::Min | O::Max | O::Pack => (2, 1),
             O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
-            O::Count | O::Nearest | O::Dist | O::FreeAt => (2, 1),
+            O::Count | O::Nearest | O::Dist | O::FreeAt | O::FitsAt => (2, 1),
             O::LookAt | O::SignalAt | O::HeadsAt | O::FieldAt | O::Along => (2, 1),
             O::Sees => (3, 1),
             O::Best => (3, 1),
@@ -926,11 +929,48 @@ impl<'a> Halo<'a> {
     #[inline]
     pub fn row_at(&self, lx: i32, ly: i32, dx: i32, dy: i32) -> Option<&'a ActorPub> {
         let (cells, actors, i) = self.at(lx, ly, dx, dy)?;
-        let (_, slot) = cells.occupant[i]
-            .unpack()
-            .or(cells.cover[i].unpack())
-            .or_else(|| cells.extra.iter().find_map(|l| l[i].unpack()))?;
+        let l = (0..2 + cells.extra.len())
+            .map(|l| u8::try_from(l).expect("a few layers"))
+            .find(|&l| !cells.layer(l)[i].is_none())?;
+        let id = cells.layer(l)[i];
+        // A part of a big actor: its row is at its anchor, maybe in
+        // another chunk of the halo.
+        if let Some((_, ox, oy)) = id.part_of() {
+            let (cells, actors, j) = self.at(lx, ly, dx - ox, dy - oy)?;
+            let (_, slot) = cells.layer(l)[j].row()?;
+            return actors.rows.get(usize::from(slot));
+        }
+        let (_, slot) = id.row()?;
         actors.rows.get(usize::from(slot))
+    }
+
+    /// Would `kind`'s footprint (`size W H`) fit with its anchor at `(lx +
+    /// dx, ly + dy)`, the thinker standing at `(lx, ly)`: every cell in
+    /// the halo, walkable unless its layer flies, and empty in its layer
+    /// or holding the thinker itself (its anchor or one of its parts).
+    pub fn fits(&self, lx: i32, ly: i32, dx: i32, dy: i32, kind: &KindDef) -> bool {
+        let l = kind.layer;
+        let flies = self.flies >> l & 1 == 1;
+        let (w, h) = (i32::from(kind.size.0), i32::from(kind.size.1));
+        (0..h).all(|fy| {
+            (0..w).all(|fx| {
+                let (cx, cy) = (dx + fx, dy + fy);
+                let Some((cells, _, i)) = self.at(lx, ly, cx, cy) else {
+                    return false;
+                };
+                if usize::from(l) >= 2 + cells.extra.len()
+                    || !(flies || cells.walkable(i, self.materials))
+                {
+                    return false;
+                }
+                let id = cells.layer(l)[i];
+                let own = match id.part_of() {
+                    Some((k, ox, oy)) => k == kind.id && (cx - ox, cy - oy) == (0, 0),
+                    None => id.row().is_some_and(|(k, _)| k == kind.id) && (cx, cy) == (0, 0),
+                };
+                id.is_none() || own
+            })
+        })
     }
 }
 
@@ -1953,6 +1993,13 @@ impl Machine<'_> {
                         let free = self.free();
                         self.push(i32::from(self.ctx.halo.test(lx, ly, dx, dy, free)))?;
                     }
+                    O::FitsAt => {
+                        let dy = self.pop()?;
+                        let dx = self.pop()?;
+                        let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
+                        let fits = self.ctx.halo.fits(lx, ly, dx, dy, self.ctx.kind);
+                        self.push(i32::from(fits))?;
+                    }
                     O::IsAt => {
                         let pred = self.pop()?;
                         let dy = self.pop()?;
@@ -2332,6 +2379,7 @@ mod tests {
             solid: false,
             parent: None,
             group: (0, 0),
+            size: (1, 1),
         }
     }
 

@@ -160,8 +160,8 @@ fn case(p: &Program, k: &Knobs) -> Case {
         }
         cells.push((*x, *y));
         let def = kinds.by_name(i.get(&p.kinds)).expect("a kind it declares");
-        if kinds.rest(def.layer) != crate::rules::vm::Rest::Any {
-            continue; // nothing starts under it here
+        if kinds.rest(def.layer) != crate::rules::vm::Rest::Any || def.is_big() {
+            continue; // nothing starts under it here; a big one by its share
         }
         text += &format!("start {} at ({x}, {y})", def.name);
         // A need at 0, full, or anywhere between; a mem at either end of

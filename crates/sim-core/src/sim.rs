@@ -182,7 +182,9 @@ pub fn install_with(world: &mut World, kinds: Kinds) {
             .in_set(Phase::Resolve),
         systems::exchange.in_set(Phase::Exchange),
         systems::apply.in_set(Phase::Apply),
-        systems::migrate.in_set(Phase::Migrate),
+        (systems::migrate, systems::unpart)
+            .chain()
+            .in_set(Phase::Migrate),
         systems::compact.in_set(Phase::Compact),
         systems::tally.in_set(Phase::Advance),
         advance_tick.in_set(Phase::Advance),
@@ -718,7 +720,114 @@ fn load_chunks(
         let inhabited = !data.actors.rows.is_empty();
         stage::insert(world, *c, data, inhabited);
     }
+    restamp(world, coords);
     (to_gen.len(), read, bad)
+}
+
+/// Big actors' parts around chunks just loaded (`size W H`, decision 73):
+/// a part whose anchor's chunk is loaded but holds no actor of its kind
+/// and size there goes (it died, or moved, while this chunk was away);
+/// then every loaded big actor near them writes its parts into every
+/// loaded cell of its footprint that is empty. A part whose anchor's chunk
+/// is not loaded stays: a frozen actor keeps its room.
+fn restamp(world: &mut World, loaded: &[ChunkCoord]) {
+    if loaded.is_empty() || !world.resource::<Kinds>().any_big() {
+        return;
+    }
+    let mut near: Vec<ChunkCoord> = loaded
+        .iter()
+        .flat_map(|c| {
+            (-1..=1).flat_map(move |dy| (-1..=1).map(move |dx| ChunkCoord::new(c.x + dx, c.y + dy)))
+        })
+        .collect();
+    near.sort_unstable_by_key(|c| c.key());
+    near.dedup();
+    let kinds = world.resource::<Kinds>().clone();
+    let stage = world.resource::<Stage>();
+    let anchor_holds = |world: &World, a: Pos, l: u8, k: u16, dx: i32, dy: i32| -> Option<bool> {
+        let (c, i) = a.split();
+        let e = stage.entity(c)?;
+        let cells = world.get::<ChunkCells>(e)?;
+        let (w, h) = kinds.def(k).size;
+        Some(
+            cells.layer(l)[i].row().is_some_and(|(rk, _)| rk == k)
+                && dx < i32::from(w)
+                && dy < i32::from(h),
+        )
+    };
+    // Stale parts.
+    let mut clear = Vec::new();
+    for &c in &near {
+        let Some(e) = stage.entity(c) else { continue };
+        let Some(cells) = world.get::<ChunkCells>(e) else {
+            continue;
+        };
+        for l in 0..2 + cells.extra.len() {
+            let l = u8::try_from(l).expect("a few layers");
+            for (i, id) in cells.layer(l).iter().enumerate() {
+                if let Some((k, dx, dy)) = id.part_of() {
+                    let p = c.cell(i);
+                    let a = Pos::new(p.x - dx, p.y - dy);
+                    if anchor_holds(world, a, l, k, dx, dy) == Some(false) {
+                        clear.push((e, l, i));
+                    }
+                }
+            }
+        }
+    }
+    // Parts written afresh, where they would go.
+    let mut write = Vec::new();
+    for &c in &near {
+        let Some(e) = stage.entity(c) else { continue };
+        let Some(a) = world.get::<ChunkActors>(e) else {
+            continue;
+        };
+        for r in &a.rows {
+            let def = kinds.def(r.kind);
+            if !def.is_big() {
+                continue;
+            }
+            let at = c.cell(usize::from(r.cell));
+            for dy in 0..i32::from(def.size.1) {
+                for dx in 0..i32::from(def.size.0) {
+                    let (c, i) = Pos::new(at.x + dx, at.y + dy).split();
+                    if let (true, Some(e)) = ((dx, dy) != (0, 0), stage.entity(c)) {
+                        write.push((e, i, r.layer, r.kind, dx, dy));
+                    }
+                }
+            }
+        }
+    }
+    for (e, l, i) in clear {
+        if let Some(mut cells) = world.get_mut::<ChunkCells>(e) {
+            cells.layer_mut(l)[i] = crate::ActorId::NONE;
+        }
+    }
+    for (e, i, l, k, dx, dy) in write {
+        if let Some(mut cells) = world.get_mut::<ChunkCells>(e)
+            && cells.layer(l)[i].is_none()
+        {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..16
+            let part = crate::ActorId::part(k, dx as u8, dy as u8);
+            cells.layer_mut(l)[i] = part;
+        }
+    }
+}
+
+/// The chunk and row of whoever is on the cell at `p` in layer `l`: itself,
+/// or for a part of a big actor its anchor. `None` if nobody is there or a
+/// chunk is not loaded.
+pub fn row_at(world: &World, p: Pos, l: u8) -> Option<(ChunkCoord, u16)> {
+    let stage = world.resource::<Stage>();
+    let (cc, i) = p.split();
+    let cells = world.get::<ChunkCells>(stage.entity(cc)?)?;
+    let id = *cells.layer(l).get(i)?;
+    if let Some((_, dx, dy)) = id.part_of() {
+        let (ac, j) = Pos::new(p.x - dx, p.y - dy).split();
+        let cells = world.get::<ChunkCells>(stage.entity(ac)?)?;
+        return cells.layer(l)[j].row().map(|(_, s)| (ac, s));
+    }
+    id.row().map(|(_, s)| (cc, s))
 }
 
 /// Re-run the think of whoever is at `p` (standing, else ground cover)
@@ -729,10 +838,7 @@ pub fn explain(world: &World, p: Pos) -> Option<systems::Explained> {
     if !p.in_world() {
         return None;
     }
-    let (cc, i) = p.split();
-    let e = world.resource::<Stage>().entity(cc)?;
-    let cells = world.get::<ChunkCells>(e)?;
-    let (_, slot) = cells.occupant[i].unpack().or(cells.cover[i].unpack())?;
+    let (cc, slot) = row_at(world, p, 0).or_else(|| row_at(world, p, 1))?;
     explain_slot(world, cc, slot)
 }
 
@@ -830,6 +936,10 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     if !p.in_world() {
         return false;
     }
+    let size = world.resource::<Kinds>().def(kind).size;
+    if size != (1, 1) {
+        return place_big_actor(world, p, kind, mind, size);
+    }
     let (cc, i) = p.split();
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
@@ -881,6 +991,77 @@ pub fn checksum(world: &mut World) -> u64 {
     crate::rng::splitmix64(crate::rng::splitmix64(stage::checksum(world) ^ t) ^ rules)
 }
 
+/// [`place_actor`] for a big kind (`size W H`): every cell of its
+/// footprint inside the world, loaded, walkable (unless its layer flies)
+/// and empty in its layer; the row on `p`, parts on the rest.
+fn place_big_actor(
+    world: &mut World,
+    p: Pos,
+    kind: u16,
+    mind: ActorMind,
+    (w, h): (u8, u8),
+) -> bool {
+    let (layer, flies, table, heads) = {
+        let kinds = world.resource::<Kinds>();
+        let def = kinds.def(kind);
+        (
+            def.layer,
+            kinds.flies(def.layer),
+            kinds.materials.table,
+            def.start_heads(),
+        )
+    };
+    let mut cells_at = Vec::new();
+    for dy in 0..i32::from(h) {
+        for dx in 0..i32::from(w) {
+            let q = Pos::new(p.x + dx, p.y + dy);
+            if !q.in_world() {
+                return false;
+            }
+            let (c, i) = q.split();
+            let Some(e) = world.resource::<Stage>().entity(c) else {
+                return false;
+            };
+            let Some(cells) = world.get::<ChunkCells>(e) else {
+                return false;
+            };
+            if usize::from(layer) >= 2 + cells.extra.len()
+                || !(flies || cells.walkable(i, &table))
+                || !cells.layer(layer)[i].is_none()
+            {
+                return false;
+            }
+            cells_at.push((e, i, dx, dy));
+        }
+    }
+    for (e, i, dx, dy) in cells_at {
+        let mut q = world.query::<(
+            &mut ChunkCells,
+            &mut ChunkActors,
+            &mut ChunkMinds,
+            &mut ChunkMeta,
+        )>();
+        let Ok((mut cells, mut pubs, mut minds, mut meta)) = q.get_mut(world, e) else {
+            return false;
+        };
+        if (dx, dy) == (0, 0) {
+            let mut actors = ActorsMut {
+                pubs: &mut pubs.rows,
+                minds: &mut minds.rows,
+                cells: &mut cells,
+            };
+            let slot = actors.push_in(i, kind, mind, layer);
+            actors.pubs[usize::from(slot)].heads = heads;
+        } else {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..16
+            let part = crate::ActorId::part(kind, dx as u8, dy as u8);
+            cells.layer_mut(layer)[i] = part;
+        }
+        meta.dirty = true;
+    }
+    true
+}
+
 /// What every world holds between two ticks, for tests and the simulation
 /// fuzzer: the stage directory and the chunk entities agree; every chunk's
 /// rows pass [`crate::actors::validate`] (one row per occupied cell of each
@@ -906,6 +1087,61 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
         }
         crate::actors::validate(cells, &a.rows, &m.rows, kinds.len())
             .map_err(|e| format!("chunk {c:?}: {e}"))?;
+        // Parts: each points back at a loaded anchor of its kind and size
+        // (or into a chunk not loaded), and each loaded big actor's parts
+        // are all where its footprint says.
+        for l in 0..2 + cells.extra.len() {
+            let l = u8::try_from(l).expect("a few layers");
+            for (i, id) in cells.layer(l).iter().enumerate() {
+                let Some((k, dx, dy)) = id.part_of() else {
+                    continue;
+                };
+                let p = c.cell(i);
+                let (ac, j) = Pos::new(p.x - dx, p.y - dy).split();
+                let Some(ae) = stage.entity(ac) else { continue };
+                let ok = world.get::<ChunkCells>(ae).is_some_and(|ac| {
+                    let (w, h) = kinds.def(k).size;
+                    ac.layer(l)[j].row().is_some_and(|(rk, _)| rk == k)
+                        && dx < i32::from(w)
+                        && dy < i32::from(h)
+                });
+                if !ok {
+                    return Err(format!(
+                        "a part of {} at ({}, {}) whose anchor is gone",
+                        kinds.def(k).name,
+                        p.x,
+                        p.y
+                    ));
+                }
+            }
+        }
+        for r in &a.rows {
+            let def = kinds.def(r.kind);
+            if !def.is_big() {
+                continue;
+            }
+            let at = c.cell(usize::from(r.cell));
+            for dy in 0..i32::from(def.size.1) {
+                for dx in 0..i32::from(def.size.0) {
+                    if (dx, dy) == (0, 0) {
+                        continue;
+                    }
+                    let (pc, i) = Pos::new(at.x + dx, at.y + dy).split();
+                    let Some(pe) = stage.entity(pc) else { continue };
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..16
+                    let want = crate::ActorId::part(r.kind, dx as u8, dy as u8);
+                    if world
+                        .get::<ChunkCells>(pe)
+                        .is_none_or(|pc| pc.layer(r.layer)[i] != want)
+                    {
+                        return Err(format!(
+                            "{} at ({}, {}) is missing its part at +({dx}, {dy})",
+                            def.name, at.x, at.y
+                        ));
+                    }
+                }
+            }
+        }
         if cells.fields.len() != kinds.fields.len() {
             return Err(format!(
                 "chunk {c:?}: {} field layers for {} fields",
@@ -3060,6 +3296,195 @@ mod tests {
                 crate::scenario::Placement::resolve(&s.starts, &kinds, &s.terrain()).unwrap_err();
             assert!(e.msg.contains(want), "{with}\n  got: {}", e.msg);
         }
+    }
+
+    /// Big actors (`size W H`): a whale 3 x 2 swims east across a chunk
+    /// border with its parts, stops at a wall it doesn't fit past, can't
+    /// be put where it doesn't fit, gives birth to a whale where one fits;
+    /// a shark biting a part bites the whale, and a dead whale leaves no
+    /// part behind. The invariants hold at every step.
+    #[test]
+    fn big_actors_move_whole_and_die_whole() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Tally, life};
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind whale { glyph \"W\"  cadence 1  size 3 2  food 1h  mem mode, t
+               need health max 4 decay 0 vital
+               when mode == 1 => move east
+               when mode == 2 and t == 0 => { t = 1  spawn whale at at(x, y + 3) }
+               when mode == 3 and fits(east) => { t += 1  move east }
+               when true => idle }
+             kind post { glyph \"#\" }
+             kind orca { glyph \"o\"  cadence 1  size 3 2  mem t
+               when t == 0 => { t = 1  become whale }
+               when true => idle }
+             kind minnow { glyph \"m\"  cadence 1  mem t
+               when t == 0 => { t = 1  become whale }
+               when t == 1 and age > 2 => { t = 2  idle }
+               when true => idle }
+             kind shark { glyph \"s\"  cadence 1  bite 1
+               when nearest whale within 1 as w => eat w
+               when true => idle }",
+        )
+        .unwrap();
+        let id = |n: &str| kinds.by_name(n).unwrap().id;
+        let cfg = Scenario {
+            width: 192,
+            height: 64,
+            ..cfg(28)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut uid = 0x300;
+        let mut put = |w: &mut World, x, y, kind: &str, mode| {
+            uid += 1;
+            let mut m = newborn(&kinds, id(kind), uid, now);
+            m.mem[0] = mode;
+            place_actor(w, Pos::new(x, y), id(kind), m)
+        };
+        assert!(put(&mut w, 58, 5, "whale", 1)); // swims east
+        for y in 3..9 {
+            assert!(put(&mut w, 72, y, "post", 0)); // a wall at x = 72
+        }
+        assert!(!put(&mut w, 70, 6, "whale", 0), "it would cover a post");
+        assert!(!put(&mut w, 59, 6, "whale", 0), "on another whale");
+        assert!(put(&mut w, 10, 20, "whale", 2)); // a calf below it
+        assert!(put(&mut w, 10, 40, "whale", 0)); // bitten at a part
+        assert!(put(&mut w, 13, 41, "shark", 0)); // next to its (2, 1) part
+        assert!(put(&mut w, 100, 30, "whale", 3)); // only when it fits
+        assert!(put(&mut w, 105, 31, "post", 0));
+        // A fuzz find: a one-cell kind that became a big one had no parts.
+        assert!(put(&mut w, 150, 50, "minnow", 0));
+        // Another: a big one that became another kind of its size left its
+        // parts with the old kind.
+        assert!(put(&mut w, 160, 50, "orca", 0));
+        let whales = |w: &mut World| {
+            let mut q = w.query::<(&ChunkCoord, &ChunkActors)>();
+            let mut v: Vec<Pos> = q
+                .iter(w)
+                .flat_map(|(c, a)| {
+                    a.rows
+                        .iter()
+                        .filter(|r| r.kind == 0)
+                        .map(move |r| c.cell(usize::from(r.cell)))
+                })
+                .collect();
+            v.sort_unstable_by_key(|p| (p.y, p.x));
+            v
+        };
+        let parts = |w: &mut World| {
+            let mut q = w.query::<&ChunkCells>();
+            q.iter(w)
+                .map(|c| c.occupant.iter().filter(|o| o.part_of().is_some()).count())
+                .sum::<usize>()
+        };
+        for _ in 0..30 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let all = whales(&mut w);
+        assert!(
+            all.contains(&Pos::new(69, 5)),
+            "east to the wall, across the border: {all:?}"
+        );
+        assert!(
+            all.contains(&Pos::new(10, 23)),
+            "a calf where it fits: {all:?}"
+        );
+        assert!(
+            !all.contains(&Pos::new(10, 40)),
+            "eaten through a part: {all:?}"
+        );
+        assert!(
+            all.contains(&Pos::new(102, 30)),
+            "stopped where it no longer fits: {all:?}"
+        );
+        assert_eq!(all.len(), 4, "the minnow is still a minnow");
+        assert_eq!(
+            parts(&mut w),
+            5 * 5,
+            "five parts a whale and the orca, none left over"
+        );
+        let t = w.resource::<Tally>();
+        assert_eq!(t.get(id("whale"), life::EATEN), 1);
+        assert_eq!(t.get(id("whale"), life::BORN), 1);
+    }
+
+    /// A big actor across a chunk border while one of its chunks is away:
+    /// its parts in an unloaded chunk keep its room; one that died while
+    /// they were away leaves none behind when they come back; one whose
+    /// own chunk was away finds its parts where they were. Saved and
+    /// reopened, the same.
+    #[test]
+    fn big_actors_keep_their_parts_across_streaming() {
+        use crate::actors::systems::newborn;
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind whale { glyph \"W\"  cadence 1  size 3 2  mem mode
+               when mode == 1 and age >= 3 => die
+               when true => idle }",
+        )
+        .unwrap();
+        let cfg = Scenario {
+            width: 192,
+            height: 64,
+            ..cfg(29)
+        };
+        let store = tmp_store("big-streaming");
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        for (x, y, mode, uid) in [(62, 10, 1, 0x401), (62, 30, 0, 0x402)] {
+            let mut m = newborn(&kinds, 0, uid, now);
+            m.mem[0] = mode;
+            assert!(place_actor(&mut w, Pos::new(x, y), 0, m));
+        }
+        let parts = |w: &mut World| {
+            let mut q = w.query::<(&ChunkCoord, &ChunkCells)>();
+            let mut v: Vec<Pos> = q
+                .iter(w)
+                .flat_map(|(c, cells)| {
+                    (0..crate::stage::CHUNK_CELLS)
+                        .filter(|&i| cells.occupant[i].part_of().is_some())
+                        .map(move |i| c.cell(i))
+                })
+                .collect();
+            v.sort_unstable_by_key(|p| (p.y, p.x));
+            v
+        };
+        assert_eq!(parts(&mut w).len(), 10);
+        // Away: the chunk with the right-hand parts; the first whale dies.
+        let only = LoadPolicy { load: 0, unload: 0 };
+        ensure_loaded(&mut w, Pos::new(32, 10), only, Some(&store)).unwrap();
+        for _ in 0..5 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        // Back: the dead one's parts there go, the living one's stay.
+        let all = LoadPolicy { load: 2, unload: 2 };
+        ensure_loaded(&mut w, Pos::new(96, 10), all, Some(&store)).unwrap();
+        check_invariants(&mut w);
+        let left = parts(&mut w);
+        assert_eq!(left.len(), 5, "{left:?}");
+        assert!(left.iter().all(|p| p.y >= 30));
+        // Away: the living one's own chunk; its parts keep their cells.
+        ensure_loaded(&mut w, Pos::new(96, 30), only, Some(&store)).unwrap();
+        check_invariants(&mut w);
+        assert_eq!(parts(&mut w), [Pos::new(64, 30), Pos::new(64, 31)]);
+        ensure_loaded(&mut w, Pos::new(32, 30), all, Some(&store)).unwrap();
+        check_invariants(&mut w);
+        assert_eq!(parts(&mut w).len(), 5);
+        save(&mut w, &store).unwrap();
+        let mut back = open_world_with(&store, kinds.clone()).unwrap().unwrap();
+        ensure_loaded(&mut back, Pos::new(32, 30), all, Some(&store)).unwrap();
+        check_invariants(&mut back);
+        assert_eq!(parts(&mut back), parts(&mut w));
+        assert_eq!(checksum(&mut back), checksum(&mut w));
+        std::fs::remove_dir_all(store.dir()).unwrap();
     }
 
     /// A search over memory plans (chop, saw, build) from where the actor

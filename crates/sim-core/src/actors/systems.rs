@@ -37,7 +37,7 @@ use crate::actors::{
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
-use crate::rules::{Kinds, Policy, Remap};
+use crate::rules::{KindDef, Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER, STREAM_UID_LAYER};
 use crate::stage::{
@@ -570,6 +570,12 @@ fn think_one<const TRACE: bool>(
     intent.used = u16::try_from(out.used).unwrap_or(u16::MAX);
     let (lx, ly) = (vm::lx(cell), vm::ly(cell));
     match out.action {
+        Action::Move if kind.is_big() => {
+            let (dx, dy) = step_fitting(halo, lx, ly, i32::from(out.dx), i32::from(out.dy), kind);
+            #[allow(clippy::cast_possible_truncation)] // a unit step, -1..=1
+            let step = (dx as i8, dy as i8);
+            (intent.dx, intent.dy) = step;
+        }
         Action::Move => {
             let (dx, dy) = step_toward_climbing(
                 halo,
@@ -645,6 +651,32 @@ pub fn step_toward_climbing(
         }
     }
     if gentle(s.0, s.1) { s } else { (0, 0) }
+}
+
+/// [`step_toward_climbing`] for a big actor (`size W H`): a step its whole
+/// footprint fits into at tick start ([`Halo::fits`]), straight, else 45
+/// degrees either way; none: the straight step, which Migrate reports as
+/// BLOCKED.
+fn step_fitting(halo: &Halo<'_>, lx: i32, ly: i32, dx: i32, dy: i32, kind: &KindDef) -> (i32, i32) {
+    let s = (dx.signum(), dy.signum());
+    if s == (0, 0) {
+        return s;
+    }
+    let gentle = |cx: i32, cy: i32| {
+        kind.climb.is_none_or(|(f, n)| {
+            let f = usize::from(f);
+            halo.field(lx, ly, cx, cy, f) - halo.field(lx, ly, 0, 0, f) <= n
+        })
+    };
+    let dirs = &vm::DIRS8;
+    let i = dirs.iter().position(|&d| d == s).expect("a unit step");
+    for j in [i, (i + 1) % 8, (i + 7) % 8] {
+        let (cx, cy) = dirs[j];
+        if halo.fits(lx, ly, cx, cy, kind) && gentle(cx, cy) {
+            return (cx, cy);
+        }
+    }
+    s
 }
 
 // ---- Resolve ----------------------------------------------------------------------------
@@ -732,8 +764,25 @@ pub fn resolve(
                     let eat = it.action != Action::Hit;
                     // From afar too: the direction the bite came from.
                     let dir = vm::dir_index((-dx).signum(), (-dy).signum());
-                    match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
-                        Where::Here(cell) => match cells.layer(u8::from(cover))[cell].unpack() {
+                    // A part of a big actor: the bite goes to its anchor,
+                    // here or (through Exchange) in another chunk.
+                    let at = match target_of(*coord, usize::from(row.cell), it.dx, it.dy) {
+                        Where::Here(cell) => match cells.layer(u8::from(cover))[cell].part_of() {
+                            Some((_, ox, oy)) => {
+                                let p = coord.cell(cell);
+                                let (to, c) = Pos::new(p.x - ox, p.y - oy).split();
+                                if to == *coord {
+                                    Where::Here(c)
+                                } else {
+                                    Where::Elsewhere(to, c)
+                                }
+                            }
+                            None => Where::Here(cell),
+                        },
+                        w => w,
+                    };
+                    match at {
+                        Where::Here(cell) => match cells.layer(u8::from(cover))[cell].row() {
                             None => result::MISSED,
                             Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                             Some(_) => {
@@ -834,14 +883,22 @@ pub fn exchange(
         else {
             continue;
         };
-        let res = match stage.entity(fx.to).map(|e| chunks.get_mut(e)) {
+        // A part of a big actor: the bite lands on its anchor.
+        let (to, cell) = anchor_in(
+            &stage,
+            &chunks,
+            fx.to,
+            usize::from(fx.cell),
+            u8::from(cover),
+        );
+        let res = match stage.entity(to).map(|e| chunks.get_mut(e)) {
             Some(Ok((cells, _, _, mut scratch, _))) => {
-                match cells.layer(u8::from(cover))[usize::from(fx.cell)].unpack() {
+                match cells.layer(u8::from(cover))[cell].row() {
                     None => result::MISSED,
                     Some((vk, _)) if !has_health(kinds, vk) => result::REFUSED,
                     Some(_) => {
                         scratch.hits.push(Hit {
-                            cell: fx.cell,
+                            cell: cell_u16(cell),
                             key: fx.key,
                             from: src_e,
                             slot: fx.slot,
@@ -884,7 +941,7 @@ pub fn exchange(
             let group = i..j;
             i = j;
             let cell = usize::from(first.cell);
-            let Some((vk, vslot)) = cells.layer(u8::from(first.cover))[cell].unpack() else {
+            let Some((vk, vslot)) = cells.layer(u8::from(first.cover))[cell].row() else {
                 continue;
             };
             let vslot = usize::from(vslot);
@@ -1039,13 +1096,14 @@ fn transfer(
         return None;
     }
     let sv = src_minds.rows[slot].needs[t.need];
-    let Some(dst_e) = stage.entity(fx.to) else {
+    let (to, cell) = anchor_in(stage, chunks, fx.to, usize::from(fx.cell), 0);
+    let Some(dst_e) = stage.entity(to) else {
         return Some(result::MISSED);
     };
     let Ok((cells, mut dst_pubs, mut dst_minds, _, mut dst_meta)) = chunks.get_mut(dst_e) else {
         return Some(result::MISSED);
     };
-    let Some((dk, ds)) = cells.occupant[usize::from(fx.cell)].unpack() else {
+    let Some((dk, ds)) = cells.occupant[cell].row() else {
         return Some(result::MISSED);
     };
     let ds = usize::from(ds);
@@ -1092,6 +1150,29 @@ fn transfer(
     Some(result::OK)
 }
 
+/// Where the actor at `cell` of chunk `to`, in `layer`, keeps its row: the
+/// same cell, or for a part of a big actor its anchor, maybe in another
+/// chunk. As it stands now; a chunk not loaded is taken as it is.
+fn anchor_in(
+    stage: &Stage,
+    chunks: &ChunkQuery,
+    to: ChunkCoord,
+    cell: usize,
+    layer: u8,
+) -> (ChunkCoord, usize) {
+    let part = stage
+        .entity(to)
+        .and_then(|e| chunks.get(e).ok())
+        .and_then(|(cells, ..)| cells.layer(layer)[cell].part_of());
+    match part {
+        Some((_, ox, oy)) => {
+            let p = to.cell(cell);
+            Pos::new(p.x - ox, p.y - oy).split()
+        }
+        None => (to, cell),
+    }
+}
+
 // ---- Apply ------------------------------------------------------------------------------
 
 pub fn apply(
@@ -1132,6 +1213,15 @@ pub fn apply(
                 }
                 let row = pubs.rows[usize::from(it.slot)];
                 if row.flags & flags::DEAD != 0 {
+                    continue;
+                }
+                // A big actor's move or birth is Migrate's: it claims nothing here.
+                let big = match it.action {
+                    Action::Move => kinds.def(row.kind).is_big(),
+                    Action::Spawn => kinds.def(it.kind).is_big(),
+                    _ => false,
+                };
+                if big {
                     continue;
                 }
                 // A declared layer: its own claims, a slot empty at tick
@@ -1287,6 +1377,22 @@ pub fn apply(
                             }
                         })
                     }
+                    // A big actor's move: every cell of its footprint,
+                    // maybe in other chunks, so Migrate settles it.
+                    Action::Move if kinds.def(actors.pubs[slot].kind).is_big() => {
+                        let (to, cell) = match target_of(*coord, from, it.dx, it.dy) {
+                            Where::Here(cell) => (*coord, cell),
+                            Where::Elsewhere(to, cell) => (to, cell),
+                        };
+                        outbox.list.push(Effect {
+                            key: it.key,
+                            slot: it.slot,
+                            what: EffectKind::Move,
+                            to,
+                            cell: cell_u16(cell),
+                        });
+                        Some(result::NONE)
+                    }
                     // Ground cover is rooted.
                     Action::Move if cover => Some(result::REFUSED),
                     Action::Move if actors.pubs[slot].layer >= 2 => {
@@ -1365,6 +1471,24 @@ pub fn apply(
                     Action::Spawn if !scratch.ration(kinds, it.kind) => Some(result::REFUSED),
                     // Past the halo, even into a loaded chunk: as unloaded.
                     Action::Spawn if beyond(from, it.dx, it.dy) => Some(result::BLOCKED),
+                    // A big child: Migrate places its footprint.
+                    Action::Spawn if kinds.def(it.kind).is_big() => {
+                        let (to, cell) = match target_of(*coord, from, it.dx, it.dy) {
+                            Where::Here(cell) => (*coord, cell),
+                            Where::Elsewhere(to, cell) => (to, cell),
+                        };
+                        outbox.list.push(Effect {
+                            key: it.key,
+                            slot: it.slot,
+                            what: EffectKind::Spawn {
+                                kind: it.kind,
+                                with: it.with,
+                            },
+                            to,
+                            cell: cell_u16(cell),
+                        });
+                        Some(result::NONE)
+                    }
                     Action::Spawn if kinds.def(it.kind).layer >= 2 => {
                         let l = kinds.def(it.kind).layer;
                         Some(match target_of(*coord, from, it.dx, it.dy) {
@@ -1588,7 +1712,7 @@ fn join(
     }
     match target_of(coord, usize::from(row.cell), it.dx, it.dy) {
         Where::Here(cell) => {
-            let Some((k, t)) = actors.cells.layer(row.layer)[cell].unpack() else {
+            let Some((k, t)) = actors.cells.layer(row.layer)[cell].row() else {
                 return result::MISSED;
             };
             let t = usize::from(t);
@@ -1858,6 +1982,11 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if actors.pubs[slot].heads > kinds.def(to).max_heads() {
         return result::REFUSED; // a group becomes only what holds its heads
     }
+    if kinds.def(to).is_big() || kinds.def(actors.pubs[slot].kind).is_big() {
+        // Its parts carry its kind, maybe in chunks Apply can't write:
+        // a big actor neither becomes nor is become.
+        return result::REFUSED;
+    }
     let from = actors.pubs[slot].kind;
     let remap = kinds.remap(from, to);
     let def = kinds.def(to);
@@ -1900,6 +2029,7 @@ pub fn migrate(
     stage: Res<Stage>,
     mut work: ResMut<CrossScratch>,
     mut outboxes: Query<&mut Outbox>,
+    coords: Query<&ChunkCoord>,
     mut chunks: ChunkQuery,
 ) {
     let (tick, seed) = (tick.0, cfg.seed);
@@ -1929,6 +2059,23 @@ pub fn migrate(
             set_result(&mut chunks, src_e, slot, result::BLOCKED);
             continue;
         };
+        let big = match fx.what {
+            EffectKind::Move => chunks
+                .get(src_e)
+                .is_ok_and(|(_, p, ..)| kinds.def(p.rows[slot].kind).is_big()),
+            EffectKind::Spawn { kind, .. } => kinds.def(kind).is_big(),
+            _ => false,
+        };
+        if big {
+            let Ok(&from) = coords.get(src_e) else {
+                continue;
+            };
+            if let Some(res) = place_big(&kinds, seed, tick, &stage, &mut chunks, src_e, from, &fx)
+            {
+                set_result(&mut chunks, src_e, slot, res);
+            }
+            continue;
+        }
         let Ok([mut src, mut dst]) = chunks.get_many_mut([src_e, dst_e]) else {
             set_result(&mut chunks, src_e, slot, result::BLOCKED);
             continue;
@@ -1945,7 +2092,7 @@ pub fn migrate(
         }
         if fx.what == EffectKind::Join {
             let row = src.1.rows[slot];
-            let res = match dst_cells.layer(row.layer)[cell].unpack() {
+            let res = match dst_cells.layer(row.layer)[cell].row() {
                 Some((k, t)) if k == row.kind => {
                     let t = usize::from(t);
                     let sum = u32::from(dst_pubs.rows[t].heads) + u32::from(row.heads);
@@ -2098,6 +2245,209 @@ pub fn migrate(
         }
         dst_meta.dirty = true;
         src_meta.dirty = true;
+    }
+}
+
+/// A big actor's move (its anchor to `fx.cell` of `fx.to`) or birth: every
+/// cell of its footprint loaded, walkable unless its layer flies, and
+/// empty in its layer or its own, untouched this tick where it stands.
+/// Then the old cells are cleared and the new ones written: the anchor
+/// holds the row (moved to another chunk if the anchor crossed), the rest
+/// parts. `None`: the mover is gone (nothing to say).
+#[allow(clippy::too_many_arguments)]
+fn place_big(
+    kinds: &Kinds,
+    seed: u64,
+    tick: u64,
+    stage: &Stage,
+    chunks: &mut ChunkQuery,
+    src_e: Entity,
+    from: ChunkCoord,
+    fx: &Effect,
+) -> Option<u8> {
+    let slot = usize::from(fx.slot);
+    let row = chunks.get(src_e).ok()?.1.rows[slot];
+    let mover = fx.what == EffectKind::Move;
+    if mover && row.flags & flags::DEAD != 0 {
+        return None;
+    }
+    let kind = match fx.what {
+        EffectKind::Spawn { kind, .. } => kind,
+        _ => row.kind,
+    };
+    let def = kinds.def(kind);
+    let (l, flies) = (def.layer, kinds.flies(def.layer));
+    let (w, h) = (i32::from(def.size.0), i32::from(def.size.1));
+    let old = from.cell(usize::from(row.cell));
+    let new = fx.to.cell(usize::from(fx.cell));
+    let cells_of = |a: Pos| {
+        (0..h).flat_map(move |dy| (0..w).map(move |dx| (dx, dy, Pos::new(a.x + dx, a.y + dy))))
+    };
+    for (_, _, p) in cells_of(new) {
+        let (c, i) = p.split();
+        let Some((cells, _, _, scratch, _)) = stage.entity(c).and_then(|e| chunks.get(e).ok())
+        else {
+            return Some(result::BLOCKED);
+        };
+        if usize::from(l) >= 2 + cells.extra.len()
+            || !(flies || cells.walkable(i, &kinds.materials.table))
+        {
+            return Some(result::BLOCKED);
+        }
+        let id = cells.layer(l)[i];
+        let own = mover
+            && match id.part_of() {
+                Some((k, ox, oy)) => k == kind && Pos::new(p.x - ox, p.y - oy) == old,
+                None => id.row() == Some((kind, fx.slot)) && p == old,
+            };
+        if !own && (!id.is_none() || (l == 0 && !scratch.enterable(i))) {
+            return Some(result::BLOCKED);
+        }
+    }
+    // Clear the old footprint (a move), then write the new one.
+    if mover {
+        for (dx, dy, p) in cells_of(old).filter(|&(dx, dy, _)| (dx, dy) != (0, 0)) {
+            let (c, i) = p.split();
+            if let Some(e) = stage.entity(c)
+                && let Ok((mut cells, _, _, mut scratch, mut meta)) = chunks.get_mut(e)
+                && cells.layer(l)[i] == part_id(kind, dx, dy)
+            {
+                cells.layer_mut(l)[i] = ActorId::NONE;
+                if l == 0 {
+                    scratch.touch(i);
+                }
+                meta.dirty = true;
+            }
+        }
+    }
+    let (to, cell) = new.split();
+    let dst_e = stage.entity(to).expect("checked loaded above");
+    if mover && dst_e == src_e {
+        let (mut cells, mut pubs, _, mut scratch, mut meta) = chunks.get_mut(src_e).ok()?;
+        cells.layer_mut(l)[usize::from(row.cell)] = ActorId::NONE;
+        cells.layer_mut(l)[cell] = ActorId::pack(kind, fx.slot);
+        pubs.rows[slot].cell = cell_u16(cell);
+        if l == 0 {
+            scratch.touch(usize::from(row.cell));
+            scratch.touch(cell);
+        }
+        meta.dirty = true;
+    } else {
+        let mind = if mover {
+            let (_, _, minds, _, _) = chunks.get(src_e).ok()?;
+            let mut m = minds.rows[slot];
+            m.events = (m.events & !result::MASK) | result::OK;
+            m
+        } else {
+            let EffectKind::Spawn { with, .. } = fx.what else {
+                unreachable!("a move or a birth")
+            };
+            spawn_mind(kinds, seed, tick, new, kind, with)
+        };
+        if mover {
+            let (mut cells, mut pubs, mut minds, mut scratch, mut meta) =
+                chunks.get_mut(src_e).ok()?;
+            ActorsMut {
+                pubs: &mut pubs.rows,
+                minds: &mut minds.rows,
+                cells: &mut cells,
+            }
+            .kill(slot);
+            scratch.deaths += 1;
+            if l == 0 {
+                scratch.touch(usize::from(row.cell));
+            }
+            meta.dirty = true;
+        }
+        let (mut cells, mut pubs, mut minds, mut scratch, mut meta) = chunks.get_mut(dst_e).ok()?;
+        let mut to_rows = ActorsMut {
+            pubs: &mut pubs.rows,
+            minds: &mut minds.rows,
+            cells: &mut cells,
+        };
+        let n = usize::from(to_rows.push_in(cell, kind, mind, l));
+        if mover {
+            let moved = &mut to_rows.pubs[n];
+            moved.signal = row.signal;
+            moved.look = row.look;
+            moved.heads = row.heads;
+            moved.flags = row.flags & flags::WAKE;
+        } else {
+            to_rows.pubs[n].heads = def.start_heads();
+            scratch.count(kind, life::BORN);
+        }
+        if l == 0 {
+            scratch.touch(cell);
+        }
+        meta.dirty = true;
+    }
+    for (dx, dy, p) in cells_of(new).filter(|&(dx, dy, _)| (dx, dy) != (0, 0)) {
+        let (c, i) = p.split();
+        let e = stage.entity(c).expect("checked loaded above");
+        let (mut cells, _, _, mut scratch, mut meta) = chunks.get_mut(e).ok()?;
+        cells.layer_mut(l)[i] = part_id(kind, dx, dy);
+        if l == 0 {
+            scratch.touch(i);
+        }
+        meta.dirty = true;
+    }
+    // A mover that crossed into another chunk says OK from its new row.
+    Some(if mover && dst_e != src_e {
+        result::NONE
+    } else {
+        result::OK
+    })
+}
+
+/// The part `(dx, dy)` of an actor of `kind` (both small: in a footprint).
+fn part_id(kind: u16, dx: i32, dy: i32) -> ActorId {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)] // 0..16
+    ActorId::part(kind, dx as u8, dy as u8)
+}
+
+/// After Migrate, one thread: the parts of every big actor that died this
+/// tick (eaten, starved, its own `die`, or moved to another chunk, whose
+/// new parts are already written) are cleared, in whatever chunk they lie.
+/// Only a part that still points back at the dead one's cell goes.
+pub fn unpart(
+    kinds: Res<Kinds>,
+    stage: Res<Stage>,
+    mut work: Local<Vec<(Pos, u8, u16, (u8, u8))>>,
+    mut chunks: Query<(&ChunkCoord, &mut ChunkCells, &ChunkActors, &Scratch)>,
+) {
+    if !kinds.any_big() {
+        return;
+    }
+    work.clear();
+    for &(c, e) in stage.active() {
+        let Ok((_, _, pubs, scratch)) = chunks.get(e) else {
+            continue;
+        };
+        if scratch.deaths == 0 {
+            continue;
+        }
+        for r in &pubs.rows {
+            let def = kinds.def(r.kind);
+            if r.flags & flags::DEAD != 0 && def.is_big() {
+                work.push((c.cell(usize::from(r.cell)), r.layer, r.kind, def.size));
+            }
+        }
+    }
+    for &(a, l, k, (w, h)) in work.iter() {
+        for dy in 0..i32::from(h) {
+            for dx in 0..i32::from(w) {
+                if (dx, dy) == (0, 0) {
+                    continue;
+                }
+                let (c, i) = Pos::new(a.x + dx, a.y + dy).split();
+                if let Some(e) = stage.entity(c)
+                    && let Ok((_, mut cells, _, _)) = chunks.get_mut(e)
+                    && cells.layer(l)[i] == part_id(k, dx, dy)
+                {
+                    cells.layer_mut(l)[i] = ActorId::NONE;
+                }
+            }
+        }
     }
 }
 

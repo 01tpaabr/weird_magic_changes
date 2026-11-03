@@ -277,15 +277,15 @@ pub fn validate(
             ));
         }
     }
-    let occupied = cells.occupant.iter().filter(|o| !o.is_none()).count()
-        + cells.cover.iter().filter(|o| !o.is_none()).count()
-        + cells
-            .extra
-            .iter()
-            .map(|l| l.iter().filter(|o| !o.is_none()).count())
-            .sum::<usize>();
+    // Parts (a big actor's other cells) own no row here.
+    let held = |l: &[ActorId; CHUNK_CELLS]| l.iter().filter(|o| o.row().is_some()).count();
+    let occupied =
+        held(&cells.occupant) + held(&cells.cover) + cells.extra.iter().map(held).sum::<usize>();
     if occupied != pubs.len() {
         return Err(format!("{occupied} occupied cells but {} rows", pubs.len()));
+    }
+    if let Some(i) = cells.cover.iter().position(|o| o.part_of().is_some()) {
+        return Err(format!("cell {i} of the cover holds a part"));
     }
     Ok(())
 }

@@ -219,6 +219,7 @@ pub fn hand_assembled() -> Kinds {
             solid: false,
             parent: None,
             group: (0, 0),
+            size: (1, 1),
         },
         KindDef {
             id: TREE,
@@ -245,6 +246,7 @@ pub fn hand_assembled() -> Kinds {
             solid: false,
             parent: None,
             group: (0, 0),
+            size: (1, 1),
         },
     ];
     Kinds::from_parts(defs, code, consts, vec![])

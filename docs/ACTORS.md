@@ -53,6 +53,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     heads: u16,     // 1, or a group's heads (`group max N`): heads_of(t), `count` in scenarios
     _pad2: u16,
 }
+// A big actor (`size W H`) has its row on its top-left cell; its other cells hold a part:
+// ActorId::part(kind, dx, dy), the slot's high bit set and the offset back in its place.
 #[repr(C)] pub struct ActorMind {  // 168 B, Pod. Only the owning chunk touches it.
     uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child, STREAM_UID_LAYER | layer << 16 in a declared layer]
     born: u32, last_think: u32,   // wrapping ticks
@@ -107,7 +109,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
   `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
   a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
-- **Save**: chunk file v15 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
+- **Save**: chunk file v16 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'

@@ -1819,6 +1819,8 @@ pub struct Placement {
     stacked: Vec<(u32, Option<Region>, Option<Placed>, Rest, Rest)>,
     /// Each kind's tag bits, for a layer that rests on a tag.
     tags: Vec<u64>,
+    /// Each kind's `size`: a big one starts only where its footprint fits.
+    sizes: Vec<(u8, u8)>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
     /// The rules' materials: which cells are walkable.
@@ -1962,6 +1964,29 @@ impl Placement {
                             .map_or("?", |d| d.name.as_str());
                         return Err(err(format!("`{kind}` at ({x}, {y}) is on {name}")));
                     }
+                    // A big one: its whole footprint in the anchor's chunk
+                    // (chunks generate apart), on cells it may stand on.
+                    if def.is_big() {
+                        let (w, h) = (i32::from(def.size.0), i32::from(def.size.1));
+                        let n = CHUNK_SIZE;
+                        if x.rem_euclid(n) + w > n || y.rem_euclid(n) + h > n {
+                            return Err(err(format!(
+                                "`{kind}` at ({x}, {y}) is {w} x {h}: it crosses a chunk border (every 64 cells) at the start; start it where it fits"
+                            )));
+                        }
+                        for (cx, cy) in (0..h).flat_map(|dy| (0..w).map(move |dx| (x + dx, y + dy)))
+                        {
+                            let (g, f) = terrain.cell(cx, cy);
+                            let m = &kinds.materials;
+                            if m.table.blocks(f)
+                                || (!m.table.walkable(g, Feature::None) && !kinds.flies(def.layer))
+                            {
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) covers ({cx}, {cy}), where it can't stand"
+                                )));
+                            }
+                        }
+                    }
                     let (mut needs, mut mems, mut heads) = (Vec::new(), Vec::new(), None);
                     for (name, v) in with {
                         if name == "heads" {
@@ -2071,6 +2096,29 @@ impl Placement {
                 msg: format!("two starts at ({}, {})", p.x, p.y),
             });
         }
+        // Two starts on one cell of a layer, counting a big one's footprint.
+        if kinds.any_big() {
+            let mut cover: Vec<(i32, i32, u8, usize)> = Vec::new();
+            for (e, at) in &explicit {
+                let def = kinds.def(e.placed.kind);
+                let p = e.chunk.cell(usize::from(e.cell));
+                for dy in 0..i32::from(def.size.1) {
+                    for dx in 0..i32::from(def.size.0) {
+                        cover.push((p.y + dy, p.x + dx, e.placed.layer, *at));
+                    }
+                }
+            }
+            cover.sort_unstable();
+            let same = |a: &(i32, i32, u8, usize), b: &(i32, i32, u8, usize)| {
+                (a.0, a.1, a.2) == (b.0, b.1, b.2)
+            };
+            if let Some(w) = cover.windows(2).find(|w| same(&w[0], &w[1])) {
+                return Err(StartError {
+                    start: Some(w[0].3.max(w[1].3)),
+                    msg: format!("two starts at ({}, {})", w[0].1, w[0].0),
+                });
+            }
+        }
         // A start in a layer that rests on a kind: over one, started there.
         for (i, (e, at)) in explicit.iter().enumerate() {
             let rest = kinds.rest(e.placed.layer);
@@ -2111,6 +2159,7 @@ impl Placement {
             bounds,
             stacked,
             tags: kinds.tag_bits.clone(),
+            sizes: kinds.defs.iter().map(|d| d.size).collect(),
             explicit,
             table: kinds.materials.table,
             layers: kinds.layers.len(),
@@ -2159,6 +2208,12 @@ impl Placement {
             }
         }
         None
+    }
+
+    /// The cells kind `kind` covers, `(w, h)`.
+    #[inline]
+    pub fn size_of(&self, kind: u16) -> (u8, u8) {
+        self.sizes.get(usize::from(kind)).copied().unwrap_or((1, 1))
     }
 
     /// Any shares with `on`?
@@ -3136,6 +3191,78 @@ legend {
             e.contains("t:2: the shares at (0, 0) add up to more than 1"),
             "{e}"
         );
+    }
+
+    /// A big kind starts where its whole footprint fits in one chunk, on
+    /// cells it may stand on, overlapping no other start; a share places
+    /// it only where it fits, its parts on the rest of its cells.
+    #[test]
+    fn big_starts_fit_their_chunk() {
+        let k = crate::rules::compile("t.rules", "kind whale { size 3 2 }  kind fish { }").unwrap();
+        let p = GenParams::default();
+        let t = noise(7, &p);
+        let flat_cell = |x0: i32, y0: i32| {
+            (0..64)
+                .flat_map(|y| (0..64).map(move |x| (x0 + x, y0 + y)))
+                .find(|&(x, y)| {
+                    (0..2).all(|dy| {
+                        (0..3).all(|dx| {
+                            let (g, f) = gen_cell(7, &p, x + dx, y + dy);
+                            g.walkable() && !f.blocks()
+                        })
+                    }) && (x + 3) % 64 != 0
+                        && x % 64 < 61
+                        && y % 64 < 62
+                })
+                .unwrap()
+        };
+        let (x, y) = flat_cell(0, 0);
+        let resolve =
+            |text: String| Placement::resolve(&Scenario::parse("t", &text).unwrap().starts, &k, &t);
+        assert!(resolve(format!("start whale at ({x}, {y})")).is_ok());
+        let e = resolve(format!("start whale at (62, {y})")).unwrap_err();
+        assert!(e.msg.contains("crosses a chunk border"), "{}", e.msg);
+        let e = resolve(format!(
+            "start whale at ({x}, {y})\nstart fish at ({}, {})",
+            x + 2,
+            y + 1
+        ))
+        .unwrap_err();
+        assert!(
+            e.msg
+                .contains(&format!("two starts at ({}, {})", x + 2, y + 1)),
+            "{}",
+            e.msg
+        );
+        assert_eq!(e.start, Some(1));
+        let e = resolve(format!(
+            "start whale at ({x}, {y})\nstart whale at ({}, {})",
+            x + 1,
+            y
+        ))
+        .unwrap_err();
+        assert!(e.msg.contains("two starts"), "{}", e.msg);
+        // Shares: every whale in its chunk, with its five parts.
+        let pl = resolve("start whale 1 / 20\nstart fish 1 / 20".into()).unwrap();
+        let mut data = crate::stage::ChunkData::default();
+        for c in [ChunkCoord::new(0, 0), ChunkCoord::new(1, 1)] {
+            crate::stage::worldgen::generate_chunk(&t, &pl, c, &mut data);
+            crate::actors::validate(&data.cells, &data.actors.rows, &data.minds.rows, k.len())
+                .unwrap();
+            let whales = data.actors.rows.iter().filter(|r| r.kind == 0).count();
+            let parts = data
+                .cells
+                .occupant
+                .iter()
+                .filter(|o| o.part_of().is_some())
+                .count();
+            assert!(whales > 20, "{whales} whales");
+            assert_eq!(parts, 5 * whales);
+            for r in data.actors.rows.iter().filter(|r| r.kind == 0) {
+                let (cx, cy) = (usize::from(r.cell) % 64, usize::from(r.cell) / 64);
+                assert!(cx + 3 <= 64 && cy + 2 <= 64, "in its chunk");
+            }
+        }
     }
 
     #[test]

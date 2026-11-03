@@ -724,6 +724,7 @@ fn a_bad_world_header_never_panics() {
                     vec![SavedKind {
                         name: "dragon".into(),
                         layer: 0,
+                        size: (1, 1),
                         needs: vec![],
                         mems: vec![],
                         states: vec![],

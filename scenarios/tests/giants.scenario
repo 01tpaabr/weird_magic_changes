@@ -1,0 +1,23 @@
+# The giants pack (packs/giants): big actors. A dense wood on the left (a
+# tree on half its cells), a meadow on the right. Deer slip deep into the
+# wood; mammoths, 3 x 3, never fit between its trees, however often they
+# try, and graze the meadow.
+#
+#   make run ARGS="scenario scenarios/tests/giants.scenario"
+rules ../../packs/giants
+seed 9
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start tree 1 / 2 in (0, 0) to (63, 127)
+start deer 1 / 200 in (72, 0) to (191, 127)
+start mammoth 1 / 400 in (72, 8) to (183, 119)
+start mammoth at (100, 60)
+run 2d
+expect eventually max woods of deer == 1 to 1d    # from the meadow, deep into the wood
+expect never max woods of mammoth > 0             # a mammoth never fits
+expect eventually max tries of mammoth >= 20 to 1d   # though they try
+expect eventually at (100, 60) mammoth to 1min    # a start by hand
+expect died mammoth == 0
+expect died deer == 0
+expect traps deer == 0
+expect traps mammoth == 0

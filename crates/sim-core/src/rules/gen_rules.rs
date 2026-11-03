@@ -146,6 +146,9 @@ struct Owner {
     /// `group max N init M`: a kind's own, or its kind parent's.
     group: Option<(u16, u16)>,
     own_group: bool,
+    /// `size W H`: a kind's own, or its kind parent's.
+    size: Option<(u8, u8)>,
+    own_size: bool,
 }
 
 struct G<'a> {
@@ -501,21 +504,39 @@ impl<'a> G<'a> {
                     .collect();
                 o.place = p.place;
                 o.group = p.group;
+                o.size = p.size;
             }
             // A kind lives in one layer: its parent's, else one of its own.
             if o.place.is_none() {
                 o.own_place = true;
-                // Ground cover is never a group: not under a group parent.
-                o.place = if o.group.is_none() && self.maybe(10) {
+                // Ground cover is never a group nor big: not under one.
+                o.place = if o.group.is_none() && o.size.is_none() && self.maybe(10) {
                     Some("cover")
                 } else if self.layers && self.maybe(30) {
-                    Some(self.one(&["layer gair", "layer gdeep", "layer gtop"]))
+                    // A big kind's own cells hold it up, never a resting layer.
+                    if o.size.is_some() {
+                        Some(self.one(&["layer gair", "layer gdeep"]))
+                    } else {
+                        Some(self.one(&["layer gair", "layer gdeep", "layer gtop"]))
+                    }
                 } else {
                     None
                 };
             }
             // A group, now and then (never ground cover): its own, or a
             // larger one than its kind parent's.
+            // Big, now and then (never cover, nor in `gtop`, which rests).
+            // Only a kind with no kind parent: one that is could inherit a
+            // `split` or `join` a big group may not run.
+            let rooted = !o.parents.iter().any(|p| p.starts_with('k'));
+            if rooted
+                && o.size.is_none()
+                && !matches!(o.place, Some("cover" | "layer gtop"))
+                && self.maybe(15)
+            {
+                o.size = Some((1 + self.n(4) as u8, 1 + self.n(4) as u8));
+                o.own_size = true;
+            }
             if o.place != Some("cover") && self.maybe(25) {
                 let max = 2 + self.n(200) as u16;
                 let max = o.group.map_or(max, |(m, _)| m.saturating_add(max));
@@ -820,6 +841,9 @@ impl<'a> G<'a> {
             if self.fields > 0 && self.maybe(20) {
                 d.push(format!("climb {} on fa", self.n(5)));
             }
+        }
+        if let (Some((w, h)), true) = (o.size, o.own_size) {
+            d.push(format!("size {w} {h}"));
         }
         if let (Some((max, init)), true) = (o.group, o.own_group) {
             d.push(if init == 1 && self.maybe(50) {
@@ -1365,7 +1389,8 @@ impl<'a> G<'a> {
             .map(|(f, _)| f.to_string())
             .filter(|f| needs.contains(f))
             .collect();
-        if (self.groups_here() || !self.strict) && self.maybe(15) {
+        let big = self.cur().is_some_and(|o| o.size.is_some());
+        if ((self.groups_here() && !big) || !self.strict) && self.maybe(15) {
             let t = self.target(d - 1);
             return if self.maybe(50) {
                 format!("split {} at {t}", self.expr(d - 1))
@@ -1692,7 +1717,7 @@ impl<'a> G<'a> {
                 format!("{f}({})", self.expr(d - 1))
             }
             4 => {
-                let f = self.one(&["dist", "free", "look_of", "signal_of", "heads_of"]);
+                let f = self.one(&["dist", "free", "fits", "look_of", "signal_of", "heads_of"]);
                 format!("{f}({})", self.target(d - 1))
             }
             5 => {

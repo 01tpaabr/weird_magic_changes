@@ -48,7 +48,7 @@ use crate::stage::{
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 15;
+pub const FORMAT_VERSION: u32 = 16;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 
@@ -90,6 +90,8 @@ pub struct SavedKind {
     pub name: String,
     /// 0 standing, 1 ground cover, 2 and up a declared layer.
     pub layer: u8,
+    /// `size W H`: the cells it covers.
+    pub size: (u8, u8),
     pub needs: Vec<String>,
     pub mems: Vec<String>,
     pub states: Vec<String>,
@@ -104,6 +106,7 @@ impl SavedKind {
             .map(|d| SavedKind {
                 name: d.name.clone(),
                 layer: d.layer,
+                size: d.size,
                 needs: d.needs.iter().map(|n| n.name.clone()).collect(),
                 mems: d.mems.clone(),
                 states: kinds
@@ -312,6 +315,7 @@ impl Store {
             let k = SavedKind {
                 name: r.str()?,
                 layer: r.u8()?,
+                size: (r.u8()?, r.u8()?),
                 needs: r.strs()?,
                 mems: r.strs()?,
                 states: r.strs()?,
@@ -464,6 +468,8 @@ impl Store {
         for k in &m.kinds {
             w.str(&k.name);
             w.u8(k.layer);
+            w.u8(k.size.0);
+            w.u8(k.size.1);
             w.strs(&k.needs);
             w.strs(&k.mems);
             w.strs(&k.states);
@@ -887,6 +893,7 @@ mod tests {
                 SavedKind {
                     name: "seed".into(),
                     layer: 0,
+                    size: (1, 1),
                     needs: names(&["water", "health"]),
                     mems: names(&["lit"]),
                     states: Vec::new(),
@@ -894,6 +901,7 @@ mod tests {
                 SavedKind {
                     name: "árvore".into(),
                     layer: 3,
+                    size: (1, 1),
                     needs: Vec::new(),
                     mems: Vec::new(),
                     states: names(&["grow", "rest"]),
@@ -974,6 +982,7 @@ mod tests {
         let kind = |needs: usize, mems: usize| SavedKind {
             name: "seed".into(),
             layer: 0,
+            size: (1, 1),
             needs: slot(needs),
             mems: slot(mems),
             states: Vec::new(),

@@ -67,6 +67,8 @@ struct Target {
     states: Vec<u8>,
     /// The most heads a row of the new kind holds (1: not a group).
     max_heads: u16,
+    /// It covers more than one cell: its parts carry its kind.
+    big: bool,
 }
 
 /// How rows and fields written under one rule set map onto another.
@@ -130,6 +132,12 @@ impl Plan {
                 kinds.push(None);
                 continue;
             };
+            if od.size != nd.size {
+                return Err(format!(
+                    "kind `{}` changed size from {} x {} to {} x {}: restart to change that",
+                    od.name, od.size.0, od.size.1, nd.size.0, nd.size.1
+                ));
+            }
             if old_name(od.layer) != new_name(nd.layer) {
                 return Err(format!(
                     "kind `{}` moved from {} to {}: restart to change that",
@@ -146,6 +154,7 @@ impl Plan {
                 mems: [None; MEM_SLOTS],
                 states: Vec::new(),
                 max_heads: nd.max_heads(),
+                big: nd.is_big(),
             };
             for (i, n) in nd.needs.iter().enumerate() {
                 t.needs[i] = od.needs.iter().position(|o| *o == n.name);
@@ -272,6 +281,23 @@ impl Plan {
         }
         if dead {
             actors.compact();
+        }
+        // Parts of big actors carry their kind: renumbered as rows are, or
+        // gone with their kind.
+        if self.kinds.iter().flatten().any(|t| t.big) {
+            for l in 0..2 + actors.cells.extra.len() {
+                let l = u8::try_from(l).expect("a few layers");
+                for id in actors.cells.layer_mut(l).iter_mut() {
+                    if let Some((k, dx, dy)) = id.part_of() {
+                        *id = match self.kinds.get(usize::from(k)).and_then(Option::as_ref) {
+                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                            // 0..16
+                            Some(t) => ActorId::part(t.kind, dx as u8, dy as u8),
+                            None => ActorId::NONE,
+                        };
+                    }
+                }
+            }
         }
         // Declared layers by name: the rows left are in layers the new
         // rules declare (`between` checked their kinds).
