@@ -325,6 +325,18 @@ fn namespaces(
             }
         };
         tokens.drain(..2);
+        if let Some(t) = tokens.first()
+            && t.tok == Tok::Name("namespace".into())
+        {
+            return Err(pos_err(
+                &Pos {
+                    file: name.to_string(),
+                    line: t.line,
+                    col: t.col,
+                },
+                "one `namespace` line a file",
+            ));
+        }
         space_of.push(Some(i));
     }
     if spaces.is_empty() {
@@ -337,9 +349,22 @@ fn namespaces(
                 parse(name, tokens.clone(), &mut own)?;
             }
         }
-        for (n, _) in top_names(&own) {
-            let global = NOT_PLAYER_NAMES.contains(&n) || ["soil", "water", "rock"].contains(&n);
-            if !global && !names.iter().any(|m| m == n) {
+        // The engine's soil, water and rock redeclared stay the engine's.
+        let engine = |n: &str| ["soil", "water", "rock"].contains(&n);
+        for (n, at) in top_names(&own) {
+            let material = own.materials.iter().any(|m| m.name == n);
+            if material && engine(n) {
+                continue;
+            }
+            if NOT_PLAYER_NAMES.contains(&n) {
+                return Err(pos_err(
+                    at,
+                    format!(
+                        "`{n}` is a word the language reads: a namespace's item takes another name"
+                    ),
+                ));
+            }
+            if !names.iter().any(|m| m == n) {
                 names.push(n.to_string());
             }
         }
@@ -636,6 +661,15 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    fn err_at(&self, line: u32, col: u32, msg: impl Into<String>) -> CompileError {
+        CompileError {
+            file: self.file.to_string(),
+            line,
+            col,
+            msg: msg.into(),
+        }
+    }
+
     /// The byte `k` ahead, 0 past the end (a real NUL byte is also 0:
     /// only [`Self::end`] says where the file ends).
     fn peek(&self, k: usize) -> u8 {
@@ -686,7 +720,7 @@ impl<'a> Lexer<'a> {
                 while self.peek(0).is_ascii_digit() {
                     v = v * 10 + i64::from(self.bump() - b'0');
                     if v > i64::from(i32::MAX) {
-                        return Err(self.err("number too large"));
+                        return Err(self.err_at(line, col, "number too large"));
                     }
                 }
                 let mut unit = String::new();
@@ -710,15 +744,24 @@ impl<'a> Lexer<'a> {
                 match unit.as_str() {
                     "" => Tok::Int(i32::try_from(v).expect("checked against i32::MAX above")),
                     "min" => Tok::Time(
-                        ticks(minutes(v as u64)).ok_or_else(|| self.err("time too long"))?,
+                        ticks(minutes(v as u64))
+                            .ok_or_else(|| self.err_at(line, col, "time too long"))?,
                     ),
-                    "h" => {
-                        Tok::Time(ticks(hours(v as u64)).ok_or_else(|| self.err("time too long"))?)
+                    "h" => Tok::Time(
+                        ticks(hours(v as u64))
+                            .ok_or_else(|| self.err_at(line, col, "time too long"))?,
+                    ),
+                    "d" => Tok::Time(
+                        ticks(days(v as u64))
+                            .ok_or_else(|| self.err_at(line, col, "time too long"))?,
+                    ),
+                    u => {
+                        return Err(self.err_at(
+                            line,
+                            col,
+                            format!("unknown unit `{u}` (min, h, d)"),
+                        ));
                     }
-                    "d" => {
-                        Tok::Time(ticks(days(v as u64)).ok_or_else(|| self.err("time too long"))?)
-                    }
-                    u => return Err(self.err(format!("unknown unit `{u}` (min, h, d)"))),
                 }
             } else if b.is_ascii_alphabetic() || b == b'_' {
                 let mut s = String::new();
@@ -728,18 +771,22 @@ impl<'a> Lexer<'a> {
                 Tok::Name(s)
             } else if b == b'"' {
                 self.bump();
-                let mut s = String::new();
+                let start = self.at;
                 loop {
                     match self.peek(0) {
-                        b'"' => {
-                            self.bump();
-                            break;
+                        b'"' => break,
+                        _ if self.end() => {
+                            return Err(self.err_at(line, col, "unterminated string"));
                         }
-                        _ if self.end() => return Err(self.err("unterminated string")),
-                        b'\n' => return Err(self.err("unterminated string")),
-                        _ => s.push(char::from(self.bump())),
+                        b'\n' => return Err(self.err_at(line, col, "unterminated string")),
+                        _ => {
+                            self.bump();
+                        }
                     }
                 }
+                // Both ends sit on an ASCII `"`: a whole UTF-8 slice.
+                let s = self.text[start..self.at].to_string();
+                self.bump();
                 Tok::Str(s)
             } else {
                 let two = [b, self.peek(1)];
@@ -1674,7 +1721,11 @@ impl Parser<'_> {
                     while !self.eat_sym("}") {
                         if self.eat_kw("flies") {
                             flies = true;
-                        } else if self.eat_kw("on") {
+                        } else if self.is_kw("on") {
+                            if on.is_some() {
+                                return Err(self.err("`on` given twice in a layer"));
+                            }
+                            self.bump();
                             on = Some(self.ident("kind or tag")?);
                         } else {
                             return Err(self.err(format!(
@@ -1765,6 +1816,11 @@ impl Parser<'_> {
                 m.drink = true;
             } else if !ground && self.eat_kw("opaque") {
                 m.opaque = true;
+            } else if (self.is_kw("glyph") && m.glyph.is_some())
+                || (self.is_kw("color") && m.color.is_some())
+            {
+                let what = if ground { "ground" } else { "feature" };
+                return Err(self.err(format!("{} given twice in a {what}", self.describe())));
             } else if self.eat_kw("glyph") {
                 m.glyph = Some(match self.bump() {
                     Tok::Str(s) if s.len() == 1 && s.as_bytes()[0].is_ascii_graphic() => {
@@ -2239,6 +2295,8 @@ impl Parser<'_> {
                 ("reach", d.reach.is_some()),
                 ("layer", d.layer.is_some()),
                 ("climb", d.climb.is_some()),
+                ("size", d.size.is_some()),
+                ("group", d.group.is_some()),
             ];
             if let Some((w, _)) = given.iter().find(|(w, set)| *set && self.is_kw(w)) {
                 return Err(self.err_at(&p, format!("`{w}` declared twice")));
@@ -2338,10 +2396,11 @@ impl Parser<'_> {
                 let max = self.additive()?;
                 let mut decays = true;
                 if self.eat_kw("decay") {
+                    let at = self.pos();
                     match self.int("0 (points) or 1 (per tick)")? {
                         0 => decays = false,
                         1 => decays = true,
-                        _ => return Err(self.err_at(&p, "decay is 0 (points) or 1 (per tick)")),
+                        _ => return Err(self.err_at(&at, "decay is 0 (points) or 1 (per tick)")),
                     }
                 }
                 let vital = self.eat_kw("vital");
@@ -2464,11 +2523,12 @@ impl Parser<'_> {
     }
 
     fn block(&mut self) -> Result<Vec<Stmt>> {
+        let open = self.pos();
         self.expect_sym("{")?;
         let mut stmts = Vec::new();
         while !self.is_sym("}") {
             if *self.peek() == Tok::Eof {
-                return Err(self.err("unclosed block"));
+                return Err(self.err_at(&open, "unclosed block"));
             }
             stmts.push(self.nested(Self::stmt)?);
             self.eat_sym(";");

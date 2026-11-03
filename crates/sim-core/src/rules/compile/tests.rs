@@ -3358,10 +3358,16 @@ fn search_and_rename_review_finds_stay_fixed() {
     );
     assert!(e.contains("a search doesn't act"), "{e}");
 
+    // A namespace's `const steps` is refused, as a player's is.
     let spaced = "namespace foo
                   const steps = 3
-                  const cost = 2
-                  search s { state a = 0  next { try a + 1 cost cost }  goal a >= steps }
+                  search s { state a = 0  next { try a + 1 }  goal a >= steps }
+                  kind k { glyph \"k\"  mem m  when s() as p and p.steps > 0 => { m = p.cost  idle }  when true => idle }";
+    let e = compile("t.rules", spaced).unwrap_err().to_string();
+    assert!(e.contains("a word the language reads"), "{e}");
+    let spaced = "namespace foo
+                  const many = 3
+                  search s { state a = 0  next { try a + 1 cost 2 }  goal a >= many }
                   kind k { glyph \"k\"  mem m  when s() as p and p.steps > 0 => { m = p.cost  idle }  when true => idle }";
     let k = compile("t.rules", spaced).unwrap();
     assert!(k.by_name("foo.k").is_some());
@@ -3441,6 +3447,91 @@ fn nested_counts_in_a_law_parse_in_linear_time() {
         e.contains("`and`, `or` and `not` make conditions, not numbers"),
         "{e}"
     );
+}
+
+#[test]
+fn single_declarations_given_twice_are_errors() {
+    for (text, want) in [
+        ("kind a { size 2 2  size 3 3 }", "`size` declared twice"),
+        (
+            "kind a { group max 4  group max 5 }",
+            "`group` declared twice",
+        ),
+        (
+            "kind k { } layer air { on k  on k }",
+            "`on` given twice in a layer",
+        ),
+        (
+            "ground mud { glyph \"m\"  glyph \"n\" }",
+            "`glyph` given twice in a ground",
+        ),
+        (
+            "feature wall { color \"#000000\"  color \"#ffffff\" }",
+            "`color` given twice in a feature",
+        ),
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}: {e}");
+    }
+}
+
+#[test]
+fn a_namespace_is_one_line_and_renames_every_item() {
+    let one = |text: &str| compile_files(&[("w.rules", text)]).unwrap_err().to_string();
+    // A word the language reads would stay global: refused, as for a player.
+    for (text, name) in [
+        ("namespace w\nconst limit = 3\nkind k { }", "limit"),
+        ("namespace w\nsub steps() { return 1 }", "steps"),
+        ("namespace w\nkind size { }", "size"),
+        ("namespace w\nfield group max 9", "group"),
+    ] {
+        let e = one(text);
+        assert!(
+            e.contains(&format!(
+                "`{name}` is a word the language reads: a namespace's item takes another name"
+            )),
+            "{text}: {e}"
+        );
+    }
+    // The engine's grounds redeclared stay the engine's.
+    compile_files(&[("w.rules", "namespace w\nground water { drink }\nkind k { }")]).unwrap();
+    assert_eq!(
+        one("namespace a\nnamespace b\nkind k { }"),
+        "w.rules:2:1: one `namespace` line a file"
+    );
+}
+
+#[test]
+fn lexer_errors_point_at_the_start_and_strings_are_utf8() {
+    for (text, want) in [
+        (
+            "kind a { sight 99999999999 }",
+            "t.rules:1:16: number too large",
+        ),
+        ("kind a { food 99999d }", "t.rules:1:15: time too long"),
+        (
+            "kind a { food 3w }",
+            "t.rules:1:15: unknown unit `w` (min, h, d)",
+        ),
+        ("kind a { glyph \"ab", "t.rules:1:16: unterminated string"),
+        (
+            "kind a { glyph \"ab\n\" }",
+            "t.rules:1:16: unterminated string",
+        ),
+        (
+            "kind a {\n when true => {\n idle\n",
+            "t.rules:2:15: unclosed block",
+        ),
+        (
+            "kind a { need w max 9 decay 2 }",
+            "t.rules:1:29: decay is 0 (points) or 1 (per tick)",
+        ),
+    ] {
+        assert_eq!(compile_err(text), want, "{text}");
+    }
+    let toks = Lexer::new("t", "\"é ü\" x").lex().unwrap();
+    assert_eq!(toks[0].tok, Tok::Str("é ü".into()));
+    assert_eq!((toks[1].line, toks[1].col), (1, 7));
 }
 
 #[test]
