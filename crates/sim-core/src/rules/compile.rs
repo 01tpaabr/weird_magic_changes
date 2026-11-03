@@ -2506,7 +2506,7 @@ impl Parser<'_> {
         if self.eat_kw("let") {
             let (name, at) = self.ident("local name")?;
             self.expect_sym("=")?;
-            let value = self.expr()?;
+            let value = self.value()?;
             return Ok(Stmt::Let { name, at, value });
         }
         if self.eat_kw("return") {
@@ -2514,7 +2514,7 @@ impl Parser<'_> {
             let value = if self.is_sym("}") || self.is_sym(";") || self.pos().line != at.line {
                 None
             } else {
-                Some(self.expr()?)
+                Some(self.value()?)
             };
             return Ok(Stmt::Return { value, at });
         }
@@ -2642,12 +2642,12 @@ impl Parser<'_> {
         if self.is_kw("look") && matches!(self.peek2(), Tok::Sym("=")) {
             self.bump();
             self.bump();
-            return Ok(Stmt::Look(self.expr()?));
+            return Ok(Stmt::Look(self.value()?));
         }
         if self.is_kw("signal") && matches!(self.peek2(), Tok::Sym("=")) {
             self.bump();
             self.bump();
-            return Ok(Stmt::Signal(self.expr()?));
+            return Ok(Stmt::Signal(self.value()?));
         }
         if self.eat_kw("next") {
             let (name, at) = self.ident("state name")?;
@@ -2655,7 +2655,7 @@ impl Parser<'_> {
         }
         if self.eat_kw("add") {
             let (field, at) = self.ident("field name")?;
-            return Ok(Stmt::Add(field, self.expr()?, at));
+            return Ok(Stmt::Add(field, self.value()?, at));
         }
         if self.is_kw("harvest") || self.is_kw("drop") {
             let drop = self.is_kw("drop");
@@ -2728,7 +2728,7 @@ impl Parser<'_> {
                     self.describe()
                 )));
             };
-            let value = self.expr()?;
+            let value = self.value()?;
             return Ok(Stmt::SetAt {
                 name,
                 at,
@@ -2738,12 +2738,12 @@ impl Parser<'_> {
             });
         }
         if self.eat_sym("=") {
-            let value = self.expr()?;
+            let value = self.value()?;
             return Ok(Stmt::Set { name, at, value });
         }
         for (sym, op) in [("+=", OpCode::Add), ("-=", OpCode::Sub)] {
             if self.eat_sym(sym) {
-                let value = self.expr()?;
+                let value = self.value()?;
                 return Ok(Stmt::Assign {
                     name,
                     at,
@@ -2756,6 +2756,20 @@ impl Parser<'_> {
             "expected `(`, `=`, `+=` or `-=` after `{name}`, found {}",
             self.describe()
         )))
+    }
+
+    /// The value a statement stores or returns: an expression, where an
+    /// `and` or `or` after it is a condition written for a number.
+    fn value(&mut self) -> Result<Expr> {
+        let e = self.expr()?;
+        if self.is_kw("and") || self.is_kw("or") {
+            return Err(self.err(format!(
+                "{} joins conditions only (in `when`, `if` and `while`), not a value: \
+                 `if a and b {{ x = 1 }}`",
+                self.describe()
+            )));
+        }
+        Ok(e)
     }
 
     /// `( arg, ... )`. A bare name is typed by the callee's parameter.
@@ -2911,28 +2925,25 @@ impl Parser<'_> {
         }
         if self.is_sym("(") {
             // Either a parenthesised condition or a parenthesised expression
-            // starting a comparison; parse as a cond and let expr-level
-            // parentheses handle the rest. If both fail, the error that got
-            // further into the tokens is the real one.
-            let save = (self.at, self.deepest);
+            // starting a comparison. A condition holds every expression, so
+            // parse a condition; an expression in it followed by an operator
+            // goes on from there as an expression. Never a second parse: in
+            // a law an expression holds conditions (`count (c) within r`),
+            // and parsing each level twice is exponential in the nesting.
             self.bump();
-            let mut cond_err = None;
-            match self.nested(Self::cond) {
-                Ok(c) => match self.expect_sym(")") {
-                    Ok(()) if !self.starts_binop() => return Ok(c),
-                    Ok(()) => {}
-                    Err(e) => cond_err = Some((self.at, e)),
-                },
-                Err(e) => cond_err = Some((self.at, e)),
+            let c = self.nested(Self::cond)?;
+            self.expect_sym(")")?;
+            if !self.starts_binop() {
+                return Ok(c);
             }
-            (self.at, self.deepest) = save;
-            return match self.expr() {
-                Ok(e) => Ok(Cond::Expr(e)),
-                Err(e) => match cond_err {
-                    Some((at, ce)) if at > self.at => Err(ce),
-                    _ => Err(e),
-                },
+            let Cond::Expr(e) = c else {
+                return Err(self.err(format!(
+                    "{} after a condition: `and`, `or` and `not` make conditions, not numbers",
+                    self.describe()
+                )));
             };
+            let reached = self.deepest;
+            return Ok(Cond::Expr(self.expr_with(Some((e, reached)))?));
         }
         let e = self.expr()?;
         // `name(args) as plan [into route]`: a search's plan.
@@ -3048,8 +3059,14 @@ impl Parser<'_> {
 
     // expr := additive [cmp additive]: comparisons don't chain.
     fn expr(&mut self) -> Result<Expr> {
+        self.expr_with(None)
+    }
+
+    /// An expression whose first operand, if given, is parsed already (with
+    /// the depth it reached): a parenthesised one the caller read.
+    fn expr_with(&mut self, first: Option<(Expr, u32)>) -> Result<Expr> {
         let outer = std::mem::replace(&mut self.deepest, self.depth);
-        let mut e = self.additive()?;
+        let mut e = self.additive_with(first)?;
         if let Some(op) = self.cmp_op() {
             self.bump();
             let left = std::mem::replace(&mut self.deepest, self.depth);
@@ -3068,8 +3085,12 @@ impl Parser<'_> {
     }
 
     fn additive(&mut self) -> Result<Expr> {
+        self.additive_with(None)
+    }
+
+    fn additive_with(&mut self, first: Option<(Expr, u32)>) -> Result<Expr> {
         let outer = std::mem::replace(&mut self.deepest, self.depth);
-        let mut e = self.term()?;
+        let mut e = self.term_with(first)?;
         loop {
             let op = match self.peek() {
                 Tok::Sym("+") => OpCode::Add,
@@ -3078,7 +3099,7 @@ impl Parser<'_> {
             };
             self.bump();
             let left = std::mem::replace(&mut self.deepest, self.depth);
-            let r = self.term()?;
+            let r = self.term_with(None)?;
             self.chained(left)?;
             e = Expr::Bin(op, Box::new(e), Box::new(r));
         }
@@ -3086,9 +3107,15 @@ impl Parser<'_> {
         Ok(e)
     }
 
-    fn term(&mut self) -> Result<Expr> {
+    fn term_with(&mut self, first: Option<(Expr, u32)>) -> Result<Expr> {
         let outer = std::mem::replace(&mut self.deepest, self.depth);
-        let mut e = self.unary()?;
+        let mut e = match first {
+            Some((e, reached)) => {
+                self.deepest = self.deepest.max(reached);
+                e
+            }
+            None => self.unary()?,
+        };
         loop {
             let op = match self.peek() {
                 Tok::Sym("*") => OpCode::Mul,

@@ -3401,3 +3401,55 @@ fn search_and_rename_review_finds_stay_fixed() {
         "the guess loads no local `gx`"
     );
 }
+/// `count (c) within r` nested `k` deep in a field's law condition.
+fn nested_counts(k: usize, inner: &str) -> String {
+    let mut c = inner.to_string();
+    for _ in 0..k {
+        c = format!("(count ({c}) within 1) + 0 > 0");
+    }
+    format!("field f max 10 {{ every 1 {{ if {c} {{ f = 1 }} }} }}")
+}
+
+#[test]
+fn nested_counts_in_a_law_parse_in_linear_time() {
+    // Each level was parsed twice (as a condition, then as an expression):
+    // 2^k parses, 40 s at k = 24.
+    let start = std::time::Instant::now();
+    compile_ok(&nested_counts(1, "f > 0"));
+    for k in [12, 24, 40] {
+        // Refused after parsing (or too deep to parse).
+        let e = compile_err(&nested_counts(k, "f > 0"));
+        assert!(
+            e.contains("an aggregate inside an aggregate") || e.contains("nested too deep"),
+            "{e}"
+        );
+        // A syntax error at the bottom is found as fast.
+        assert!(compile("t.rules", &nested_counts(k, "f >")).is_err());
+    }
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        start.elapsed()
+    );
+    // A parenthesised expression goes on as one: the same code either way.
+    let a =
+        compile_ok("kind a { mem m  when (m) + 1 > 2 => idle  when (m + 1) * 2 > (3) => idle }");
+    let b = compile_ok("kind a { mem m  when m + 1 > 2 => idle  when (m + 1) * 2 > 3 => idle }");
+    assert_eq!(a.code, b.code);
+    let e = compile_err("kind a { mem m  when (m > 0 and m < 3) + 1 > 0 => idle }");
+    assert!(
+        e.contains("`and`, `or` and `not` make conditions, not numbers"),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_and_in_a_value_says_it_joins_conditions() {
+    let e = compile_err("kind a { mem p, q  when true => { let b = p > 0 and q < 3  idle } }");
+    assert!(
+        e.contains("`and` joins conditions only (in `when`, `if` and `while`)"),
+        "{e}"
+    );
+    let e = compile_err("kind a { mem p  when true => { p = 1 or 2  idle } }");
+    assert!(e.contains("`or` joins conditions only"), "{e}");
+}
