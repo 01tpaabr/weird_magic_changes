@@ -80,6 +80,10 @@ pub struct ActorPub {
     /// (`Kinds::layers`, `docs/WORLD.md` §7).
     pub layer: u8,
     pub _pad: u8,
+    /// How many it stands for: 1, or up to its kind's `group max` for a
+    /// group (`docs/RULES.md` §12, Groups). Readable by others (`heads_of`).
+    pub heads: u16,
+    pub _pad2: u16,
 }
 
 /// The private record: everything only the actor's own rules see.
@@ -109,7 +113,7 @@ pub struct ActorMind {
     pub _pad: u32,
 }
 
-const _: () = assert!(size_of::<ActorPub>() == 12);
+const _: () = assert!(size_of::<ActorPub>() == 16);
 const _: () = assert!(size_of::<ActorMind>() == 168);
 
 /// Public rows of one chunk. Same length and order as its [`ChunkMinds`].
@@ -182,6 +186,8 @@ impl ActorsMut<'_> {
             flags: if layer_no == 1 { flags::COVER } else { 0 },
             layer: layer_no,
             _pad: 0,
+            heads: 1,
+            _pad2: 0,
         });
         self.minds.push(mind);
         slot
@@ -309,7 +315,7 @@ mod tests {
 
     #[test]
     fn records_are_pod_sized_as_documented() {
-        assert_eq!(size_of::<ActorPub>(), 12);
+        assert_eq!(size_of::<ActorPub>(), 16);
         assert_eq!(size_of::<ActorMind>(), 168);
         assert_eq!(align_of::<ActorMind>(), 8);
         let m = mind(7);

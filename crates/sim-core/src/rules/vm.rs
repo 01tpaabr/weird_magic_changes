@@ -210,6 +210,12 @@ pub enum OpCode {
     /// The found plan's `via`s, first first, into the memory array at `a`,
     /// `imm` long (0 past the plan's end)
     SearchInto,
+    /// `dx dy -> heads` of whoever stands there, else of the cover there,
+    /// else of the first in a declared layer (as `LookAt`); 0 for nobody
+    HeadsAt,
+    /// `n ->`; add `n` heads to own group (an effect, like `SetSignal`;
+    /// several add up)
+    Grow,
 }
 
 impl OpCode {
@@ -230,14 +236,14 @@ impl OpCode {
             O::SearchTry => (a + 2, 0),
             O::SearchPush => (1, 0),
             O::SearchSwap | O::SearchDone | O::SearchFail | O::SearchOut | O::SearchInto => (0, 0),
-            O::SetLook | O::SetSignal | O::FieldAdd => (1, 0),
+            O::SetLook | O::SetSignal | O::FieldAdd | O::Grow => (1, 0),
             O::Add | O::Sub | O::Mul | O::Div | O::Mod => (2, 1),
             O::Lt | O::Le | O::Eq | O::Ne | O::Ge | O::Gt => (2, 1),
             O::Min | O::Max | O::Pack => (2, 1),
             O::Neg | O::Abs | O::Sign | O::Hi | O::Lo | O::Rand | O::Chance => (1, 1),
             O::Clamp | O::IsAt => (3, 1),
             O::Count | O::Nearest | O::Dist | O::FreeAt => (2, 1),
-            O::LookAt | O::SignalAt | O::FieldAt | O::Along => (2, 1),
+            O::LookAt | O::SignalAt | O::HeadsAt | O::FieldAt | O::Along => (2, 1),
             O::Sees => (3, 1),
             O::Best => (3, 1),
             O::FieldPred => (1 + 2 * (a >> 4), 1),
@@ -251,9 +257,10 @@ impl OpCode {
                 Some(Action::Spawn) => (3, 0),
                 Some(Action::Take | Action::Give) => (4, 0),
                 Some(Action::Harvest | Action::Drop) => (3, 0),
-                Some(Action::Build) => (3, 0),
+                Some(Action::Build | Action::Split) => (3, 0),
                 Some(
-                    Action::Move
+                    Action::Join
+                    | Action::Move
                     | Action::Drink
                     | Action::Eat
                     | Action::Hit
@@ -294,11 +301,13 @@ pub enum Sense {
     Taken,
     /// 1 if the last think trapped (fuel out, a second action, a fault)
     Trapped,
+    /// Own heads: 1, or how many a group stands for
+    Heads,
 }
 
 impl Sense {
     /// Every sense, in numbering order.
-    pub const ALL: [Sense; 15] = [
+    pub const ALL: [Sense; 16] = [
         Self::Light,
         Self::Age,
         Self::X,
@@ -314,6 +323,7 @@ impl Sense {
         Self::Result,
         Self::Taken,
         Self::Trapped,
+        Self::Heads,
     ];
 
     pub fn from_u8(a: u8) -> Option<Self> {
@@ -363,6 +373,13 @@ pub enum Action {
     Build,
     /// `dx dy`: clear the feature of the cell there (adjacent or underfoot)
     Dig,
+    /// `dx dy n`: a group splits `n` of its heads off into a new group on
+    /// the adjacent free cell there, which starts as it is (needs, memory,
+    /// state)
+    Split,
+    /// `dx dy`: a group joins the adjacent group of its kind there, which
+    /// takes its heads; the joiner is gone
+    Join,
 }
 
 impl Action {
@@ -383,6 +400,8 @@ impl Action {
             12 => Some(Self::Drop),
             13 => Some(Self::Build),
             14 => Some(Self::Dig),
+            15 => Some(Self::Split),
+            16 => Some(Self::Join),
             _ => None,
         }
     }
@@ -459,6 +478,8 @@ pub struct Outcome {
     pub look: Option<u8>,
     /// `signal = v` effect, if the think set one.
     pub signal: Option<i16>,
+    /// `grow n` effects, added up.
+    pub grow: i32,
     pub trap: Option<Trap>,
     /// Ops executed, for `wmc why` and the fuel counters.
     pub used: u32,
@@ -479,6 +500,7 @@ impl Default for Outcome {
             next: None,
             look: None,
             signal: None,
+            grow: 0,
             trap: None,
             used: 0,
         }
@@ -929,6 +951,8 @@ pub struct Ctx<'a> {
     /// Own public bytes.
     pub look: u8,
     pub signal: i16,
+    /// Own heads (`ActorPub::heads`).
+    pub heads: u16,
 }
 
 /// Values on the stack of one think, shared by a rule and the subs it
@@ -1230,6 +1254,7 @@ impl Machine<'_> {
             Sense::Result => i32::from(self.mind.events & result::MASK),
             Sense::Taken => i32::from(self.mind.events & event::TAKEN != 0),
             Sense::Trapped => i32::from(self.mind.events & event::FUEL != 0),
+            Sense::Heads => i32::from(c.heads),
         }
     }
 
@@ -1546,6 +1571,14 @@ impl Machine<'_> {
                 self.out.dx = clamp_i8(dx);
                 self.out.dy = clamp_i8(dy);
             }
+            Action::Split => {
+                let n = self.pop()?;
+                let dy = self.pop()?;
+                let dx = self.pop()?;
+                self.out.amount = n.max(0);
+                self.out.dx = clamp_i8(dx);
+                self.out.dy = clamp_i8(dy);
+            }
             Action::Build => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
@@ -1571,7 +1604,8 @@ impl Machine<'_> {
             | Action::Eat
             | Action::Hit
             | Action::Graze
-            | Action::Dig => {
+            | Action::Dig
+            | Action::Join => {
                 let dy = self.pop()?;
                 let dx = self.pop()?;
                 // Far targets are fine: Think reduces a move to one step,
@@ -1953,19 +1987,24 @@ impl Machine<'_> {
                         }
                     }
                     O::Halt => break 'op true,
+                    O::Grow => {
+                        let v = self.pop()?;
+                        self.out.grow = self.out.grow.saturating_add(v);
+                    }
                     O::SetSignal => {
                         let v = self.pop()?;
                         #[allow(clippy::cast_possible_truncation)] // clamped to the i16 range
                         let v = v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16;
                         self.out.signal = Some(v);
                     }
-                    O::LookAt | O::SignalAt => {
+                    O::LookAt | O::SignalAt | O::HeadsAt => {
                         let dy = self.pop()?;
                         let dx = self.pop()?;
                         let (lx, ly) = (lx(self.ctx.cell), ly(self.ctx.cell));
                         let v = match self.ctx.halo.row_at(lx, ly, dx, dy) {
                             None => 0,
                             Some(r) if op.code == O::LookAt => i32::from(r.look),
+                            Some(r) if op.code == O::HeadsAt => i32::from(r.heads),
                             Some(r) => i32::from(r.signal),
                         };
                         self.push(v)?;
@@ -2292,6 +2331,7 @@ mod tests {
             layer: 0,
             solid: false,
             parent: None,
+            group: (0, 0),
         }
     }
 
@@ -2380,6 +2420,7 @@ mod tests {
             rng: rng_base(1, tick, 7),
             look: 0,
             signal: 0,
+            heads: 1,
         };
         think(kinds, ctx, mind)
     }
@@ -2506,6 +2547,7 @@ mod tests {
                 rng: rng_base(1, 1000, 7),
                 look: 0,
                 signal: 0,
+                heads: 1,
             };
             let mut trace = Vec::new();
             let out = think_traced(&kinds, ctx, &mut mind(), &mut trace);

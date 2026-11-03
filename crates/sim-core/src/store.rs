@@ -48,7 +48,7 @@ use crate::stage::{
 };
 use crate::time::TICKS_PER_DAY;
 
-pub const FORMAT_VERSION: u32 = 14;
+pub const FORMAT_VERSION: u32 = 15;
 const WORLD_MAGIC: &[u8; 4] = b"WMCW";
 const CHUNK_MAGIC: &[u8; 4] = b"WMCC";
 

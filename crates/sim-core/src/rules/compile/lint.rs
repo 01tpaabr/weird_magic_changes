@@ -134,10 +134,16 @@ impl Seen<'_> {
             }
             Stmt::Move(t, _)
             | Stmt::Dig(t, _)
+            | Stmt::Join(t, _)
             | Stmt::Drink(t, _)
             | Stmt::Eat(t, _)
             | Stmt::Hit(t, _)
             | Stmt::Graze(t, _) => self.target(t),
+            Stmt::Split { amount, target, .. } => {
+                self.target(target);
+                self.expr(amount);
+            }
+            Stmt::Grow(e, _) => self.expr(e),
             Stmt::Build {
                 material, target, ..
             } => {
@@ -231,7 +237,7 @@ impl Seen<'_> {
                 self.pred(p);
                 self.expr(r);
             }
-            Expr::Dist(t) | Expr::FreeAt(t) | Expr::LookOf(t) => self.target(t),
+            Expr::Dist(t) | Expr::FreeAt(t) | Expr::LookOf(t) | Expr::HeadsOf(t) => self.target(t),
             Expr::IsAt(t, p) => {
                 self.target(t);
                 self.pred(p);
@@ -818,6 +824,8 @@ impl<'a> Gen<'a> {
             | Stmt::Hit(_, at)
             | Stmt::Graze(_, at)
             | Stmt::Transfer { at, .. }
+            | Stmt::Split { at, .. }
+            | Stmt::Join(_, at)
             | Stmt::Spawn { pos: at, .. }
             | Stmt::Become { at, .. }
             | Stmt::Idle(at)
@@ -1003,9 +1011,15 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
-            Stmt::Move(t, _) | Stmt::Dig(t, _) | Stmt::Build { target: t, .. } => {
-                self.walk_target(kinds, w, t, out)
+            Stmt::Move(t, _)
+            | Stmt::Dig(t, _)
+            | Stmt::Join(t, _)
+            | Stmt::Build { target: t, .. } => self.walk_target(kinds, w, t, out),
+            Stmt::Split { amount, target, .. } => {
+                self.walk_target(kinds, w, target, out);
+                self.walk_expr(kinds, w, amount, out);
             }
+            Stmt::Grow(e, _) => self.walk_expr(kinds, w, e, out),
             Stmt::Idle(_) | Stmt::Die(_) | Stmt::Next(..) => {}
             Stmt::Search(se) => {
                 for e in &se.start {
@@ -1088,6 +1102,7 @@ impl<'a> Gen<'a> {
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
+            | Expr::HeadsOf(t)
             | Expr::SignalOf(t, _) => self.walk_target(kinds, w, t, out),
             Expr::Along { target, .. } => self.walk_target(kinds, w, target, out),
             Expr::Sees { target, eye, .. } => {

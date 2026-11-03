@@ -285,6 +285,8 @@ first). Those names are not words of the language; the last three read as the sh
 | `dig t` | clears the feature of t, adjacent or underfoot: a rock, a wall. `BLOCKED` if there is none; `REFUSED` for a cell not adjacent |
 | `harvest F n` | moves up to `n` of field F on the actor's own cell into its need of the same name, never past the need's max (§12, Fields). `BLOCKED` if nothing moved; a `fixed` field can't be harvested |
 | `drop F n` | moves up to `n` of the need named F into field F on the actor's own cell, never past the field's max. `BLOCKED` if nothing moved |
+| `split n at t` | a group (§12, Groups) puts `n` of its heads, at least one and fewer than it has, into a new group of its kind on the adjacent cell t, which needs room as a `spawn` does (and counts as one under a `budget`). The new group starts as the old one is: needs, memory, state, age. `REFUSED` for a cell not adjacent or an `n` out of range; `BLOCKED` if the cell is taken |
+| `join t` | a group gives all its heads to the group of its kind on the adjacent cell t, in its layer, and is gone; the one joined keeps its own needs and memory. `MISSED` if no group of its kind is there; `REFUSED` if the heads would pass the kind's `group max` |
 
 Bites land before anyone moves, on either side of a chunk border, in key order. Several
 eaters of one victim each get the share they took. Transfers are settled after bites, also
@@ -316,10 +318,12 @@ Effects combine with the action and don't end the think.
 | `result`, `blocked`, `missed`, `refused` | the last action's outcome |
 | `taken` | something was taken from it since its last think |
 | `trapped` | its last think ran out of fuel or faulted |
+| `heads` | how many it stands for: 1, or a group's heads (§12, Groups) |
 | `count pred within r` | matching cells in the square of radius r, **own cell included**. The radius is one term (a number, a name, a call or a parenthesised expression): `count fox within 3 - 1` is the count minus one; write `within (R - 1)` for a sum |
 | `free(t)` | the cell is walkable and nobody stands there; for a kind in a declared layer, nobody is there in its layer (and it is walkable, unless the layer flies) |
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
 | `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover, else of the first declared layer holding someone; 0 for nobody |
+| `heads_of(t)` | how many whoever is at t (as `look_of`) stands for: 1, or a group's heads; 0 for nobody |
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
 
@@ -600,6 +604,53 @@ kind monkey {
 }
 ```
 
+### Groups
+
+A kind declared `group max N [init M]` is a **group**: each actor of it stands for up to N
+animals (its `heads`, 2 to 65535), and starts with M (1 if not given). A herd of a thousand
+is one actor: one think, one row, one cell. That is how a world holds millions of animals
+with only thousands of thinkers. A group is its own actor in every other way: it moves,
+senses, eats and has needs as one; its needs are the group's.
+
+```rules
+field pasture max 9 { init 3  every 6h { pasture = min(pasture + 1, 9) } }
+
+kind herd {
+  glyph "H"
+  group max 200 init 20
+  food 1h
+  need food max 2d vital
+  need health max 1 decay 0 vital
+
+  when food < 1d and pasture(here) > 0 => { add pasture -1  food = min(food + 6h / heads, 2d)  idle }
+  when heads > 60 and nearest free within 1 as n => split heads / 2 at n
+  when heads < 10 and nearest herd within 1 as h and heads_of(h) + heads <= 200 => join h
+  when food > 1d and chance(1) => { grow max(heads / 20, 1)  idle }
+  when true => move random free
+}
+```
+
+- `heads` is its own count; `heads_of(t)` another's (1 for one who is not a group), so a
+  wolf can pick the smallest herd in sight.
+- `grow n` (an effect, like `look = v`: several add up) adds `n` heads, at most to the max;
+  a negative `n` takes them away, and a group grown to none is gone. Heads gained are births
+  (`born`), heads lost deaths (`died`, its own `die`).
+- `split n at t` and `join t` (§8) move heads between groups of a kind.
+- **Losses take heads.** Each head has the group's `health`: a bite that takes the last of
+  it kills one head, and the rest of the bite goes on into the next, at full health, so one
+  bite may take several. A vital need that runs out kills one head and refills for the
+  rest. A rule's `die` ends the whole group, and so does a fall (§12, Layers). Every death
+  is counted per head, by its cause.
+- A group `become`s only a kind that holds its heads (a group of 5 can't become a kind that
+  is not a group).
+- `grow`, `split` and `join` are a group's: only in a group kind's rules or member subs
+  (not a file sub). Ground cover is never a group. A kind inherits its parent's `group`.
+- Scenarios: a group starts with its `init` heads, or `start K at (X, Y) with (heads = N)`;
+  `count K` counts heads, and `rows K` actors (§14). `observe` counts heads.
+
+`packs/herds` plays it: herds that calve when fed, split at 60 and join under 10, under
+wolves, level at about 50 000 animals in a few hundred rows.
+
 ### Fields
 
 A **field** is a number in every cell of the world, declared by a pack beside its kinds:
@@ -770,7 +821,7 @@ start hive at (77, 103)                        # exactly there
 | `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
 | `start K N / D in (X0, Y0) to (X1, Y1)` | | this share of the walkable cells in that region, both corners included: X0 to X1 across, Y0 to Y1 down |
 | `start K N / D on K2 [in ...]` | | a kind above the standing (ground cover or a declared layer): this share of the cells where a K2 (or a kind that extends it) starts, above it. The only way a share starts a kind whose layer rests on a kind (§12, Layers) |
-| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`) |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`), and a group's `heads` |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
@@ -870,7 +921,8 @@ expect became chick == 1
 | line | |
 |---|---|
 | `run T` | step T ticks (`64`, `90min`, `2h`, `1d`) |
-| `expect count K OP N` | actors of K alive now; `count K in STATE` only those in that state (`count villager in WORK`) |
+| `expect count K OP N` | actors of K alive now, a group's every head (§12, Groups); `count K in STATE` only those in that state (`count villager in WORK`) |
+| `expect rows K OP N` | actors of K alive now, a group as one; `in STATE` as for `count` |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
 | `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
@@ -1268,6 +1320,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | | |
 |---|---|
 | needs, mem slots per kind | 4, 32 |
+| heads in a group | 65535 |
 | tags per rule set | 64, less one for each layer that rests on a kind |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |
@@ -1298,7 +1351,7 @@ Reserved words can't name a need, mem, local, kind, sub or constant. They are ev
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
 `rand`, `chance`, `flow`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,
-`taken`, `trapped`), and `place` (where kinds start is a scenario's `start` line now, §14).
+`taken`, `trapped`, `heads`), and `place` (where kinds start is a scenario's `start` line now, §14).
 `wmc lint` says so when you hit one. `water`,
 `soil`, `rock`, `bare` and `food` are not reserved: a kind may have `need water`. But
 `water`, `soil`, `rock` and `bare` always mean the predicate where one is read, so they can't

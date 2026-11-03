@@ -11,7 +11,7 @@ compiled once, run by every individual of that kind against its own state).
 
 ## 1. The shape
 
-An actor is a **row in the chunk it stands on**: a 12-byte public record (`ActorPub`) that
+An actor is a **row in the chunk it stands on**: a 16-byte public record (`ActorPub`) that
 any chunk may read while thinking, a 168-byte private record (`ActorMind`) that only its
 own chunk touches, and the `occupant` entry of its cell, which packs `(kind, slot)`. A
 **cover** kind (grass) sits in the cell's `cover` entry instead: walkable ground cover that
@@ -41,7 +41,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 ## 2. Storage
 
 ```rust
-#[repr(C)] pub struct ActorPub {   // 12 B, Pod. Read by any chunk in Think; written by the owner outside Think.
+#[repr(C)] pub struct ActorPub {   // 16 B, Pod. Read by any chunk in Think; written by the owner outside Think.
     cell: u16,      // local cell; invariant: occupant[cell] == ActorId::pack(kind, slot)
     kind: u16,      // index into Programs.kinds (0xFFFF reserved by ActorId::NONE)
     stagger: u16,   // uid low bits: cadence phase
@@ -50,6 +50,8 @@ work that touches two chunks at once runs sequentially, in coordinate order.
     flags: u8,      // DEAD | WAKE | COVER
     layer: u8,      // 0 standing, 1 ground cover, 2 and up a declared layer (ChunkCells::extra)
     _pad: u8,
+    heads: u16,     // 1, or a group's heads (`group max N`): heads_of(t), `count` in scenarios
+    _pad2: u16,
 }
 #[repr(C)] pub struct ActorMind {  // 168 B, Pod. Only the owning chunk touches it.
     uid: u64,                 // identity: hash_cell(seed, STREAM_UID, x, y) [^ splitmix64(tick) when spawned at run time; STREAM_UID_COVER for a cover child, STREAM_UID_LAYER | layer << 16 in a declared layer]
@@ -65,7 +67,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
 
 - **Two components, not one**, so Think can read every chunk's `ChunkActors` while writing
   its own `ChunkMinds` (Bevy refuses the alternative). The every-tick scans (cadence
-  due-check, dead-check) stream only the 12-byte rows.
+  due-check, dead-check) stream only the 16-byte rows.
 - **`ActorId` keeps its `u32`**; a live value is `kind << 16 | slot`. A vision scan learns
   what stands on a cell from the occupant array alone. Slots are chunk-local and valid only
   within a tick; identity across ticks is `uid` or a position (unique: one standing and one cover actor
@@ -105,7 +107,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   rules declare. Actors read them, and write their own cell in Apply (`add`, `harvest`,
   `drop`); a field's law runs in the Simulate phase. Scent, four engine-owned channels with
   a fixed fade, was removed for them (decision 56): the bees' trail is the field `trail`.
-- **Save**: chunk file v14 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
+- **Save**: chunk file v15 = cell layers (`occupant`, `cover`, the declared layers, the field layers), `n`, `ActorPub[n]`,
   `ActorMind[n]` as raw LE bytes; every row validated on load (`kind` in range, `cell` in
   range, the row's layer agrees). A chunk
   holding any row is **dirty**, generated or read, and stays dirty after a save: its rows'
@@ -145,7 +147,7 @@ work that touches two chunks at once runs sequentially, in coordinate order.
   to the new max; point needs (`decay 0`, e.g. health) reset to max. Needs the new kind
   adds start at max. Memory carries by name, the rest is zeroed; `state` resets.
 
-Per actor: 184 B persistent (12 + 168 + 4 occupant) + 64 B intent scratch.
+Per actor: 188 B persistent (16 + 168 + 4 occupant) + 64 B intent scratch.
 
 ## 3. Senses
 

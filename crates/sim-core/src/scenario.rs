@@ -325,8 +325,10 @@ pub enum Agg {
 /// A number an `expect` reads from the world.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Metric {
-    /// `count [only] K`: actors alive.
+    /// `count [only] K`: actors alive, a group's every head.
     Count(Who),
+    /// `rows [only] K`: actors alive, a group one.
+    Rows(Who),
     /// `born|became|eaten|died|thinks|traps [only] K`: a life counter so
     /// far (`counter` is an `actors::life` index); with `cause`, only the
     /// deaths of that cause.
@@ -477,9 +479,16 @@ fn agg(w: &str) -> Option<Agg> {
 /// A metric at the start of `words`, and the index after it.
 fn metric_at(words: &[&str]) -> Result<(Metric, usize), String> {
     let first = *words.first().ok_or(FORMS)?;
-    if first == "count" {
+    if first == "count" || first == "rows" {
         let (who, i) = who_in(words, 1).ok_or(FORMS)?;
-        return Ok((Metric::Count(who), i));
+        return Ok((
+            if first == "count" {
+                Metric::Count(who)
+            } else {
+                Metric::Rows(who)
+            },
+            i,
+        ));
     }
     if let Some(counter) = counter(first) {
         let (who, i) = who_at(words, 1).ok_or(FORMS)?;
@@ -660,7 +669,13 @@ fn expectation(rest: &str, now: u64) -> Result<Expect, String> {
                     "a rate needs a window longer than zero: a `run` before this line, or `from` and `to`"
                         .into(),
                 ),
-                (Metric::Count(_) | Metric::Value { .. } | Metric::Field { .. }, true) => Err(
+                (
+                    Metric::Count(_)
+                    | Metric::Rows(_)
+                    | Metric::Value { .. }
+                    | Metric::Field { .. },
+                    true,
+                ) => Err(
                     "only a counter (born, became, eaten, died, thinks, traps) has a rate per day"
                         .into(),
                 ),
@@ -691,7 +706,7 @@ fn expectation(rest: &str, now: u64) -> Result<Expect, String> {
 fn point(rest: &str) -> Result<Expect, String> {
     let words: Vec<&str> = rest.split_whitespace().collect();
     let first = *words.first().ok_or(FORMS)?;
-    if first == "count" || counter(first).is_some() || agg(first).is_some() {
+    if first == "count" || first == "rows" || counter(first).is_some() || agg(first).is_some() {
         let (metric, i) = metric_at(&words)?;
         let (op, v) = op_value(&words, i)?;
         return Ok(Expect::Is { metric, op, v });
@@ -1779,6 +1794,8 @@ pub struct Explicit {
     /// What `with` sets, by slot: `(need, value)` and `(mem, value)`.
     pub needs: Vec<(u8, i32)>,
     pub mems: Vec<(u8, i32)>,
+    /// `with (heads = N)`, for a group: the heads it starts with.
+    pub heads: Option<u16>,
 }
 
 /// A scenario's starts resolved against a kind table: what worldgen places.
@@ -1945,9 +1962,22 @@ impl Placement {
                             .map_or("?", |d| d.name.as_str());
                         return Err(err(format!("`{kind}` at ({x}, {y}) is on {name}")));
                     }
-                    let (mut needs, mut mems) = (Vec::new(), Vec::new());
+                    let (mut needs, mut mems, mut heads) = (Vec::new(), Vec::new(), None);
                     for (name, v) in with {
-                        if let Some(i) = def.need_named(name) {
+                        if name == "heads" {
+                            let max = def.max_heads();
+                            if def.group.0 == 0 {
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `heads`: `{kind}` is not a group"
+                                )));
+                            }
+                            if !(1..=i32::from(max)).contains(v) {
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `heads = {v}`: a `{kind}` holds 1 to {max} heads"
+                                )));
+                            }
+                            heads = Some(u16::try_from(*v).expect("1..=max, checked above"));
+                        } else if let Some(i) = def.need_named(name) {
                             let max = def.needs[i].max;
                             if !(0..=max).contains(v) {
                                 return Err(err(format!(
@@ -1974,6 +2004,7 @@ impl Placement {
                             placed,
                             needs,
                             mems,
+                            heads,
                         },
                         at,
                     ));
@@ -2858,6 +2889,7 @@ legend {
             placed: b,
             needs: vec![],
             mems: vec![],
+            heads: None,
         };
         assert_eq!(pl.explicit_in(here), [only(here, local(dry))]);
         assert_eq!(pl.explicit_in(there), [only(there, local(far))]);

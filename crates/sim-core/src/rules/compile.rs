@@ -841,6 +841,8 @@ struct Decls {
     reach: Option<(Expr, Pos)>,
     /// `climb N on F`: the most a step may rise in field F.
     climb: Option<(Expr, String, Pos)>,
+    /// `group max N [init M]`: a row stands for up to N heads.
+    group: Option<(Expr, Option<Expr>, Pos)>,
     tags: Vec<String>,
     needs: Vec<NeedAst>,
     mems: Vec<(String, Pos)>,
@@ -1133,6 +1135,16 @@ enum Stmt {
     Move(Target, Pos),
     /// `dig t`: clear the feature at `t`.
     Dig(Target, Pos),
+    /// `split n at t`: a group's `n` heads start a new group at `t`.
+    Split {
+        amount: Expr,
+        target: Target,
+        at: Pos,
+    },
+    /// `join t`: a group gives its heads to the group of its kind at `t`.
+    Join(Target, Pos),
+    /// `grow n`: an effect, a group's heads change by `n`.
+    Grow(Expr, Pos),
     /// `build M at t`: lay ground or feature `M` on the free cell `t`.
     Build {
         material: String,
@@ -1218,6 +1230,9 @@ enum Expr {
     /// `look_of(t)`, `signal_of(t)`: the public bytes of whoever is there.
     LookOf(Target),
     SignalOf(Target, Pos),
+    /// `heads_of(t)`: the heads of whoever is at `t` (1 for one who is not
+    /// a group, 0 for nobody).
+    HeadsOf(Target),
     /// `min`, `max`, `abs`, `sign`, `clamp`, `pack`, `hi`, `lo`: the opcode
     /// and its arguments.
     Fn(OpCode, Vec<Expr>),
@@ -1344,6 +1359,7 @@ fn sense_named(name: &str) -> Option<Sense> {
         "result" => Sense::Result,
         "taken" => Sense::Taken,
         "trapped" => Sense::Trapped,
+        "heads" => Sense::Heads,
         _ => return None,
     })
 }
@@ -1420,6 +1436,10 @@ pub const KEYWORDS: &[&str] = &[
     "each",
     "look_of",
     "signal_of",
+    "heads_of",
+    "grow",
+    "split",
+    "join",
     "pack",
     "hi",
     "lo",
@@ -1450,9 +1470,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 16] = [
+const DECL_WORDS: [&str; 17] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
-    "place", "need", "mem", "reach", "climb", "layer",
+    "place", "need", "mem", "reach", "climb", "layer", "group",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -2263,6 +2283,15 @@ impl Parser<'_> {
                 self.expect_kw("on")?;
                 let (f, _) = self.ident("field name")?;
                 d.climb = Some((n, f, p));
+            } else if self.eat_kw("group") {
+                self.expect_kw("max")?;
+                let max = self.additive()?;
+                let init = if self.eat_kw("init") {
+                    Some(self.additive()?)
+                } else {
+                    None
+                };
+                d.group = Some((max, init, p));
             } else if self.eat_kw("cover") {
                 d.cover = true;
             } else if self.eat_kw("solid") {
@@ -2558,6 +2587,18 @@ impl Parser<'_> {
         }
         if self.eat_kw("move") {
             return Ok(Stmt::Move(self.target()?, at));
+        }
+        if self.eat_kw("split") {
+            let amount = self.expr()?;
+            self.expect_kw("at")?;
+            let target = self.target()?;
+            return Ok(Stmt::Split { amount, target, at });
+        }
+        if self.eat_kw("join") {
+            return Ok(Stmt::Join(self.target()?, at));
+        }
+        if self.eat_kw("grow") {
+            return Ok(Stmt::Grow(self.expr()?, at));
         }
         if self.eat_kw("dig") {
             return Ok(Stmt::Dig(self.target()?, at));
@@ -3185,14 +3226,14 @@ impl Parser<'_> {
                         self.expect_sym(")")?;
                         Ok(Expr::IsAt(t, p))
                     }
-                    "look_of" | "signal_of" => {
+                    "look_of" | "signal_of" | "heads_of" => {
                         self.expect_sym("(")?;
                         let t = self.target()?;
                         self.expect_sym(")")?;
-                        Ok(if n == "look_of" {
-                            Expr::LookOf(t)
-                        } else {
-                            Expr::SignalOf(t, at)
+                        Ok(match n.as_str() {
+                            "look_of" => Expr::LookOf(t),
+                            "heads_of" => Expr::HeadsOf(t),
+                            _ => Expr::SignalOf(t, at),
                         })
                     }
                     "min" | "max" | "abs" | "sign" | "clamp" | "pack" | "hi" | "lo" => {
@@ -3283,6 +3324,8 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Become { .. }
         | Stmt::Spawn { .. }
         | Stmt::Transfer { .. }
+        | Stmt::Split { .. }
+        | Stmt::Join(..)
         | Stmt::Harvest { .. }
         | Stmt::Move(..)
         | Stmt::Dig(..)
@@ -3293,6 +3336,7 @@ fn returns_value(body: &[Stmt]) -> bool {
         | Stmt::Graze(..)
         | Stmt::Look(_)
         | Stmt::Signal(_)
+        | Stmt::Grow(..)
         | Stmt::Add(..)
         | Stmt::Next(..) => false,
     })
@@ -3324,6 +3368,8 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Die(_)
             | Stmt::Become { .. }
             | Stmt::Transfer { .. }
+            | Stmt::Split { .. }
+            | Stmt::Join(..)
             | Stmt::Harvest { .. }
             | Stmt::Move(..)
             | Stmt::Dig(..)
@@ -3334,6 +3380,7 @@ fn spawn_withs<'b>(body: &'b [Stmt], out: &mut Vec<(&'b str, &'b [(String, Expr,
             | Stmt::Graze(..)
             | Stmt::Look(_)
             | Stmt::Signal(_)
+            | Stmt::Grow(..)
             | Stmt::Add(..)
             | Stmt::Next(..) => {}
         }
@@ -3391,6 +3438,8 @@ struct Inst<'a> {
     climb: Option<(i32, u8)>,
     /// A declared layer (2 and up).
     layer: Option<u8>,
+    /// `group max N init M`: the most heads, and the heads a row starts with.
+    group: Option<(u16, u16)>,
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
@@ -3473,6 +3522,8 @@ fn acts(body: &[Stmt]) -> Option<String> {
             Stmt::Graze(..) => "graze".into(),
             Stmt::Transfer { give: true, .. } => "give".into(),
             Stmt::Transfer { give: false, .. } => "take".into(),
+            Stmt::Split { .. } => "split".into(),
+            Stmt::Join(..) => "join".into(),
             Stmt::Idle(_) => "idle".into(),
             Stmt::Next(state, _) => format!("next {state}"),
             Stmt::Call { name, .. } => format!("{name}()"),
@@ -3580,6 +3631,8 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Become { at, .. }
         | Stmt::Spawn { pos: at, .. }
         | Stmt::Transfer { at, .. }
+        | Stmt::Split { at, .. }
+        | Stmt::Join(_, at)
         | Stmt::Harvest { at, .. }
         | Stmt::Move(_, at)
         | Stmt::Dig(_, at)
@@ -3602,6 +3655,7 @@ fn action_at(s: &Stmt) -> Option<&Pos> {
         | Stmt::Return { .. }
         | Stmt::Look(_)
         | Stmt::Signal(_)
+        | Stmt::Grow(..)
         | Stmt::Add(..)
         | Stmt::Next(..)
         | Stmt::ForEach { .. } => None,
@@ -3631,6 +3685,8 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Become { .. }
         | Stmt::Spawn { .. }
         | Stmt::Transfer { .. }
+        | Stmt::Split { .. }
+        | Stmt::Join(..)
         | Stmt::Harvest { .. }
         | Stmt::Move(..)
         | Stmt::Dig(..)
@@ -3641,6 +3697,7 @@ fn may_return(s: &Stmt) -> bool {
         | Stmt::Graze(..)
         | Stmt::Look(_)
         | Stmt::Signal(_)
+        | Stmt::Grow(..)
         | Stmt::Add(..)
         | Stmt::Next(..) => false,
     }
@@ -4748,6 +4805,44 @@ impl<'a> Gen<'a> {
             ));
         }
         let solid = d.solid || parents.iter().any(|&p| self.insts[p].solid);
+        let group = match &d.group {
+            None => None,
+            Some((max, init, at)) => {
+                let max = self.fold(max, at)?;
+                let init = match init {
+                    Some(e) => self.fold(e, at)?,
+                    None => 1,
+                };
+                if !(2..=i32::from(u16::MAX)).contains(&max) {
+                    return Err(self.err(
+                        at,
+                        format!("group max {max}: a group holds 2 to 65535 heads"),
+                    ));
+                }
+                if !(1..=max).contains(&init) {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "group init {init}: a group starts with 1 to its max ({max}) heads"
+                        ),
+                    ));
+                }
+                Some((
+                    u16::try_from(max).expect("2..=65535, checked above"),
+                    u16::try_from(init).expect("1..=max, checked above"),
+                ))
+            }
+        };
+        let group = self.pick(group, &parents, |i| i.group, "groups", item)?;
+        if cover && group.is_some() {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` is ground cover and a group: ground cover is one a cell",
+                    it.name
+                ),
+            ));
+        }
 
         let mut tags: Vec<String> = Vec::new();
         for t in parents
@@ -4971,6 +5066,7 @@ impl<'a> Gen<'a> {
             reach,
             climb,
             layer,
+            group,
             tags,
             needs,
             mems,
@@ -5192,6 +5288,7 @@ impl<'a> Gen<'a> {
             },
             solid: inst.solid,
             parent,
+            group: inst.group.unwrap_or((0, 0)),
         })
     }
 
@@ -5404,7 +5501,9 @@ impl<'a> Gen<'a> {
             Stmt::SetAt { index, value, .. } => {
                 self.expr_acts(index, depth) || self.expr_acts(value, depth)
             }
-            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Add(_, e, _) => self.expr_acts(e, depth),
+            Stmt::Look(e) | Stmt::Signal(e) | Stmt::Grow(e, _) | Stmt::Add(_, e, _) => {
+                self.expr_acts(e, depth)
+            }
             Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| self.expr_acts(e, depth)),
             Stmt::If { cond, then, els } => self.cond_acts(cond, depth) || body(then) || body(els),
             Stmt::While { cond, body: b } => self.cond_acts(cond, depth) || body(b),
@@ -5472,6 +5571,7 @@ impl<'a> Gen<'a> {
             | Expr::FreeAt(t)
             | Expr::IsAt(t, _)
             | Expr::LookOf(t)
+            | Expr::HeadsOf(t)
             | Expr::SignalOf(t, _) => self.target_acts(t, depth),
             Expr::Call { name, args, .. } => {
                 self.args_act(args, depth) || self.call_acts(name, depth)
@@ -6015,6 +6115,24 @@ impl<'a> Gen<'a> {
 
     /// A kind (its family, or `only` it), a tag or a material by name, as
     /// a predicate value.
+    /// `grow`, `split` and `join` are a group's: in a kind's code (not a
+    /// file sub's, which has no kind), and the kind a group.
+    fn group_only(&self, verb: &str, at: &Pos) -> Result<()> {
+        let Some(i) = self.cur else {
+            return Err(self.err(at, format!("`{verb}` inside a sub: heads belong to a kind")));
+        };
+        if self.insts[i].group.is_none() {
+            return Err(self.err(
+                at,
+                format!(
+                    "`{verb}`: `{}` is not a group (declare `group max N`)",
+                    self.inst_name(i)
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn named_pred(&self, name: &str, only: bool, at: &Pos) -> Result<i32> {
         Ok(if let Some(id) = self.kind_id(name) {
             i32::from(id) + if only { pred::ONLY } else { 0 }
@@ -6300,6 +6418,10 @@ impl<'a> Gen<'a> {
             Expr::SignalOf(t, _) => {
                 self.target(t)?;
                 self.asm.op(OpCode::SignalAt);
+            }
+            Expr::HeadsOf(t) => {
+                self.target(t)?;
+                self.asm.op(OpCode::HeadsAt);
             }
             Expr::Fn(op, args) => {
                 for a in args {
@@ -6792,6 +6914,22 @@ impl<'a> Gen<'a> {
             Stmt::Move(t, _) => {
                 self.target(t)?;
                 self.asm.act(Action::Move);
+            }
+            Stmt::Split { amount, target, at } => {
+                self.group_only("split", at)?;
+                self.target(target)?;
+                self.expr(amount)?;
+                self.asm.act(Action::Split);
+            }
+            Stmt::Join(t, at) => {
+                self.group_only("join", at)?;
+                self.target(t)?;
+                self.asm.act(Action::Join);
+            }
+            Stmt::Grow(e, at) => {
+                self.group_only("grow", at)?;
+                self.expr(e)?;
+                self.asm.op(OpCode::Grow);
             }
             Stmt::Dig(t, _) => {
                 self.target(t)?;

@@ -75,7 +75,10 @@ pub struct NeedStats {
 /// One kind at one sample.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct KindSample {
+    /// Heads alive: a row each, a group's its `heads`.
     pub alive: u64,
+    /// Rows alive (a group is one).
+    pub rows: u64,
     /// [`EVENTS`] since the last sample.
     pub events: [u64; EVENTS.len()],
     /// Deaths since the last sample, by cause.
@@ -199,7 +202,8 @@ fn sample(
         for (row, mind) in pubs.rows.iter().zip(&minds.rows) {
             let k = usize::from(row.kind);
             let Some(ks) = out.get_mut(k) else { continue };
-            ks.alive += 1;
+            ks.alive += u64::from(row.heads);
+            ks.rows += 1;
             for (i, need) in kinds.defs[k].needs.iter().enumerate() {
                 needs[k][i].push(need_now(mind.needs[i], need.decays, tick, mind.last_think));
             }
@@ -228,7 +232,7 @@ fn sample(
             .zip(&minds.rows)
             .enumerate()
             .filter(|(_, (row, mind))| {
-                let alive = out.get(usize::from(row.kind)).map_or(0, |k| k.alive);
+                let alive = out.get(usize::from(row.kind)).map_or(0, |k| k.rows);
                 alive <= cap || splitmix64(mind.uid ^ splitmix64(tick)) % alive < cap
             })
             .map(|(i, _)| sim_core::actors::slot_u16(i))
@@ -297,6 +301,8 @@ fn action_name(a: Action) -> &'static str {
         Action::Drop => "drop",
         Action::Build => "build",
         Action::Dig => "dig",
+        Action::Split => "split",
+        Action::Join => "join",
     }
 }
 

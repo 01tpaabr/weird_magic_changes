@@ -1,0 +1,22 @@
+# The herds pack (packs/herds): groups. Each herd starts with 20 animals;
+# well fed, they calve, split when big and join when small; wolves take
+# two at a bite. The grass sets how many there can be: about 50 000
+# animals by the third day, then level, in a few hundred rows.
+#
+#   make run ARGS="scenario scenarios/tests/herds.scenario"
+rules ../../packs/herds
+seed 8
+size 192 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start herd 1 / 2000
+start wolf 1 / 4000
+start herd at (5, 5) with (heads = 150)
+run 4d
+expect eventually rows herd >= 30 to 1d        # big herds split
+expect never rows herd > 1500                  # few rows for many heads: seen 1187 for 50 000
+expect mean count herd >= 40000 from 3d        # the land's fill
+expect never count herd > 60000                # and no more
+expect eaten herd by wolf > 300                # two a bite
+expect born herd > 30000                       # calves
+expect traps herd == 0
+expect traps wolf == 0

@@ -65,7 +65,7 @@ fn expect_slot(kinds: &Kinds, k: u16, name: &str) -> Option<(bool, usize)> {
 /// Whether the rules define every kind, need and memory `m` names.
 fn check_metric(kinds: &Kinds, m: &Metric) -> Result<(), String> {
     match m {
-        Metric::Count(who) => {
+        Metric::Count(who) | Metric::Rows(who) => {
             expect_states(kinds, who)?;
         }
         Metric::Tally { who, cause, .. } => {
@@ -132,7 +132,7 @@ pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<f64>, 
         })
     };
     Ok(match m {
-        Metric::Count(who) => {
+        Metric::Rows(who) => {
             let looks = looks(who)?;
             let n: usize = rows
                 .map(|(a, m)| {
@@ -141,6 +141,21 @@ pub fn measure(world: &World, kinds: &Kinds, m: &Metric) -> Result<Option<f64>, 
                         .zip(&m.rows)
                         .filter(|(r, mind)| looks(r.kind, mind.state))
                         .count()
+                })
+                .sum();
+            Some(n as f64)
+        }
+        // Heads: a row each, a group's its `heads`.
+        Metric::Count(who) => {
+            let looks = looks(who)?;
+            let n: u64 = rows
+                .map(|(a, m)| {
+                    a.rows
+                        .iter()
+                        .zip(&m.rows)
+                        .filter(|(r, mind)| looks(r.kind, mind.state))
+                        .map(|(r, _)| u64::from(r.heads))
+                        .sum::<u64>()
                 })
                 .sum();
             Some(n as f64)
@@ -239,6 +254,7 @@ pub fn holds(
             None => {
                 let seen = match metric {
                     Metric::Count(w)
+                    | Metric::Rows(w)
                     | Metric::Tally { who: w, .. }
                     | Metric::Value { who: w, .. } => format!("no `{}` alive", w.kind),
                     Metric::Field { .. } => "no cells loaded".into(),

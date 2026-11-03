@@ -8,7 +8,8 @@
 //! exists (rows of a kind that is gone are dropped), each need and mem
 //! carries over by name (clamped to the new max; new needs start full, new
 //! mems at 0), the state by its name (else the first), each field by its
-//! name (clamped to its max; a new one starts at its `init`), each
+//! name (clamped to its max; a new one starts at its `init`), a group's
+//! heads (clamped to the new kind's max: 1 if it is no longer a group), each
 //! declared layer by its name. A kind cannot move between layers (standing,
 //! ground cover, a declared one, by name; refused: restart). The world's starts are all kept: one whose
 //! kind is gone places nobody (a share keeps its interval, so the others
@@ -64,6 +65,8 @@ struct Target {
     mems: [Option<usize>; MEM_SLOTS],
     /// Old state index -> new.
     states: Vec<u8>,
+    /// The most heads a row of the new kind holds (1: not a group).
+    max_heads: u16,
 }
 
 /// How rows and fields written under one rule set map onto another.
@@ -142,6 +145,7 @@ impl Plan {
                 need_count: nd.needs.len(),
                 mems: [None; MEM_SLOTS],
                 states: Vec::new(),
+                max_heads: nd.max_heads(),
             };
             for (i, n) in nd.needs.iter().enumerate() {
                 t.needs[i] = od.needs.iter().position(|o| *o == n.name);
@@ -262,6 +266,7 @@ impl Plan {
                         m.mem[i] = t.mems[i].map_or(0, |src| old.mem[src]);
                     }
                     m.state = t.states.get(usize::from(old.state)).copied().unwrap_or(0);
+                    actors.pubs[slot].heads = row.heads.clamp(1, t.max_heads);
                 }
             }
         }

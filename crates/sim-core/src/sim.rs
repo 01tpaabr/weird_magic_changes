@@ -661,10 +661,12 @@ fn load_chunks(
                         *v = (*v).min(f.max);
                     }
                 }
-                for (p, m) in d.actors.rows.iter().zip(&mut d.minds.rows) {
-                    for (i, n) in kinds.def(p.kind).needs.iter().enumerate() {
+                for (p, m) in d.actors.rows.iter_mut().zip(&mut d.minds.rows) {
+                    let def = kinds.def(p.kind);
+                    for (i, n) in def.needs.iter().enumerate() {
                         m.needs[i] = m.needs[i].clamp(0, n.max);
                     }
+                    p.heads = p.heads.clamp(1, def.max_heads());
                 }
                 // On the 32-bit clock: the rows' clocks wrap too.
                 let frozen = stamp(now.wrapping_sub(saved.last_ticked));
@@ -687,16 +689,20 @@ fn load_chunks(
         let mut chunks = generate_many(&c.terrain(), &c.placement, &to_gen);
         fill_fields_many(c.seed, &kinds.fields, &to_gen, &mut chunks);
         for (&coord, data) in to_gen.iter().zip(&mut chunks) {
-            for (p, m) in data.actors.rows.iter().zip(&mut data.minds.rows) {
+            for (p, m) in data.actors.rows.iter_mut().zip(&mut data.minds.rows) {
                 *m = systems::newborn(kinds, p.kind, m.uid, now);
+                p.heads = kinds.def(p.kind).start_heads();
             }
             for e in c.placement.explicit_in(coord) {
-                if e.needs.is_empty() && e.mems.is_empty() {
+                if e.needs.is_empty() && e.mems.is_empty() && e.heads.is_none() {
                     continue;
                 }
                 let (_, slot) = data.cells.layer(e.placed.layer)[usize::from(e.cell)]
                     .unpack()
                     .expect("an explicit start is placed");
+                if let Some(h) = e.heads {
+                    data.actors.rows[usize::from(slot)].heads = h;
+                }
                 let m = &mut data.minds.rows[usize::from(slot)];
                 for &(i, v) in &e.needs {
                     m.needs[usize::from(i)] = v;
@@ -816,7 +822,7 @@ pub fn find_uid(world: &mut World, uid: u64) -> Option<(Pos, ChunkCoord, u16)> {
 }
 
 /// Put an actor of `kind` with `mind` on the cell at `p` (in the cover
-/// layer for a `cover` kind), for tests and tools (worldgen and `spawn` are
+/// layer for a `cover` kind; a group with its `init` heads), for tests and tools (worldgen and `spawn` are
 /// the in-game ways). `false` if the cell is outside the world, the chunk
 /// is not loaded, the cell is not walkable, its layer is taken, or the kind its layer rests on is not standing there. Marks
 /// the chunk dirty. Not for use inside a tick.
@@ -828,7 +834,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
     };
-    let (layer, flies, table, rest, tags) = {
+    let (layer, flies, table, rest, tags, heads) = {
         let kinds = world.resource::<Kinds>();
         let layer = kinds.def(kind).layer;
         (
@@ -837,6 +843,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
             kinds.materials.table,
             kinds.rest(layer),
             kinds.tag_bits.clone(),
+            kinds.def(kind).start_heads(),
         )
     };
     let mut q = world.query::<(
@@ -860,7 +867,8 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
         minds: &mut minds.rows,
         cells: &mut cells,
     };
-    actors.push_in(i, kind, mind, layer);
+    let slot = actors.push_in(i, kind, mind, layer);
+    actors.pubs[usize::from(slot)].heads = heads;
     meta.dirty = true;
     true
 }
@@ -877,7 +885,8 @@ pub fn checksum(world: &mut World) -> u64 {
 /// fuzzer: the stage directory and the chunk entities agree; every chunk's
 /// rows pass [`crate::actors::validate`] (one row per occupied cell of each
 /// layer, each pointing back); every row stands on a walkable cell (any
-/// cell in a layer that flies), in the layer its kind says, with only the flags a row may keep between ticks,
+/// cell in a layer that flies), in the layer its kind says, with 1 to its kind's
+/// `group max` heads (1 if not a group), with only the flags a row may keep between ticks,
 /// the stagger of its uid, its needs in `0..=max` (unused slots 0), unused
 /// mem slots 0, a state of its kind, and clocks not past now; every chunk
 /// holds a layer per field, each value in `0..=max`. The first broken one,
@@ -931,6 +940,13 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
             }
             if r.layer != def.layer {
                 return bad(format!("in layer {}, its kind's is {}", r.layer, def.layer));
+            }
+            if !(1..=def.max_heads()).contains(&r.heads) {
+                return bad(format!(
+                    "{} heads, its kind holds 1 to {}",
+                    r.heads,
+                    def.max_heads()
+                ));
             }
             if !kinds
                 .rest(r.layer)
@@ -1862,6 +1878,7 @@ mod tests {
             dy: 0,
             look: None,
             signal: None,
+            grow: 0,
             amount: 0,
             with: [0; 2],
             field: 0,
@@ -2828,6 +2845,221 @@ mod tests {
         assert_eq!(all.iter().filter(|r| r.1 == tree).count(), 5);
         let fell: Vec<_> = w.resource::<Tally>().deaths_of(monkey).collect();
         assert_eq!(fell, [(Cause::Fell, 1)], "the lone tree's monkey fell");
+    }
+
+    /// Groups (`group max N init M`): `grow` adds heads up to the max and a
+    /// group that grows to none is gone; a bite's damage goes from head to
+    /// head; a vital need that runs out takes one head and refills; `split`
+    /// and `join` move heads between groups of a kind, in a chunk and
+    /// across a border; a group too big for a kind can't `become` it.
+    #[test]
+    fn groups_grow_split_join_and_lose_heads() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Cause, Tally, life};
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "kind herd { glyph \"h\"  cadence 1  group max 20 init 5  mem mode, t
+               when mode == 1 and t == 0 => { t = 1  grow 30  idle }
+               when mode == 2 and t == 0 => { t = 1  split 3 at east }
+               when mode == 3 and t == 0 => { t = 1  join east }
+               when mode == 4 and t == 0 => { t = 1  grow -10  idle }
+               when mode == 5 and t == 0 => { t = 1  become calf }
+               when mode == 6 and t == 0 => { t = 1  split heads at east }
+               when true => idle }
+             kind calf { glyph \"c\" }
+             kind prey { glyph \"p\"  cadence 1  group max 20 init 10  food 2h
+               need health max 1 decay 0 vital
+               when true => idle }
+             kind flock { glyph \"f\"  cadence 1  group max 9 init 4
+               need food max 3 vital
+               when true => idle }
+             kind wolf { glyph \"W\"  cadence 1  bite 3  mem done
+               when done == 0 and nearest prey within 1 as p => { done = 1  eat p }
+               when true => idle }",
+        )
+        .unwrap();
+        let id = |n: &str| kinds.by_name(n).unwrap().id;
+        let cfg = Scenario {
+            width: 128,
+            height: 64,
+            ..cfg(27)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut uid = 0x200;
+        let mut put = |w: &mut World, x, y, kind: &str, mode| {
+            uid += 1;
+            let mut m = newborn(&kinds, id(kind), uid, now);
+            m.mem[0] = mode;
+            assert!(place_actor(w, Pos::new(x, y), id(kind), m));
+        };
+        put(&mut w, 5, 5, "herd", 1); // grows to its max, 20
+        put(&mut w, 5, 10, "herd", 2); // splits 3 east: 2 and 3
+        put(&mut w, 5, 15, "herd", 3); // joins the one east: 10
+        put(&mut w, 6, 15, "herd", 0);
+        put(&mut w, 5, 20, "herd", 4); // grows to none: gone
+        put(&mut w, 5, 25, "herd", 5); // can't become a calf
+        put(&mut w, 5, 30, "herd", 6); // can't split off all it has
+        put(&mut w, 63, 10, "herd", 2); // splits across the border
+        put(&mut w, 63, 15, "herd", 3); // joins across the border
+        put(&mut w, 64, 15, "herd", 0);
+        put(&mut w, 5, 40, "prey", 0);
+        put(&mut w, 6, 40, "wolf", 0); // one bite of 3: three heads
+        put(&mut w, 5, 50, "flock", 0); // a head starves every few ticks
+        let heads_at = |w: &mut World, x, y| {
+            let mut q = w.query::<(&ChunkCoord, &ChunkActors)>();
+            q.iter(w)
+                .flat_map(|(c, a)| {
+                    a.rows
+                        .iter()
+                        .map(move |r| (c.cell(usize::from(r.cell)), r.kind, r.heads))
+                })
+                .find(|&(p, ..)| p == Pos::new(x, y))
+                .map(|(_, k, h)| (k, h))
+        };
+        for _ in 0..3 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let herd = id("herd");
+        assert_eq!(
+            heads_at(&mut w, 5, 5),
+            Some((herd, 20)),
+            "grow stops at the max"
+        );
+        assert_eq!(heads_at(&mut w, 5, 10), Some((herd, 2)));
+        assert_eq!(heads_at(&mut w, 6, 10), Some((herd, 3)), "split off");
+        assert_eq!(heads_at(&mut w, 5, 15), None, "joined");
+        assert_eq!(heads_at(&mut w, 6, 15), Some((herd, 10)));
+        assert_eq!(heads_at(&mut w, 5, 20), None, "grew to none");
+        assert_eq!(
+            heads_at(&mut w, 5, 25),
+            Some((herd, 5)),
+            "too big to become a calf"
+        );
+        assert_eq!(
+            heads_at(&mut w, 5, 30),
+            Some((herd, 5)),
+            "a split leaves one at least"
+        );
+        assert_eq!(heads_at(&mut w, 6, 30), None);
+        assert_eq!(heads_at(&mut w, 63, 10), Some((herd, 2)));
+        assert_eq!(
+            heads_at(&mut w, 64, 10),
+            Some((herd, 3)),
+            "split across the border"
+        );
+        assert_eq!(heads_at(&mut w, 63, 15), None);
+        assert_eq!(
+            heads_at(&mut w, 64, 15),
+            Some((herd, 10)),
+            "joined across the border"
+        );
+        assert_eq!(
+            heads_at(&mut w, 5, 40),
+            Some((id("prey"), 7)),
+            "one bite, three heads"
+        );
+        let t = w.resource::<Tally>();
+        assert_eq!(t.get(id("prey"), life::EATEN), 3);
+        assert_eq!(
+            t.deaths_of(id("prey")).collect::<Vec<_>>(),
+            [(Cause::Killed(id("wolf")), 3)]
+        );
+        assert_eq!(t.get(herd, life::BORN), 15, "grew 15");
+        assert_eq!(t.get(herd, life::DIED), 5, "five heads grown away");
+        for _ in 0..12 {
+            step(&mut w);
+            check_invariants(&mut w);
+        }
+        let flock = heads_at(&mut w, 5, 50).map_or(0, |(_, h)| h);
+        assert!(flock < 4, "heads starve one at a time: {flock} left");
+        let t = w.resource::<Tally>();
+        let starved = t.get(id("flock"), life::DIED);
+        assert_eq!(u64::from(4 - flock), starved);
+        assert!(
+            t.deaths_of(id("flock"))
+                .all(|(c, _)| matches!(c, Cause::Starved(0)))
+        );
+    }
+
+    /// A group starts with its `init` heads, or what a start's `with (heads
+    /// = N)` gives it; `count` in a scenario counts heads.
+    #[test]
+    fn groups_start_with_their_heads() {
+        use crate::rules::compile;
+        use crate::scenario::{Metric, Who};
+        let kinds = compile(
+            "t.rules",
+            "kind herd { glyph \"h\"  group max 50 init 6  when true => idle }
+             kind lone { glyph \"l\"  when true => idle }",
+        )
+        .unwrap();
+        let text = "seed 3\nsize 64 64\nterrain water_level 0 rock_on_soil 0 rock_on_water 0\n\
+                    start herd 1 / 64\nstart lone 1 / 64\nstart herd at (3, 3) with (heads = 7)";
+        let s = Scenario::parse("t", text).unwrap();
+        let mut w = new_world_with(&s, kinds.clone()).unwrap();
+        check_invariants(&mut w);
+        let (herd, lone) = (
+            kinds.by_name("herd").unwrap().id,
+            kinds.by_name("lone").unwrap().id,
+        );
+        let all = {
+            let mut q = w.query::<(&ChunkCoord, &ChunkActors)>();
+            q.iter(&w)
+                .flat_map(|(c, a)| {
+                    a.rows
+                        .iter()
+                        .map(move |r| (c.cell(usize::from(r.cell)), r.kind, r.heads))
+                })
+                .collect::<Vec<_>>()
+        };
+        let (mut herds, mut heads) = (0u64, 0u64);
+        for &(p, k, h) in &all {
+            if k == herd {
+                herds += 1;
+                heads += u64::from(h);
+                assert_eq!(h, if p == Pos::new(3, 3) { 7 } else { 6 });
+            } else {
+                assert_eq!((k, h), (lone, 1));
+            }
+        }
+        assert!(herds > 10);
+        let who = |k: &str| Who {
+            kind: k.into(),
+            only: false,
+            state: None,
+        };
+        let count =
+            |w: &World, k: &str| crate::scenario::measure(w, &kinds, &Metric::Count(who(k)));
+        assert_eq!(
+            count(&w, "herd"),
+            Ok(Some(heads as f64)),
+            "count counts heads"
+        );
+        let lones = all.iter().filter(|r| r.1 == lone).count();
+        assert_eq!(count(&w, "lone"), Ok(Some(lones as f64)));
+        for (with, want) in [
+            (
+                "start lone at (3, 3) with (heads = 2)",
+                "`lone` is not a group",
+            ),
+            (
+                "start herd at (3, 3) with (heads = 51)",
+                "a `herd` holds 1 to 50 heads",
+            ),
+            (
+                "start herd at (3, 3) with (heads = 0)",
+                "a `herd` holds 1 to 50 heads",
+            ),
+        ] {
+            let s = Scenario::parse("t", with).unwrap();
+            let e =
+                crate::scenario::Placement::resolve(&s.starts, &kinds, &s.terrain()).unwrap_err();
+            assert!(e.msg.contains(want), "{with}\n  got: {}", e.msg);
+        }
     }
 
     /// A search over memory plans (chop, saw, build) from where the actor
@@ -3857,6 +4089,53 @@ mod tests {
         reload_rules(&mut reloaded, None, b).unwrap();
         assert_eq!(water(&mut reloaded), 100, "as a hot reload clamps");
         assert_eq!(checksum(&mut reopened), checksum(&mut reloaded));
+        std::fs::remove_dir_all(store.dir()).unwrap();
+    }
+
+    /// A group's heads are saved; reopened, or reloaded, under rules with a
+    /// lower max they are clamped to it (1, under rules where it is not a
+    /// group), as needs are.
+    #[test]
+    fn a_groups_heads_save_and_clamp() {
+        use crate::actors::systems::newborn;
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let rules = |g: &str| {
+            compile(
+                "a.rules",
+                &format!("kind herd {{ cadence 1024  {g}  when true => idle }}"),
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (
+            rules("group max 50 init 30"),
+            rules("group max 10"),
+            rules(""),
+        );
+        let store = tmp_store("group-heads");
+        let mut w = new_world_with(&cfg(2), a.clone()).unwrap();
+        flatten(&mut w);
+        let p = Pos::new(10, 10);
+        let m = newborn(&a, 0, 0xA2, tick(&w));
+        assert!(place_actor(&mut w, p, 0, m));
+        save(&mut w, &store).unwrap();
+        let heads = |w: &mut World| {
+            let mut q = w.query::<&ChunkActors>();
+            q.iter(w)
+                .flat_map(|a| a.rows.iter().map(|r| r.heads))
+                .collect::<Vec<_>>()
+        };
+        let focus = LoadPolicy { load: 0, unload: 0 };
+        for (rules, want, why) in [(&a, 30, "kept"), (&b, 10, "clamped"), (&c, 1, "one")] {
+            let mut reopened = open_world_with(&store, rules.clone()).unwrap().unwrap();
+            ensure_loaded(&mut reopened, p, focus, Some(&store)).unwrap();
+            assert_eq!(heads(&mut reopened), [want], "{why}");
+            check_invariants(&mut reopened);
+            let mut reloaded = open_world_with(&store, a.clone()).unwrap().unwrap();
+            ensure_loaded(&mut reloaded, p, focus, Some(&store)).unwrap();
+            reload_rules(&mut reloaded, None, rules.clone()).unwrap();
+            assert_eq!(heads(&mut reloaded), [want], "{why}, as a hot reload does");
+        }
         std::fs::remove_dir_all(store.dir()).unwrap();
     }
 

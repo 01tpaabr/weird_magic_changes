@@ -202,7 +202,7 @@ fn map() -> impl Strategy<Value = (Vec<String>, usize, (u32, u32))> {
 fn check() -> impl Strategy<Value = String> {
     let ops = ["==", "!=", "<", "<=", ">", ">="];
     let counters = [
-        "count", "born", "became", "eaten", "died", "thinks", "traps",
+        "count", "rows", "born", "became", "eaten", "died", "thinks", "traps",
     ];
     let rates = ["born", "became", "eaten", "died", "thinks", "traps"];
     (

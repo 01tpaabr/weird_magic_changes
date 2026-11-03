@@ -386,6 +386,8 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
                 " (no water there: it will be refused)"
             }
         ),
+        Action::Split => format!("split {} heads off at {}", it.amount, at(it.dx, it.dy)),
+        Action::Join => format!("join the group at {}", at(it.dx, it.dy)),
         Action::Eat => format!("eat {}", at(it.dx, it.dy)),
         Action::Hit => format!("hit {}", at(it.dx, it.dy)),
         Action::Graze => format!("graze {}", at(it.dx, it.dy)),
@@ -430,6 +432,9 @@ pub fn decision(kinds: &Kinds, e: &Explained) -> String {
     }
     if let Some(v) = it.signal {
         let _ = write!(d, "; signal = {v}");
+    }
+    if it.grow != 0 {
+        let _ = write!(d, "; grow {}", it.grow);
     }
     for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
         if let Some(def) = kinds.fields.get(usize::from(f)) {

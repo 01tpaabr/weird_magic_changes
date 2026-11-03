@@ -429,6 +429,7 @@ fn the_limits_table_is_the_codes() {
             vec![n(NEED_SLOTS), n(MEM_SLOTS)],
         ),
         ("tags per rule set".into(), vec![n(MAX_TAGS)]),
+        ("heads in a group".into(), vec![n(u16::MAX as usize)]),
         ("fields per rule set".into(), vec![n(MAX_FIELDS)]),
         (
             "grounds, features per rule set".into(),
@@ -999,7 +1000,7 @@ fn the_rows_in_the_actors_design_are_the_codes() {
         .find(|b| b.info == "rust")
         .expect("ACTORS.md shows the rows in a rust block");
     let code = std::fs::read_to_string(repo().join("crates/sim-core/src/actors/mod.rs")).unwrap();
-    for (name, n) in [("ActorPub", 8), ("ActorMind", 10)] {
+    for (name, n) in [("ActorPub", 10), ("ActorMind", 10)] {
         let want = fields(&code, name);
         assert_eq!(want.len(), n, "{name}: {want:?}");
         assert_eq!(fields(&rust.text, name), want, "{name}");

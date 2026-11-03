@@ -68,9 +68,9 @@ const POOL: [&str; 16] = [
     "target", "pred",
 ];
 const PRED_WORDS: [&str; 5] = ["water", "soil", "rock", "free", "bare"];
-const SENSES: [&str; 15] = [
+const SENSES: [&str; 16] = [
     "x", "y", "age", "light", "hour", "day", "kind", "look", "signal", "state", "hurt", "hurt_dir",
-    "result", "taken", "trapped",
+    "result", "taken", "trapped", "heads",
 ];
 /// The fields a valid program may declare, with their policy: free,
 /// conserved, fixed. Kinds may carry a need of a field's name.
@@ -143,6 +143,9 @@ struct Owner {
     own_place: bool,
     /// Inherited member subs it redefines, with the same signature.
     overrides: Vec<Sig>,
+    /// `group max N init M`: a kind's own, or its kind parent's.
+    group: Option<(u16, u16)>,
+    own_group: bool,
 }
 
 struct G<'a> {
@@ -388,6 +391,12 @@ impl<'a> G<'a> {
         self.cur().map(|o| o.states.clone()).unwrap_or_default()
     }
 
+    /// Writing a group kind's own rules (not a sub's, which has no kind):
+    /// `grow`, `split` and `join` may go here.
+    fn groups_here(&self) -> bool {
+        self.strict && !self.in_sub && self.cur().is_some_and(|o| !o.is_trait && o.group.is_some())
+    }
+
     fn needs_here(&self) -> Vec<String> {
         self.cur().map(|o| o.needs.clone()).unwrap_or_default()
     }
@@ -491,17 +500,27 @@ impl<'a> G<'a> {
                     .cloned()
                     .collect();
                 o.place = p.place;
+                o.group = p.group;
             }
             // A kind lives in one layer: its parent's, else one of its own.
             if o.place.is_none() {
                 o.own_place = true;
-                o.place = if self.maybe(10) {
+                // Ground cover is never a group: not under a group parent.
+                o.place = if o.group.is_none() && self.maybe(10) {
                     Some("cover")
                 } else if self.layers && self.maybe(30) {
                     Some(self.one(&["layer gair", "layer gdeep", "layer gtop"]))
                 } else {
                     None
                 };
+            }
+            // A group, now and then (never ground cover): its own, or a
+            // larger one than its kind parent's.
+            if o.place != Some("cover") && self.maybe(25) {
+                let max = 2 + self.n(200) as u16;
+                let max = o.group.map_or(max, |(m, _)| m.saturating_add(max));
+                o.group = Some((max, 1 + self.n(usize::from(max)) as u16));
+                o.own_group = true;
             }
             for t in 0..traits {
                 self.extend_trait(&mut o, t, 35);
@@ -801,6 +820,13 @@ impl<'a> G<'a> {
             if self.fields > 0 && self.maybe(20) {
                 d.push(format!("climb {} on fa", self.n(5)));
             }
+        }
+        if let (Some((max, init)), true) = (o.group, o.own_group) {
+            d.push(if init == 1 && self.maybe(50) {
+                format!("group max {max}")
+            } else {
+                format!("group max {max} init {init}")
+            });
         }
         if !o.tags.is_empty() {
             d.push(format!("tags {}", o.tags.join(" ")));
@@ -1220,6 +1246,12 @@ impl<'a> G<'a> {
     }
 
     fn effect(&mut self, d: u32) -> String {
+        if self.groups_here() && self.maybe(20) {
+            return format!("grow {}", self.expr(d));
+        }
+        if !self.strict && self.maybe(5) {
+            return format!("grow {}", self.expr(d));
+        }
         match self.n(3) {
             0 => format!("look = {}", self.expr(d)),
             2 if !self.strict => format!("add {} {}", self.pool(&[]), self.expr(d)),
@@ -1333,6 +1365,14 @@ impl<'a> G<'a> {
             .map(|(f, _)| f.to_string())
             .filter(|f| needs.contains(f))
             .collect();
+        if (self.groups_here() || !self.strict) && self.maybe(15) {
+            let t = self.target(d - 1);
+            return if self.maybe(50) {
+                format!("split {} at {t}", self.expr(d - 1))
+            } else {
+                format!("join {t}")
+            };
+        }
         match self.n(11) {
             0 => "idle".into(),
             1 => "die".into(),
@@ -1652,7 +1692,7 @@ impl<'a> G<'a> {
                 format!("{f}({})", self.expr(d - 1))
             }
             4 => {
-                let f = self.one(&["dist", "free", "look_of", "signal_of"]);
+                let f = self.one(&["dist", "free", "look_of", "signal_of", "heads_of"]);
                 format!("{f}({})", self.target(d - 1))
             }
             5 => {

@@ -25,14 +25,14 @@ pub const SYMBOL: Color = Color::rgb(0x89, 0xa4, 0xbb);
 pub const COMMENT: Color = Color::rgb(0x63, 0x77, 0x77);
 
 /// Words that are an action: what a think does.
-const ACTIONS: [&str; 15] = [
+const ACTIONS: [&str; 18] = [
     "idle", "die", "become", "spawn", "move", "drink", "eat", "hit", "graze", "take", "give",
-    "next", "harvest", "drop", "add",
+    "next", "harvest", "drop", "add", "split", "join", "grow",
 ];
 
 /// Keywords that read the world or name a cell: functions, searches,
 /// targets, outcomes, constants.
-const BUILTINS: [&str; 37] = [
+const BUILTINS: [&str; 38] = [
     "nearest",
     "best",
     "count",
@@ -48,6 +48,7 @@ const BUILTINS: [&str; 37] = [
     "clamp",
     "look_of",
     "signal_of",
+    "heads_of",
     "pack",
     "hi",
     "lo",
@@ -73,9 +74,9 @@ const BUILTINS: [&str; 37] = [
 ];
 
 /// The senses (`vm::Sense`), reserved but not in [`KEYWORDS`].
-pub const SENSES: [&str; 15] = [
+pub const SENSES: [&str; 16] = [
     "light", "age", "x", "y", "hour", "day", "kind", "look", "signal", "state", "hurt", "hurt_dir",
-    "result", "taken", "trapped",
+    "result", "taken", "trapped", "heads",
 ];
 
 /// The ground predicates: plain names to the compiler where a name goes.

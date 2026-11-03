@@ -233,6 +233,7 @@ impl<'a> Watch<'a> {
                 if self.read == 0 {
                     let who = match metric {
                         super::Metric::Count(w)
+                        | super::Metric::Rows(w)
                         | super::Metric::Tally { who: w, .. }
                         | super::Metric::Value { who: w, .. } => &w.kind,
                         super::Metric::Field { .. } => {

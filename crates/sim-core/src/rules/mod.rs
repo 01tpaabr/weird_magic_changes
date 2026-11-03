@@ -254,6 +254,9 @@ pub struct KindDef {
     /// pre-order over this tree, so a kind's family (itself and every kind
     /// that extends it) is the id range `id..Kinds::family_end[id]`.
     pub parent: Option<u16>,
+    /// `group max N init M`: a row stands for up to `N` heads (`heads`),
+    /// starting with `M`; `(0, 0)` for a kind whose row is one actor.
+    pub group: (u16, u16),
 }
 
 /// Where a rule's code sits, for `wmc why`: not part of the program, not
@@ -405,6 +408,18 @@ pub const DEFAULT_COLOR: u32 = 0x00FF_F39C;
 impl KindDef {
     pub fn cadence(&self) -> u64 {
         1 << self.cadence_shift
+    }
+
+    /// The most heads a row of it holds: 1 unless it is a group.
+    #[inline]
+    pub fn max_heads(&self) -> u16 {
+        self.group.0.max(1)
+    }
+
+    /// The heads a row of it starts with: 1 unless it is a group.
+    #[inline]
+    pub fn start_heads(&self) -> u16 {
+        self.group.1.max(1)
     }
 
     /// Slot of the need called `name`, if this kind has one.
@@ -741,6 +756,9 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
             | u64::from(d.bite) << 24
             | u64::from(d.reach) << 32
             | u64::from(d.layer) << 40);
+        if d.group != (0, 0) {
+            mix(0x6E0 << 32 | u64::from(d.group.0) << 16 | u64::from(d.group.1));
+        }
         if let Some((f, n)) = d.climb {
             mix(u64::from(f) << 32 | u64::from(n as u32));
         }

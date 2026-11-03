@@ -62,7 +62,9 @@ pub struct Intent {
     pub look: Option<u8>,
     /// `signal = v` effect, likewise.
     pub signal: Option<i16>,
-    /// Amount of `Take` / `Give`.
+    /// `grow n` effects, added up: heads a group gains (or loses), likewise.
+    pub grow: i32,
+    /// Amount of `Take` / `Give`; heads a `Split` takes.
     pub amount: i32,
     /// A `Spawn`'s child's first two `mem` values.
     pub with: [i32; 2],
@@ -112,6 +114,12 @@ pub enum EffectKind {
     },
     /// `dig`: clear the feature.
     Dig,
+    /// `split`: a new group of the mover's kind with `heads` of its heads.
+    Split {
+        heads: u16,
+    },
+    /// `join`: the mover's heads go to the group of its kind there.
+    Join,
     /// `take` (or `give`): up to `amount` of the mover's need `need` and
     /// the target's need of the same name. In-chunk ones too: every
     /// transfer is settled in Exchange, in key order.
@@ -181,8 +189,9 @@ pub struct Scratch {
     pub hits: Vec<Hit>,
     pub deaths: u32,
     events: Vec<[u32; LIFE_EVENTS]>,
-    /// This tick's deaths, by kind and cause: few, so a list.
-    causes: Vec<(u16, Cause)>,
+    /// This tick's deaths, by kind and cause, each with how many heads
+    /// died (a group loses one or more): few, so a list.
+    causes: Vec<(u16, Cause, u32)>,
     /// Per player, with a `budget { rows N }`: its rows here and its spawns
     /// wanted here ([`ration`] fills them), then the spawns this chunk may
     /// make this tick (Apply spends them in key order).
@@ -498,6 +507,7 @@ fn think_one<const TRACE: bool>(
         dy: 0,
         look: None,
         signal: None,
+        grow: 0,
         amount: 0,
         with: [0; 2],
         field: 0,
@@ -521,6 +531,7 @@ fn think_one<const TRACE: bool>(
         rng: vm::rng_base(seed, tick, mind.uid),
         look: row.look,
         signal: row.signal,
+        heads: row.heads,
     };
     let out = if TRACE {
         vm::think_traced(kinds, ctx, mind, trace)
@@ -540,6 +551,7 @@ fn think_one<const TRACE: bool>(
     intent.dy = out.dy;
     intent.look = out.look;
     intent.signal = out.signal;
+    intent.grow = out.grow;
     intent.amount = out.amount;
     intent.with = out.with;
     intent.field = out.field;
@@ -550,6 +562,9 @@ fn think_one<const TRACE: bool>(
         Action::Take | Action::Give | Action::Harvest | Action::Drop
     ) {
         intent.kind = u16::from(out.need);
+    }
+    if out.action == Action::Split {
+        intent.kind = row.kind; // the new group's: claimed as a spawn's
     }
     intent.trapped = out.trap.is_some();
     intent.used = u16::try_from(out.used).unwrap_or(u16::MAX);
@@ -890,26 +905,54 @@ pub fn exchange(
             // Whose bite took the last of its health (the first biter's, if
             // it had none left).
             let mut killer = first.kind;
+            // A group's heads each have the health: a bite that takes the
+            // last of one goes on into the next, at full health, so one
+            // bite may take several; the last head's is the row's death.
+            let mut heads = pubs.rows[vslot].heads.max(1);
+            let (mut lost, mut taken_all) = (0u16, 0i32);
             for hit in &scratch.hits[group] {
-                let taken = i32::from(hit.bite).min(left);
-                left -= taken;
-                if taken > 0 && left <= 0 {
-                    killer = hit.kind;
-                }
-                if hit.eat && taken > 0 && def.food > 0 {
-                    // Health is in 0..=max (every write clamps it), so
-                    // taken <= max and food <= def.food, an i32.
-                    #[allow(clippy::cast_possible_truncation)]
-                    let food = (i64::from(def.food) * i64::from(taken) / max) as i32;
-                    work.credits.push((hit.from, hit.slot, food));
+                let mut bite = i32::from(hit.bite);
+                loop {
+                    let taken = bite.min(left);
+                    left -= taken;
+                    bite -= taken;
+                    taken_all = taken_all.saturating_add(taken);
+                    if hit.eat && taken > 0 && def.food > 0 {
+                        // Health is in 0..=max (every write clamps it), so
+                        // taken <= max and food <= def.food, an i32.
+                        #[allow(clippy::cast_possible_truncation)]
+                        let food = (i64::from(def.food) * i64::from(taken) / max) as i32;
+                        work.credits.push((hit.from, hit.slot, food));
+                    }
+                    if left > 0 || heads == 0 {
+                        break;
+                    }
+                    if taken > 0 || lost == 0 {
+                        killer = hit.kind;
+                    }
+                    heads -= 1;
+                    lost += 1;
+                    if heads == 0 || bite == 0 {
+                        if heads > 0 {
+                            left = def.needs[h].max;
+                        }
+                        break;
+                    }
+                    left = def.needs[h].max;
                 }
             }
-            let taken = m.needs[h].max(0) - left;
             m.needs[h] = left;
-            m.hurt = m.hurt.saturating_add(taken.clamp(0, 255) as u8);
+            m.hurt = m.hurt.saturating_add(taken_all.clamp(0, 255) as u8);
             m.hurt_dir = first.dir;
-            let dead = left <= 0;
+            let dead = heads == 0;
             pubs.rows[vslot].flags |= flags::WAKE;
+            pubs.rows[vslot].heads = heads.max(1);
+            if lost > 0 && !dead {
+                scratch.add(vk, life::EATEN, u32::from(lost));
+                scratch
+                    .causes
+                    .push((vk, Cause::Killed(killer), u32::from(lost)));
+            }
             if dead {
                 ActorsMut {
                     pubs: &mut pubs.rows,
@@ -921,8 +964,10 @@ pub fn exchange(
                 if !first.cover {
                     scratch.touch(cell); // a grazed-out tuft frees no standing room
                 }
-                scratch.count(vk, life::EATEN);
-                scratch.causes.push((vk, Cause::Killed(killer)));
+                scratch.add(vk, life::EATEN, u32::from(lost));
+                scratch
+                    .causes
+                    .push((vk, Cause::Killed(killer), u32::from(lost)));
             }
             meta.dirty = true;
         }
@@ -1076,7 +1121,10 @@ pub fn apply(
             // touches the cell, so a tied key (twin uids) after it is blocked.
             scratch.layer_claims.clear();
             for it in &intents.list {
-                if !matches!(it.action, Action::Move | Action::Spawn | Action::Build) {
+                if !matches!(
+                    it.action,
+                    Action::Move | Action::Spawn | Action::Build | Action::Split
+                ) {
                     continue;
                 }
                 if it.action == Action::Spawn && is_cover(kinds, it.kind) {
@@ -1089,7 +1137,7 @@ pub fn apply(
                 // A declared layer: its own claims, a slot empty at tick
                 // start, any ground if it flies.
                 let layer = match it.action {
-                    Action::Move => row.layer,
+                    Action::Move | Action::Split => row.layer,
                     Action::Spawn => kinds.def(it.kind).layer,
                     _ => 0,
                 };
@@ -1153,14 +1201,32 @@ pub fn apply(
                             .map_or(Cause::Died, |i| {
                                 Cause::Starved(u8::try_from(i).expect("4 need slots"))
                             });
-                        actors.kill(slot);
-                        scratch.deaths += 1;
-                        if !cover {
-                            scratch.touch(from);
+                        // A group whose vital need ran out loses one head,
+                        // and the rest go on with it refilled; a rule's
+                        // `die` ends the whole group.
+                        let heads = actors.pubs[slot].heads.max(1);
+                        if heads > 1 && cause != Cause::Died {
+                            actors.pubs[slot].heads = heads - 1;
+                            let def = kinds.def(kind);
+                            let m = &mut actors.minds[slot];
+                            for (v, n) in m.needs.iter_mut().zip(&def.needs) {
+                                if n.vital && *v <= 0 {
+                                    *v = n.max;
+                                }
+                            }
+                            scratch.count(kind, life::DIED);
+                            scratch.causes.push((kind, cause, 1));
+                            Some(result::OK)
+                        } else {
+                            actors.kill(slot);
+                            scratch.deaths += 1;
+                            if !cover {
+                                scratch.touch(from);
+                            }
+                            scratch.add(kind, life::DIED, u32::from(heads));
+                            scratch.causes.push((kind, cause, u32::from(heads)));
+                            Some(result::OK)
                         }
-                        scratch.count(kind, life::DIED);
-                        scratch.causes.push((kind, cause));
-                        Some(result::OK)
                     }
                     Action::Become => {
                         let res = change_kind(kinds, tick, &mut actors, slot, it.kind);
@@ -1277,6 +1343,24 @@ pub fn apply(
                             result::NONE // Migrate decides
                         }
                     }),
+                    Action::Split => Some(split(
+                        kinds,
+                        seed,
+                        tick,
+                        *coord,
+                        &mut scratch,
+                        &mut outbox,
+                        &mut actors,
+                        it,
+                    )),
+                    Action::Join => Some(join(
+                        kinds,
+                        &mut scratch,
+                        &mut outbox,
+                        &mut actors,
+                        *coord,
+                        it,
+                    )),
                     // The arena's budget: this player has no room left.
                     Action::Spawn if !scratch.ration(kinds, it.kind) => Some(result::REFUSED),
                     // Past the halo, even into a loaded chunk: as unloaded.
@@ -1390,6 +1474,17 @@ pub fn apply(
                 if let Some(signal) = it.signal {
                     pubs.rows[slot].signal = signal;
                 }
+                if it.grow != 0 && pubs.rows[slot].flags & flags::DEAD == 0 {
+                    grow(
+                        kinds,
+                        &mut cells,
+                        &mut pubs,
+                        &mut minds,
+                        &mut scratch,
+                        slot,
+                        it.grow,
+                    );
+                }
                 for (&f, &v) in it.add_fields.iter().zip(&it.add_values) {
                     let f = usize::from(f);
                     if let (Some(def), Some(layer)) = (kinds.fields.get(f), cells.fields.get_mut(f))
@@ -1402,6 +1497,192 @@ pub fn apply(
             }
         },
     );
+}
+
+/// `split n at t`: `n` of a group's heads, at least one and fewer than it
+/// has, start a new group of its kind on the adjacent cell `t`, claimed as
+/// a spawn's (the arena's budget counts it as one). The new group starts
+/// as the old one is: needs, memory, state, age. Across a chunk border,
+/// Migrate settles it.
+#[allow(clippy::too_many_arguments)]
+fn split(
+    kinds: &Kinds,
+    seed: u64,
+    tick: u64,
+    coord: ChunkCoord,
+    scratch: &mut Scratch,
+    outbox: &mut Outbox,
+    actors: &mut ActorsMut<'_>,
+    it: &Intent,
+) -> u8 {
+    let slot = usize::from(it.slot);
+    let row = actors.pubs[slot];
+    let near = it.dx.abs() <= 1 && it.dy.abs() <= 1 && (it.dx, it.dy) != (0, 0);
+    let Ok(heads) = u16::try_from(it.amount) else {
+        return result::REFUSED;
+    };
+    if !near || heads == 0 || heads >= row.heads || !scratch.ration(kinds, row.kind) {
+        return result::REFUSED;
+    }
+    let l = row.layer;
+    match target_of(coord, usize::from(row.cell), it.dx, it.dy) {
+        Where::Here(cell) => {
+            let won = if l >= 2 {
+                scratch.layer_won(l, cell, it.key)
+                    && (kinds.flies(l) || actors.cells.walkable(cell, &kinds.materials.table))
+                    && kinds
+                        .rest(l)
+                        .holds(actors.cells.occupant[cell], &kinds.tag_bits)
+            } else {
+                scratch.claim[cell] == it.key
+            };
+            if !won {
+                return result::BLOCKED;
+            }
+            let child = split_mind(
+                kinds,
+                seed,
+                tick,
+                coord.cell(cell),
+                row.kind,
+                &actors.minds[slot],
+            );
+            let new = actors.push_in(cell, row.kind, child, l);
+            actors.pubs[usize::from(new)].heads = heads;
+            actors.pubs[slot].heads -= heads;
+            if l == 0 {
+                scratch.touch(cell);
+            }
+            result::OK
+        }
+        Where::Elsewhere(to, cell) => {
+            outbox.list.push(Effect {
+                key: it.key,
+                slot: it.slot,
+                what: EffectKind::Split { heads },
+                to,
+                cell: cell_u16(cell),
+            });
+            result::NONE
+        }
+    }
+}
+
+/// `join t`: a group gives all its heads to the group of its kind on the
+/// adjacent cell `t` (in its layer), if they fit under the kind's `group
+/// max`, and is gone. The one joined keeps its own needs and memory.
+/// Across a chunk border, Migrate settles it.
+fn join(
+    kinds: &Kinds,
+    scratch: &mut Scratch,
+    outbox: &mut Outbox,
+    actors: &mut ActorsMut<'_>,
+    coord: ChunkCoord,
+    it: &Intent,
+) -> u8 {
+    let slot = usize::from(it.slot);
+    let row = actors.pubs[slot];
+    let near = it.dx.abs() <= 1 && it.dy.abs() <= 1 && (it.dx, it.dy) != (0, 0);
+    if !near {
+        return result::REFUSED;
+    }
+    match target_of(coord, usize::from(row.cell), it.dx, it.dy) {
+        Where::Here(cell) => {
+            let Some((k, t)) = actors.cells.layer(row.layer)[cell].unpack() else {
+                return result::MISSED;
+            };
+            let t = usize::from(t);
+            if k != row.kind || actors.pubs[t].flags & flags::DEAD != 0 {
+                return result::MISSED;
+            }
+            let sum = u32::from(actors.pubs[t].heads) + u32::from(row.heads);
+            if sum > u32::from(kinds.def(k).max_heads()) {
+                return result::REFUSED;
+            }
+            actors.pubs[t].heads = u16::try_from(sum).expect("at most the kind's max");
+            actors.kill(slot);
+            scratch.deaths += 1;
+            if row.layer == 0 {
+                scratch.touch(usize::from(row.cell));
+            }
+            result::OK
+        }
+        Where::Elsewhere(to, cell) => {
+            outbox.list.push(Effect {
+                key: it.key,
+                slot: it.slot,
+                what: EffectKind::Join,
+                to,
+                cell: cell_u16(cell),
+            });
+            result::NONE
+        }
+    }
+}
+
+/// `grow n`: a group's heads change by `n`, clamped to 0 and its kind's
+/// `group max`; heads gained are births, heads lost deaths (`Cause::Died`),
+/// and a group with none left is gone. Nothing for a kind that is not a
+/// group.
+fn grow(
+    kinds: &Kinds,
+    cells: &mut ChunkCells,
+    pubs: &mut ChunkActors,
+    minds: &mut ChunkMinds,
+    scratch: &mut Scratch,
+    slot: usize,
+    n: i32,
+) {
+    let row = pubs.rows[slot];
+    let def = kinds.def(row.kind);
+    if def.group.0 == 0 {
+        return;
+    }
+    let new = (i32::from(row.heads).saturating_add(n)).clamp(0, i32::from(def.max_heads()));
+    let delta = new - i32::from(row.heads);
+    if delta > 0 {
+        scratch.add(row.kind, life::BORN, delta.unsigned_abs());
+    } else if delta < 0 {
+        scratch.add(row.kind, life::DIED, delta.unsigned_abs());
+        scratch
+            .causes
+            .push((row.kind, Cause::Died, delta.unsigned_abs()));
+    }
+    if new == 0 {
+        ActorsMut {
+            pubs: &mut pubs.rows,
+            minds: &mut minds.rows,
+            cells,
+        }
+        .kill(slot);
+        scratch.deaths += 1;
+        if row.layer == 0 {
+            scratch.touch(usize::from(row.cell));
+        }
+    } else {
+        pubs.rows[slot].heads = u16::try_from(new).expect("1..=max, clamped above");
+    }
+}
+
+/// The mind of a group `split` off another onto `pos` this tick: the
+/// parent's, but its own uid (derived as a spawn's: a cell takes one birth
+/// a layer a tick) and no events.
+fn split_mind(
+    kinds: &Kinds,
+    seed: u64,
+    tick: u64,
+    pos: Pos,
+    kind: u16,
+    parent: &ActorMind,
+) -> ActorMind {
+    let uid = spawn_mind(kinds, seed, tick, pos, kind, [0; 2]).uid;
+    ActorMind {
+        uid,
+        events: 0,
+        hurt: 0,
+        hurt_dir: 0,
+        ..*parent
+    }
 }
 
 /// Lay `material` (a ground, or `0x100 | feature`) on `cell`, which the
@@ -1574,6 +1855,9 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     if kinds.def(to).layer != layer {
         return result::REFUSED; // a row cannot change layers
     }
+    if actors.pubs[slot].heads > kinds.def(to).max_heads() {
+        return result::REFUSED; // a group becomes only what holds its heads
+    }
     let from = actors.pubs[slot].kind;
     let remap = kinds.remap(from, to);
     let def = kinds.def(to);
@@ -1650,6 +1934,52 @@ pub fn migrate(
             continue;
         };
         let (dst_cells, dst_pubs, dst_minds, dst_scratch, dst_meta) = &mut dst;
+        // A group gone since it asked (its own `grow` took its last head):
+        // nothing of it moves, splits or joins.
+        let mover = matches!(
+            fx.what,
+            EffectKind::Move | EffectKind::Split { .. } | EffectKind::Join
+        );
+        if mover && src.1.rows[slot].flags & flags::DEAD != 0 {
+            continue;
+        }
+        if fx.what == EffectKind::Join {
+            let row = src.1.rows[slot];
+            let res = match dst_cells.layer(row.layer)[cell].unpack() {
+                Some((k, t)) if k == row.kind => {
+                    let t = usize::from(t);
+                    let sum = u32::from(dst_pubs.rows[t].heads) + u32::from(row.heads);
+                    if dst_pubs.rows[t].flags & flags::DEAD != 0 {
+                        result::MISSED
+                    } else if sum > u32::from(kinds.def(k).max_heads()) {
+                        result::REFUSED
+                    } else {
+                        dst_pubs.rows[t].heads =
+                            u16::try_from(sum).expect("at most the kind's max");
+                        result::OK
+                    }
+                }
+                _ => result::MISSED,
+            };
+            if res == result::OK {
+                let (src_cells, src_pubs, src_minds, src_scratch, src_meta) = &mut src;
+                ActorsMut {
+                    pubs: &mut src_pubs.rows,
+                    minds: &mut src_minds.rows,
+                    cells: src_cells,
+                }
+                .kill(slot);
+                src_scratch.deaths += 1;
+                if row.layer == 0 {
+                    src_scratch.touch(usize::from(row.cell));
+                }
+                src_meta.dirty = true;
+                dst_meta.dirty = true;
+            } else {
+                set_result_in(&mut src.2, slot, res);
+            }
+            continue;
+        }
         // The ground's own: a cell taken by nobody, laid or cleared.
         if let EffectKind::Build { material } = fx.what {
             let ok = dst_cells.walkable(cell, &kinds.materials.table)
@@ -1686,6 +2016,12 @@ pub fn migrate(
             _ => src.1.rows[slot].layer,
         };
         let walkable = dst_cells.walkable(cell, &kinds.materials.table);
+        if let EffectKind::Split { heads } = fx.what
+            && heads >= src.1.rows[slot].heads
+        {
+            set_result_in(&mut src.2, slot, result::REFUSED);
+            continue;
+        }
         let ok = match layer {
             0 => walkable && dst_cells.occupant[cell].is_none() && dst_scratch.enterable(cell),
             1 => walkable && dst_cells.cover[cell].is_none(),
@@ -1717,6 +2053,7 @@ pub fn migrate(
                 let moved = &mut to.pubs[usize::from(new)];
                 moved.signal = row.signal;
                 moved.look = row.look;
+                moved.heads = row.heads;
                 moved.flags = row.flags & flags::WAKE;
                 let mut from = ActorsMut {
                     pubs: &mut src_pubs.rows,
@@ -1735,10 +2072,26 @@ pub fn migrate(
                 dst_scratch.count(kind, life::BORN);
                 set_result_in(src_minds, slot, result::OK);
             }
+            EffectKind::Split { heads } => {
+                let kind = src_pubs.rows[slot].kind;
+                let child = split_mind(
+                    &kinds,
+                    seed,
+                    tick,
+                    fx.to.cell(cell),
+                    kind,
+                    &src_minds.rows[slot],
+                );
+                let new = to.push_in(cell, kind, child, layer);
+                to.pubs[usize::from(new)].heads = heads;
+                src_pubs.rows[slot].heads -= heads;
+                set_result_in(src_minds, slot, result::OK);
+            }
             EffectKind::Bite { .. }
             | EffectKind::Transfer { .. }
             | EffectKind::Build { .. }
-            | EffectKind::Dig => unreachable!("handled above"),
+            | EffectKind::Dig
+            | EffectKind::Join => unreachable!("handled above"),
         }
         if layer == 0 {
             dst_scratch.touch(cell);
@@ -1766,8 +2119,8 @@ fn set_result_in(minds: &mut ChunkMinds, slot: usize, res: u8) {
 /// so chunk order does not matter.
 pub fn tally(mut total: ResMut<Tally>, mut q: Query<&mut Scratch>) {
     for mut s in &mut q {
-        for (k, c) in s.causes.drain(..) {
-            *total.deaths.entry((k, c)).or_default() += 1;
+        for (k, c, n) in s.causes.drain(..) {
+            *total.deaths.entry((k, c)).or_default() += u64::from(n);
         }
         if s.events.iter().all(|e| e.iter().all(|&n| n == 0)) {
             continue;
@@ -1809,7 +2162,11 @@ pub fn ration(
                 s.players[p].0 += 1;
             }
         }
-        for it in intents.list.iter().filter(|i| i.action == Action::Spawn) {
+        for it in intents
+            .list
+            .iter()
+            .filter(|i| matches!(i.action, Action::Spawn | Action::Split))
+        {
             if let Some(p) = players.of(it.kind) {
                 s.players[p].1 += 1;
             }
@@ -1902,8 +2259,10 @@ fn fall(
         }
         .kill(slot);
         scratch.deaths += 1;
-        scratch.count(r.kind, life::DIED);
-        scratch.causes.push((r.kind, Cause::Fell));
+        scratch.add(r.kind, life::DIED, u32::from(r.heads));
+        scratch
+            .causes
+            .push((r.kind, Cause::Fell, u32::from(r.heads)));
     }
 }
 
@@ -1936,6 +2295,8 @@ mod tests {
             flags: 0,
             layer: 0,
             _pad: 0,
+            heads: 1,
+            _pad2: 0,
         };
         assert!(due(5, &row, 8)); // (5 + 3) % 8 == 0
         assert!(!due(6, &row, 8));

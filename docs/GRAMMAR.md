@@ -47,11 +47,12 @@ glyph color cover solid tags cadence sight fuel bite place need max decay vital 
 if else while repeat for each choose let return
 and or not true false nearest best count within as only is free
 idle die become spawn with move dig build drink eat hit graze take give next look signal
+grow split join
 field add harvest drop
 here attacker toward away random at dir north east south west
-min abs sign clamp rand chance dist look_of signal_of pack hi lo
+min abs sign clamp rand chance dist look_of signal_of heads_of pack hi lo
 blocked missed refused
-x y age light hour day kind look signal state hurt hurt_dir result taken trapped
+x y age light hour day kind look signal state hurt hurt_dir result taken trapped heads
 ```
 
 (`look`, `signal`, `kind` and `state` are senses as well as keywords; `place` is refused
@@ -148,6 +149,7 @@ decl = "glyph" STRING
      | "tags" { TAG }
      | "cadence" additive | "sight" additive | "fuel" additive | "food" additive | "bite" additive
      | "reach" additive | "climb" additive "on" IDENT | "layer" IDENT
+     | "group" "max" additive [ "init" additive ]      (2 to 65535 heads; init 1 to max, default 1)
      | "need" IDENT "max" additive [ "decay" INT ] [ "vital" ]
      | "mem" mem_slot { "," mem_slot }        mem_slot = IDENT [ "[" INT "]" ]   (an array: INT slots, 1 to 32)
 TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
@@ -155,7 +157,7 @@ TAG  = IDENT that is not "food", "water", "soil", "rock" or "bare"
 
 - *`glyph`: a string of one printable ASCII character (`!` to `~`). `color`: `"#rrggbb"`,
   six hex digits. Neither in a trait.*
-- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food`, `bite`, `reach`, `climb` and `layer` are given at
+- *`glyph`, `color`, `cover`, `solid`, `cadence`, `sight`, `fuel`, `food`, `bite`, `reach`, `climb`, `layer` and `group` are given at
   most once per body; `tags`, `need` and `mem` repeat, each name once (a mem may not repeat
   a need of the same body).*
 - *`decay` is followed by the INT `0` (points) or `1` (per tick, the default); nothing else.*
@@ -181,7 +183,9 @@ stmt  = "if" cond block [ "else" ( if_stmt | block ) ]
       | "become" IDENT
       | "spawn" IDENT "at" target [ "with" "(" IDENT "=" expr { "," IDENT "=" expr } ")" ]
       | ( "take" | "give" ) target IDENT expr
-      | ( "move" | "drink" | "eat" | "hit" | "graze" | "dig" ) target
+      | ( "move" | "drink" | "eat" | "hit" | "graze" | "dig" | "join" ) target
+      | "split" expr "at" target
+      | "grow" expr
       | "build" IDENT "at" target
       | "look" "=" expr
       | "signal" "=" expr
@@ -210,6 +214,8 @@ arm   = expr ":" ( block | stmt ) [ ";" ]
   `-` or `(`, so this only bites a `choose` weight: separate such an arm with `;`.
 - *`with` names distinct memory slots, at most two.*
 - *`choose` has at least one arm.*
+- *`grow`, `split` and `join` only in the rules or member subs of a kind declared `group`
+  (or a trait that declares it), never in a file sub.*
 
 ## 5. Conditions
 
@@ -245,7 +251,7 @@ primary  = INT | TIME
          | "(" expr ")"
          | "count" pred "within" unary
          | ( "rand" | "chance" ) "(" expr ")"
-         | ( "dist" | "free" | "look_of" | "signal_of" ) "(" target ")"
+         | ( "dist" | "free" | "look_of" | "signal_of" | "heads_of" ) "(" target ")"
          | ( "sum" | "min" | "max" ) IDENT "along" target      (outside a law)
          | "sees" "(" target ")" "over" IDENT [ "eye" unary ]
          | "is" "(" target "," pred ")"

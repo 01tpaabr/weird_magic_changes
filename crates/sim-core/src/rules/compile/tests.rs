@@ -44,6 +44,7 @@ fn run_think_in(
         rng,
         look: 0,
         signal: 0,
+        heads: 1,
     };
     vm::think(k, ctx, mind)
 }
@@ -2369,7 +2370,7 @@ fn a_law_that_leaves_zero_at_zero_is_quiet() {
         "t.rules",
         "field room max 9
          field fade max 255 { every 16 { fade -= (fade + 31) / 32 } }
-         field grow max 9 { every 1h { grow = min(grow + 1, room) } }
+         field crop max 9 { every 1h { crop = min(crop + 1, room) } }
          field life max 1 { every 1 { let n = sum life within 1  if n == 3 { life = 1 } else if n != 4 { life = 0 } } }
          field up max 9 { every 1 { up += 1 } }
          field dice max 9 { every 1 { dice = chance(50) * 0 } }
@@ -2387,7 +2388,7 @@ fn a_law_that_leaves_zero_at_zero_is_quiet() {
         quiet,
         [
             ("fade", true),
-            ("grow", true),
+            ("crop", true),
             ("life", true),
             ("up", false),
             ("dice", false),
@@ -2675,6 +2676,90 @@ fn layers_are_declared_named_and_inherited() {
         .map(|i| format!("layer l{i} "))
         .collect();
     assert!(compile_err(&many).contains("at most 8 layers"));
+}
+
+/// Groups (`group max N [init M]`): inherited like any declaration; a
+/// group's own words (`grow`, `split`, `join`) only in a group's code;
+/// `heads` and `heads_of` anywhere.
+#[test]
+fn groups_are_declared_inherited_and_checked() {
+    let k = compile(
+        "t.rules",
+        "kind herd { group max 500 init 20
+           when heads > 100 and nearest free within 1 as n => split heads / 2 at n
+           when nearest herd within 1 as h and heads_of(h) + heads <= 500 => join h
+           when true => { grow 1  idle } }
+         kind big extends herd { group max 900 }
+         kind calf extends herd { }
+         kind lone { when heads_of(here) == 1 => idle }",
+    )
+    .unwrap();
+    let g = |n: &str| k.by_name(n).unwrap().group;
+    assert_eq!(
+        [g("herd"), g("big"), g("calf"), g("lone")],
+        [(500, 20), (900, 1), (500, 20), (0, 0)]
+    );
+    let d = k.by_name("lone").unwrap();
+    assert_eq!((d.max_heads(), d.start_heads()), (1, 1));
+    assert_ne!(
+        k.hash,
+        compile(
+            "t.rules",
+            "kind herd { group max 501 init 20
+               when heads > 100 and nearest free within 1 as n => split heads / 2 at n
+               when nearest herd within 1 as h and heads_of(h) + heads <= 500 => join h
+               when true => { grow 1  idle } }
+             kind big extends herd { group max 900 }
+             kind calf extends herd { }
+             kind lone { when heads_of(here) == 1 => idle }"
+        )
+        .unwrap()
+        .hash,
+        "a group's max is in the hash"
+    );
+    let errs = [
+        ("kind k { group 5 }", "expected `max`"),
+        ("kind k { group max 1 }", "a group holds 2 to 65535 heads"),
+        (
+            "kind k { group max 70000 }",
+            "a group holds 2 to 65535 heads",
+        ),
+        (
+            "kind k { group max 5 init 6 }",
+            "starts with 1 to its max (5) heads",
+        ),
+        (
+            "kind k { group max 5 init 0 }",
+            "starts with 1 to its max (5) heads",
+        ),
+        ("kind k { cover  group max 5 }", "ground cover and a group"),
+        (
+            "kind k { when true => { grow 1  idle } }",
+            "`grow`: `k` is not a group",
+        ),
+        (
+            "kind k { when true => split 1 at east }",
+            "`split`: `k` is not a group",
+        ),
+        (
+            "kind k { when true => join east }",
+            "`join`: `k` is not a group",
+        ),
+        (
+            "sub s() { grow 1 }  kind k { group max 5  when true => { s()  idle } }",
+            "`grow` inside a sub",
+        ),
+        ("kind k { mem heads }", "reserved"),
+        ("kind k { mem grow }", "reserved"),
+        (
+            "trait a { group max 5 }  trait b { group max 6 }  kind k extends a, b { }",
+            "groups",
+        ),
+    ];
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
 }
 
 /// A layer that rests on a kind (`layer canopy { on tree }`, `docs/WORLD.md`

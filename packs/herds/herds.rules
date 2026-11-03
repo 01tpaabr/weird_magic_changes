@@ -1,0 +1,49 @@
+# herds: groups (docs/RULES.md §12, Groups). A herd is one actor that stands
+# for up to 200 animals (`heads`): it grazes and moves as one, grows when
+# it is well fed, splits in two when it gets big and joins a herd next to
+# it when it gets small. Wolves are single; a wolf's bite takes two
+# animals, and a hungry herd loses one at a time. Many animals, few rows.
+# scenarios/tests/herds.scenario plays it.
+
+field grass max 9 {
+  init 3
+  color "#5fae3a"
+  every 6h { grass = min(grass + 1, 9) }                    # grows back
+}
+
+kind herd {
+  glyph "H"
+  color "#d8c49a"
+  cadence 4
+  sight 12
+  fuel 2048
+  group max 200 init 20
+  food 1h
+  need food max 2d vital
+  need health max 1 decay 0 vital
+
+  when food < 1d and grass(here) > 0 => { add grass -1  food = min(food + 6h / heads, 2d)  idle }   # a share each
+  when heads > 60 and nearest free within 1 as n => split heads / 2 at n
+  when heads < 10 and nearest herd within 1 as h and heads_of(h) + heads <= 200 => join h
+  when food > 1d and chance(1) => {                         # well fed: calves, who share the food
+    let n = max(heads / 20, 1)
+    food = food * heads / (heads + n)
+    grow n
+    idle
+  }
+  when food < 1d and best grass on free within 12 as g => move toward g
+  when true => move random free
+}
+
+kind wolf {
+  glyph "W"
+  color "#a0a0a8"
+  cadence 2
+  sight 24
+  bite 2
+  need food max 2d vital
+
+  when food < 40h and nearest herd within 1 as h => eat h
+  when food < 40h and nearest herd within 24 as h => move toward h
+  when true => move random free
+}
