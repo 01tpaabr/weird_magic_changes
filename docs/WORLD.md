@@ -214,7 +214,7 @@ drifted); rain and a drain (`outside 0`) are the pack's, as a source and a sink.
 
 Built 2026-11-02 (decision 61, `RULES.md` §12 "Layers"), smaller than first drawn: standing
 and cover stay the engine's two layers (0 and 1), and a pack declares more, `layer air {
-flies }`, one `u32` array each per chunk (`ChunkCells::extra`), at most 8. A kind names
+flies }`, one `u32` array each per chunk (`ChunkCells::extra`), at most 6 (decision 61). A kind names
 its layer (`layer air`), a row keeps it in a byte. Each layer has its own occupancy and its
 own claims (`Scratch::layer_claims`: a sorted `(layer, cell, key)` list, the lowest key
 wins), so a flier and a walker never contest a cell; `flies` lets a layer's actors over any

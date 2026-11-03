@@ -447,6 +447,11 @@ fn the_limits_table_is_the_codes() {
             vec![n(sim_core::rules::MAX_LAYERS)],
         ),
         (
+            "players per rule set".into(),
+            // one owner byte a kind, `Players::NONE` for the arena's
+            vec![i64::from(sim_core::rules::Players::NONE) - 1],
+        ),
+        (
             "fields one think adds to".into(),
             vec![n(sim_core::rules::vm::ADDS)],
         ),

@@ -360,7 +360,8 @@ A program that parses compiles only if it also keeps these. Each points at the s
   (§12); a trait's rules and member subs only what the trait and its own parents declare
   (§6).
 - A trait parameter may not share a name with a constant, or with a need or mem of its
-  trait.
+  trait. A need or mem may not share a name with a constant either.
+- `size`, `group`, a layer's `on`, and a material's `glyph` and `color` are given once.
 - Constants and every number in a declaration or an `extends` argument are folded at
   compile time: numbers, constants declared above, trait parameters in scope, arithmetic,
   comparisons and `min max abs sign clamp pack hi lo` (§12).

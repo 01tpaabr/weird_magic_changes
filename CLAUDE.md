@@ -86,7 +86,7 @@ make run ARGS="lab f --set K=1,2,3"         # a scenario's goals for each value 
 make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: its run/expect lines (--threads N);
                                    # `expect always|never|eventually|mean ... from T to T` watch the run,
                                    # `seeds N` + `pass M` (or --seeds/--pass) run it on several seeds
-make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads (make test runs them too)
+make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads, checksums compared (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
 make fuzz       the fuzzers (rules, scenarios, saves, CLI, simulation), FUZZ_CASES each, new seed (printed)

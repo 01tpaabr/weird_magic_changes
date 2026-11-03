@@ -90,7 +90,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `cover` | no | ground cover (grass): lies under whoever stands on the cell, never blocks, never moves; eaten with `graze` |
 | `layer NAME` | standing | the declared layer (§12, Layers) its actors live in, one a cell, apart from who stands there and the cover; not with `cover` |
 | `solid` | no | drawn as a whole cell of its colour, no glyph (a solid cover: the background of whoever stands on it); for pictures and boards. Only the renderer reads it: `wmc show` and the inspector still use the glyph |
-| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set, less one for each layer that rests on a kind; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
+| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set, less one for each layer up to the last that rests on a kind (a resting layer's bit is fixed by its place among the layers); the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
 | `cadence N` | 8 | thinks every N ticks; a power of two |
 | `sight N` | 4 | the largest radius any search reaches, 0 to 64 |
 | `fuel N` | 512 | ops per think, 1 to 32768 |
@@ -250,8 +250,8 @@ the trait a tag (`tags drinker`) and match the tag.
 | `return expr`, `return` | inside a sub: leave it with a value, or with none. The value must start on the `return` line: a `return` with nothing after it on its line returns nothing, and the next line is the next statement or `choose` arm |
 
 A name reads a local first (a `let`, an `as` binding, a sub's parameter), then a need or mem
-slot, then a trait parameter, then a constant. A local may hide a trait parameter or a
-constant, but not a need or mem slot the code can name: `let food = 5` in a kind with `need
+slot, then a trait parameter, then a constant. A need or mem can't be named like a constant (an error).
+A local may hide a trait parameter or a constant, but not a need or mem slot the code can name: `let food = 5` in a kind with `need
 food` is an error, as is a binding or a member sub's parameter of that name.
 
 ```rules error
@@ -323,8 +323,8 @@ Effects combine with the action and don't end the think.
 | `free(t)` | the cell is walkable and nobody stands there; for a kind in a declared layer, nobody is there in its layer (and it is walkable, unless the layer flies) |
 | `is(t, pred)` | the cell matches pred (`is(here, grass)`); `is(here, water)`, `is(here, rock)` ask about the ground and the feature |
 | `look_of(t)`, `signal_of(t)` | the public bytes of whoever stands at t, else of its cover, else of the first declared layer holding someone; 0 for nobody |
-| `heads_of(t)` | how many whoever is at t (as `look_of`) stands for: 1, or a group's heads; 0 for nobody |
-| `fits(t)` | would the reader fit with its top-left cell at t: every cell of its `size` walkable (unless its layer flies) and empty in its layer, or its own (§12, Big actors); `free(t)` for a one-cell kind, and true `here` |
+| `heads_of(t)` | the heads of the group at t, in whatever layer it is (a herd in a canopy over a tree); else how many whoever is at t (as `look_of`) stands for: 1; 0 for nobody |
+| `fits(t)` | would the reader fit with its top-left cell at t: every cell of its `size` walkable (unless its layer flies) and empty in its layer, or its own (§12, Big actors); `free(t)` for a one-cell kind, and true `here`. It costs fuel by its cells, as a search does (W x H / 8) |
 | `dist(t)` | Chebyshev distance to t |
 | `v.dx`, `v.dy` | a bound target's offset |
 
@@ -341,7 +341,8 @@ Searches (`count`, `nearest`, `best`, `for each`) are capped by `sight` and see 
 neighbouring chunks. An unloaded chunk reads as rock with nobody on it, and so does any
 cell out of reach (§11). `nearest` scans
 rings 1 to r (not its own cell), and each ring starts at a random point so a flock doesn't
-all pick the same target.
+all pick the same target. A big actor's `nearest`, `best` and `for each` skip all of its own
+cells; `count` still counts them and `is(t, ...)` still sees them.
 
 ## 11. Targets and predicates
 
@@ -402,7 +403,8 @@ Randomness is drawn per actor per tick from the world seed, so a replay draws th
 from 0 to 7. Past the ends a read is 0 and a write changes nothing, as `x / 0` is 0. The
 index is worked out once, so `route[rand(8)] += 1` adds to the element it read. Slots of an
 array count toward the 32 a kind has; a save and a reload keep each element by name
-(`route[3]`), so a longer array keeps what the shorter one held.
+(`route[3]`), so a longer array keeps what the shorter one held. An array has one length: a kind and
+the traits it extends that declare it must agree.
 
 **Searches.** A `search` explores choices before acting: from a starting **state** (up to 8
 numbers), its `next` block offers the states one step away with `try`, each with a `cost`
@@ -468,7 +470,8 @@ when to_water() as p => move dir(p.via)
   holds at most 32768 states. Each expanded state runs its code, which spends fuel as any
   think does, plus a little per state: give a planner the `fuel` (up to 32768).
 - **Local.** A search reads only what a rule could, within `sight`; it doesn't act, `next`,
-  `return` or call what acts, and a search can't start inside another (the think traps).
+  `return` or call what acts, and a search's `next`, `goal` and `guess` start no search, not even through a call (a
+  compile error).
 - **The same everywhere.** Ties go to the state offered first, so a plan is the same on any
   number of threads.
 
@@ -578,8 +581,9 @@ need walkable cells, as walkers do. `free` means free in the reader's own layer;
 or tag predicate (`nearest crab`, `is(here, gull)`) finds an actor in any layer; from a
 declared layer, `eat` and `hit` reach the one standing under the biter (`here`) as well as
 its neighbours. A kind inherits its parent's layer; ground cover can't be in a declared
-layer. A layer's name is global like a kind's, never `standing` or `cover`; at most 8 a
-rule set. The renderer draws the topmost layer holding someone. A save keeps layers by
+layer. A layer's name is global like a kind's, never `standing` or `cover`; at most 6 a
+rule set, so a chunk holds at most 32768 actors in all its layers (a birth or a move into
+a chunk that full is `BLOCKED`). The renderer draws the topmost layer holding someone. A save keeps layers by
 name; a kind that moved to another layer is refused (restart). `packs/sky` plays it.
 
 **A layer that rests on a kind.** `layer canopy { on tree }` holds its actors only where a
@@ -635,7 +639,8 @@ kind herd {
   wolf can pick the smallest herd in sight.
 - `grow n` (an effect, like `look = v`: several add up) adds `n` heads, at most to the max;
   a negative `n` takes them away, and a group grown to none is gone. Heads gained are births
-  (`born`), heads lost deaths (`died`, its own `die`).
+  (`born`), heads lost deaths (`died`, its own `die`). It comes before the rule's action:
+  `grow 5  join h` joins with the grown count, and a group grown to none does nothing else.
 - `split n at t` and `join t` (§8) move heads between groups of a kind.
 - **Losses take heads.** Each head has the group's `health`: a bite that takes the last of
   it kills one head, and the rest of the bite goes on into the next, at full health, so one
@@ -646,7 +651,8 @@ kind herd {
   is not a group).
 - `grow`, `split` and `join` are a group's: only in a group kind's rules or member subs
   (not a file sub). Ground cover is never a group. A kind inherits its parent's `group`.
-- Scenarios: a group starts with its `init` heads, or `start K at (X, Y) with (heads = N)`;
+- Scenarios: a group starts with its `init` heads (placed, or born of a `spawn`, each head
+  counted `born`), or `start K at (X, Y) with (heads = N)`;
   `count K` counts heads, and `rows K` actors (§14). `observe` counts heads.
 
 `packs/herds` plays it: herds that calve when fed, split at 60 and join under 10, under
@@ -676,8 +682,11 @@ kind mammoth {
   free cell.
 - **Every cell is it.** A sense sees its kind on each of its cells (`nearest mammoth`
   finds the nearest one, `count mammoth within r` counts cells); `eat`, `hit`, `take` and
-  `give` on any of its cells reach it, and `look_of`, `signal_of`, `heads_of` read it.
-  Nobody else enters its cells, and nothing is built on them.
+  `give` on any of its cells reach it, and `look_of`, `signal_of`, `heads_of` read it
+  (a `kind:look` predicate matches only its top-left cell). Nobody else enters its cells, and
+  nothing is built on them. Its own searches skip its cells (§10), and its own `eat`, `hit`,
+  `take` or `give` on one of them is `REFUSED`. Its senses, `reach` and `dist` measure from
+  its top-left cell.
 - Its moves and births are settled after everyone else's, one at a time in key order,
   across chunk borders: a one-cell actor that claimed a cell this tick wins it.
 - A `spawn` of a big kind needs room for all of it. A big actor never `become`s another
@@ -965,7 +974,7 @@ expect became chick == 1
 | `expect rows K OP N` | actors of K alive now, a group as one; `in STATE` as for `count` |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
-| `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
+| `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory (an array's element: `max route[0] of K`) over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
 | `expect min\|max\|sum\|avg FIELD OP V` | a field over every cell of the world: `always sum water == 3276800` holds what a conserved field moves to its total |
 | `expect at (X, Y) K` | someone there, in any layer, is a K; `nobody` for a cell with nobody in any layer; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
@@ -991,13 +1000,14 @@ since the world was made, and it must lie within the `run` lines before its line
 fall at its start, its end and every whole minute between (every 15 ticks), so a condition
 that lasts less than a minute can slip between two; a rate reads its counter at the two
 ends. The report says what it saw: `true at all 121 checks; it was 2`, `false at 3h 15min
-(180); from 150 to 260`, `first true at 1min (0)`, `mean 18.4 over 721 checks`, `24 per
+(180); from 150 to 260`, `first true at 1min (0)`, `mean 18.4 over 721 checks (3 more with none alive)`, `24 per
 day: 2 in 2h`.
 
 **Several seeds.** One seed can be lucky. `seeds N` runs the test on seeds `seed`,
 `seed + 1`, ... (`N` of them, at most 1000), and `pass M` makes it pass when every
 expectation held on at least `M` of them (all, when not given); `wmc scenario --seeds N
---pass M` overrides both. The report gives a line per seed (its verdict, what failed on it,
+--pass M` overrides both (a `pass` above the seeds it runs on is an error, so `pass 7`
+without `seeds` needs `--seeds`). The report gives a line per seed (its verdict, what failed on it,
 its checksum), then how many seeds each expectation held on: `7/8`.
 
 ```scenario
@@ -1122,9 +1132,11 @@ each colony to 60 ants.
 both declare a `path` don't load together. A file that starts `namespace NAME` puts its
 top-level names (kinds, traits, subs, constants, fields, materials, layers) in NAME: inside
 the namespace's files they stay plain, and everywhere else, other packs and scenarios, they
-are `NAME.ITEM`. Tags stay global (they are how packs find each other's actors), and so do
-the words the language reads (`water`, `soil`, `rock`, `food`, `health`, ...): a namespace
-that redeclares `ground water` changes the world's water. A namespace can't be a player's
+are `NAME.ITEM`. Tags stay global (they are how packs find each other's actors). A namespace's
+item can't take a word the language reads (`limit`, `steps`, `size`, `group`, `food`, ...),
+as a player's can't, except a `ground` or `feature` that redeclares the engine's `soil`,
+`water` or `rock`: that one stays global, and a namespace that redeclares `ground water`
+changes the world's water. A file has one `namespace` line. A namespace can't be a player's
 name or any pack's item, and a player's pack declares none (its names are its own already).
 
 ```text
@@ -1278,8 +1290,10 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
     that appears spawns or becomes one; a `start K at` outside the initial region (a note).
 - **Two actions in a row** are a compile error when the compiler can see both: a statement
   that acts on every path, then another action in the same block.
-- **`wmc why [-v] <dir> <x> <y> [ticks [w h seed]]`** steps `ticks`, waits for the actor at
-  (x, y) to think (up to its cadence, at least a day), and prints that think. It shows the
+- **`wmc why [-v] <dir> <x> <y> [time [w h seed]]`** steps `time` (ticks, or `90min`, `2h`,
+  `4d`), waits for the actor at (x, y) to think (up to its cadence; past 65536 ticks, about
+  3 days, it says when that think comes and how many ticks to give it instead), and prints
+  that think. The header shows a group's heads and a big actor's size. It shows the
   actor's needs and memory, and every rule it checked: `FIRED`, `no` (condition false),
   `TRAPPED` (the think trapped in its condition) or blank (not reached); under a `no` whose
   condition has several terms, the one that was false (`false: food < 20h`). Then the decision
@@ -1315,7 +1329,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
   (`31.2 .. 44, median 38`; the median of an even count is the mean of the middle two).
   Runs go every variant's first seed, then every variant's second, and so on. A run stops
   at its first sure failure (an `always` false, a `never` true), and its later lines read
-  `not reached`; and once more of a variant's seeds failed than `pass` allows, its later
+  `not reached` unless already decided (an `eventually` already true, a window closed); and once more of a variant's seeds failed than `pass` allows, its later
   seeds do not run (`2 not run, it could no longer pass`): a hopeless variant costs little
   (a fox goal's lab of 3 variants x 8 seeds: 176 s down to 45 s). `--full` runs every seed
   of every variant to its end. `--seeds` and `--pass` override the scenario's, `--csv
@@ -1328,13 +1342,13 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **`wmc observe <time> [w h seed] --scenario <file>`** makes the scenario's world (on no
   disk; its `run` and `expect` lines are not run), steps it for that time (ticks, or
   `90min`, `2h`, `4d`) and reports how each kind lives and dies: how many are alive over
-  time and the lowest count; births and deaths per day, deaths by cause (`eaten by fox`,
+  time and the lowest count; births and deaths per day, deaths by cause (`killed by fox`,
   `no water`, `own die`) and per head (deaths a day over the mean alive), and per kind and
   cause the same per head in about 8 windows over the run (a rate that only grows is a
   stock filling up); who kills whom
   (`kills a day`: per killer kind, all and per head, and of which kinds); and per kind, its
   typical needs, how many are in each state, what its thinks decide, the rules that fire
-  most (by `file:line`), and how its actions turn out (`BLOCKED 14%`). Decisions and rules
+  most (by `file:line`, `#2` for a second rule on one line), and how its actions turn out (`BLOCKED 14%`). Decisions and rules
   come from dry runs of up to `--sample N` (100) thinks per kind at each sample, as the
   inspector runs them: nothing in the world changes. `--gates` adds, per kind, each rule
   those thinks reached: how many reached it and fired it, and per term of its condition's
@@ -1362,10 +1376,11 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | needs, mem slots per kind | 4, 32 |
 | heads in a group | 65535 |
 | a big actor's size | 16 x 16 cells |
-| tags per rule set | 64, less one for each layer that rests on a kind |
+| tags per rule set | 64, less one for each layer up to the last that rests on a kind |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |
-| declared layers per rule set | 8 (beside standing and cover) |
+| declared layers per rule set | 6 (beside standing and cover) |
+| players per rule set | 254 |
 | fields one think adds to | 4 (a fifth traps) |
 | steps in one law | 128 (one per number, name, operator and aggregate, about) |
 | numbers in a search's state | 8 |

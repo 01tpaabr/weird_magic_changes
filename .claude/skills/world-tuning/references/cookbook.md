@@ -15,7 +15,7 @@ Read `wmc observe`'s per-day table, its kills table and the per-kind blocks, the
 | symptom | observe shows | look at |
 |---|---|---|
 | dies out, of a need | `causes of death: no X`; X low in `needs` | how it refills X: its search radius, its gates (`--gates` on the rules that refill X), the X around it, competitors |
-| dies out, killed | `eaten by K`; K's line in `kills a day` (per head) | the brakes on consumption below |
+| dies out, killed | `killed by K`; K's line in `kills a day` (per head) | the brakes on consumption below |
 | dies out, old | `own die`, few `born` or `became` | its births: `--gates` on its `spawn` or `become` rules names the term that stops them |
 | explodes | births per head far above deaths per head | the density gates on its births |
 | a state empties or floods | `states WORK 100%  REST 0%`; `count K in STATE` | the transition rules' gates; lockstep (everyone switches at once) |
@@ -73,7 +73,7 @@ when nearest fox within 5 as f => move away f
 ```
 Knob: the radius, and the rule's place (above the eating rules, fear wins over hunger). A
 radius past the kind's `sight` is cut to `sight` (the lint warns): raise `sight` with it.
-Watch the prey's `eaten by` share and its `no food` deaths together.
+Watch the prey's `killed by` share and its `no food` deaths together.
 
 ## Births and growth
 
@@ -131,7 +131,7 @@ with `chance(50)` at each think it is left alone (84 thinks a day).
 when health < 4 and hurt == 0 and chance(50) => health += 1
 ```
 Knob: the chance and the cadence (`chance(10)` let the hens graze the meadow down to 15%).
-Watch `expect mean count grass >= K` and grass `eaten by` in observe.
+Watch `expect mean count grass >= K` and grass `killed by` in observe.
 
 ### A resource in the terrain
 

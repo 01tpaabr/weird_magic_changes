@@ -92,7 +92,7 @@ every need full: a kind that should start elsewhere sets it at its first think (
 Every way a need grows stops at its max:
 - `eat`, `hit`, `graze` take `bite` (default 1) from the victim's `health`; `eat` and
   `graze` give the eater `food x taken / max health` of the victim kind's `food`, clamped at
-  the eater's max; at `health` 0 the victim dies (observe: `eaten by K`).
+  the eater's max; at `health` 0 the victim dies (observe: `killed by K`).
 - `take t NEED n` and `give t NEED n` move up to `n`, never past the receiver's max, never
   more than the giver has.
 - A rule's own write (`energy += 1h`) is clamped to `0..max` too.

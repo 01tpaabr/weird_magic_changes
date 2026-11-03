@@ -149,8 +149,8 @@ The tools on worlds that are not ecosystems (this session):
   carries `water` by name, so the young tree starts nearly dry, and a tree's roots also
   reach only 2 cells. Check with `wmc why` on a young tree. Rule of thumb: `become` keeps
   a decaying need's level, so a kind born late in a dry life inherits the drought.
-- **Who kills whom, at a glance.** Same run: hens died 80% `eaten by fox`, 20% `no water`;
-  every bee death was `no food`; grass was 79% `eaten by chicken`, 21% by chicks. Reading
+- **Who kills whom, at a glance.** Same run: hens died 80% `killed by fox`, 20% `no water`;
+  every bee death was `no food`; grass was 79% `killed by chicken`, 21% by chicks. Reading
   the causes first would have saved the earlier sessions most of their guessing.
 - **A first lab.** Bee goals on a 192x192 world for a day, 4 seeds, 3 to pass (`mean count
   bee >= 15 from 12h`, `mean born bee per day >= 20`, `mean died bee of food per day <=
