@@ -336,10 +336,11 @@ fn cause_name(kinds: &Kinds, kind: u16, c: Cause) -> String {
                 .map_or("?", |n| n.name.as_str())
         ),
         Cause::Died => "own die".into(),
+        Cause::Fell => "fell".into(),
     }
 }
 
-/// The CSV name of a cause: `killed.fox`, `starved.water`, `died`.
+/// The CSV name of a cause: `killed.fox`, `starved.water`, `died`, `fell`.
 fn cause_key(kinds: &Kinds, kind: u16, c: Cause) -> String {
     match c {
         Cause::Killed(by) => format!(
@@ -358,6 +359,7 @@ fn cause_key(kinds: &Kinds, kind: u16, c: Cause) -> String {
                 .map_or("?", |n| n.name.as_str())
         ),
         Cause::Died => "died".into(),
+        Cause::Fell => "fell".into(),
     }
 }
 

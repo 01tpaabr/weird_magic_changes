@@ -1,0 +1,45 @@
+# forest: a layer that rests on a kind (docs/RULES.md §12, Layers). Monkeys
+# live in the canopy, which is only where a tree stands: they share the
+# tree's cell, move from tree to tree (`free` to a monkey is a tree with an
+# empty canopy) and have their young in the next tree. Woodcutters fell the
+# trees for food; a monkey in a tree when it falls falls with it. Monkeys
+# keep away from a woodcutter next to their tree; trees reseed the
+# clearings. scenarios/tests/forest.scenario plays it.
+
+layer canopy { on tree }
+
+kind tree {
+  glyph "T"
+  color "#2f7d32"
+  cadence 16
+  food 6h
+  need health max 1 decay 0 vital                          # one blow fells it
+
+  when chance(2) and count tree within 2 < 6 and nearest free within 2 as n => spawn tree at n
+  when true => idle
+}
+
+kind woodcutter {
+  glyph "w"
+  color "#b07a3c"
+  cadence 4
+  sight 16
+  need food max 2d vital
+
+  when food < 40h and nearest tree within 1 as t => eat t
+  when food < 40h and nearest tree within 16 as t => move toward t
+  when true => move random free
+}
+
+kind monkey {
+  glyph "m"
+  color "#8a5a2b"
+  layer canopy
+  cadence 4
+  sight 6
+
+  when nearest woodcutter within 2 as w => move random free     # away, if a tree is free
+  when chance(1) and count monkey within 3 < 3 and nearest free within 1 as n => spawn monkey at n
+  when chance(20) => move random free
+  when true => idle
+}

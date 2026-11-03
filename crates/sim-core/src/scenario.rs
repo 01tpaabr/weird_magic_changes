@@ -36,11 +36,12 @@
 
 use std::fmt;
 
+use crate::rules::vm::Rest;
 use crate::rules::{Diagnostic, Kinds, Level};
 use crate::stage::worldgen::{GenParams, Terrain};
 use crate::stage::{
-    CHUNK_CELLS, CHUNK_SIZE, ChunkCoord, Feature, Ground, MaterialTable, Pos, WORLD_EXTENT,
-    cell_u16,
+    ActorId, CHUNK_CELLS, CHUNK_SIZE, ChunkCoord, Feature, Ground, MaterialTable, Pos,
+    WORLD_EXTENT, cell_u16,
 };
 
 mod checks;
@@ -118,13 +119,15 @@ impl fmt::Display for Region {
 /// Where a kind starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Start {
-    /// `start K n / d [in (x0, y0) to (x1, y1)]`: this share of walkable
-    /// cells, everywhere or in the region.
+    /// `start K n / d [on K2] [in (x0, y0) to (x1, y1)]`: this share of
+    /// walkable cells, everywhere or in the region; with `on`, of the
+    /// cells where a `K2` starts (a second draw, a layer above it).
     Share {
         kind: String,
         num: u32,
         den: u32,
         region: Option<Region>,
+        on: Option<String>,
     },
     /// `start K at (x, y) [with (name = v, ...)]`: exactly there, newborn
     /// but for the needs and memory `with` sets.
@@ -140,14 +143,21 @@ pub enum Start {
 /// share that holds it, and the cell. A share with no region holds every
 /// cell; the most the shares on one cell add up to is reached on a cell
 /// whose x is some region's left edge and y some region's top (or anywhere,
-/// with no regions), so those are the cells to try.
+/// with no regions), so those are the cells to try. The shares with `on`
+/// are a second draw: they add up among themselves.
 pub fn share_peak(starts: &[Start]) -> Option<(usize, i32, i32)> {
+    share_peak_of(starts, false).or_else(|| share_peak_of(starts, true))
+}
+
+fn share_peak_of(starts: &[Start], stacked: bool) -> Option<(usize, i32, i32)> {
     let shares: Vec<(usize, u64, Option<Region>)> = starts
         .iter()
         .enumerate()
         .filter_map(|(i, s)| match s {
-            Start::Share { region, .. } => Some((i, u64::from(s.share()), *region)),
-            Start::At { .. } => None,
+            Start::Share { region, on, .. } if on.is_some() == stacked => {
+                Some((i, u64::from(s.share()), *region))
+            }
+            Start::Share { .. } | Start::At { .. } => None,
         })
         .collect();
     let everywhere: u64 = shares.iter().filter(|s| s.2.is_none()).map(|s| s.1).sum();
@@ -219,8 +229,12 @@ impl fmt::Display for Start {
                 num,
                 den,
                 region,
+                on,
             } => {
                 write!(f, "start {kind} {num} / {den}")?;
+                if let Some(on) = on {
+                    write!(f, " on {on}")?;
+                }
                 match region {
                     Some(r) => write!(f, " {r}"),
                     None => Ok(()),
@@ -1045,7 +1059,7 @@ impl Scenario {
     /// against the rules ([`Placement::resolve`]).
     pub fn parse(file: &str, text: &str) -> Result<Scenario, ScenarioError> {
         let mut s = Scenario::default();
-        let mut total = 0u64;
+        let mut total = [0u64; 2];
         let mut regions = 0usize;
         let mut seed_line: Option<u32> = None;
         let mut size_line: Option<u32> = None;
@@ -1227,14 +1241,22 @@ impl Scenario {
                         });
                         s.start_lines.push(line_no);
                     } else {
-                        // `N / D`, then maybe `in (X0, Y0) to (X1, Y1)`.
-                        let (share, region) = match tail.split_once(" in") {
+                        // `N / D`, maybe `on KIND`, then maybe `in (X0, Y0)
+                        // to (X1, Y1)`.
+                        // The region starts at the first ` in` past the
+                        // kind an `on` names (which may begin with "in").
+                        let from = tail.find(" on ").map_or(0, |j| {
+                            let name = tail[j + 4..].trim_start();
+                            tail.len() - name.len() + name.find(' ').unwrap_or(name.len())
+                        });
+                        let cut = tail[from..].find(" in").map(|i| i + from);
+                        let (share, region) = match cut.map(|i| tail.split_at(i)) {
                             None => (tail.as_str(), None),
                             Some((share, region)) => {
                                 const FORM: &str =
                                     "expected `start KIND N / D in (X0, Y0) to (X1, Y1)`";
                                 let (x0, y0, after) =
-                                    xy(region).ok_or_else(|| err(line_no, FORM.into()))?;
+                                    xy(&region[3..]).ok_or_else(|| err(line_no, FORM.into()))?;
                                 let (x1, y1, after) = after
                                     .trim_start()
                                     .strip_prefix("to")
@@ -1246,6 +1268,22 @@ impl Scenario {
                                 let r = Region { x0, y0, x1, y1 };
                                 r.check().map_err(|m| err(line_no, m))?;
                                 (share, Some(r))
+                            }
+                        };
+                        let on_at = share
+                            .split_once(" on ")
+                            .or_else(|| share.trim_end().strip_suffix(" on").map(|s| (s, "")));
+                        let (share, on) = match on_at {
+                            None => (share, None),
+                            Some((share, on)) => {
+                                let on = on.trim();
+                                if on.is_empty() || on.contains(char::is_whitespace) {
+                                    return Err(err(
+                                        line_no,
+                                        "expected `start KIND N / D on KIND`".into(),
+                                    ));
+                                }
+                                (share, Some(on.to_string()))
                             }
                         };
                         let parts: Vec<&str> = share.split('/').map(str::trim).collect();
@@ -1260,7 +1298,7 @@ impl Scenario {
                             return Err(err(line_no, "a share is N / D with 0 < N <= D".into()));
                         }
                         if s.starts.iter().any(|o| {
-                            matches!(o, Start::Share { kind: k, region: r, .. } if k == kind && *r == region)
+                            matches!(o, Start::Share { kind: k, region: r, on: w, .. } if k == kind && *r == region && *w == on)
                         }) {
                             return Err(err(
                                 line_no,
@@ -1279,11 +1317,13 @@ impl Scenario {
                                 ));
                             }
                         }
+                        let stacked = on.is_some();
                         let start = Start::Share {
                             kind: kind.to_string(),
                             num,
                             den,
                             region,
+                            on,
                         };
                         if start.share() == 0 {
                             return Err(err(
@@ -1293,12 +1333,13 @@ impl Scenario {
                                 ),
                             ));
                         }
-                        // Shares everywhere: the sum so far. With regions, the
+                        // Shares everywhere: the sum so far (those with `on`
+                        // apart, a draw of their own). With regions, the
                         // cells where they overlap, once all are read.
                         if region.is_none() {
-                            total += u64::from(start.share());
+                            total[usize::from(stacked)] += u64::from(start.share());
                         }
-                        if total > u64::from(PLACE_ONE) {
+                        if total[usize::from(stacked)] > u64::from(PLACE_ONE) {
                             return Err(err(line_no, "the shares add up to more than 1".into()));
                         }
                         s.starts.push(start);
@@ -1753,6 +1794,14 @@ pub struct Placement {
     /// draw is below a bound, and not below the previous one, starts that
     /// kind. Empty when a share has a region.
     bounds: Vec<(u32, Option<Placed>)>,
+    /// The shares with `on`, a second draw at a cell where someone starts
+    /// standing: those whose region holds the cell cut the draw's range in
+    /// this order, and a draw in one starts that kind above the one
+    /// standing if it is the `on` kind (`.3`) and holds up the kind's
+    /// layer (`.4`).
+    stacked: Vec<(u32, Option<Region>, Option<Placed>, Rest, Rest)>,
+    /// Each kind's tag bits, for a layer that rests on a tag.
+    tags: Vec<u64>,
     /// Sorted by chunk `(y, x)`, then cell.
     explicit: Vec<Explicit>,
     /// The rules' materials: which cells are walkable.
@@ -1797,6 +1846,7 @@ impl Placement {
         let mut missing: Vec<&str> = Vec::new();
         let mut first_missing = None;
         let mut shares: Vec<(u32, Option<Region>, Option<Placed>)> = Vec::new();
+        let mut stacked = Vec::new();
         // Each with its index in `starts`, for the error.
         let mut explicit: Vec<(Explicit, usize)> = Vec::new();
         for (at, s) in starts.iter().enumerate() {
@@ -1806,8 +1856,12 @@ impl Placement {
             };
             let Some(def) = kinds.by_name(s.kind()) else {
                 if saved {
-                    if let Start::Share { region, .. } = s {
-                        shares.push((s.share(), *region, None));
+                    if let Start::Share { region, on, .. } = s {
+                        if on.is_some() {
+                            stacked.push((s.share(), *region, None, Rest::Any, Rest::Any));
+                        } else {
+                            shares.push((s.share(), *region, None));
+                        }
                     }
                     continue;
                 }
@@ -1825,11 +1879,54 @@ impl Placement {
                 layer: def.layer,
             };
             match s {
-                Start::Share { kind, region, .. } => {
+                Start::Share {
+                    kind,
+                    num,
+                    den,
+                    region,
+                    on,
+                } => {
                     if let Some(r) = region {
                         r.check().map_err(|m| err(format!("`{kind}` {r}: {m}")))?;
                     }
-                    shares.push((s.share(), *region, Some(placed)));
+                    let rest = kinds.rest(def.layer);
+                    let Some(on) = on else {
+                        if let Some(l) = kinds.layers.get(usize::from(def.layer).wrapping_sub(2))
+                            && rest != Rest::Any
+                        {
+                            return Err(err(format!(
+                                "`{kind}` lives in `{}`, which rests on a kind: start it `on` one, as `start {kind} {num} / {den} on KIND`",
+                                l.name
+                            )));
+                        }
+                        shares.push((s.share(), *region, Some(placed)));
+                        continue;
+                    };
+                    if def.layer == 0 {
+                        return Err(err(format!(
+                            "`{kind}` stands: a share `on` a kind is for one above it (cover or a declared layer)"
+                        )));
+                    }
+                    let gate = match kinds.by_name(on) {
+                        Some(g) if g.layer == 0 => g,
+                        Some(_) => {
+                            return Err(err(format!(
+                                "`{on}` does not stand (it lives in another layer): `on` names a kind that stands"
+                            )));
+                        }
+                        None if saved => {
+                            stacked.push((s.share(), *region, None, Rest::Any, Rest::Any));
+                            continue;
+                        }
+                        None => return Err(err(format!("`on {on}`: no kind `{on}`"))),
+                    };
+                    if !rest.holds(ActorId::pack(gate.id, 0), &kinds.tag_bits) {
+                        return Err(err(format!(
+                            "`{kind}`'s layer does not rest on `{on}`: none could start there"
+                        )));
+                    }
+                    let gate = Rest::of(i32::from(gate.id), &kinds.family_end);
+                    stacked.push((s.share(), *region, Some(placed), gate, rest));
                 }
                 Start::At { kind, x, y, with } => {
                     in_world(*x, *y).map_err(|m| err(format!("`{kind}` at {m}")))?;
@@ -1943,6 +2040,31 @@ impl Placement {
                 msg: format!("two starts at ({}, {})", p.x, p.y),
             });
         }
+        // A start in a layer that rests on a kind: over one, started there.
+        for (i, (e, at)) in explicit.iter().enumerate() {
+            let rest = kinds.rest(e.placed.layer);
+            if rest == Rest::Any {
+                continue;
+            }
+            let under = explicit[..i]
+                .iter()
+                .rev()
+                .take_while(|(o, _)| (o.chunk, o.cell) == (e.chunk, e.cell))
+                .find(|(o, _)| o.placed.layer == 0);
+            if !under
+                .is_some_and(|(o, _)| rest.holds(ActorId::pack(o.placed.kind, 0), &kinds.tag_bits))
+            {
+                let p = e.chunk.cell(usize::from(e.cell));
+                let def = kinds.def(e.placed.kind);
+                return Err(StartError {
+                    start: Some(*at),
+                    msg: format!(
+                        "`{}` at ({}, {}): its layer rests on a kind, and none starts there",
+                        def.name, p.x, p.y
+                    ),
+                });
+            }
+        }
         let explicit = explicit.into_iter().map(|(e, _)| e).collect();
         let mut bounds = Vec::new();
         if shares.iter().all(|s| s.1.is_none()) {
@@ -1956,6 +2078,8 @@ impl Placement {
         Ok(Placement {
             shares,
             bounds,
+            stacked,
+            tags: kinds.tag_bits.clone(),
             explicit,
             table: kinds.materials.table,
             layers: kinds.layers.len(),
@@ -1985,6 +2109,30 @@ impl Placement {
             }
         }
         None
+    }
+
+    /// What the shares with `on` start above the one standing on `(x, y)`
+    /// (`occupant`), whose second draw is `u`.
+    #[inline]
+    pub fn stacked(&self, u: u32, x: i32, y: i32, occupant: ActorId) -> Option<Placed> {
+        let mut upto = 0u32;
+        for &(share, region, placed, gate, rest) in &self.stacked {
+            if region.is_some_and(|r| !r.contains(x, y)) {
+                continue;
+            }
+            upto += share;
+            if u < upto {
+                return placed.filter(|_| {
+                    gate.holds(occupant, &self.tags) && rest.holds(occupant, &self.tags)
+                });
+            }
+        }
+        None
+    }
+
+    /// Any shares with `on`?
+    pub fn has_stacked(&self) -> bool {
+        self.stacked.iter().any(|s| s.2.is_some())
     }
 
     /// Any shares that place a kind?
@@ -2038,6 +2186,7 @@ mod tests {
             num,
             den,
             region: None,
+            on: None,
         };
         assert_eq!(
             s.starts,
@@ -2744,6 +2893,7 @@ legend {
                 num: 1,
                 den: 4,
                 region: r(64, 16, 95, 47),
+                on: None,
             }
         );
         // Printed as written, and that parses back the same.
@@ -2787,6 +2937,173 @@ legend {
         assert!(!pl.has_shares_in(ChunkCoord::new(0, 0)));
         assert!(!pl.has_shares_in(ChunkCoord::new(1, 1)));
         assert!(!pl.has_shares_in(ChunkCoord::new(-1, 0)));
+    }
+
+    /// `start K n / d on T`: a second draw, among the cells where a `T`
+    /// starts standing, for a kind in a layer above; a kind in a layer that
+    /// rests on a kind must start so (or `at` a cell where its support
+    /// starts). The shares with `on` add up among themselves.
+    #[test]
+    fn shares_on_a_kind_start_above_it() {
+        let text = "start tree 1 / 2\n\
+                    start rock_kind 1 / 2\n\
+                    start monkey 3 / 4 on tree\n\
+                    start owl 1 / 4 on rock_kind in (0, 0) to (63, 63)";
+        let sc = Scenario::parse("t", text).unwrap();
+        assert_eq!(
+            sc.starts[3],
+            Start::Share {
+                kind: "owl".into(),
+                num: 1,
+                den: 4,
+                region: Some(Region {
+                    x0: 0,
+                    y0: 0,
+                    x1: 63,
+                    y1: 63
+                }),
+                on: Some("rock_kind".into()),
+            }
+        );
+        let printed: Vec<String> = sc.starts.iter().map(ToString::to_string).collect();
+        assert_eq!(printed[2], "start monkey 3 / 4 on tree");
+        assert_eq!(
+            Scenario::parse("t", &printed.join("\n")).unwrap().starts,
+            sc.starts
+        );
+        let k = crate::rules::compile(
+            "t.rules",
+            "layer canopy { on tree }  layer sky { flies }
+             kind tree { }  kind oak extends tree { }  kind rock_kind { }
+             kind monkey { layer canopy }  kind owl { layer sky }  kind moss { cover }",
+        )
+        .unwrap();
+        let id = |n: &str| k.by_name(n).unwrap().id;
+        let p = GenParams::default();
+        let t = noise(7, &p);
+        let pl = Placement::resolve(&sc.starts, &k, &t).unwrap();
+        let on = |n: &str| ActorId::pack(id(n), 0);
+        let monkey = Some(Placed {
+            kind: id("monkey"),
+            layer: 2,
+        });
+        let owl = Some(Placed {
+            kind: id("owl"),
+            layer: 3,
+        });
+        let quarter = PLACE_ONE / 4;
+        assert_eq!(pl.stacked(0, 5, 5, on("tree")), monkey);
+        assert_eq!(pl.stacked(0, 5, 5, on("oak")), monkey, "the family");
+        assert_eq!(pl.stacked(0, 5, 5, on("rock_kind")), None, "not on a tree");
+        assert_eq!(pl.stacked(0, 5, 5, ActorId::NONE), None);
+        assert_eq!(pl.stacked(3 * quarter, 5, 5, on("rock_kind")), owl);
+        assert_eq!(
+            pl.stacked(3 * quarter, 99, 5, on("rock_kind")),
+            None,
+            "its region"
+        );
+        assert!(pl.has_stacked());
+        // Worldgen: every monkey and owl over its kind, and some of both.
+        let mut data = crate::stage::ChunkData::default();
+        let (mut monkeys, mut owls) = (0, 0);
+        for c in [ChunkCoord::new(0, 0), ChunkCoord::new(1, 0)] {
+            crate::stage::worldgen::generate_chunk(&t, &pl, c, &mut data);
+            for r in &data.actors.rows {
+                let under = data.cells.occupant[usize::from(r.cell)]
+                    .unpack()
+                    .map(|u| u.0);
+                if r.kind == id("monkey") {
+                    monkeys += 1;
+                    assert_eq!(under, Some(id("tree")));
+                    assert_eq!(r.layer, 2);
+                } else if r.kind == id("owl") {
+                    owls += 1;
+                    assert_eq!(under, Some(id("rock_kind")));
+                    assert_eq!(c, ChunkCoord::new(0, 0), "owls in their region only");
+                }
+            }
+            crate::actors::validate(&data.cells, &data.actors.rows, &data.minds.rows, k.len())
+                .unwrap();
+        }
+        assert!(
+            monkeys > 300 && owls > 100,
+            "{monkeys} monkeys, {owls} owls"
+        );
+        let errs = [
+            (
+                "start monkey 1 / 2",
+                "`monkey` lives in `canopy`, which rests on a kind",
+            ),
+            ("start tree 1 / 2 on rock_kind", "`tree` stands"),
+            ("start owl 1 / 2 on monkey", "`monkey` does not stand"),
+            ("start owl 1 / 2 on moss", "`moss` does not stand"),
+            (
+                "start monkey 1 / 2 on rock_kind",
+                "does not rest on `rock_kind`",
+            ),
+            ("start monkey 1 / 2 on nobody", "no kind `nobody`"),
+            ("start monkey at (3, 3)", "none starts there"),
+            (
+                "start rock_kind at (3, 3)\nstart monkey at (3, 3)",
+                "none starts there",
+            ),
+        ];
+        let dry = (0..CHUNK_CELLS)
+            .map(|i| ChunkCoord::new(0, 0).cell(i))
+            .find(|q| {
+                let (g, f) = gen_cell(7, &p, q.x, q.y);
+                g.walkable() && !f.blocks()
+            })
+            .unwrap();
+        for (text, want) in errs {
+            let text = text.replace("(3, 3)", &format!("({}, {})", dry.x, dry.y));
+            let e = Placement::resolve(&Scenario::parse("t", &text).unwrap().starts, &k, &t)
+                .unwrap_err();
+            assert!(e.msg.contains(want), "{text}\n  got: {}", e.msg);
+        }
+        let both = format!(
+            "start oak at ({x}, {y})\nstart monkey at ({x}, {y})",
+            x = dry.x,
+            y = dry.y
+        );
+        let pl = Placement::resolve(&Scenario::parse("t", &both).unwrap().starts, &k, &t).unwrap();
+        assert_eq!(pl.explicit_in(ChunkCoord::new(0, 0)).len(), 2);
+        // Parse: the stacked shares add up among themselves.
+        for (text, want) in [
+            (
+                "start a 1 / 2 on t\nstart b 3 / 4 on u",
+                "t:2: the shares add up to more than 1",
+            ),
+            ("start a 1 / 2 on", "expected `start KIND N / D on KIND`"),
+            (
+                "start a 1 / 2 on t u",
+                "expected `start KIND N / D on KIND`",
+            ),
+            (
+                "start a 1 / 2 on t\nstart a 1 / 4 on t",
+                "two shares for `a`",
+            ),
+        ] {
+            let e = Scenario::parse("t", text).unwrap_err().to_string();
+            assert!(e.contains(want), "{text}\n  got: {e}");
+        }
+        assert!(
+            Scenario::parse(
+                "t",
+                "start a 3 / 4\nstart b 3 / 4 on a\nstart inkfish 1 / 8 on a"
+            )
+            .is_ok()
+        );
+        let e = Scenario::parse(
+            "t",
+            "start a 1 / 2 on t in (0, 0) to (9, 9)\nstart b 3 / 4 on u",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            e.contains("t:2: the shares at (0, 0) add up to more than 1"),
+            "{e}"
+        );
     }
 
     #[test]
@@ -2868,6 +3185,7 @@ legend {
                         num: 1 + below(4),
                         den: 8,
                         region: (below(5) > 0).then_some(Region { x0, y0, x1, y1 }),
+                        on: None,
                     }
                 })
                 .collect();

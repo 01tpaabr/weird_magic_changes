@@ -265,7 +265,7 @@ fn top_names(items: &Items) -> impl Iterator<Item = (&str, &Pos)> {
         .chain(items.consts.iter().map(|c| (c.name.as_str(), &c.at)))
         .chain(items.fields.iter().map(|f| (f.name.as_str(), &f.at)))
         .chain(items.materials.iter().map(|m| (m.name.as_str(), &m.at)))
-        .chain(items.layers.iter().map(|(l, at)| (l.name.as_str(), at)))
+        .chain(items.layers.iter().map(|(l, at, _)| (l.name.as_str(), at)))
 }
 
 /// Namespaces (`docs/RULES.md` §15): an arena file that starts `namespace
@@ -401,7 +401,7 @@ fn player_names(player: &str, own: &Items, arena: &Items) -> Result<Vec<String>>
             ),
         ));
     }
-    if let Some((l, at)) = own.layers.first() {
+    if let Some((l, at, _)) = own.layers.first() {
         return Err(pos_err(
             at,
             format!(
@@ -435,7 +435,7 @@ fn player_names(player: &str, own: &Items, arena: &Items) -> Result<Vec<String>>
     arena_names.extend(arena.consts.iter().map(|c| c.name.as_str()));
     arena_names.extend(arena.fields.iter().map(|f| f.name.as_str()));
     arena_names.extend(arena.materials.iter().map(|m| m.name.as_str()));
-    arena_names.extend(arena.layers.iter().map(|(l, _)| l.name.as_str()));
+    arena_names.extend(arena.layers.iter().map(|(l, ..)| l.name.as_str()));
     let declared = own
         .items
         .iter()
@@ -873,8 +873,10 @@ struct Items {
     consts: Vec<ConstAst>,
     fields: Vec<FieldAst>,
     materials: Vec<MaterialAst>,
-    /// `layer NAME { flies }`: declared layers, with where.
-    layers: Vec<(LayerDef, Pos)>,
+    /// `layer NAME { flies  on KIND }`: declared layers, with where, and the
+    /// kind or tag each rests on as written (`LayerDef::on` is resolved
+    /// once kinds are numbered).
+    layers: Vec<(LayerDef, Pos, Option<(String, Pos)>)>,
     /// `budget { fuel N  rows N  private N }`: the arena's room for players.
     budgets: Vec<BudgetAst>,
 }
@@ -1637,19 +1639,27 @@ impl Parser<'_> {
                 items.materials.push(self.material()?);
             } else if self.eat_kw("layer") {
                 let (name, at) = self.ident("layer name")?;
-                let mut flies = false;
+                let (mut flies, mut on) = (false, None);
                 if self.eat_sym("{") {
                     while !self.eat_sym("}") {
-                        if !self.eat_kw("flies") {
+                        if self.eat_kw("flies") {
+                            flies = true;
+                        } else if self.eat_kw("on") {
+                            on = Some(self.ident("kind or tag")?);
+                        } else {
                             return Err(self.err(format!(
-                                "expected `flies` or `}}` in a layer, found {}",
+                                "expected `flies`, `on` or `}}` in a layer, found {}",
                                 self.describe()
                             )));
                         }
-                        flies = true;
                     }
                 }
-                items.layers.push((LayerDef { name, flies }, at));
+                let def = LayerDef {
+                    name,
+                    flies,
+                    on: None,
+                };
+                items.layers.push((def, at, on));
             } else if self.is_kw("budget") {
                 let at = self.pos();
                 self.bump();
@@ -3537,7 +3547,9 @@ struct Gen<'a> {
     materials_ast: &'a [MaterialAst],
     materials: Materials,
     /// The `layer` declarations.
-    items_ast_layers: &'a [(LayerDef, Pos)],
+    items_ast_layers: &'a [(LayerDef, Pos, Option<(String, Pos)>)],
+    /// What each declared layer rests on, resolved (`LayerDef::on`).
+    layer_on: Vec<Option<i32>>,
     /// Per kind named by a `spawn ... with`: the memory slots those spawns
     /// set, in first-appearance order (at most two), each with where it
     /// was first named. They take the kind's first slots, which is where
@@ -3678,6 +3690,7 @@ impl<'a> Gen<'a> {
             materials_ast: &items.materials,
             materials: Materials::default(),
             items_ast_layers: &items.layers,
+            layer_on: Vec::new(),
             const_vals: Vec::new(),
             insts: Vec::new(),
             kind_insts: Vec::new(),
@@ -3753,15 +3766,63 @@ impl<'a> Gen<'a> {
             .collect()
     }
 
+    /// What each layer rests on (`layer NAME { on KIND }`): a kind or a tag,
+    /// once the kinds are numbered. Whether the kind stands is checked with
+    /// the kind table ([`Gen::check_rests`]).
+    fn resolve_rests(&mut self) -> Result<()> {
+        let mut out = Vec::with_capacity(self.items_ast_layers.len());
+        for (_, _, on) in self.items_ast_layers {
+            out.push(match on {
+                None => None,
+                Some((name, at)) => {
+                    let p = self.named_pred(name, false, at)?;
+                    if p < 0 {
+                        return Err(self.err(
+                            at,
+                            format!(
+                                "`on {name}`: a layer rests on a kind or a tag, not a material"
+                            ),
+                        ));
+                    }
+                    Some(p)
+                }
+            });
+        }
+        self.layer_on = out;
+        Ok(())
+    }
+
+    /// A layer rests on one that stands: not on ground cover, nor on a
+    /// kind in a declared layer.
+    fn check_rests(&self, defs: &[KindDef]) -> Result<()> {
+        for ((l, _, on), p) in self.items_ast_layers.iter().zip(&self.layer_on) {
+            let (Some((name, at)), Some(p)) = (on, p) else {
+                continue;
+            };
+            if let Some(d) = usize::try_from(*p).ok().and_then(|k| defs.get(k))
+                && d.layer != 0
+            {
+                return Err(self.err(
+                    at,
+                    format!(
+                        "layer `{}` rests on `{name}`, which does not stand (it lives in another layer)",
+                        l.name
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Layers: global names like a kind's; at most [`MAX_LAYERS`].
     fn resolve_layers(&self) -> Result<()> {
-        if let Some((_, at)) = self.items_ast_layers.get(MAX_LAYERS) {
+        if let Some((_, at, _)) = self.items_ast_layers.get(MAX_LAYERS) {
             return Err(self.err(at, format!("at most {MAX_LAYERS} layers in a rule set")));
         }
-        for (i, (l, at)) in self.items_ast_layers.iter().enumerate() {
+        for (i, (l, at, _)) in self.items_ast_layers.iter().enumerate() {
             let taken = self.items_ast_layers[..i]
                 .iter()
-                .any(|(o, _)| o.name == l.name)
+                .any(|(o, ..)| o.name == l.name)
                 || self.item_named(&l.name).is_some()
                 || self.subs.iter().any(|s| s.name == l.name)
                 || self.tags.contains(&l.name)
@@ -4189,10 +4250,22 @@ impl<'a> Gen<'a> {
                     ));
                 }
                 if !self.tags.contains(t) {
-                    if self.tags.len() == MAX_TAGS {
-                        return Err(
-                            self.err(&it.at, format!("at most {MAX_TAGS} tags in a rule set"))
-                        );
+                    // A layer that rests on a kind takes a tag bit of its own.
+                    let resting = self
+                        .items_ast_layers
+                        .iter()
+                        .filter(|l| l.2.is_some())
+                        .count();
+                    if self.tags.len() == MAX_TAGS - resting {
+                        let why = if resting > 0 {
+                            format!(" ({MAX_TAGS}, less one for each layer that rests on a kind)")
+                        } else {
+                            String::new()
+                        };
+                        return Err(self.err(
+                            &it.at,
+                            format!("at most {} tags in a rule set{why}", MAX_TAGS - resting),
+                        ));
                     }
                     self.tags.push(t.clone());
                 }
@@ -4274,6 +4347,7 @@ impl<'a> Gen<'a> {
         }
         self.number_kinds();
         self.resolve_laws()?;
+        self.resolve_rests()?;
         // The sub table: file subs, then each kind's member subs.
         let mut next_sub = self.subs.len();
         let mut sub_names: Vec<String> = self.subs.iter().map(|s| s.name.clone()).collect();
@@ -4342,6 +4416,7 @@ impl<'a> Gen<'a> {
                     .collect()
             })
             .collect();
+        self.check_rests(&defs)?;
         let players = self.players(&mut defs);
         let kinds = Kinds::from_parts(defs, code, std::mem::take(&mut self.pool), sub_entries)
             .with_fields(std::mem::take(&mut self.field_defs))
@@ -4349,7 +4424,8 @@ impl<'a> Gen<'a> {
             .with_layers(
                 self.items_ast_layers
                     .iter()
-                    .map(|(l, _)| l.clone())
+                    .zip(&self.layer_on)
+                    .map(|((l, ..), &on)| LayerDef { on, ..l.clone() })
                     .collect(),
             )
             .with_players(players);
@@ -4649,7 +4725,7 @@ impl<'a> Gen<'a> {
                 let i = self
                     .items_ast_layers
                     .iter()
-                    .position(|(l, _)| l.name == *name);
+                    .position(|(l, ..)| l.name == *name);
                 let i = i.ok_or_else(|| {
                     self.err(
                         at,

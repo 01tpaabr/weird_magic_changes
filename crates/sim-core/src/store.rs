@@ -240,14 +240,15 @@ impl Store {
             let kind = r.str()?;
             starts.push(match tag {
                 // 3: a share with a region (still format 9: saves without
-                // one read as before).
-                0 | 3 => {
+                // one read as before); 4: a share `on` a kind, then whether
+                // it has a region (still format 14).
+                0 | 3 | 4 => {
                     // What `Scenario::parse` refuses: `share()` divides by `den`.
                     let (num, den) = (r.u32()?, r.u32()?);
                     if num == 0 || den == 0 || num > den {
                         return Err(bad(format!("share {num} / {den} for `{kind}`")));
                     }
-                    let region = if tag == 3 {
+                    let region = if tag == 3 || (tag == 4 && r.u8()? != 0) {
                         let (x0, y0, x1, y1) = (r.i32()?, r.i32()?, r.i32()?, r.i32()?);
                         let region = Region { x0, y0, x1, y1 };
                         region
@@ -257,11 +258,13 @@ impl Store {
                     } else {
                         None
                     };
+                    let on = if tag == 4 { Some(r.str()?) } else { None };
                     Start::Share {
                         kind,
                         num,
                         den,
                         region,
+                        on,
                     }
                 }
                 // 2: an explicit start with `with` values (still format 9:
@@ -398,16 +401,27 @@ impl Store {
                     num,
                     den,
                     region,
+                    on,
                 } => {
-                    w.u8(if region.is_some() { 3 } else { 0 });
+                    w.u8(match (on, region) {
+                        (Some(_), _) => 4,
+                        (None, Some(_)) => 3,
+                        (None, None) => 0,
+                    });
                     w.str(kind);
                     w.u32(*num);
                     w.u32(*den);
+                    if on.is_some() {
+                        w.u8(u8::from(region.is_some()));
+                    }
                     if let Some(r) = region {
                         w.i32(r.x0);
                         w.i32(r.y0);
                         w.i32(r.x1);
                         w.i32(r.y1);
+                    }
+                    if let Some(on) = on {
+                        w.str(on);
                     }
                 }
                 Start::At { kind, x, y, with } => {
@@ -822,6 +836,7 @@ mod tests {
                     num: 1,
                     den: 100,
                     region: None,
+                    on: None,
                 },
                 Start::at("árvore", -3, 70000),
                 Start::Share {
@@ -834,6 +849,26 @@ mod tests {
                         x1: 999_999_999,
                         y1: 2,
                     }),
+                    on: None,
+                },
+                Start::Share {
+                    kind: "monkey".into(),
+                    num: 1,
+                    den: 3,
+                    region: None,
+                    on: Some("árvore".into()),
+                },
+                Start::Share {
+                    kind: "owl".into(),
+                    num: 2,
+                    den: 3,
+                    region: Some(Region {
+                        x0: -1,
+                        y0: -2,
+                        x1: 3,
+                        y1: 4,
+                    }),
+                    on: Some("seed".into()),
                 },
                 Start::At {
                     kind: "fox".into(),
@@ -923,6 +958,7 @@ mod tests {
                 num,
                 den,
                 region: None,
+                on: None,
             }];
             s.write_meta(&WorldMeta {
                 starts,

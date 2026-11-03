@@ -818,7 +818,7 @@ pub fn find_uid(world: &mut World, uid: u64) -> Option<(Pos, ChunkCoord, u16)> {
 /// Put an actor of `kind` with `mind` on the cell at `p` (in the cover
 /// layer for a `cover` kind), for tests and tools (worldgen and `spawn` are
 /// the in-game ways). `false` if the cell is outside the world, the chunk
-/// is not loaded, or the cell is not walkable or its layer is taken. Marks
+/// is not loaded, the cell is not walkable, its layer is taken, or the kind its layer rests on is not standing there. Marks
 /// the chunk dirty. Not for use inside a tick.
 pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> bool {
     if !p.in_world() {
@@ -828,10 +828,16 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     let Some(e) = world.resource::<Stage>().entity(cc) else {
         return false;
     };
-    let (layer, flies, table) = {
+    let (layer, flies, table, rest, tags) = {
         let kinds = world.resource::<Kinds>();
         let layer = kinds.def(kind).layer;
-        (layer, kinds.flies(layer), kinds.materials.table)
+        (
+            layer,
+            kinds.flies(layer),
+            kinds.materials.table,
+            kinds.rest(layer),
+            kinds.tag_bits.clone(),
+        )
     };
     let mut q = world.query::<(
         &mut ChunkCells,
@@ -845,6 +851,7 @@ pub fn place_actor(world: &mut World, p: Pos, kind: u16, mind: ActorMind) -> boo
     if usize::from(layer) >= 2 + cells.extra.len()
         || !(flies || cells.walkable(i, &table))
         || !cells.layer(layer)[i].is_none()
+        || !rest.holds(cells.occupant[i], &tags)
     {
         return false;
     }
@@ -924,6 +931,12 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
             }
             if r.layer != def.layer {
                 return bad(format!("in layer {}, its kind's is {}", r.layer, def.layer));
+            }
+            if !kinds
+                .rest(r.layer)
+                .holds(cells.occupant[usize::from(r.cell)], &kinds.tag_bits)
+            {
+                return bad("in a layer that rests on a kind, over none of it".into());
             }
             if cells.extra.len() != kinds.layers.len() {
                 return bad(format!(
@@ -2749,6 +2762,72 @@ mod tests {
         assert_eq!(m[5], 0, "past the ends reads 0");
         assert_eq!(m[6] + m[7], 13, "each += landed on the element it read");
         assert_eq!(&m[8..], &[0; 24], "nothing written past the array");
+    }
+
+    /// A layer that rests on a kind (`layer canopy { on tree }`): monkeys
+    /// move only from tree to tree (`free` in their layer is a tree with
+    /// nobody in its canopy), can't be put where no tree stands, and one
+    /// whose tree dies falls (`Cause::Fell`).
+    #[test]
+    fn monkeys_keep_to_the_trees_and_fall_with_them() {
+        use crate::actors::systems::newborn;
+        use crate::actors::{Cause, Tally};
+        use crate::rules::compile;
+        let kinds = compile(
+            "t.rules",
+            "layer canopy { on tree }
+             kind tree { glyph \"T\"  cadence 1  mem doomed, t
+               when doomed == 1 and t >= 10 => die
+               when true => { t += 1  idle } }
+             kind monkey { glyph \"m\"  layer canopy  cadence 1  mem steps
+               when true => { steps += 1  move random free } }",
+        )
+        .unwrap();
+        let (tree, monkey) = (
+            kinds.by_name("tree").unwrap().id,
+            kinds.by_name("monkey").unwrap().id,
+        );
+        let cfg = Scenario {
+            width: 64,
+            height: 64,
+            ..cfg(26)
+        };
+        let mut w = new_world_with(&cfg, kinds.clone()).unwrap();
+        flatten(&mut w);
+        let now = tick(&w);
+        let mut uid = 0x100;
+        let mut put = |w: &mut World, x, y, kind, doomed| {
+            uid += 1;
+            let mut m = newborn(&kinds, kind, uid, now);
+            m.mem[0] = doomed;
+            place_actor(w, Pos::new(x, y), kind, m)
+        };
+        assert!(!put(&mut w, 30, 30, monkey, 0), "no tree there");
+        for x in 5..10 {
+            assert!(put(&mut w, x, 5, tree, 0));
+        }
+        assert!(put(&mut w, 30, 30, tree, 1), "a tree that dies, alone");
+        for (x, y) in [(5, 5), (9, 5), (30, 30)] {
+            assert!(put(&mut w, x, y, monkey, 0));
+        }
+        let mut moved = false;
+        for _ in 0..30 {
+            step(&mut w);
+            check_invariants(&mut w);
+            for (_, k, p, _) in rows(&mut w) {
+                if k == monkey {
+                    let up = (p.y == 5 && (5..10).contains(&p.x)) || p == Pos::new(30, 30);
+                    assert!(up, "a monkey off the trees at {p:?}");
+                    moved |= p.x != 5 && p.x != 9;
+                }
+            }
+        }
+        assert!(moved, "monkeys go from tree to tree");
+        let all = rows(&mut w);
+        assert_eq!(all.iter().filter(|r| r.1 == monkey).count(), 2);
+        assert_eq!(all.iter().filter(|r| r.1 == tree).count(), 5);
+        let fell: Vec<_> = w.resource::<Tally>().deaths_of(monkey).collect();
+        assert_eq!(fell, [(Cause::Fell, 1)], "the lone tree's monkey fell");
     }
 
     /// A search over memory plans (chop, saw, build) from where the actor

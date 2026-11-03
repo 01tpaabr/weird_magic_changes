@@ -1,0 +1,24 @@
+# The forest pack (packs/forest): monkeys in a canopy layer that rests on the
+# trees. A quarter of the trees start with a monkey in them; woodcutters
+# fell trees, and the monkeys in them fall; the rest move from tree to tree
+# and keep away from the woodcutters, so the troop lives on.
+#
+#   make run ARGS="scenario scenarios/tests/forest.scenario"
+rules ../../packs/forest
+seed 7
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start tree 1 / 3
+start woodcutter 1 / 400
+start monkey 1 / 4 on tree
+start tree at (2, 2)
+start monkey at (2, 2)                         # one cell, two layers
+run 1d
+expect eventually at (2, 2) monkey to 1min     # started in that tree
+expect eaten tree by woodcutter > 30           # seen 72
+expect died monkey > 5                         # every one a fall: seen 20
+expect born monkey > 100                       # into the next tree, seen 476
+expect never count monkey < 600                # the troop lives on, seen 714 at least
+expect traps tree == 0
+expect traps woodcutter == 0
+expect traps monkey == 0

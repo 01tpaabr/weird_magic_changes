@@ -165,7 +165,8 @@ struct G<'a> {
     fields: usize,
     /// A ground `gmud` and a feature `gwall` are declared.
     materials: bool,
-    /// Layers `gair` (flies) and `gdeep` are declared.
+    /// Layers `gair` (flies), `gdeep` and `gtop` are declared; `gtop`
+    /// rests on a tag, when there is one (`layer gtop { on TAG }`).
     layers: bool,
     /// Writing a law's block (the syntax mode): there `count (` starts an
     /// aggregate, so no field condition goes where a search's predicate does.
@@ -497,7 +498,7 @@ impl<'a> G<'a> {
                 o.place = if self.maybe(10) {
                     Some("cover")
                 } else if self.layers && self.maybe(30) {
-                    Some(self.one(&["layer gair", "layer gdeep"]))
+                    Some(self.one(&["layer gair", "layer gdeep", "layer gtop"]))
                 } else {
                     None
                 };
@@ -602,6 +603,10 @@ impl<'a> G<'a> {
         if self.layers {
             let sep = self.sep();
             out += &format!("layer gair {{ flies }}{sep}layer gdeep\n");
+            match self.tags.first() {
+                Some(t) => out += &format!("layer gtop {{ on {t} }}\n"),
+                None => out += "layer gtop\n",
+            }
         }
         if self.materials {
             let sep = self.sep();

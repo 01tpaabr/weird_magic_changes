@@ -351,6 +351,7 @@ fn a_bad_world_header_never_panics() {
         num,
         den,
         region: None,
+        on: None,
     };
     let at = |x, y| Start::at("hive", x, y);
     // (what, the meta, whether opening refuses it)
@@ -389,11 +390,49 @@ fn a_bad_world_header_never_panics() {
                         num: 1,
                         den: 2,
                         region: None,
+                        on: None,
                     },
                 ],
                 ..meta.clone()
             },
             true,
+        ),
+        (
+            "stacked shares over one",
+            WorldMeta {
+                starts: vec![
+                    Start::Share {
+                        kind: "grass".into(),
+                        num: 3,
+                        den: 4,
+                        region: None,
+                        on: Some("tree".into()),
+                    },
+                    Start::Share {
+                        kind: "seed".into(),
+                        num: 1,
+                        den: 2,
+                        region: None,
+                        on: Some("tree".into()),
+                    },
+                ],
+                ..meta.clone()
+            },
+            true,
+        ),
+        (
+            "a share on a kind the rules lack",
+            WorldMeta {
+                starts: vec![Start::Share {
+                    kind: "grass".into(),
+                    num: 1,
+                    den: 2,
+                    region: None,
+                    on: Some("nobody".into()),
+                }],
+                ..meta.clone()
+            },
+            false,
         ),
         (
             "a share of all",
@@ -440,6 +479,7 @@ fn a_bad_world_header_never_panics() {
                         x1: 3,
                         y1: 5,
                     }),
+                    on: None,
                 }],
                 ..meta.clone()
             },
@@ -458,6 +498,7 @@ fn a_bad_world_header_never_panics() {
                         x1: i32::MAX,
                         y1: 5,
                     }),
+                    on: None,
                 }],
                 ..meta.clone()
             },
@@ -478,6 +519,7 @@ fn a_bad_world_header_never_panics() {
                             x1: 4,
                             y1: 4,
                         }),
+                        on: None,
                     },
                 ],
                 ..meta.clone()
@@ -519,6 +561,7 @@ fn a_bad_world_header_never_panics() {
                         num: 1,
                         den: 3,
                         region: None,
+                        on: None,
                     },
                 ],
                 ..meta.clone()

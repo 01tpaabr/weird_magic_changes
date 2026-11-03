@@ -218,6 +218,9 @@ pub enum Cause {
     Starved(u8),
     /// One of its rules chose `die` (old age, say).
     Died,
+    /// Its layer rests on a kind (`layer NAME { on KIND }`) and none stood
+    /// under it at the end of a tick.
+    Fell,
 }
 
 /// Life events and work per kind since the world was loaded: births,
@@ -239,7 +242,7 @@ impl Tally {
     /// The deaths of `kind` so far, by cause.
     pub fn deaths_of(&self, kind: u16) -> impl Iterator<Item = (Cause, u64)> + '_ {
         self.deaths
-            .range((kind, Cause::Killed(0))..=(kind, Cause::Died))
+            .range((kind, Cause::Killed(0))..=(kind, Cause::Fell))
             .map(|(&(_, c), &n)| (c, n))
     }
 }
@@ -1094,6 +1097,9 @@ pub fn apply(
                     if let Some(cell) = local_target(usize::from(row.cell), it.dx, it.dy)
                         && cells.layer(layer)[cell].is_none()
                         && (kinds.flies(layer) || cells.walkable(cell, &kinds.materials.table))
+                        && kinds
+                            .rest(layer)
+                            .holds(cells.occupant[cell], &kinds.tag_bits)
                     {
                         scratch.layer_claims.push((layer, cell_u16(cell), it.key));
                     }
@@ -1225,7 +1231,10 @@ pub fn apply(
                             Where::Here(cell)
                                 if scratch.layer_won(l, cell, it.key)
                                     && (kinds.flies(l)
-                                        || actors.cells.walkable(cell, &kinds.materials.table)) =>
+                                        || actors.cells.walkable(cell, &kinds.materials.table))
+                                    && kinds
+                                        .rest(l)
+                                        .holds(actors.cells.occupant[cell], &kinds.tag_bits) =>
                             {
                                 let kind = actors.pubs[slot].kind;
                                 actors.cells.layer_mut(l)[from] = ActorId::NONE;
@@ -1278,7 +1287,10 @@ pub fn apply(
                             Where::Here(cell)
                                 if scratch.layer_won(l, cell, it.key)
                                     && (kinds.flies(l)
-                                        || actors.cells.walkable(cell, &kinds.materials.table)) =>
+                                        || actors.cells.walkable(cell, &kinds.materials.table))
+                                    && kinds
+                                        .rest(l)
+                                        .holds(actors.cells.occupant[cell], &kinds.tag_bits) =>
                             {
                                 let child = spawn_mind(
                                     kinds,
@@ -1681,6 +1693,9 @@ pub fn migrate(
                 usize::from(l) < 2 + dst_cells.extra.len()
                     && dst_cells.layer(l)[cell].is_none()
                     && (walkable || kinds.flies(l))
+                    && kinds
+                        .rest(l)
+                        .holds(dst_cells.occupant[cell], &kinds.tag_bits)
             }
         };
         if !ok {
@@ -1825,6 +1840,7 @@ pub fn ration(
 // ---- Compact ----------------------------------------------------------------------------
 
 pub fn compact(
+    kinds: Res<Kinds>,
     mut q: Query<(
         &mut ChunkCells,
         &mut ChunkActors,
@@ -1834,11 +1850,16 @@ pub fn compact(
         &mut Outbox,
     )>,
 ) {
+    let kinds = &*kinds;
+    let rests = kinds.any_rest();
     q.par_iter_mut().for_each(
         |(mut cells, mut pubs, mut minds, mut intents, mut scratch, mut outbox)| {
             intents.list.clear();
             outbox.list.clear();
             scratch.reset();
+            if rests {
+                fall(kinds, &mut cells, &mut pubs, &mut minds, &mut scratch);
+            }
             if scratch.deaths == 0 {
                 return;
             }
@@ -1853,6 +1874,39 @@ pub fn compact(
     );
 }
 
+/// Every row of a layer that rests on a kind (`layer NAME { on KIND }`)
+/// with none of it standing beneath at the end of the tick falls, and
+/// dies (`Cause::Fell`): its tree was felled, or went off. In slot order;
+/// in its own chunk, so in parallel.
+fn fall(
+    kinds: &Kinds,
+    cells: &mut ChunkCells,
+    pubs: &mut ChunkActors,
+    minds: &mut ChunkMinds,
+    scratch: &mut Scratch,
+) {
+    for slot in 0..pubs.rows.len() {
+        let r = pubs.rows[slot];
+        if r.layer < 2
+            || r.flags & flags::DEAD != 0
+            || kinds
+                .rest(r.layer)
+                .holds(cells.occupant[usize::from(r.cell)], &kinds.tag_bits)
+        {
+            continue;
+        }
+        ActorsMut {
+            pubs: &mut pubs.rows,
+            minds: &mut minds.rows,
+            cells,
+        }
+        .kill(slot);
+        scratch.deaths += 1;
+        scratch.count(r.kind, life::DIED);
+        scratch.causes.push((r.kind, Cause::Fell));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1863,6 +1917,7 @@ mod tests {
         chunks[4] = Some((cells, actors));
         Halo {
             flies: 0,
+            rests: 0,
             chunks,
             tags: &[],
             family_end: &[],

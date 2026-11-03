@@ -19,8 +19,8 @@ use bevy_ecs::prelude::*;
 
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::rng::splitmix64;
-use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS, MaterialTable};
-use vm::Op;
+use crate::stage::{ActorId, Feature, Ground, MAX_FEATURES, MAX_GROUNDS, MaterialTable};
+use vm::{Op, Rest};
 
 pub use builtin::{BEE, CHICK, CHICKEN, EGG, FLOWER, FOX, GRASS, HIVE, SEED, TREE};
 pub use compile::{
@@ -163,14 +163,18 @@ impl Materials {
 }
 
 /// A layer a pack declares beside standing and ground cover (`layer NAME
-/// { flies }`, `docs/WORLD.md` §7): one actor a cell, over or under the
-/// others, never in their way.
+/// { flies  on KIND }`, `docs/WORLD.md` §7): one actor a cell, over or
+/// under the others, never in their way.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayerDef {
     pub name: String,
     /// Its rows move and start over any ground (birds over water), not
     /// only where one can walk.
     pub flies: bool,
+    /// `on KIND` (or a tag): its rows are only where one of these stands
+    /// (monkeys in the trees); a row whose support is gone falls, and
+    /// dies (`Cause::Fell`). A kind or tag predicate (`vm::pred`).
+    pub on: Option<i32>,
 }
 
 /// The players of an arena (`docs/RULES.md` §15) and the room the arena's
@@ -620,7 +624,21 @@ impl Kinds {
             for b in l.name.bytes() {
                 h = splitmix64(h ^ u64::from(b));
             }
-            self.hash = splitmix64(h ^ u64::from(l.flies));
+            h = splitmix64(h ^ u64::from(l.flies));
+            self.hash = splitmix64(h ^ l.on.map_or(u64::MAX, |p| u64::from(p as u32)));
+        }
+        // Each kind that holds up a layer carries its support bit, which
+        // is what `free` in that layer reads (`vm::support_bit`).
+        for (i, l) in layers.iter().enumerate() {
+            let Some(p) = l.on else { continue };
+            let on = Rest::of(p, &self.family_end);
+            let bit = vm::support_bit(u8::try_from(i + 2).expect("at most MAX_LAYERS layers"));
+            for k in 0..self.tag_bits.len() {
+                let id = ActorId::pack(u16::try_from(k).expect("kinds fit u16"), 0);
+                if on.holds(id, &self.tag_bits) {
+                    self.tag_bits[k] |= 1 << bit;
+                }
+            }
         }
         self.layers = layers;
         self
@@ -653,6 +671,24 @@ impl Kinds {
             .checked_sub(2)
             .and_then(|i| self.layers.get(i))
             .is_some_and(|l| l.flies)
+    }
+
+    /// What a row of layer `layer` must stand over (`layer NAME { on KIND
+    /// }`): [`Rest::Any`] for a layer that rests on nothing.
+    #[inline]
+    pub fn rest(&self, layer: u8) -> Rest {
+        match usize::from(layer)
+            .checked_sub(2)
+            .and_then(|i| self.layers.get(i))
+        {
+            Some(l) if l.on.is_some() => Rest::Tag(vm::support_bit(layer)),
+            _ => Rest::Any,
+        }
+    }
+
+    /// Does any declared layer rest on a kind?
+    pub fn any_rest(&self) -> bool {
+        self.layers.iter().any(|l| l.on.is_some())
     }
 
     /// The index of field `name`.

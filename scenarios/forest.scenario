@@ -1,0 +1,15 @@
+# The forest pack (packs/forest): monkeys in a canopy layer that rests on the
+# trees. A quarter of the trees start with a monkey in them; woodcutters
+# fell trees, and the monkeys in them fall; the rest move from tree to tree
+# and keep away from the woodcutters, so the troop lives on.
+#
+#   make run ARGS="play saves/forest --scenario scenarios/forest.scenario"
+rules ../packs/forest
+seed 7
+size 128 64
+terrain water_level 0 rock_on_soil 0 rock_on_water 0
+start tree 1 / 3
+start woodcutter 1 / 400
+start monkey 1 / 4 on tree
+start tree at (2, 2)
+start monkey at (2, 2)                         # one cell, two layers

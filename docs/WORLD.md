@@ -223,9 +223,17 @@ from a declared layer `eat`/`hit` reach the one standing beneath (`here`). Saves
 by name (store v13). Not built from the first sketch: an `item` layer with `pick`/`put`, and
 what a layer blocks (`blocks standing`); both wait for a world that needs them.
 
+A layer may **rest on a kind** (decision 71): `layer canopy { on tree }` holds its actors
+only over a standing `tree` (its family, or a tag). The claims, `free`, Migrate and spawns
+check the one standing beneath; Compact drops whoever is over nothing at the end of the
+tick (`Cause::Fell`), so a felled tree takes its monkeys with it. A scenario starts such a
+kind with a second placement draw, `start monkey 1 / 4 on tree`. It is how several actors
+share a cell without a per-cell list: one a layer, each layer saying what it stands on.
+
 ```text
-layer air { flies }   # gulls over the sea (packs/sky)
-layer burrow          # moles under the walkers
+layer air { flies }    # gulls over the sea (packs/sky)
+layer burrow           # moles under the walkers
+layer canopy { on tree }   # monkeys in the trees (packs/forest)
 ```
 
 ## 8. Cost (measured)

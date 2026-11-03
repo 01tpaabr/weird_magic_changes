@@ -92,7 +92,8 @@ fn terrain() -> impl Strategy<Value = String> {
 }
 
 /// Share lines, one per kind, each at most 1/8 so they add up to at most 1
-/// on any cell; some in a region, near the initial one or across chunks.
+/// on any cell; some in a region, near the initial one or across chunks;
+/// some of a kind above the standing `on` one that stands.
 fn shares() -> impl Strategy<Value = Vec<String>> {
     let region = prop::option::of((-80i32..200, -80i32..200, 0i32..150, 0i32..150));
     prop::collection::vec((any::<Index>(), 1u32..=250, 8u32..=2000, region), 0..5).prop_map(|v| {
@@ -105,10 +106,24 @@ fn shares() -> impl Strategy<Value = Vec<String>> {
             }
             kinds.push(kind);
             let num = 1 + num % (den / 8);
+            // A kind above the standing (ground cover) now and then starts
+            // `on` one that stands: a second draw.
+            let def = k.get(&KINDS.defs);
+            let standing: Vec<&str> = KINDS
+                .defs
+                .iter()
+                .filter(|d| d.layer == 0)
+                .map(|d| d.name.as_str())
+                .collect();
+            let on = if def.layer != 0 && num % 2 == 0 && !standing.is_empty() {
+                format!(" on {}", standing[num as usize % standing.len()])
+            } else {
+                String::new()
+            };
             lines.push(match region {
-                None => format!("start {kind} {num} / {den}"),
+                None => format!("start {kind} {num} / {den}{on}"),
                 Some((x, y, w, h)) => format!(
-                    "start {kind} {num} / {den} in ({x}, {y}) to ({}, {})",
+                    "start {kind} {num} / {den}{on} in ({x}, {y}) to ({}, {})",
                     x + w,
                     y + h
                 ),

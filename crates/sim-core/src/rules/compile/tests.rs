@@ -29,6 +29,7 @@ fn run_think_in(
     chunks[4] = Some((cells, actors));
     let halo = Halo {
         flies: 0,
+        rests: 0,
         chunks,
         tags: &k.tag_bits,
         family_end: &k.family_end,
@@ -2646,7 +2647,7 @@ fn layers_are_declared_named_and_inherited() {
         ("layer standing", "already a name"),
         (
             "layer air { walkable }",
-            "expected `flies` or `}` in a layer",
+            "expected `flies`, `on` or `}` in a layer",
         ),
         ("kind k { layer air }", "no layer `air`"),
         (
@@ -2674,6 +2675,91 @@ fn layers_are_declared_named_and_inherited() {
         .map(|i| format!("layer l{i} "))
         .collect();
     assert!(compile_err(&many).contains("at most 8 layers"));
+}
+
+/// A layer that rests on a kind (`layer canopy { on tree }`, `docs/WORLD.md`
+/// §7): on a kind's family or a tag that stands; never a material, cover or
+/// a kind in a declared layer.
+#[test]
+fn a_layer_rests_on_a_kind_that_stands() {
+    use crate::rules::vm::Rest;
+    let k = compile(
+        "t.rules",
+        "layer canopy { on tree }
+         layer nest { flies  on tall }
+         kind tree { tags tall }
+         kind oak extends tree { }
+         kind monkey { layer canopy }
+         kind owl { layer nest }",
+    )
+    .unwrap();
+    let (tree, oak, monkey) = (
+        k.by_name("tree").unwrap().id,
+        k.by_name("oak").unwrap().id,
+        k.by_name("monkey").unwrap().id,
+    );
+    let on = |l: u8, kind: u16| {
+        k.rest(l)
+            .holds(crate::stage::ActorId::pack(kind, 0), &k.tag_bits)
+    };
+    assert!(
+        on(2, tree) && on(2, oak) && !on(2, monkey),
+        "a kind's family"
+    );
+    assert!(on(3, tree) && on(3, oak) && !on(3, monkey), "a tag");
+    assert!(!on(2, u16::MAX - 1) && k.rest(0) == Rest::Any && k.rest(1) == Rest::Any);
+    assert!(k.flies(3) && !k.flies(2));
+    assert!(k.any_rest());
+    assert_ne!(
+        k.hash,
+        compile(
+            "t.rules",
+            "layer canopy
+             layer nest { flies  on tall }
+             kind tree { tags tall }
+             kind oak extends tree { }
+             kind monkey { layer canopy }
+             kind owl { layer nest }"
+        )
+        .unwrap()
+        .hash,
+        "what a layer rests on is in the hash"
+    );
+    let errs = [
+        ("layer canopy { on }", "expected a kind or tag"),
+        ("layer canopy { on soil }", "not a material"),
+        (
+            "layer canopy { on nobody }",
+            "unknown kind, tag or material `nobody`",
+        ),
+        (
+            "layer canopy { on grass }  kind grass { cover }",
+            "does not stand",
+        ),
+        (
+            "layer canopy { on monkey }  kind monkey { layer canopy }",
+            "does not stand",
+        ),
+        ("layer canopy { on t }  trait t { }", "is a trait"),
+    ];
+    // A layer that rests on a kind takes a tag bit.
+    let tags: Vec<String> = (0..64).map(|i| format!("t{i}")).collect();
+    let many = format!(
+        "layer canopy {{ on k }}  kind k {{ tags {} }}",
+        tags.join(" ")
+    );
+    assert!(
+        compile_err(&many).contains("at most 63 tags in a rule set (64, less one for each layer")
+    );
+    let fits = format!(
+        "layer canopy {{ on k }}  kind k {{ tags {} }}",
+        tags[..63].join(" ")
+    );
+    assert!(compile("t.rules", &fits).is_ok());
+    for (text, want) in errs {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}\n  got: {e}");
+    }
 }
 
 /// Players (`docs/WORLD.md` §12): each one's top-level names are its own,

@@ -36,6 +36,8 @@ pub const STREAM_FIELD: u64 = 0x0008;
 /// A declared layer's uids, with the layer above bit 16: run-time births in
 /// it, and a start stacked over another on one cell; never reuse.
 pub const STREAM_UID_LAYER: u64 = 0x0011;
+/// The second placement draw: the shares with `on`, above the one standing.
+pub const STREAM_PLACE_STACKED: u64 = 0x0012;
 
 /// Knobs. Defaults give a soil map with a few lakes and scattered rocks.
 /// Stored in the save file: changing them changes every unsaved chunk.
@@ -122,6 +124,7 @@ pub fn generate_chunk(
     if explicit.is_empty() && !placement.has_shares_in(coord) {
         return;
     }
+    let stacked = placement.has_stacked();
     // Explicit starts are sorted by cell: merge them into the cell walk.
     let mut explicit = explicit.iter().peekable();
     for i in 0..CHUNK_CELLS {
@@ -152,6 +155,18 @@ pub fn generate_chunk(
                 placement.placed(placement_hash(seed, p.x, p.y), p.x, p.y)
         {
             out.actors_mut().push_in(i, kind, mind, layer);
+            // The second draw: a share `on` the kind that just started.
+            if stacked {
+                let u = (hash_cell(seed, STREAM_PLACE_STACKED, p.x, p.y) >> 40) as u32;
+                if let Some(up) = placement.stacked(u, p.x, p.y, out.cells.occupant[i])
+                    && out.cells.layer(up.layer)[i].is_none()
+                {
+                    let stream = STREAM_UID_LAYER | u64::from(up.layer) << 16;
+                    let uid = hash_cell(seed, stream, p.x, p.y);
+                    let mind = ActorMind { uid, ..mind };
+                    out.actors_mut().push_in(i, up.kind, mind, up.layer);
+                }
+            }
         }
     }
 }

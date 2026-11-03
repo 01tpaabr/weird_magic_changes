@@ -561,8 +561,10 @@ pub enum Want {
     Tag(u32),
     Free,
     /// `free` for a kind in declared layer `.0`: nobody there in that
-    /// layer, and walkable unless the layer flies (`.1`).
-    FreeIn(u8, bool),
+    /// layer, walkable unless the layer flies (`.1 & FLIES`), and over
+    /// what it rests on if it rests on a kind (`.1 & RESTS`: the one
+    /// standing there carries the layer's support bit, [`support_bit`]).
+    FreeIn(u8, u8),
     Bare,
     Ground(i32),
     Feature(i32),
@@ -571,6 +573,20 @@ pub enum Want {
     Fields(u16, u8),
     /// A value no cell matches.
     Nothing,
+}
+
+/// [`Want::FreeIn`]'s flags: the layer flies.
+pub const FLIES: u8 = 1;
+/// [`Want::FreeIn`]'s flags: the layer rests on a kind.
+pub const RESTS: u8 = 2;
+
+/// The bit in a kind's tag bits (`Kinds::tag_bits`) that says it holds up
+/// declared layer `layer` (`layer NAME { on KIND }`): the top bits, one a
+/// layer, so a layer that rests on a kind costs a tag (`MAX_TAGS`). Read by
+/// the hottest test there is, so no new `Want` and no new argument.
+#[inline]
+pub fn support_bit(layer: u8) -> u32 {
+    63 - (u32::from(layer) - 2)
 }
 
 impl Want {
@@ -702,15 +718,49 @@ impl Want {
                     || (!cells.extra.is_empty() && self.hits_above(cells, actors, i, tags))
             }
             Want::Free => cells.walkable(i, m) && occupant.is_none(),
-            Want::FreeIn(l, flies) => {
+            Want::FreeIn(l, flags) => {
                 usize::from(l) < 2 + cells.extra.len()
                     && cells.layer(l)[i].is_none()
-                    && (flies || cells.walkable(i, m))
+                    && (flags & FLIES != 0 || cells.walkable(i, m))
+                    && (flags & RESTS == 0 || Rest::Tag(support_bit(l)).holds(occupant, tags))
             }
             Want::Bare => cells.walkable(i, m) && cover.is_none(),
             Want::Ground(g) => i32::from(cells.ground[i].0) == g,
             Want::Feature(f) => i32::from(cells.feature[i].0) == f,
             Want::Fields(..) | Want::Nothing => false,
+        }
+    }
+}
+
+/// What a row of a declared layer must stand over (`layer NAME { on KIND
+/// }`): anything, a kind's family (or one kind), or a tag.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Rest {
+    #[default]
+    Any,
+    Kinds(u16, u16),
+    Tag(u32),
+}
+
+impl Rest {
+    /// Decode a layer's `on` predicate (a kind or a tag, `pred`).
+    pub fn of(pred: i32, family_end: &[u16]) -> Rest {
+        match Want::of(pred, family_end) {
+            Want::Kinds(lo, hi) => Rest::Kinds(lo, hi),
+            Want::Tag(b) => Rest::Tag(b),
+            _ => Rest::Any,
+        }
+    }
+
+    /// Does the one standing on the cell (`occupant`) hold up this layer?
+    #[inline]
+    pub fn holds(self, occupant: ActorId, tags: &[u64]) -> bool {
+        match self {
+            Rest::Any => true,
+            Rest::Kinds(lo, hi) => occupant.unpack().is_some_and(|(k, _)| k >= lo && k < hi),
+            Rest::Tag(bit) => occupant
+                .unpack()
+                .is_some_and(|(k, _)| tags.get(usize::from(k)).is_some_and(|t| t >> bit & 1 == 1)),
         }
     }
 }
@@ -730,6 +780,8 @@ pub struct Halo<'a> {
     pub materials: &'a MaterialTable,
     /// Bit `l`: declared layer `l` flies (`Kinds::flies`).
     pub flies: u16,
+    /// Bit `l`: declared layer `l` rests on a kind (`Kinds::rest`).
+    pub rests: u16,
 }
 
 impl<'a> Halo<'a> {
@@ -754,6 +806,9 @@ impl<'a> Halo<'a> {
             flies: (2..2 + kinds.layers.len())
                 .filter(|&l| kinds.flies(u8::try_from(l).expect("at most MAX_LAYERS")))
                 .fold(0, |m, l| m | 1 << l),
+            rests: (2..2 + kinds.layers.len())
+                .filter(|&l| kinds.layers[l - 2].on.is_some())
+                .fold(0, |m, l| m | 1 << l),
         }
     }
 
@@ -764,8 +819,25 @@ impl<'a> Halo<'a> {
         if layer < 2 {
             Want::Free
         } else {
-            Want::FreeIn(layer, self.flies >> layer & 1 == 1)
+            self.free_in(layer)
         }
+    }
+
+    /// [`Halo::free_of`] in a declared layer (out of line: the think loop
+    /// inlines `free_of` at every `free`, and most kinds stand).
+    #[inline(never)]
+    fn free_in(&self, layer: u8) -> Want {
+        let flies = if self.flies >> layer & 1 == 1 {
+            FLIES
+        } else {
+            0
+        };
+        let rests = if self.rests >> layer & 1 == 1 {
+            RESTS
+        } else {
+            0
+        };
+        Want::FreeIn(layer, flies | rests)
     }
 
     /// The chunk and local index at `(lx + dx, ly + dy)` from the centre
@@ -2283,6 +2355,7 @@ mod tests {
         let (cells, actors) = stage();
         let halo = Halo {
             flies: 0,
+            rests: 0,
             chunks: [
                 None,
                 None,
@@ -2415,6 +2488,7 @@ mod tests {
         let (cells, actors) = stage();
         let mut halo = Halo {
             flies: 0,
+            rests: 0,
             chunks: [None; 9],
             tags: &[],
             family_end: &[],
@@ -2786,6 +2860,7 @@ mod tests {
         let (cells, actors) = stage();
         let mut halo = Halo {
             flies: 0,
+            rests: 0,
             chunks: [None; 9],
             tags: &[],
             family_end: &[],

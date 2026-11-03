@@ -107,22 +107,39 @@ fn case(p: &Program, k: &Knobs) -> Case {
          rock_on_soil 0.{soil:02} rock_on_water 0.{water:02}\n",
         k.seed, k.width, k.height
     );
+    let kinds = crate::rules::compile("fuzz.rules", &p.text).expect("a valid program compiles");
     let mut used: Vec<&str> = Vec::new();
-    let mut whole = 0;
+    // The plain shares, and those `on` a kind (a second draw), each at most a whole.
+    let mut whole = [0, 0];
     for (i, d, region) in &k.shares {
         if p.kinds.is_empty() {
             break;
         }
         let kind = i.get(&p.kinds).as_str();
+        let def = kinds.by_name(kind).expect("a kind it declares");
+        // A layer that rests on a kind: start it on the first that stands
+        // and holds it up, if any does.
+        let rest = kinds.rest(def.layer);
+        let on = if rest == crate::rules::vm::Rest::Any {
+            String::new()
+        } else {
+            match kinds.defs.iter().find(|d| {
+                d.layer == 0 && rest.holds(crate::stage::ActorId::pack(d.id, 0), &kinds.tag_bits)
+            }) {
+                Some(under) => format!(" on {}", under.name),
+                None => continue,
+            }
+        };
+        let w = &mut whole[usize::from(!on.is_empty())];
         let share = crate::scenario::PLACE_ONE / d;
-        if !used.contains(&kind) && whole + share <= crate::scenario::PLACE_ONE {
+        if !used.contains(&kind) && *w + share <= crate::scenario::PLACE_ONE {
             used.push(kind);
-            whole += share;
+            *w += share;
             text += &match region {
-                None => format!("start {kind} 1 / {d}\n"),
+                None => format!("start {kind} 1 / {d}{on}\n"),
                 Some((x, y, w, h)) => {
                     format!(
-                        "start {kind} 1 / {d} in ({x}, {y}) to ({}, {})\n",
+                        "start {kind} 1 / {d}{on} in ({x}, {y}) to ({}, {})\n",
                         x + w,
                         y + h
                     )
@@ -132,7 +149,6 @@ fn case(p: &Program, k: &Knobs) -> Case {
     }
     // Only walkable cells, one start each: the terrain is the seed's.
     let s = Scenario::parse("fuzz.scenario", &text).expect("a generated scenario parses");
-    let kinds = crate::rules::compile("fuzz.rules", &p.text).expect("a valid program compiles");
     let mut cells: Vec<(i32, i32)> = Vec::new();
     for (i, x, y, with) in &k.ats {
         if p.kinds.is_empty() || cells.contains(&(*x, *y)) {
@@ -144,6 +160,9 @@ fn case(p: &Program, k: &Knobs) -> Case {
         }
         cells.push((*x, *y));
         let def = kinds.by_name(i.get(&p.kinds)).expect("a kind it declares");
+        if kinds.rest(def.layer) != crate::rules::vm::Rest::Any {
+            continue; // nothing starts under it here
+        }
         text += &format!("start {} at ({x}, {y})", def.name);
         // A need at 0, full, or anywhere between; a mem at either end of
         // what a scenario can write, or anything.

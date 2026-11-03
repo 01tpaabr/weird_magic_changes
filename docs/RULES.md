@@ -90,7 +90,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `cover` | no | ground cover (grass): lies under whoever stands on the cell, never blocks, never moves; eaten with `graze` |
 | `layer NAME` | standing | the declared layer (§12, Layers) its actors live in, one a cell, apart from who stands there and the cover; not with `cover` |
 | `solid` | no | drawn as a whole cell of its colour, no glyph (a solid cover: the background of whoever stands on it); for pictures and boards. Only the renderer reads it: `wmc show` and the inspector still use the glyph |
-| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
+| `tags a b ...` | none | names a predicate can match (`nearest meat within 8`); at most 64 tags in a rule set, less one for each layer that rests on a kind; the list ends at the next declaration, `sub`, `when`, `inherit`, `state` or `}`, so no tag is named `food` |
 | `cadence N` | 8 | thinks every N ticks; a power of two |
 | `sight N` | 4 | the largest radius any search reaches, 0 to 64 |
 | `fuel N` | 512 | ops per think, 1 to 32768 |
@@ -577,6 +577,29 @@ layer. A layer's name is global like a kind's, never `standing` or `cover`; at m
 rule set. The renderer draws the topmost layer holding someone. A save keeps layers by
 name; a kind that moved to another layer is refused (restart). `packs/sky` plays it.
 
+**A layer that rests on a kind.** `layer canopy { on tree }` holds its actors only where a
+`tree` (or a kind that extends it) stands, or with `on TAG`, a kind with that tag. A monkey
+in the canopy shares the tree's cell without contesting it; `free` to the monkey means a
+tree with nobody in its canopy, so `move random free` and `nearest free` keep to the trees,
+and a move or spawn to a cell with no tree is `BLOCKED`. When a tree dies, is eaten or
+`become`s something else, whoever was in its canopy falls at the end of the tick and dies
+(`observe` names the cause `fell`). `on` names a kind that stands: not ground cover, nor a
+kind in a declared layer. In a scenario, a kind of such a layer starts `on` its kind
+(`start monkey 1 / 4 on tree`, §14), or `at` a cell where one starts. `packs/forest`
+plays it:
+
+```rules
+layer canopy { on tree }
+
+kind tree { glyph "T" }
+
+kind monkey {
+  glyph "m"
+  layer canopy
+  when true => move random free      # to a tree next to it, if its canopy is empty
+}
+```
+
 ### Fields
 
 A **field** is a number in every cell of the world, declared by a pack beside its kinds:
@@ -746,6 +769,7 @@ start hive at (77, 103)                        # exactly there
 | `terrain NAME V ...` | below | `water_scale` 12 (lake size in cells, above 0; below about 1 the lakes are finer than a cell and the terrain looks like noise), `water_level` 0.30 (roughly the share of water), `rock_on_soil` 0.04, `rock_on_water` 0.01 |
 | `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
 | `start K N / D in (X0, Y0) to (X1, Y1)` | | this share of the walkable cells in that region, both corners included: X0 to X1 across, Y0 to Y1 down |
+| `start K N / D on K2 [in ...]` | | a kind above the standing (ground cover or a declared layer): this share of the cells where a K2 (or a kind that extends it) starts, above it. The only way a share starts a kind whose layer rests on a kind (§12, Layers) |
 | `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`) |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
@@ -784,8 +808,12 @@ is exact to one part in 2^24 (the smallest is 1 / 16777216), so
 halves, quarters and eighths add up exactly (`start alive 3 / 8` and `start dead 5 / 8` fill
 every cell), while `1 / 3` and `2 / 3` leave about one cell in 16.7 million empty. An explicit start takes its cell, whatever the
 shares would have put there. A kind starts in its layer: a cell holds one explicit start a layer (a gull over a crab),
-and the shares one actor a cell, in its kind's layer, on walkable cells. Everyone starts newborn,
-needs full, but for what `with` sets.
+and the shares one actor a cell, in its kind's layer, on walkable cells. The shares with `on`
+are a second draw: where a share started someone standing, the cell draws again, and those
+shares cut that range, in their order, adding up to at most 1 among themselves; a draw that
+lands on a share whose `on` kind is not the one standing there starts nobody. So `start tree 1 /
+3` and `start monkey 1 / 4 on tree` start a monkey in about a quarter of the trees. Everyone
+starts newborn, needs full, but for what `with` sets.
 
 **A drawn map.** A scenario can draw its ground instead of rolling it. The map's size is the
 scenario's `size` unless you give a larger one (leave `size` out to use the map's; a smaller
@@ -1240,7 +1268,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | | |
 |---|---|
 | needs, mem slots per kind | 4, 32 |
-| tags per rule set | 64 |
+| tags per rule set | 64, less one for each layer that rests on a kind |
 | fields per rule set | 64 |
 | grounds, features per rule set | 16, 15 (the engine's three among them) |
 | declared layers per rule set | 8 (beside standing and cover) |

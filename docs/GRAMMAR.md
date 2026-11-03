@@ -84,7 +84,7 @@ IDENT = NAME that is not a reserved word
 | `along`, `over`, `eye`, `on` | after `sum`/`min`/`max IDENT`, after `sees(t)`, after its field, in `climb N` | any name |
 | `relief` | in a `field` block | any name |
 | `walkable`, `blocks`, `opaque` | in a material's block | any name |
-| `flies` | in a layer's block | any name |
+| `flies`, `on` | in a layer's block | any name |
 | `sum`, `avg` (before a name); `min`, `max` (before a name); `count` (before `(`) | an aggregate, in a law | any name, or the function |
 | `on` | after `best IDENT` | any name |
 
@@ -93,7 +93,7 @@ IDENT = NAME that is not a reserved word
 ```
 file      = [ "namespace" NAME ] { item | sub | search | const | field | material | layer | budget } EOF
 budget    = "budget" "{" { ( "fuel" | "rows" | "private" ) additive } "}"     (each part once; an arena's only)
-layer     = "layer" IDENT [ "{" [ "flies" ] "}" ]
+layer     = "layer" IDENT [ "{" { "flies" | "on" IDENT } "}" ]    (`on` a kind or tag that stands)
 material  = "ground" IDENT "{" { "walkable" | "drink" | "glyph" STRING | "color" STRING } "}"
           | "feature" IDENT "{" { "blocks" | "opaque" | "glyph" STRING | "color" STRING } "}"
 const     = "const" IDENT "=" expr [ ";" ]
