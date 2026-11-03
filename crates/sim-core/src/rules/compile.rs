@@ -101,6 +101,9 @@ pub fn player_of(pack: &str) -> (Option<&str>, &str) {
     }
 }
 
+/// Players in a rule set: each has an index below [`Players::NONE`].
+const MAX_PLAYERS: usize = Players::NONE as usize - 1;
+
 /// Words a player's item can't take: renamed into the player's namespace,
 /// they would stop meaning what the language reads them as.
 const NOT_PLAYER_NAMES: [&str; 52] = [
@@ -217,6 +220,17 @@ pub fn compile_owned(files: &[(&str, &str, Option<&str>)], consts: &[ConstSet]) 
         {
             players.push(p);
         }
+    }
+    if players.len() > MAX_PLAYERS {
+        return Err(CompileError {
+            file: "--rules".into(),
+            line: 0,
+            col: 0,
+            msg: format!(
+                "{} players: a rule set has at most {MAX_PLAYERS}",
+                players.len()
+            ),
+        });
     }
     if let Some(p) = players.iter().find(|p| spaces.iter().any(|(s, _)| s == *p)) {
         return Err(CompileError {
@@ -4239,7 +4253,7 @@ impl<'a> Gen<'a> {
                     p.names.len() - 1
                 }
             };
-            p.of.push(u8::try_from(i).unwrap_or(Players::NONE));
+            p.of.push(u8::try_from(i).expect("at most MAX_PLAYERS, checked in compile_owned"));
             if let Some(cap) = self.budget[0] {
                 d.fuel = d.fuel.min(cap);
             }
@@ -4425,15 +4439,19 @@ impl<'a> Gen<'a> {
                     ));
                 }
                 if !self.tags.contains(t) {
-                    // A layer that rests on a kind takes a tag bit of its own.
+                    // A layer that rests on a kind takes a tag bit of its own,
+                    // by its place among the layers (`vm::support_bit`):
+                    // the bits from the top down to the last resting one's.
                     let resting = self
                         .items_ast_layers
                         .iter()
-                        .filter(|l| l.2.is_some())
-                        .count();
+                        .rposition(|l| l.2.is_some())
+                        .map_or(0, |i| i + 1);
                     if self.tags.len() == MAX_TAGS - resting {
                         let why = if resting > 0 {
-                            format!(" ({MAX_TAGS}, less one for each layer that rests on a kind)")
+                            format!(
+                                " ({MAX_TAGS}, less one for each layer up to the last that rests on a kind)"
+                            )
                         } else {
                             String::new()
                         };
@@ -4507,6 +4525,29 @@ impl<'a> Gen<'a> {
                         pat,
                         format!(
                             "parameter `{pn}` of `{}` hides the constant `{pn}`",
+                            it.name
+                        ),
+                    ));
+                }
+            }
+            // A slot named like a const would read as the slot in code and
+            // as the const where only consts are known (`wmc rates`).
+            let needs = it
+                .decls
+                .needs
+                .iter()
+                .map(|n| ("need", n.name.as_str(), &n.at));
+            let mems = it
+                .decls
+                .mems
+                .iter()
+                .map(|(m, at)| ("mem", array_of(m).unwrap_or(m), at));
+            for (what, n, at) in needs.chain(mems) {
+                if self.const_value(n).is_some() {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "{what} `{n}` of `{}` has the name of the constant `{n}`",
                             it.name
                         ),
                     ));
@@ -4887,10 +4928,12 @@ impl<'a> Gen<'a> {
             None => None,
             Some((n, f, at)) => {
                 let n = self.fold(n, at)?;
-                if n < 0 {
+                let field = self.field(f, at)?.0;
+                // Checking a trait, out of range is "not declared".
+                if n < 0 && !self.checking {
                     return Err(self.err(at, format!("climb {n}: a step rises 0 or more")));
                 }
-                Some((n, self.field(f, at)?.0))
+                (n >= 0).then_some((n, field))
             }
         };
         let climb = self.pick(climb, &parents, |i| i.climb, "climbs", item)?;
@@ -4931,24 +4974,27 @@ impl<'a> Gen<'a> {
                     Some(e) => self.fold(e, at)?,
                     None => 1,
                 };
-                if !(2..=i32::from(u16::MAX)).contains(&max) {
+                let fits = (2..=i32::from(u16::MAX)).contains(&max) && (1..=max).contains(&init);
+                if !fits && self.checking {
+                    None
+                } else if !(2..=i32::from(u16::MAX)).contains(&max) {
                     return Err(self.err(
                         at,
                         format!("group max {max}: a group holds 2 to 65535 heads"),
                     ));
-                }
-                if !(1..=max).contains(&init) {
+                } else if !(1..=max).contains(&init) {
                     return Err(self.err(
                         at,
                         format!(
                             "group init {init}: a group starts with 1 to its max ({max}) heads"
                         ),
                     ));
+                } else {
+                    Some((
+                        u16::try_from(max).expect("2..=65535, checked above"),
+                        u16::try_from(init).expect("1..=max, checked above"),
+                    ))
                 }
-                Some((
-                    u16::try_from(max).expect("2..=65535, checked above"),
-                    u16::try_from(init).expect("1..=max, checked above"),
-                ))
             }
         };
         let group = self.pick(group, &parents, |i| i.group, "groups", item)?;
@@ -4957,14 +5003,18 @@ impl<'a> Gen<'a> {
             Some((w, h, at)) => {
                 let (w, h) = (self.fold(w, at)?, self.fold(h, at)?);
                 if !(1..=MAX_SIZE).contains(&w) || !(1..=MAX_SIZE).contains(&h) {
-                    return Err(
-                        self.err(at, format!("size {w} {h}: 1 to {MAX_SIZE} cells each way"))
-                    );
+                    if !self.checking {
+                        return Err(
+                            self.err(at, format!("size {w} {h}: 1 to {MAX_SIZE} cells each way"))
+                        );
+                    }
+                    None
+                } else {
+                    Some((
+                        u8::try_from(w).expect("1..=16, checked above"),
+                        u8::try_from(h).expect("1..=16, checked above"),
+                    ))
                 }
-                Some((
-                    u8::try_from(w).expect("1..=16, checked above"),
-                    u8::try_from(h).expect("1..=16, checked above"),
-                ))
             }
         };
         let size = self.pick(size, &parents, |i| i.size, "sizes", item)?;
@@ -5068,6 +5118,44 @@ impl<'a> Gen<'a> {
                     names.join(", ")
                 ),
             ));
+        }
+        // An array has one length: a trait's and its kind's, two parents'.
+        let mut lengths: Vec<(&str, usize, &str)> = Vec::new();
+        let sources = parents
+            .iter()
+            .map(|&p| {
+                (
+                    self.inst_name(p),
+                    self.insts[p].mems.iter().map(String::as_str).collect(),
+                )
+            })
+            .chain([(
+                it.name.as_str(),
+                d.mems.iter().map(|(m, _)| m.as_str()).collect(),
+            )]);
+        for (owner, list) in sources {
+            let list: Vec<&str> = list;
+            let mut seen: Vec<(&str, usize)> = Vec::new();
+            for a in list.iter().filter_map(|m| array_of(m)) {
+                match seen.iter_mut().find(|(n, _)| *n == a) {
+                    Some((_, k)) => *k += 1,
+                    None => seen.push((a, 1)),
+                }
+            }
+            for (a, k) in seen {
+                match lengths.iter().find(|(n, ..)| *n == a) {
+                    Some(&(_, j, other)) if j != k => {
+                        return Err(self.err(
+                            &it.at,
+                            format!(
+                                "`{a}` is declared with two lengths, {j} in `{other}` and {k} in `{owner}`: declare the array once"
+                            ),
+                        ));
+                    }
+                    Some(_) => {}
+                    None => lengths.push((a, k, owner)),
+                }
+            }
         }
         let mut mems: Vec<String> = Vec::new();
         for m in parents.iter().flat_map(|&p| self.insts[p].mems.iter()) {
@@ -5902,7 +5990,8 @@ impl<'a> Gen<'a> {
                 c => terms.push(c),
             }
         }
-        let folded = |e: &Expr| self.fold(e, &rule.at).ok().map(i64::from);
+        // A name a need, mem or binding hides is not the const.
+        let folded = |e: &Expr| self.fold_known(e, &rule.at, |_| false).map(i64::from);
         let mut times = |n: i64, d: i64| {
             let (n, d) = (n.clamp(0, d) as u64, d as u64);
             let (num, den) = (
@@ -5935,7 +6024,7 @@ impl<'a> Gen<'a> {
                 }
                 Expr::Bin(OpCode::Gt | OpCode::Ge, a, v)
                     if matches!(a.as_ref(), Expr::Sense(Sense::Age))
-                        && let Some(v) = self.fold(v, &rule.at).ok() =>
+                        && let Some(v) = self.fold_known(v, &rule.at, |_| false) =>
                 {
                     shape.after_age = Some(v);
                 }

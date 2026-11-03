@@ -1761,18 +1761,11 @@ fn a_name_that_hides_a_constant_is_not_folded() {
     compile_ok(
         "const w = 1 sub pick(w) { choose { w: idle } } kind a { when 1 => { pick(0)  move north } }",
     );
-    for text in [
-        "const w = 1 kind a { mem w  when w => idle\n when 1 => move north }",
-        "const full = 1 kind a { need full max 10 decay 0  when full => idle\n when true => move north }",
+    // (A mem or need named like a constant is an error.)
+    let k = compile_ok(
         "const w = 1 kind a { when 1 => { let w = 0  choose { w: idle } }\n when 1 => move north }",
-    ] {
-        let k = compile_ok(text);
-        assert!(
-            k.debug.diagnostics.is_empty(),
-            "{text}: {:?}",
-            k.debug.diagnostics
-        );
-    }
+    );
+    assert!(k.debug.diagnostics.is_empty(), "{:?}", k.debug.diagnostics);
     // A let in another kind, compiled last, hides nothing here.
     let k = compile_ok(
         "const w = 1 kind a { when w => idle\n when 1 => move north }\n\
@@ -3558,6 +3551,102 @@ fn an_action_in_a_field_condition_is_seen() {
          kind ox {{ when true => {{ if s() {{ idle }}  idle }} }}"
     ));
     assert!(e.contains("a search doesn't act"), "{e}");
+}
+
+#[test]
+fn a_trait_with_placeholder_arguments_is_checked_leniently() {
+    // The trait check runs with 1 for each parameter: `group max 1`,
+    // `size 0 1` and `climb -1` are out of range then, not for the kinds.
+    compile_ok("trait herd(n) { group max n }  kind cow extends herd(10) { }");
+    compile_ok("trait big(w) { size w - 1 w }  kind ox extends big(3) { }");
+    compile_ok(
+        "field height max 99  trait hill(n) { climb n - 2 on height }  kind goat extends hill(4) { }",
+    );
+    // Out of range for a kind is still an error.
+    let e = compile_err("trait herd(n) { group max n }  kind cow extends herd(1) { }");
+    assert!(e.contains("group max 1"), "{e}");
+    let e = compile_err(
+        "field height max 99  trait hill(n) { climb n - 2 on height }  kind goat extends hill(1) { }",
+    );
+    assert!(e.contains("climb -1"), "{e}");
+}
+
+#[test]
+fn a_need_or_mem_named_like_a_const_is_an_error() {
+    for (text, want) in [
+        (
+            "const w = 1 kind a { mem w  when true => idle }",
+            "mem `w` of `a` has the name of the constant `w`",
+        ),
+        (
+            "const route = 1 trait t { mem route[3] } kind a extends t { }",
+            "mem `route` of `t` has the name of the constant `route`",
+        ),
+        (
+            "const full = 1 kind a { need full max 10 decay 0 }",
+            "need `full` of `a` has the name of the constant `full`",
+        ),
+    ] {
+        let e = compile_err(text);
+        assert!(e.contains(want), "{text}: {e}");
+    }
+}
+
+#[test]
+fn players_are_at_most_254() {
+    let arena = "kind rock_pile { }";
+    let names: Vec<(String, String)> = (0..255)
+        .map(|i| (format!("p{i}.rules"), format!("p{i}")))
+        .collect();
+    let mut files: Vec<(&str, &str, Option<&str>)> = vec![("arena.rules", arena, None)];
+    for (name, player) in &names {
+        files.push((name, "kind ant { }", Some(player)));
+    }
+    let e = compile_owned(&files, &[]).unwrap_err().to_string();
+    assert!(e.contains("255 players: a rule set has at most 254"), "{e}");
+    files.pop();
+    let k = compile_owned(&files, &[]).unwrap();
+    let players = k.players.of.iter().filter(|&&p| p != Players::NONE).count();
+    assert_eq!(players, 254);
+}
+
+#[test]
+fn an_array_has_one_length_in_a_trait_and_its_kind() {
+    for text in [
+        "trait t { mem r[8] } kind k extends t { mem r[4]  when true => { r[0] = 1  idle } }",
+        "trait t { mem r[4] } kind k extends t { mem r[8]  when true => { r[0] = 1  idle } }",
+        "trait a { mem r[4] } trait b { mem r[8] } kind k extends a, b { }",
+    ] {
+        let e = compile_err(text);
+        assert!(
+            e.contains("`r` is declared with two lengths"),
+            "{text}: {e}"
+        );
+    }
+    compile_ok(
+        "trait t { mem r[4] } kind k extends t { mem r[4]  when true => { r[3] = 1  idle } }",
+    );
+}
+
+#[test]
+fn every_support_bit_a_resting_layer_may_take_is_reserved() {
+    // `low` rests on a kind and is the second layer: support bit 62, so
+    // bits 62 and 63 are not tags.
+    let rules = |tags: usize| {
+        let names: Vec<String> = (0..tags).map(|i| format!("t{i}")).collect();
+        format!(
+            "kind log {{ tags {} }} layer air layer low {{ on log }}",
+            names.join(" ")
+        )
+    };
+    compile_ok(&rules(62));
+    let e = compile_err(&rules(63));
+    assert!(
+        e.contains(
+            "at most 62 tags in a rule set (64, less one for each layer up to the last that rests on a kind)"
+        ),
+        "{e}"
+    );
 }
 
 #[test]
