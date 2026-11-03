@@ -51,11 +51,16 @@ lint:
 test:
 	cargo test --workspace $(DEV)
 
+# Each at 1 and 8 threads; their `checksum:` and `state:` lines must match.
 scenario-test: build
 	@for f in scenarios/*.scenario scenarios/tests/*.scenario; do \
-		for t in 1 8; do \
-			cargo run -q -p app --bin wmc $(DEV) -- scenario $$f --threads $$t || exit 1; \
-		done; \
+		one=$$(cargo run -q -p app --bin wmc $(DEV) -- scenario $$f --threads 1); ok=$$?; \
+		echo "$$one"; [ $$ok -eq 0 ] || exit 1; \
+		eight=$$(cargo run -q -p app --bin wmc $(DEV) -- scenario $$f --threads 8); ok=$$?; \
+		echo "$$eight"; [ $$ok -eq 0 ] || exit 1; \
+		if [ "$$(grep -E '^(checksum|state):' <<< "$$one")" != "$$(grep -E '^(checksum|state):' <<< "$$eight")" ]; then \
+			echo "$$f: the checksums differ at 1 and 8 threads"; exit 1; \
+		fi; \
 	done
 
 # `make test` runs these properties with a few cases and a fixed seed; this
