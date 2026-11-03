@@ -415,11 +415,24 @@ impl<'a> Gen<'a> {
                 }
             }
             let d = &it.decls;
-            for (e, _) in [&d.cadence, &d.sight, &d.fuel, &d.food, &d.bite]
+            for (e, _) in [&d.cadence, &d.sight, &d.fuel, &d.food, &d.bite, &d.reach]
                 .into_iter()
                 .flatten()
             {
                 seen.expr(e);
+            }
+            if let Some((n, ..)) = &d.climb {
+                seen.expr(n);
+            }
+            if let Some((w, h, _)) = &d.size {
+                seen.expr(w);
+                seen.expr(h);
+            }
+            if let Some((max, init, _)) = &d.group {
+                seen.expr(max);
+                if let Some(e) = init {
+                    seen.expr(e);
+                }
             }
             for n in &d.needs {
                 seen.expr(&n.max);
@@ -459,6 +472,35 @@ impl<'a> Gen<'a> {
                 who: format!("const `{}`", c.name),
             };
             seen.expr(&c.value);
+        }
+        // Fields and the budget: their numbers and laws use consts (a law
+        // names fields, not a kind's needs: apart, for consts only).
+        let mut world = Names::default();
+        for f in self.fields_ast {
+            let mut seen = Seen {
+                names: &mut world,
+                who: format!("field `{}`", f.name),
+            };
+            seen.expr(&f.max);
+            if let Some((_, e, _)) = &f.init {
+                seen.expr(e);
+            }
+            if let Some((e, _)) = &f.outside {
+                seen.expr(e);
+            }
+            if let Some((every, body, _)) = &f.law {
+                seen.expr(every);
+                seen.stmts(body);
+            }
+        }
+        if let Some(b) = self.budget_ast {
+            let mut seen = Seen {
+                names: &mut world,
+                who: "the budget".into(),
+            };
+            for (e, _) in [&b.fuel, &b.rows, &b.private].into_iter().flatten() {
+                seen.expr(e);
+            }
         }
 
         // Each kind's code, followed.
@@ -673,7 +715,7 @@ impl<'a> Gen<'a> {
             }
         }
         for c in self.consts {
-            if !names.all.contains(&c.name) {
+            if !names.all.contains(&c.name) && !world.all.contains(&c.name) {
                 out.warn(&c.at, format!("const `{}` is never used", c.name));
             }
         }
@@ -683,6 +725,11 @@ impl<'a> Gen<'a> {
     /// Warnings and notes about the compiled kinds, in kind order.
     fn diagnose(&mut self, out: &mut Out) {
         let items = self.items;
+        // A rule that never runs, by (rule, why), with the kinds it never
+        // runs in; and how many kinds run each rule (a trait's rule may
+        // run in one kind and not in another: then the warning names them).
+        let mut never: Vec<((usize, String), &'a Pos, Vec<&'a str>)> = Vec::new();
+        let mut runs_in: HashMap<usize, usize> = HashMap::new();
         for k in 0..self.kind_insts.len() {
             self.enter(k);
             let ki = self.kind_insts[k];
@@ -694,14 +741,34 @@ impl<'a> Gen<'a> {
                 .into_iter()
                 .chain(&inst.state_lists)
                 .collect();
+            let kind_name = items[inst.item].name.as_str();
+            let mut mine: Vec<usize> = lists
+                .iter()
+                .flat_map(|l| {
+                    l.rules
+                        .iter()
+                        .map(|rr| std::ptr::from_ref(rr.rule) as usize)
+                })
+                .collect();
+            mine.sort_unstable();
+            mine.dedup();
+            for r in mine {
+                *runs_in.entry(r).or_default() += 1;
+            }
+            let mut found = |rule: &'a Rule, why: String| {
+                let key = (std::ptr::from_ref(rule) as usize, why);
+                match never.iter_mut().find(|(k, ..)| *k == key) {
+                    Some((_, _, kinds)) => kinds.push(kind_name),
+                    None => never.push((key, &rule.at, vec![kind_name])),
+                }
+            };
             for (li, list) in lists.iter().enumerate() {
                 if li > 0 {
                     if let (Some(end), Some(first)) = (reflex_end, list.rules.first()) {
-                        out.push(
-                            Level::Warning,
-                            &first.rule.at,
+                        found(
+                            first.rule,
                             format!(
-                                "never runs: the reflex rule at {}:{} always ends the think",
+                                "the reflex rule at {}:{} always ends the think",
                                 end.at.file, end.at.line
                             ),
                         );
@@ -716,11 +783,10 @@ impl<'a> Gen<'a> {
                     let always = matches!(&rr.rule.cond, Cond::Expr(e) if self.fold_known(e, &rr.rule.at, |_| false).is_some_and(|v| v != 0));
                     if always && self.ends_all(&rr.rule.body, false, 0, false) {
                         if let Some(next) = list.rules.get(i + 1) {
-                            out.push(
-                                Level::Warning,
-                                &next.rule.at,
+                            found(
+                                next.rule,
                                 format!(
-                                    "never runs: the rule at {}:{} always ends the think",
+                                    "the rule at {}:{} always ends the think",
                                     rr.rule.at.file, rr.rule.at.line
                                 ),
                             );
@@ -751,6 +817,15 @@ impl<'a> Gen<'a> {
                     );
                 }
             }
+        }
+        for ((rule, why), at, kinds) in never {
+            let some = if runs_in.get(&rule).is_some_and(|&n| n > kinds.len()) {
+                let names: Vec<String> = kinds.iter().map(|k| format!("`{k}`")).collect();
+                format!(" in {}", names.join(", "))
+            } else {
+                String::new()
+            };
+            out.push(Level::Warning, at, format!("never runs{some}: {why}"));
         }
         self.owner = None;
         self.params.clear();
@@ -821,22 +896,7 @@ impl<'a> Gen<'a> {
     fn walk_stmt(&mut self, kinds: &Kinds, w: &mut Walk, s: &'a Stmt, out: &mut Out) {
         let eater = &kinds.defs[usize::from(w.kind)].name;
         // An action inside `for each` (`next` is not one).
-        let acts = match s {
-            Stmt::Move(_, at)
-            | Stmt::Drink(_, at)
-            | Stmt::Eat(_, at)
-            | Stmt::Hit(_, at)
-            | Stmt::Graze(_, at)
-            | Stmt::Transfer { at, .. }
-            | Stmt::Split { at, .. }
-            | Stmt::Join(_, at)
-            | Stmt::Spawn { pos: at, .. }
-            | Stmt::Become { at, .. }
-            | Stmt::Idle(at)
-            | Stmt::Die(at) => Some(at),
-            _ => None,
-        };
-        if let Some(at) = acts
+        if let Some(at) = action_at(s)
             && w.each > 0
         {
             match &w.each_call {
@@ -1551,6 +1611,37 @@ mod tests {
             "kind ant { mem n  state A { when true => for each free within 1 as c { n += 1  next B } }  state B { when true => idle } }",
             "inside `for each`"
         ));
+        // Every action is one: digging, building, harvesting, dropping.
+        for act in ["dig c", "build rock at c", "harvest food 1", "drop food 1"] {
+            let text = format!(
+                "field food max 9 kind ant {{ need food max 1d  when true => for each free within 1 as c {{ {act} }} }}"
+            );
+            assert!(
+                has(&text, "an action inside `for each` traps"),
+                "{act}: {:?}",
+                lint(&text)
+            );
+        }
+    }
+
+    #[test]
+    fn a_rule_of_a_trait_never_runs_in_one_kind() {
+        // The trait's rule runs in `cow`; in `ox` its own rule hides it.
+        let got = lint(
+            "trait walker { when chance(50) => move random free }
+             kind ox extends walker { when true => idle }
+             kind cow extends walker { }",
+        );
+        assert!(
+            got.iter()
+                .any(|d| d == "1: never runs in `ox`: the rule at t.rules:2 always ends the think"),
+            "{got:?}"
+        );
+        // A kind's own rule needs no name.
+        assert!(has(
+            "kind ox { when true => idle\n when true => move north }",
+            "never runs: the rule"
+        ));
     }
 
     #[test]
@@ -1611,12 +1702,22 @@ mod tests {
     fn a_const_used_only_in_a_declaration() {
         let got = lint(
             "const S = 2 const R = 8 const C = 4 const M = 50 const F = 3 const B = 2 const U = 512 const Z = 1
+             const RE = 2 const GM = 9 const GI = 2 const W = 2 const H = 1 const CL = 3
+             const FM = 99 const SC = 8 const EV = 4 const LW = 1 const OUT = 5 const BF = 900 const BR = 100
+             budget { fuel BF  rows BR }
+             field height max FM { init noise scale SC outside OUT every EV { height = height - LW } }
              trait looker(r) { when count water within r > 0 => idle }
-             kind owl extends looker(S) { sight R cadence C fuel U food F bite B
+             kind owl extends looker(S) { sight R cadence C fuel U food F bite B reach RE
+               group max GM init GI
+               climb CL on height
                need food max M  need health max 5 decay 0 vital
-               inherit looker }",
+               inherit looker }
+             kind ox { size W H }",
         );
-        for c in ["S", "R", "C", "M", "F", "B", "U"] {
+        for c in [
+            "S", "R", "C", "M", "F", "B", "U", "RE", "GM", "GI", "W", "H", "CL", "FM", "SC", "EV",
+            "LW", "OUT", "BF", "BR",
+        ] {
             let not = format!("const `{c}` is never used");
             assert!(!got.iter().any(|d| d.contains(&not)), "{not}: {got:?}");
         }
