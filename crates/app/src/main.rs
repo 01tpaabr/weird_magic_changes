@@ -4,13 +4,13 @@
 //! wmc                                          the main menu (`app::menu`), over the gallery
 //! wmc show [width] [height] [seed]             print the initial region once and exit
 //! wmc play <save_dir> [width height seed]      open a window: WASD camera, streaming, saves
-//! wmc run <save_dir> <ticks> [width height seed] step the world headless, print rate + checksum
+//! wmc run <save_dir> <time> [width height seed]  step the world headless, print rate + checksum
 //! wmc lint <pack>...                           compile rule packs and print what they hold
 //! wmc scenario <file>                          a scenario test: make its world, then its
 //!                                              `run` and `expect` lines; exit 1 if one fails
 //!                                              (on each of its seeds: --seeds N, --pass M)
-//! wmc why [-v] <save_dir> <x> <y> [ticks [w h seed]]
-//!                                              step `ticks`, then explain the next think of
+//! wmc why [-v] <save_dir> <x> <y> [time [w h seed]]
+//!                                              step `time`, then explain the next think of
 //!                                              the actor at (x, y); `-v` lists every op
 //! wmc lab <file>                               the scenario test in <file> for every combination
 //!                                              of `--set NAME=a,b,c` values, on each of its seeds,
@@ -27,6 +27,8 @@
 //!                                              --kind K (repeatable), --gates (per rule:
 //!                                              reached, fired, the term that stopped it)
 //! ```
+//! A time is ticks, or one in units as a scenario's `run` line writes it
+//! (90min, 2h, 4d).
 //! Any command takes `--rules <pack>` (repeatable), `--scenario <file>`,
 //! `--set NAME=V` (repeatable: the rules' `const NAME` takes the value V)
 //! and `--threads N`, anywhere after its name. A pack is a directory of `*.rules` files or one
@@ -93,12 +95,14 @@ fn take_switch(args: &mut Vec<String>, flag: &str) -> bool {
     args.len() != before
 }
 
-/// Take every `--flag value` pair out of `args`.
+/// Take every `--flag value` pair out of `args`. A value is never another
+/// flag (`--csv --gates` lacks one; it does not write a file `--gates`).
 fn take_flag(args: &mut Vec<String>, flag: &str) -> anyhow::Result<Vec<String>> {
     let mut values = Vec::new();
     while let Some(i) = args.iter().position(|a| a == flag) {
         let v = args
             .get(i + 1)
+            .filter(|v| !v.starts_with("--"))
             .with_context(|| format!("{flag} needs a value"))?
             .clone();
         args.drain(i..i + 2);
@@ -160,17 +164,7 @@ fn main() -> anyhow::Result<()> {
         }
         sets.push((name, values));
     }
-    if let Some(n) = take_flag(&mut args, "--threads")?.pop() {
-        let n: usize = n
-            .parse()
-            .ok()
-            .filter(|n| (1..=par::MAX_THREADS).contains(n))
-            .with_context(|| format!("--threads needs a count from 1 to {}", par::MAX_THREADS))?;
-        par::init_task_pool_with(Some(n));
-    } else {
-        // Checked here: the pool reads it when a world is made, and panics.
-        par::env_threads().map_err(anyhow::Error::msg)?;
-    }
+    let threads = take_flag(&mut args, "--threads")?.pop();
     // `-v` and negative coordinates start with one `-`, a flag with two.
     if let Some(f) = args.iter().find(|a| a.starts_with("--")) {
         bail!("unknown flag {f}");
@@ -179,6 +173,18 @@ fn main() -> anyhow::Result<()> {
         bail!("--strict is only for lint");
     }
     let command = args.first().map(String::as_str);
+    if let Some(n) = threads {
+        let n: usize = n
+            .parse()
+            .ok()
+            .filter(|n| (1..=par::MAX_THREADS).contains(n))
+            .with_context(|| format!("--threads needs a count from 1 to {}", par::MAX_THREADS))?;
+        par::init_task_pool_with(Some(n));
+    } else if !matches!(command, Some("lint" | "rates")) {
+        // Checked here, where threads run (`lint` and `rates` make no
+        // world): the pool reads it when a world is made, and panics.
+        par::env_threads().map_err(anyhow::Error::msg)?;
+    }
     if command != Some("observe") && (every.is_some() || sample.is_some()) {
         bail!("--every and --sample are only for observe");
     }
@@ -217,11 +223,11 @@ fn main() -> anyhow::Result<()> {
         }
         Some("run") => {
             let dir = save_dir(args.get(1), "run")?;
-            let ticks = args
-                .get(2)
-                .context("run needs a tick count")?
-                .parse()
-                .context("bad tick count")?;
+            let ticks = time_arg(
+                args.get(2)
+                    .context("run needs a time: ticks, or 90min, 2h, 4d")?,
+                true,
+            )?;
             run(dir, ticks, &setup(&args[3..])?)
         }
         Some("why") => {
@@ -235,10 +241,7 @@ fn main() -> anyhow::Result<()> {
                     .with_context(|| format!("bad {what}"))
             };
             let (x, y) = (coord(1, "x")?, coord(2, "y")?);
-            let ticks = a
-                .get(3)
-                .map_or(Ok(0), |t| t.parse())
-                .context("bad tick count")?;
+            let ticks = a.get(3).map_or(Ok(0), |t| time_arg(t, true))?;
             why(
                 dir,
                 Pos::new(x, y),
@@ -248,17 +251,14 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Some("observe") => {
-            let time = |t: &str| {
-                sim_core::scenario::ticks_of(t)
-                    .with_context(|| format!("bad time {t:?}: ticks, or a time (90min, 2h, 4d)"))
-            };
-            let ticks = time(
+            let ticks = time_arg(
                 args.get(1)
                     .context("observe needs a time: ticks, or 90min, 2h, 4d")?,
+                false,
             )?;
             let mut opts = app::observe::Options::default();
             if let Some(e) = &every {
-                opts.every = time(e)?;
+                opts.every = time_arg(e, false)?;
             }
             if let Some(n) = &sample {
                 opts.sample = n
@@ -333,9 +333,25 @@ fn main() -> anyhow::Result<()> {
         }
         None if alone => play::menu(),
         None => bail!(
-            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <ticks> [w h seed] | wmc why [-v] <dir> <x> <y> [ticks [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
+            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <time> [w h seed] | wmc why [-v] <dir> <x> <y> [time [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
+}
+
+/// A time on the command line (`run`, `why`, `observe`, `--every`), as a
+/// scenario's `run` line writes one: ticks, or 90min, 2h, 4d. Zero only
+/// where `zero` allows it.
+fn time_arg(t: &str, zero: bool) -> anyhow::Result<u64> {
+    t.parse::<u64>()
+        .ok()
+        .or_else(|| sim_core::scenario::ticks_of(t))
+        .filter(|&n| zero || n > 0)
+        .with_context(|| {
+            format!(
+                "bad time {t:?}: {}ticks, or a time (90min, 2h, 4d)",
+                if zero { "" } else { "more than 0 " }
+            )
+        })
 }
 
 /// A scenario file, else the built-in one. The packs a file names are
@@ -475,9 +491,23 @@ fn open_or_new(dir: &str, setup: &Setup) -> anyhow::Result<World> {
     )
 }
 
-/// `wmc why`: step `ticks`, then wait (up to its cadence, at least a day)
-/// for the actor at `p` to be due, explain that think, and run it to show
-/// where it went.
+/// The longest `wmc why` steps a world waiting for a think: about three
+/// days. A kind that thinks more seldom (`cadence 2^30`) would hold it for
+/// hours; past this it says when the think comes instead.
+const WHY_WAIT: u64 = 1 << 16;
+
+/// Ticks from `now` to `row`'s next think by its cadence (a wake-up may
+/// come sooner), if the sim's own test (`systems::due`) agrees there.
+fn next_think(now: u64, row: &sim_core::ActorPub, cadence: u64) -> Option<u64> {
+    let shift = cadence.trailing_zeros().saturating_sub(16);
+    let phase = now.wrapping_add(u64::from(row.stagger) << shift) & (cadence - 1);
+    let k = cadence.wrapping_sub(phase) & (cadence - 1);
+    sim_core::actors::systems::due(now + k, row, cadence).then_some(k)
+}
+
+/// `wmc why`: step `ticks`, then wait (up to its cadence, at least a day,
+/// at most [`WHY_WAIT`]) for the actor at `p` to be due, explain that
+/// think, and run it to show where it went.
 fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Result<()> {
     let mut world = open_or_new(dir, setup)?;
     for _ in 0..ticks {
@@ -500,12 +530,18 @@ fn why(dir: &str, p: Pos, ticks: u64, ops: bool, setup: &Setup) -> anyhow::Resul
         if e.due {
             break (at, e);
         }
-        // Its own cadence (a `become` may change it), at least a day.
-        let limit = world
-            .resource::<Kinds>()
-            .def(e.row.kind)
-            .cadence()
-            .max(sim_core::TICKS_PER_DAY);
+        // Its own cadence (a `become` may change it), at least a day, at
+        // most WHY_WAIT: a think further off is said, not waited for.
+        let cadence = world.resource::<Kinds>().def(e.row.kind).cadence();
+        let limit = cadence.clamp(sim_core::TICKS_PER_DAY, WHY_WAIT);
+        if let Some(k) = next_think(sim::tick(&world), &e.row, cadence)
+            && waited + k > WHY_WAIT
+        {
+            bail!(
+                "it thinks every {cadence} ticks, its next think {k} ticks on, and `why` waits at most {WHY_WAIT} for one: give `why` {} ticks to step first",
+                ticks + waited + k
+            );
+        }
         if waited >= limit {
             bail!("it did not think within {limit} ticks");
         }
@@ -535,13 +571,21 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
     let to = sim::tick(&world);
     let loaded = world.resource::<Stage>().loaded_count();
     let kinds = world.resource::<Kinds>().clone();
-    let mut per_kind = vec![0usize; kinds.len()];
+    // Heads, as born and died count them: a row each, a group's its `heads`.
+    let mut per_kind = vec![0u64; kinds.len()];
+    let mut rows = 0usize;
     for a in world.query::<&ChunkActors>().iter(&world) {
+        rows += a.rows.len();
         for r in &a.rows {
-            per_kind[usize::from(r.kind)] += 1;
+            per_kind[usize::from(r.kind)] += u64::from(r.heads);
         }
     }
-    let actors: usize = per_kind.iter().sum();
+    let actors: u64 = per_kind.iter().sum();
+    let in_rows = if rows as u64 == actors {
+        String::new()
+    } else {
+        format!(" in {rows} rows")
+    };
     let by_kind: Vec<String> = kinds
         .names()
         .zip(&per_kind)
@@ -561,7 +605,7 @@ fn run(dir: &str, ticks: u64, setup: &Setup) -> anyhow::Result<()> {
     )?;
     writeln!(
         out,
-        "chunks:    {loaded} ({actors} actors: {})",
+        "chunks:    {loaded} ({actors} actors{in_rows}: {})",
         by_kind.join(", ")
     )?;
     writeln!(
@@ -619,6 +663,14 @@ fn observe(
     }
     let mut world = sim::new_world_with(&s.scenario, kinds)
         .map_err(|e| app::new_world_error(&s.name, s.scenario.line_of(&e), e))?;
+    // Made before the run: a path it cannot write fails now, not after it.
+    let csv = csv
+        .map(|path| {
+            std::fs::File::create(path)
+                .map(|f| (path, std::io::BufWriter::new(f)))
+                .with_context(|| format!("writing {path}"))
+        })
+        .transpose()?;
     let from = sim::tick(&world);
     let started = Instant::now();
     let report = app::observe::observe(&mut world, ticks, opts);
@@ -637,9 +689,7 @@ fn observe(
         opts.every,
         opts.sample
     )?;
-    if let Some(path) = csv {
-        let file = std::fs::File::create(path).with_context(|| format!("writing {path}"))?;
-        let mut file = std::io::BufWriter::new(file);
+    if let Some((path, mut file)) = csv {
         app::observe::write_csv(&report, kinds, &mut file)
             .and_then(|()| file.flush())
             .with_context(|| format!("writing {path}"))?;
@@ -694,13 +744,24 @@ struct LabRuns {
     full: bool,
 }
 
+/// Many worlds at once (`lab`, a multi-seed `scenario`): the runs are the
+/// parallelism, so a world gets one thread unless `--threads` or
+/// `WMC_THREADS` says how many.
+fn one_thread_a_world() -> anyhow::Result<()> {
+    let n = par::env_threads().map_err(anyhow::Error::msg)?.unwrap_or(1);
+    // The first initialiser wins: `--threads` set it already.
+    par::init_task_pool_with(Some(n));
+    Ok(())
+}
+
 /// At most this many variants (combinations of `--set` values) in a lab.
 const MAX_VARIANTS: usize = 1000;
 
 /// `wmc lab`: the scenario test in `file` for every combination of the
 /// `sets` values (one rule set each), on each of its seeds, many runs at
 /// once (`app::lab`): which variants pass, and each expectation's seeds and
-/// numbers. Each world runs on one thread unless `--threads` says more; a
+/// numbers. Each world runs on one thread unless `--threads` or
+/// `WMC_THREADS` says more; a
 /// seed stops at its first sure failure unless `full`. Writes every verdict
 /// to `csv` too, if given.
 fn lab(
@@ -746,10 +807,15 @@ fn lab(
             sim::check_expect(kinds, what).map_err(|e| anyhow::anyhow!("{file}:{line}: {e}"))?;
         }
     }
-    // The runs are the parallelism: a world each, on one thread.
-    if par::thread_count() == 0 {
-        par::init_task_pool_with(Some(1));
-    }
+    one_thread_a_world()?;
+    // Made before the runs: a path it cannot write fails now, not after them.
+    let csv = csv
+        .map(|path| {
+            std::fs::File::create(path)
+                .map(|f| (path, std::io::BufWriter::new(f)))
+                .with_context(|| format!("writing {path}"))
+        })
+        .transpose()?;
     let jobs = runs.jobs.unwrap_or_else(|| {
         std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get)
     });
@@ -794,9 +860,7 @@ fn lab(
         "{}",
         app::lab::report(file, &variants, &results, seeds, pass)
     )?;
-    if let Some(path) = csv {
-        let f = std::fs::File::create(path).with_context(|| format!("writing {path}"))?;
-        let mut f = std::io::BufWriter::new(f);
+    if let Some((path, mut f)) = csv {
         app::lab::write_csv(&variants, &results, &mut f)
             .and_then(|()| f.flush())
             .with_context(|| format!("writing {path}"))?;
@@ -883,9 +947,7 @@ fn scenario_test(
     // Several seeds: run at once, a world each (`app::lab`, every run to
     // its end), then a line per seed in seed order, and a line per
     // expectation. The same report as one after another, only sooner.
-    if par::thread_count() == 0 {
-        par::init_task_pool_with(Some(1));
-    }
+    one_thread_a_world()?;
     let jobs = std::thread::available_parallelism().map_or(4, std::num::NonZeroUsize::get);
     let variant = app::lab::Variant {
         label: String::new(),
@@ -897,7 +959,7 @@ fn scenario_test(
     if let Some(r) = runs.iter().find(|r| r.error.is_some()) {
         let e = r.error.as_deref().unwrap_or_default();
         bail!(match r.error_line {
-            Some(line) => format!("{file}:{line}: {e}"),
+            Some(line) => format!("{file}:{line}: seed {}: {e}", r.seed),
             None => format!("{file}: seed {}: {e}", r.seed),
         });
     }
@@ -1042,7 +1104,9 @@ fn lint(
         .count();
     writeln!(
         out,
-        "{} kinds, {} traits, {} ops, {} consts, {} subs, {warnings} warnings, hash {:016x}",
+        // The VM's constant pool, not the `const` lines: the compiled
+        // rules do not keep those.
+        "{} kinds, {} traits, {} ops, const pool {}, {} subs, {warnings} warnings, hash {:016x}",
         kinds.len(),
         kinds.debug.traits.len(),
         kinds.code.len(),

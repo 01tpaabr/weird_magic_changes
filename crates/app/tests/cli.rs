@@ -197,6 +197,8 @@ fn unused_arguments_are_refused() {
     let rules = repo.join("rules");
     let (ok, out, err) = wmc(&["lint", rules.to_str().unwrap(), "--strict"]);
     assert!(ok, "{out}{err}");
+    // The VM's constant pool, not the `const` lines it was once read as.
+    assert!(out.contains(" ops, const pool "), "{out}");
     assert!(!Path::new(dir).exists(), "run never saves");
 }
 
@@ -222,7 +224,8 @@ fn observe_reports_who_died_of_what() {
         "fox",
     ]);
     assert!(ok, "{err}");
-    assert!(out.contains("eaten by fox 100%"), "{out}");
+    // Eaten or hit to death: a kill.
+    assert!(out.contains("killed by fox 100%"), "{out}");
     assert!(
         out.contains("\nfox\n") && !out.contains("\nchicken\n"),
         "{out}"
@@ -846,6 +849,266 @@ fn arguments_that_are_not_utf8_are_errors() {
             && err.contains("Error: WMC_THREADS=`\u{FFFD}` is not a thread count"),
         "{:?}\n{err}",
         out.status
+    );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+// ---- what the tools report -------------------------------------------------------------
+
+/// A pack of a group (`herd`, 5 heads of 12) and a big kind (`hill`, 2x2),
+/// and a scenario starting one of each: what `run` and `why` say of them.
+fn herd_fixtures(name: &str) -> PathBuf {
+    let dir = scratch(name);
+    std::fs::create_dir_all(dir.join("herd")).unwrap();
+    std::fs::write(
+        dir.join("herd/herd.rules"),
+        "kind herd { glyph \"h\"  group max 12 init 5  when true => idle }\n\
+         kind hill { glyph \"H\"  size 2 2  when true => idle }\n\
+         kind sloth { glyph \"s\"  cadence 1073741824  when true => idle }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("herd.scenario"),
+        "rules herd\nseed 1\nsize 16 16\nterrain water_level 0 rock_on_soil 0 rock_on_water 0\n\
+         start herd at (3, 3)\nstart hill at (8, 8)\nstart sloth at (12, 12)\n",
+    )
+    .unwrap();
+    dir
+}
+
+/// `run` counts heads alive, as born and died do (a group of 5 is 5), and
+/// says how many rows hold them; `why` shows a group's heads and a big
+/// actor's size.
+#[test]
+fn run_counts_heads_and_why_shows_what_a_row_stands_for() {
+    let dir = herd_fixtures("heads");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["run", "save", "0", "--scenario", "herd.scenario"],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains("(7 actors in 3 rows: herd 5, hill 1, sloth 1)"),
+        "{out}"
+    );
+    let herd = out
+        .lines()
+        .find(|l| l.trim_start().starts_with("herd "))
+        .unwrap();
+    let alive: Vec<&str> = herd.split_whitespace().collect();
+    assert_eq!(alive[1], "5", "{herd}");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["why", "save", "3", "3", "--scenario", "herd.scenario"],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains(", heads 5 (group max 12)\n"), "{out}");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["why", "save", "8", "8", "--scenario", "herd.scenario"],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains(", size 2x2\n"), "{out}");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `why` on a kind that thinks once in 2^30 ticks says when its think comes
+/// instead of stepping the world for hours to reach it.
+#[test]
+fn why_does_not_wait_out_a_huge_cadence() {
+    let dir = herd_fixtures("sloth");
+    let started = std::time::Instant::now();
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["why", "save", "12", "12", "--scenario", "herd.scenario"],
+    );
+    assert_eq!(code, Some(1), "{out}{err}");
+    assert!(
+        err.contains("it thinks every 1073741824 ticks, its next think ")
+            && err.contains("`why` waits at most 65536 for one: give `why` "),
+        "{err}"
+    );
+    assert!(started.elapsed().as_secs() < 60, "it gave up at once");
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `run`, `why` and `observe` take a time as a scenario's `run` line
+/// writes one, and `observe --every` the unit its table prints.
+#[test]
+fn time_arguments_take_units() {
+    let dir = odd_fixtures("times");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &["run", "fresh", "2h", "--scenario", "tiny.scenario"],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.starts_with("ticks:     1800 "), "{out}");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "why",
+            "fresh",
+            "0",
+            "0",
+            "30min",
+            "--scenario",
+            "tiny.scenario",
+        ],
+    );
+    // It stepped half an hour from dawn (tick 5400), where the lone fox
+    // has died.
+    assert!(
+        code == Some(1) && err.contains("nobody at (0, 0) at tick 5850"),
+        "{out}{err}"
+    );
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "observe",
+            "1h",
+            "--every",
+            "30min",
+            "--scenario",
+            "tiny.scenario",
+        ],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    for args in [
+        &["run", "fresh", "2x"][..],
+        &["why", "fresh", "0", "0", "2m"],
+        &["observe", "0"],
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert!(
+            code == Some(1) && err.contains("bad time"),
+            "{args:?}: {out}{err}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// A flag missing its value does not take the next flag as it: `--csv
+/// --gates` writes no file named `--gates`.
+#[test]
+fn a_flag_never_takes_another_flag_as_its_value() {
+    let dir = odd_fixtures("flag-value");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "observe",
+            "1h",
+            "--scenario",
+            "tiny.scenario",
+            "--csv",
+            "--gates",
+        ],
+    );
+    assert!(
+        code == Some(1) && err.contains("--csv needs a value"),
+        "{out}{err}"
+    );
+    assert!(!dir.join("--gates").exists());
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `observe --csv` and `lab --csv` open their file before the run: a path
+/// they cannot write fails at once, before any world steps.
+#[test]
+fn a_csv_that_cannot_be_written_fails_before_the_run() {
+    let dir = odd_fixtures("csv-first");
+    let csv = "no/such/dir/out.csv";
+    for args in [
+        &["observe", "4d", "--scenario", "tiny.scenario", "--csv", csv][..],
+        &["lab", "tiny.scenario", "--csv", csv],
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert!(
+            code == Some(1) && err.contains(&format!("writing {csv}")),
+            "{args:?}: {out}{err}"
+        );
+        assert!(
+            !out.contains("observe ") && !out.contains("variant "),
+            "nothing ran: {out}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `lab` and a scenario on several seeds run a world a thread unless
+/// `--threads` or `WMC_THREADS` says otherwise; `lint` and `rates` run no
+/// world, and a bad `WMC_THREADS` does not stop them.
+#[test]
+fn many_worlds_at_once_honour_wmc_threads() {
+    let dir = odd_fixtures("threads-many");
+    std::fs::write(
+        dir.join("three.scenario"),
+        "seed 1\nseeds 3\nsize 1 1\nstart fox at (0, 0)\nrun 3\nexpect count fox == 1\n",
+    )
+    .unwrap();
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[("WMC_THREADS", "2")],
+        &["scenario", "three.scenario"],
+    );
+    assert!(code == Some(0) && out.contains("(2 threads)"), "{out}{err}");
+    let (code, out, err) = wmc_in(&dir, &[], &["scenario", "three.scenario"]);
+    assert!(code == Some(0) && out.contains("(1 threads)"), "{out}{err}");
+    let (code, out, err) = wmc_in(&dir, &[("WMC_THREADS", "2")], &["lab", "three.scenario"]);
+    assert!(
+        code == Some(0) && out.contains(", 2 thread a world;"),
+        "{out}{err}"
+    );
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    for args in [
+        &["lint", rules.to_str().unwrap()][..],
+        &["rates", "--kind", "fox"],
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[("WMC_THREADS", "abc")], args);
+        assert_eq!(code, Some(0), "{args:?}: {out}{err}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// On several seeds, a world that cannot be made says which seed; a file's
+/// `pass M` without `seeds` is checked against the seeds it runs on, so
+/// `--seeds N` can cover it.
+#[test]
+fn several_seeds_name_the_seed_and_take_pass_from_the_file() {
+    let dir = odd_fixtures("seeds");
+    std::fs::write(
+        dir.join("wolf.scenario"),
+        "seed 5\nseeds 2\nsize 4 4\nstart wolf at (0, 0)\nrun 3\nexpect count fox == 0\n",
+    )
+    .unwrap();
+    let (code, out, err) = wmc_in(&dir, &[], &["scenario", "wolf.scenario"]);
+    assert!(
+        code == Some(1)
+            && err.contains(
+                "wolf.scenario:4: seed 5: the scenario starts kinds the rules do not define: wolf"
+            ),
+        "{out}{err}"
+    );
+    std::fs::write(
+        dir.join("pass.scenario"),
+        "seed 1\npass 2\nsize 1 1\nstart fox at (0, 0)\nrun 3\nexpect count fox == 1\n",
+    )
+    .unwrap();
+    let (code, out, err) = wmc_in(&dir, &[], &["scenario", "pass.scenario", "--seeds", "3"]);
+    assert!(
+        code == Some(0) && out.contains("3 of 3 seeds held every expectation, 2 needed"),
+        "{out}{err}"
+    );
+    let (code, out, err) = wmc_in(&dir, &[], &["scenario", "pass.scenario"]);
+    assert!(
+        code == Some(1) && err.contains("it needs 2 seeds to pass, but runs on 1"),
+        "{out}{err}"
     );
     std::fs::remove_dir_all(&dir).unwrap();
 }
