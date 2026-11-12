@@ -64,8 +64,10 @@ use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
 use crate::render::palette::{
-    Color, GLYPH_MIN, Looks, NIGHT_SOIL, SOIL, TEXT_BG, TEXT_FG, VOID_BG, brightness,
+    Color, GLYPH_MIN, Looks, NIGHT_SOIL, SOIL, SPRITE_MIN, TEXT_BG, TEXT_FG, VOID_BG, brightness,
 };
+use crate::sprite::Wardrobe;
+use crate::sprite::tiles::SpriteTiles;
 
 /// Cell edge in logical pixels at startup; multiplied by the window's scale
 /// factor (2 on Retina) to get the physical cell the tileset is built for.
@@ -364,6 +366,7 @@ impl Plugin for PlayPlugin {
             .init_resource::<Selection>()
             .init_resource::<Inspector>()
             .init_resource::<PanelView>()
+            .init_resource::<Dress>()
             .add_systems(Startup, setup)
             .add_systems(
                 Update,
@@ -374,6 +377,7 @@ impl Plugin for PlayPlugin {
                     layout,
                     stream_and_tick,
                     inspect,
+                    dress,
                     render_frame,
                     upload_tiles,
                 )
@@ -520,6 +524,29 @@ impl PanelView {
             self.open.insert(rule);
         }
     }
+}
+
+/// The world's sprites (`crate::sprite`): read from its packs' sprite
+/// files when its rules change or `r` asks, and drawn into a tileset at the
+/// map's cell size when that changes.
+#[derive(Resource, Debug, Default)]
+struct Dress {
+    /// The rules (hash) the wardrobe was read for; `None` before the first.
+    for_hash: Option<u64>,
+    /// Read the files again (`r`).
+    dirty: bool,
+    wardrobe: Wardrobe,
+    /// Counts wardrobe changes, so the tiles know when to be drawn again.
+    generation: u64,
+    /// The wardrobe generation and cell size the tiles were drawn for.
+    built: Option<(u64, u32)>,
+    tiles: SpriteTiles,
+    tileset: Handle<Image>,
+    /// The wardrobe generation already said to be over the device's limit.
+    over_said: Option<u64>,
+    /// Sprites are drawn: some kind wears one, the map's cells are at least
+    /// [`SPRITE_MIN`], and the tiles fit the device.
+    on: bool,
 }
 
 /// The cell frames of a frame: the map, the status rows, the inspector,
@@ -1252,6 +1279,8 @@ fn inspect(world: &mut World) {
 /// remapped by name (`sim_core::reload`). Returns the line for the status
 /// bar: what changed, or why nothing did.
 fn reload(world: &mut World) -> String {
+    // The sprite files too, whatever the rules do (`dress` reads them).
+    world.resource_mut::<Dress>().dirty = true;
     let mut packs: Vec<std::path::PathBuf> = world
         .resource::<Kinds>()
         .debug
@@ -1331,6 +1360,84 @@ fn save(world: &mut World) -> anyhow::Result<usize> {
     })
 }
 
+/// The world's sprites: read them when the rules change or `r` asked (an
+/// error keeps the old ones for the same rules, and says so on the status
+/// bar), draw their tiles for the map's cell size, and build the map's
+/// sprite chunk for its grid. Off below [`SPRITE_MIN`] and when the tiles
+/// pass the device's array-texture limit (said once).
+fn dress(
+    kinds: Res<Kinds>,
+    layout: Res<Layout>,
+    device: Option<Res<bevy::render::renderer::RenderDevice>>,
+    mut d: ResMut<Dress>,
+    mut notice: ResMut<Notice>,
+    mut grids: ResMut<Grids>,
+    mut images: ResMut<Assets<Image>>,
+    mut commands: Commands,
+) {
+    if !layout.visible {
+        return;
+    }
+    if d.for_hash != Some(kinds.hash) || d.dirty {
+        let same = d.for_hash == Some(kinds.hash);
+        match crate::sprite::read(&kinds) {
+            Ok((w, warnings)) => {
+                for w in warnings {
+                    warn!("sprites: {w}");
+                }
+                if !same || w != d.wardrobe {
+                    d.wardrobe = w;
+                    d.generation += 1;
+                }
+            }
+            Err(e) => {
+                let text = if same {
+                    format!("sprites: {e:#} (the old ones kept)")
+                } else {
+                    d.wardrobe = Wardrobe::default();
+                    d.generation += 1;
+                    format!("sprites: {e:#} (drawn as glyphs)")
+                };
+                error!("{text}");
+                notice.show(text);
+            }
+        }
+        d.for_hash = Some(kinds.hash);
+        d.dirty = false;
+    }
+    let limit = device.map_or(crate::sprite::TILE_FLOOR, |dv| {
+        dv.limits().max_texture_array_layers
+    });
+    let tiles = d.wardrobe.tiles();
+    if tiles > limit && d.over_said != Some(d.generation) {
+        let text =
+            format!("sprites: {tiles} tiles, more than this device's {limit} (drawn as glyphs)");
+        error!("{text}");
+        notice.show(text);
+        d.over_said = Some(d.generation);
+    }
+    let on = !d.wardrobe.is_empty() && tiles <= limit && layout.cell >= SPRITE_MIN;
+    let map = &mut grids.map;
+    if on && d.built != Some((d.generation, layout.cell)) {
+        d.tiles = SpriteTiles::build(&d.wardrobe, &kinds, layout.cell);
+        d.tileset = images.add(d.tiles.tileset());
+        d.built = Some((d.generation, layout.cell));
+        map.sprite_grid = (0, 0, 0);
+    }
+    if on && map.cols > 0 && !map.sprites_fit() {
+        map.configure_sprites(&mut commands, &d.tileset);
+    }
+    if on != d.on {
+        d.on = on;
+        let v = if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        commands.entity(map.sprite).insert(v);
+    }
+}
+
 /// Phase 1: chunks -> cells, plus the status rows.
 fn render_frame(
     stage: StageCells,
@@ -1345,7 +1452,7 @@ fn render_frame(
     notice: Res<Notice>,
     inspector: Res<Inspector>,
     (screen, home, menu): (Res<Screen>, Res<Home>, Option<ResMut<Menu>>),
-    mut pview: ResMut<PanelView>,
+    (mut pview, dress): (ResMut<PanelView>, Res<Dress>),
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -1370,6 +1477,7 @@ fn render_frame(
     let looks = Looks {
         soil: if on_menu { NIGHT_SOIL } else { SOIL },
         tiny: layout.cell < GLYPH_MIN,
+        sprites: if dress.on { &dress.tiles.table } else { &[] },
         ..Looks::of(&kinds)
     };
     render_cells(|c| stage.chunk(c), looks, view, light, &mut frames.map);
@@ -1542,6 +1650,7 @@ fn upload_tiles(
     layout: Res<Layout>,
     frames: Res<Frames>,
     grids: Res<Grids>,
+    dress: Res<Dress>,
     mut tiles: Query<(&mut TilemapChunkTileData, &mut Transform)>,
 ) {
     if !layout.visible {
@@ -1597,6 +1706,18 @@ fn upload_tiles(
         };
         bg_tf.scale = scale;
         fg_tf.scale = scale;
+    }
+    // The map's sprites, over its glyphs.
+    let m = &grids.map;
+    if dress.on
+        && m.sprites_fit()
+        && m.fits(&frames.map)
+        && let Ok((mut data, mut tf)) = tiles.get_mut(m.sprite)
+        && data.len() == frames.map.cols() * frames.map.rows()
+    {
+        grid::upload_sprites(&frames.map, &mut data);
+        tf.translation = Vec3::new(map_at.0.x, map_at.0.y, m.z + 0.75);
+        tf.scale = map_scale;
     }
 }
 

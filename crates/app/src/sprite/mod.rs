@@ -12,6 +12,7 @@
 mod parse;
 pub mod raster;
 pub mod sheet;
+pub mod tiles;
 
 #[cfg(test)]
 pub mod gen_sprites;

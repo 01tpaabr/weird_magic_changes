@@ -7,7 +7,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 
 use app::render::cells::{CellFrame, Viewport, render_cells};
 use app::render::grid;
-use app::render::palette::Looks;
+use app::render::palette::{Looks, SpriteTile};
 use sim_core::{Kinds, Pos, Scenario, par, sim, stage};
 
 const COLS: u32 = 160;
@@ -42,6 +42,31 @@ fn bench_cells(c: &mut Criterion) {
             )
         });
     });
+    // The same view with every chicken and fox drawn as a sprite: the
+    // second pass over the spans that runs only when some kind wears one.
+    let mut table = vec![SpriteTile::default(); kinds.len()];
+    for k in ["chicken", "fox"] {
+        let id = usize::from(kinds.by_name(k).expect("built in").id);
+        table[id] = SpriteTile { first: 1, width: 1 };
+    }
+    g.bench_with_input(
+        BenchmarkId::new("160x90 sprites", threads),
+        &threads,
+        |b, _| {
+            b.iter(|| {
+                render_cells(
+                    |cc| stage::chunk(&world, cc),
+                    Looks {
+                        sprites: &table,
+                        ..Looks::of(&kinds)
+                    },
+                    view,
+                    200,
+                    &mut frame,
+                )
+            });
+        },
+    );
     g.finish();
 }
 

@@ -18,11 +18,17 @@ use bevy::sprite_render::{AlphaMode2d, TileData, TilemapChunk, TilemapChunkTileD
 use super::atlas::{GlyphAtlas, SOLID};
 use super::cells::CellFrame;
 
-/// Two tilemap chunks (bg under fg) covering one [`CellFrame`].
+/// Two tilemap chunks (bg under fg) covering one [`CellFrame`], and a
+/// third over them for sprites (configured only where sprites are drawn:
+/// [`Layer::configure_sprites`]).
 #[derive(Debug, Clone, Copy)]
 pub struct Layer {
     pub bg: Entity,
     pub fg: Entity,
+    pub sprite: Entity,
+    /// The grid and tile size the sprite chunk is built for; `0 x 0` until
+    /// configured.
+    pub sprite_grid: (u32, u32, u32),
     /// Grid the chunks are currently built for; `0 x 0` until configured.
     pub cols: u32,
     pub rows: u32,
@@ -40,9 +46,14 @@ impl Layer {
     pub fn spawn(commands: &mut Commands, z: f32) -> Self {
         let bg = commands.spawn(Transform::from_xyz(0.0, 0.0, z)).id();
         let fg = commands.spawn(Transform::from_xyz(0.0, 0.0, z + 0.5)).id();
+        let sprite = commands
+            .spawn((Transform::from_xyz(0.0, 0.0, z + 0.75), Visibility::Hidden))
+            .id();
         Self {
             bg,
             fg,
+            sprite,
+            sprite_grid: (0, 0, 0),
             cols: 0,
             rows: 0,
             cell: 0,
@@ -80,6 +91,27 @@ impl Layer {
                 TilemapChunkTileData(vec![None; n]),
             ));
         }
+    }
+
+    /// (Re)build the sprite chunk for the layer's grid, drawing from
+    /// `tileset` (sprite tiles of the layer's square cell size).
+    pub fn configure_sprites(&mut self, commands: &mut Commands, tileset: &Handle<Image>) {
+        self.sprite_grid = (self.cols, self.rows, self.cell);
+        let n = (self.cols * self.rows) as usize;
+        commands.entity(self.sprite).insert((
+            TilemapChunk {
+                chunk_size: UVec2::new(self.cols, self.rows),
+                tile_display_size: UVec2::new(self.cell, self.cell),
+                tileset: tileset.clone(),
+                alpha_mode: AlphaMode2d::Blend,
+            },
+            TilemapChunkTileData(vec![None; n]),
+        ));
+    }
+
+    /// Is the sprite chunk built for the layer's grid?
+    pub fn sprites_fit(&self) -> bool {
+        self.sprite_grid == (self.cols, self.rows, self.cell)
     }
 
     /// Does this layer draw `frame` as built?
@@ -137,6 +169,28 @@ pub fn upload(
     }
 }
 
+/// Write `frame`'s sprites into the sprite chunk's tile data: each tile
+/// untinted but for the frame's light (day and night dim a picture as they
+/// dim a glyph's colour), empty where there is none.
+pub fn upload_sprites(frame: &CellFrame, tiles: &mut TilemapChunkTileData) {
+    let (cols, rows) = (frame.cols(), frame.rows());
+    assert_eq!(tiles.len(), cols * rows, "sprite tile data length");
+    let tint = super::palette::Color::rgb(255, 255, 255)
+        .scaled(frame.light)
+        .tint();
+    for r in 0..rows {
+        let src = &frame.sprite[r * cols..(r + 1) * cols];
+        let dst = (rows - 1 - r) * cols;
+        for (i, &s) in src.iter().enumerate() {
+            tiles[dst + i] = (s != 0).then(|| TileData {
+                tileset_index: s - 1,
+                color: tint,
+                ..TileData::default()
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -146,6 +200,8 @@ mod tests {
         Layer {
             bg: Entity::PLACEHOLDER,
             fg: Entity::PLACEHOLDER,
+            sprite: Entity::PLACEHOLDER,
+            sprite_grid: (0, 0, 0),
             cols,
             rows,
             cell,
@@ -177,6 +233,25 @@ mod tests {
         upload(&f, &mut bg, &mut fg, 0.5);
         assert_eq!(bg[3].unwrap().color.alpha(), 0.5);
         assert_eq!(fg[3].unwrap().color.alpha(), 1.0);
+    }
+
+    #[test]
+    fn sprites_upload_flipped_dimmed_and_empty_where_none() {
+        let mut f = CellFrame::new();
+        f.resize(2, 2);
+        f.sprite.copy_from_slice(&[3, 0, 0, 1]);
+        f.light = 128;
+        let mut t = TilemapChunkTileData(vec![None; 4]);
+        upload_sprites(&f, &mut t);
+        // Frame row 1 is tile row 0.
+        assert!(t[0].is_none());
+        assert_eq!(t[1].unwrap().tileset_index, 0);
+        assert_eq!(t[2].unwrap().tileset_index, 2);
+        assert!(t[3].is_none());
+        assert_eq!(
+            t[2].unwrap().color,
+            Color::rgb(255, 255, 255).scaled(128).tint()
+        );
     }
 
     #[test]

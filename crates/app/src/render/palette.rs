@@ -271,7 +271,25 @@ pub struct Looks<'a> {
     pub fields: &'a [FieldDef],
     /// The rules' grounds and features.
     pub materials: &'a Materials,
+    /// Per kind: its sprite's tile, if it wears one (`crate::sprite`);
+    /// empty when no kind does or the cells are too small
+    /// ([`SPRITE_MIN`]).
+    pub sprites: &'a [SpriteTile],
 }
+
+/// Where a kind's picture is in the sprite tileset: `first` is its first
+/// tile plus one (0: no sprite, draw the glyph), `width` its footprint's
+/// width, so a big actor's part `(dx, dy)` is tile `first - 1 + dy *
+/// width + dx`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SpriteTile {
+    pub first: u16,
+    pub width: u8,
+}
+
+/// The smallest cell, in physical pixels, a sprite is drawn in; below it
+/// kinds are drawn by their glyphs.
+pub const SPRITE_MIN: u32 = 16;
 
 /// The smallest cell, in physical pixels, a glyph is drawn in; below it
 /// standing kinds are drawn solid.
@@ -287,6 +305,7 @@ impl Default for Looks<'_> {
             tiny: false,
             fields: &[],
             materials: &DEFAULT_MATERIALS,
+            sprites: &[],
         }
     }
 }
@@ -301,6 +320,7 @@ impl<'a> Looks<'a> {
             tiny: false,
             fields: &kinds.fields,
             materials: &kinds.materials,
+            sprites: &[],
         }
     }
 
@@ -310,6 +330,25 @@ impl<'a> Looks<'a> {
     pub fn occupant(&self, occupant: sim_core::ActorId) -> Option<(u8, Color, bool)> {
         self.actor(occupant)
             .map(|(g, c, solid)| (g, c, solid || self.tiny))
+    }
+
+    /// The sprite tile plus one for `who` (an anchor or a part of a big
+    /// actor), 0 when its kind wears no sprite: one load and a branch for a
+    /// kind without one.
+    #[inline]
+    pub fn sprite(&self, who: sim_core::ActorId) -> u16 {
+        let Some((kind, slot)) = who.unpack() else {
+            return 0;
+        };
+        let Some(t) = self.sprites.get(usize::from(kind)).filter(|t| t.first != 0) else {
+            return 0;
+        };
+        if slot & sim_core::ActorId::PART == 0 {
+            return t.first;
+        }
+        // A part: its offset from the anchor is in its slot.
+        let (dx, dy) = (slot >> 4 & 15, slot & 15);
+        t.first + dy * u16::from(t.width) + dx
     }
 
     /// Glyph, colour and solidity of whoever stands on a cell: `None` for
@@ -330,6 +369,32 @@ impl<'a> Looks<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An anchor shows its sprite's first tile, a part of a big actor its
+    /// offset from it, a kind without one 0.
+    #[test]
+    fn a_sprite_tile_for_anchors_and_parts() {
+        use sim_core::ActorId;
+        let table = [
+            SpriteTile::default(),
+            SpriteTile {
+                first: 10,
+                width: 3,
+            },
+        ];
+        let looks = Looks {
+            sprites: &table,
+            ..Looks::default()
+        };
+        assert_eq!(looks.sprite(ActorId::NONE), 0);
+        assert_eq!(looks.sprite(ActorId::pack(0, 5)), 0);
+        assert_eq!(looks.sprite(ActorId::pack(1, 5)), 10);
+        assert_eq!(looks.sprite(ActorId::part(1, 2, 1)), 10 + 3 + 2);
+        assert_eq!(looks.sprite(ActorId::part(1, 0, 2)), 10 + 6);
+        // Past the table's end: no sprite.
+        assert_eq!(looks.sprite(ActorId::pack(9, 0)), 0);
+        assert_eq!(Looks::default().sprite(ActorId::pack(1, 0)), 0);
+    }
 
     #[test]
     fn color_is_packed_0rgb() {

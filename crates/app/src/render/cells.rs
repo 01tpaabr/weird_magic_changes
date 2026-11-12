@@ -52,6 +52,12 @@ pub struct CellFrame {
     /// Packed [`Color`] per cell.
     pub fg: Vec<u32>,
     pub bg: Vec<u32>,
+    /// Per cell, a sprite tile plus one (0: none; the glyph is blank where
+    /// there is one).
+    pub sprite: Vec<u16>,
+    /// The light the map was drawn in ([`render_cells`]): sprites are
+    /// dimmed by it as the colours are.
+    pub light: u8,
 }
 
 impl CellFrame {
@@ -74,6 +80,7 @@ impl CellFrame {
         self.glyph.resize(n, VOID.glyph);
         self.fg.resize(n, VOID.fg.0);
         self.bg.resize(n, VOID.bg.0);
+        self.sprite.resize(n, 0);
     }
 
     /// Write `text` into row `row` starting at column 0, padding the rest of
@@ -95,6 +102,7 @@ impl CellFrame {
             *g = src.next().unwrap_or(b' ');
         }
         self.fg[range.clone()].fill(fg.0);
+        self.sprite[range.clone()].fill(0);
         self.bg[range].fill(bg.0);
     }
 
@@ -118,6 +126,7 @@ impl CellFrame {
             };
             *f = c.0;
         }
+        self.sprite[range.clone()].fill(0);
         self.bg[range].fill(bg.0);
     }
 }
@@ -140,6 +149,7 @@ pub fn render_cells<'c>(
     assert_eq!(cols, view.width as usize, "frame width != viewport width");
     assert!(rows <= frame.rows, "viewport taller than frame");
     let n = cols * rows;
+    frame.light = light;
     if n == 0 {
         return;
     }
@@ -147,29 +157,48 @@ pub fn render_cells<'c>(
     let bands = frame.glyph[..n]
         .chunks_mut(band)
         .zip(frame.fg[..n].chunks_mut(band))
-        .zip(frame.bg[..n].chunks_mut(band))
+        .zip(
+            frame.bg[..n]
+                .chunks_mut(band)
+                .zip(frame.sprite[..n].chunks_mut(band)),
+        )
         .enumerate();
     let chunk = &chunk;
-    let render_band = move |b: usize, glyph: &mut [u8], fg: &mut [u32], bg: &mut [u32]| {
-        let rows = glyph
-            .chunks_mut(cols)
-            .zip(fg.chunks_mut(cols))
-            .zip(bg.chunks_mut(cols));
-        for (i, ((g, f), bg)) in rows.enumerate() {
-            render_row(chunk, looks, view, light, b * ROW_BAND + i, g, f, bg);
-        }
-    };
+    let render_band =
+        move |b: usize, glyph: &mut [u8], fg: &mut [u32], bg: &mut [u32], sp: &mut [u16]| {
+            let rows = glyph
+                .chunks_mut(cols)
+                .zip(fg.chunks_mut(cols))
+                .zip(bg.chunks_mut(cols).zip(sp.chunks_mut(cols)));
+            for (i, ((g, f), (bg, sp))) in rows.enumerate() {
+                let out = Row {
+                    glyph: g,
+                    fg: f,
+                    bg,
+                    sprite: sp,
+                };
+                render_row(chunk, looks, view, light, b * ROW_BAND + i, out);
+            }
+        };
     if rows <= ROW_BAND {
-        for (b, ((g, f), bg)) in bands {
-            render_band(b, g, f, bg);
+        for (b, ((g, f), (bg, sp))) in bands {
+            render_band(b, g, f, bg, sp);
         }
         return;
     }
     ComputeTaskPool::get().scope(|s| {
-        for (b, ((g, f), bg)) in bands {
-            s.spawn(async move { render_band(b, g, f, bg) });
+        for (b, ((g, f), (bg, sp))) in bands {
+            s.spawn(async move { render_band(b, g, f, bg, sp) });
         }
     });
+}
+
+/// One frame row's outputs.
+struct Row<'a> {
+    glyph: &'a mut [u8],
+    fg: &'a mut [u32],
+    bg: &'a mut [u32],
+    sprite: &'a mut [u16],
 }
 
 fn render_row<'c>(
@@ -178,10 +207,14 @@ fn render_row<'c>(
     view: Viewport,
     light: u8,
     row: usize,
-    glyph: &mut [u8],
-    fg: &mut [u32],
-    bg: &mut [u32],
+    out: Row<'_>,
 ) {
+    let Row {
+        glyph,
+        fg,
+        bg,
+        sprite,
+    } = out;
     let w = i32::try_from(glyph.len()).expect("row width fits i32");
     let y = view
         .origin
@@ -201,6 +234,7 @@ fn render_row<'c>(
         let span_end = (cc.origin().x + CHUNK_SIZE).min(x_end);
         let n = (span_end - x) as usize;
         let (g_out, f_out, b_out) = (&mut glyph[i..i + n], &mut fg[i..i + n], &mut bg[i..i + n]);
+        let s_out = &mut sprite[i..i + n];
         match chunk(cc) {
             Some(c) => {
                 let cells = c.ground[local..local + n]
@@ -247,9 +281,35 @@ fn render_row<'c>(
                     *fo = s.fg.scaled(light).0;
                     *bo = bg.scaled(light).0;
                 }
+                // Sprites in a pass of their own: a world without any pays
+                // one fill a span. The kind whose glyph would show (who is
+                // on top, else the cover) shows its picture instead.
+                s_out.fill(0);
+                if !looks.sprites.is_empty() {
+                    for (k, (so, go)) in s_out.iter_mut().zip(g_out.iter_mut()).enumerate() {
+                        let top = c
+                            .extra
+                            .iter()
+                            .rev()
+                            .map(|l| l[local + k])
+                            .find(|id| !id.is_none())
+                            .unwrap_or(c.occupant[local + k]);
+                        let who = if top.is_none() {
+                            c.cover[local + k]
+                        } else {
+                            top
+                        };
+                        let tile = looks.sprite(who);
+                        if tile != 0 {
+                            *so = tile;
+                            *go = b' ';
+                        }
+                    }
+                }
             }
             None => {
                 g_out.fill(VOID.glyph);
+                s_out.fill(0);
                 f_out.fill(VOID.fg.scaled(light).0);
                 b_out.fill(VOID.bg.scaled(light).0);
             }
@@ -352,6 +412,45 @@ mod tests {
     }
 
     use bevy::ecs::system::{Res, RunSystemOnce};
+
+    /// A kind with a sprite draws its tile and a blank glyph; every other
+    /// cell, and the whole frame without a sprite table, is as before.
+    #[test]
+    fn a_kind_with_a_sprite_draws_its_tile_and_no_glyph() {
+        use crate::render::palette::SpriteTile;
+        let world = world(200, 150, 9);
+        let view = Viewport::centered(Pos::new(60, 40), 120, 70);
+        let plain = frame_with(&world, view, 200);
+        assert!(plain.sprite.iter().all(|&s| s == 0), "no table, no sprites");
+        let kinds = world.resource::<Kinds>();
+        let chicken = kinds.by_name("chicken").unwrap().id;
+        let mut table = vec![SpriteTile::default(); kinds.len()];
+        table[usize::from(chicken)] = SpriteTile { first: 7, width: 1 };
+        let mut f = CellFrame::new();
+        f.resize(120, 72);
+        let looks = Looks {
+            sprites: &table,
+            ..Looks::of(kinds)
+        };
+        render_cells(|c| stage::chunk(&world, c), looks, view, 200, &mut f);
+        let mut drawn = 0;
+        for k in 0..120 * 70 {
+            if f.sprite[k] != 0 {
+                assert_eq!(f.sprite[k], 7);
+                assert_eq!(f.glyph[k], b' ');
+                assert_eq!(plain.glyph[k], kinds.def(chicken).glyph);
+                drawn += 1;
+            } else {
+                assert_eq!(f.glyph[k], plain.glyph[k]);
+            }
+            assert_eq!((f.fg[k], f.bg[k]), (plain.fg[k], plain.bg[k]));
+        }
+        assert!(drawn > 0, "the world has chickens in view");
+        assert_eq!(f.light, 200);
+        // Status rows never hold sprites.
+        f.put_text(70, "status", Color(1), Color(2));
+        assert!(f.sprite[70 * 120..71 * 120].iter().all(|&s| s == 0));
+    }
 
     #[test]
     fn light_scales_every_colour_and_nothing_else() {

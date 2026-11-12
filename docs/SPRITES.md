@@ -1,7 +1,7 @@
 # Sprites: pictures made of letters (design and build plan)
 
-Status: **approved, not built** (owner, 2026-11-12: every proposed choice in §9). An agent
-builds it step by step (§8).
+Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 3
+built** (§8), the rest to come. `packs/crabs` is the example pack (`scenarios/crabs.scenario`).
 
 ## 1. Goal
 
@@ -37,7 +37,7 @@ was made with (`Kinds::debug.packs`). A sprite names the kind it draws; nothing 
 changes.
 
 ```sprite
-# packs/shore/shore.sprite
+# packs/crabs/crabs.sprite
 palette {
   shell "#d9623b"
   dark  "#8a2e16"
@@ -126,13 +126,18 @@ backgrounds under the glyphs, each tile tinted.
     a number); the offset is a hash of the cell, so a herd doesn't step in unison.
 - **Small cells:** below `SPRITE_MIN` (16 physical pixels) a kind is drawn by its glyph,
   below `GLYPH_MIN` (8) as a square, as today.
+- **Who shows:** the kind whose glyph would show (who is on top of a cell, else its ground
+  cover) shows its picture instead, over the cell's background. A child that wears its
+  parent's sprite wears the parent's picture, colours and all (the tiles are drawn once a
+  sprite); give it a sprite of its own to tell them apart.
 - **Tile budget:** the sum over sprites of `poses * frames * W * H`. Array textures have a
   layer limit that depends on the device (256 is the floor wgpu guarantees). Step 3 reads
   the device's limit, and a rule set over the budget is an error that says its count.
 - **Reload:** `r` in `wmc play` reads the sprite files again with the rules; a sprite error
   shows on the status bar and keeps the old sprites.
 - **Cost:** `render_cells/160x90` (`crates/app/benches/render.rs`) before and after, in the
-  commit and in `PERF.md`; a world without sprites must not slow by more than noise.
+  commit and in `PERF.md`; a world without sprites must not slow by more than noise. (Built:
+  the sprite tiles are a second pass over a span that runs only when some kind wears one.)
 
 ## 5. Tools: `wmc sprite`
 

@@ -1,0 +1,20 @@
+# crabs: a kind drawn as a picture (docs/SPRITES.md). crabs.sprite, beside
+# this file, draws the crab with a dozen letters: a shell, claws that swing,
+# legs and eyes; nothing here knows. A crab keeps to the water's edge and
+# walks it; now and then it tucks in for a while (`look = 1`, which the
+# sprite draws as its pose 1).
+#
+#   make run ARGS="play saves/crabs --scenario scenarios/crabs.scenario"
+
+kind crab {
+  glyph "c"
+  color "#d9623b"
+  cadence 8
+  sight 6
+  mem rest
+
+  when rest > 0 => { rest -= 1  idle }                                    # tucked in
+  when chance(8) => { look = 1  rest = 6  idle }                          # tucks in
+  when count water within 2 == 0 and nearest water within 6 as w => { look = 0  move toward w }
+  when true => { look = 0  move random free }
+}

@@ -1,0 +1,13 @@
+# The crabs pack (packs/crabs): the kind docs/SPRITES.md draws. Crabs keep
+# to the water's edge, tuck in now and then (rest 6, look 1) and never die.
+#
+#   make run ARGS="scenario scenarios/tests/crabs.scenario"
+rules ../../packs/crabs
+seed 5
+size 96 64
+terrain water_scale 10 water_level 0.30 rock_on_soil 0 rock_on_water 0
+start crab 1 / 40
+run 1d
+expect eventually max rest of crab == 6 to 1h     # tucks in
+expect always count crab > 50
+expect died crab == 0

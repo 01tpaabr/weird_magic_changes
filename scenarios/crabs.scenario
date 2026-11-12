@@ -1,0 +1,10 @@
+# The crabs pack (packs/crabs): a kind drawn as a sprite. Crabs walk the
+# edges of a few ponds and tuck in now and then; zoom in (+) to see their
+# pictures, out (-) below 16 pixels a cell to see their glyphs.
+#
+#   make run ARGS="play saves/crabs --scenario scenarios/crabs.scenario"
+rules ../packs/crabs
+seed 5
+size 96 64
+terrain water_scale 10 water_level 0.30 rock_on_soil 0 rock_on_water 0
+start crab 1 / 40

@@ -1,6 +1,7 @@
 //! `docs/SPRITES.md` is executable, as `RULES.md` is (`sim-core/tests/docs.rs`):
 //!
-//! - ```` ```sprite ````: parses.
+//! - ```` ```sprite ````: parses; one whose first line names a file of
+//!   the repo (`# packs/crabs/crabs.sprite`) is that file, comments aside.
 //! - ```` ```sprite error ````: fails on the line marked `# error: TEXT`,
 //!   with a message containing TEXT.
 //! - `ebnf`, `text`, `sh`, `rust`: not run. Anything else, a bare fence
@@ -45,6 +46,41 @@ fn blocks(md: &str) -> Vec<(usize, String, String)> {
     out
 }
 
+/// A block whose first line names a file of the repo (`# packs/x/x.sprite`)
+/// is that file: their lines, comments and blank lines dropped, are equal.
+fn is_the_file(at: &str, file: &str, block: &str) {
+    let p = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(file);
+    let real = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{at}: {file}: {e}"));
+    let code = |t: &str| -> Vec<String> {
+        t.lines()
+            .map(|l| {
+                // A comment starts at a `#` outside a string.
+                let mut quote = None;
+                let end = l
+                    .char_indices()
+                    .find(|&(_, c)| match quote {
+                        Some(q) if c == q => {
+                            quote = None;
+                            false
+                        }
+                        Some(_) => false,
+                        None if c == '"' || c == '\'' => {
+                            quote = Some(c);
+                            false
+                        }
+                        None => c == '#',
+                    })
+                    .map_or(l.len(), |(i, _)| i);
+                l[..end].trim_end().to_string()
+            })
+            .filter(|l| !l.trim().is_empty())
+            .collect()
+    };
+    assert_eq!(code(block), code(&real), "{at}: the block is not {file}");
+}
+
 #[test]
 fn every_sprite_block_parses_and_every_error_block_fails_where_it_says() {
     let md = doc();
@@ -54,6 +90,9 @@ fn every_sprite_block_parses_and_every_error_block_fails_where_it_says() {
         match info.as_str() {
             "sprite" => {
                 parse("doc.sprite", &text).unwrap_or_else(|e| panic!("{at}: {e}\n{text}"));
+                if let Some(file) = text.lines().next().and_then(|l| l.strip_prefix("# ")) {
+                    is_the_file(&at, file, &text);
+                }
                 ok += 1;
             }
             "sprite error" => {
