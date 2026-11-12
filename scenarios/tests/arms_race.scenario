@@ -1,0 +1,27 @@
+# The arms race pack (packs/arms_race): rabbits and wolves, each with a `speed`
+# gene that moves a step at every birth (`mutate 100`). This keeps the showcase
+# working, not its selection (that takes about 6 days on 128 x 128, too
+# long for a test: see scenarios/arms_race.scenario): both species live, wolves hunt, genes stay in
+# their range, and children whose speed drifted into a faster band become its
+# coloured kind.
+#
+#   make run ARGS="scenario scenarios/tests/arms_race.scenario"
+rules ../../rules/lib.rules ../../packs/arms_race
+seed 7
+size 64 64
+terrain water_level 0.12 rock_on_soil 0.01 rock_on_water 0
+start grass 1 / 3
+start rabbit 1 / 60
+start wolf 1 / 300
+run 2d
+expect always count rabbit >= 1
+expect always count wolf >= 1
+expect always min speed of rabbit >= 1
+expect always max speed of rabbit <= 16
+expect always min speed of wolf >= 1
+expect always max speed of wolf <= 16
+expect born rabbit > 1000                     # seen 2664
+expect became quick_rabbit > 150              # seen 433: speeds drift up past 5
+expect eaten rabbit by wolf > 150             # seen 393
+expect traps rabbit == 0
+expect traps wolf == 0
