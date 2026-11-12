@@ -1,7 +1,7 @@
 # Sprites: pictures made of letters (design and build plan)
 
-Status: **proposed, not built** (2026-11-12). The owner reads this first; an agent builds it
-step by step once it is approved. Decisions the owner still has to make are in §9.
+Status: **approved, not built** (owner, 2026-11-12: every proposed choice in §9). An agent
+builds it step by step (§8).
 
 ## 1. Goal
 
@@ -218,21 +218,20 @@ the last. An agent building this reads `CLAUDE.md`, `/bevy-dev` and this file fi
 Steps 1 to 3 give sprites written by hand; 4 and 5 make them move and grow; 6 to 8 are the
 image-fitting tools. Each group is useful if the work stops after it.
 
-## 9. For the owner to decide
+## 9. Decided (owner, 2026-11-12)
 
-1. **Where a kind gets its sprite.** Proposed: the sprite file names the kind (no change to
-   the rules language or the sim). The other way, a `sprite NAME` line in the kind, puts
-   looks in one place with `glyph` and `color` but changes the compiler and the rules hash.
-2. **The animation clock.** Proposed: real time, so a paused world still breathes and a
-   fast one doesn't flicker. The other way: sim ticks, so animation stops on pause and
-   speeds up with the world.
-3. **Only letters, or one filled shape too.** Letters are strokes, so a solid body takes
-   dense characters (`@ # O 0`). Proposed: letters only at first; after step 7's numbers,
-   decide whether a filled disc stamp is worth adding.
-4. **Grounds, features and fields.** Proposed: not in this plan (kinds only). Water that
-   ripples and grass that sways are a separate, smaller change to how a cell's colour is
-   chosen.
-5. **Sound.** Not in this plan.
+1. **Where a kind gets its sprite:** the sprite file names the kind (no change to the rules
+   language or the sim). Not chosen: a `sprite NAME` line in the kind, which would put looks
+   in one place with `glyph` and `color` but change the compiler and the rules hash.
+2. **The animation clock:** real time, so a paused world still breathes and a fast one
+   doesn't flicker. Not chosen: sim ticks, where animation would stop on pause and speed up
+   with the world.
+3. **Only letters, at first.** Letters are strokes, so a solid body takes dense characters
+   (`@ # O 0`). After step 7's numbers, the owner decides whether a filled disc stamp is
+   worth adding.
+4. **Kinds only.** Grounds, features and fields are not in this plan: water that ripples
+   and grass that sways are a separate, smaller change to how a cell's colour is chosen.
+5. **No sound** in this plan.
 
 ## 10. Grammar
 
