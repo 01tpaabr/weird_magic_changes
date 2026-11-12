@@ -23,7 +23,8 @@ pub const SOLID: u16 = (LAST_GLYPH - FIRST_GLYPH) as u16 + 1;
 /// Layers in the tileset: the glyphs and the solid box.
 pub const LAYERS: usize = GLYPH_COUNT + 1;
 
-static FONT: &[u8] = include_bytes!("../../assets/JetBrainsMonoNL-Regular.ttf");
+/// The bundled font's bytes (sprites rasterize their stamps with it too).
+pub(crate) static FONT: &[u8] = include_bytes!("../../assets/JetBrainsMonoNL-Regular.ttf");
 
 /// Font pixel size as a fraction of the cell. JetBrains Mono's line box is
 /// 1.32 em and its advance 0.6 em, so 0.9 makes glyphs 0.54 cells wide with

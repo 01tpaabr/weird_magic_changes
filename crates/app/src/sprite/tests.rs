@@ -1,6 +1,6 @@
 use super::*;
 
-const CRAB: &str = r##"
+pub(crate) const CRAB: &str = r##"
 palette {
   shell "#d9623b"
   eye   "#101010"

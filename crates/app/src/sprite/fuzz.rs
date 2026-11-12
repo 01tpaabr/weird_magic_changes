@@ -190,3 +190,22 @@ fn pathological_texts_are_quick() {
     assert_eq!(parse("p", &stamps).unwrap().sprites.len(), 20_000);
     assert!(start.elapsed() < std::time::Duration::from_secs(10));
 }
+
+/// Every frame of every pose of a generated file draws, at sizes from a
+/// pixel or two up, the same twice.
+#[test]
+fn generated_files_draw_and_draw_the_same() {
+    proptest!(fuzz_config(64), |(f in file(), cell in 1u32..12, wide in 1u8..4)| {
+        let palette: Vec<u32> = f.palette.iter().map(|(_, c)| *c).collect();
+        for s in &f.sprites {
+            for p in &s.poses {
+                for fr in 0..p.frames.n {
+                    let a = super::raster::draw(p, fr, &palette, 0x00ab_cdef, (wide, 1), cell);
+                    prop_assert_eq!(a.rgba.len(), usize::from(wide) * cell as usize * cell as usize * 4);
+                    let b = super::raster::draw(p, fr, &palette, 0x00ab_cdef, (wide, 1), cell);
+                    prop_assert_eq!(a, b);
+                }
+            }
+        }
+    });
+}

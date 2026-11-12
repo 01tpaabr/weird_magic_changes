@@ -23,6 +23,7 @@ bevy.workspace = true
 anyhow.workspace = true
 bytemuck.workspace = true
 fontdue.workspace = true
+image.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

@@ -436,6 +436,12 @@ fn odd_fixtures(name: &str) -> PathBuf {
     std::fs::write(dir.join("bad.scenario"), "seed x\n").unwrap();
     std::fs::write(dir.join("bad.rules"), "kind {\n").unwrap();
     std::fs::write(dir.join("afile"), "not a save").unwrap();
+    std::fs::write(
+        dir.join("crab.sprite"),
+        "palette { s \"#d9623b\" }\nsprite crab { frames 2 every 1s \"O\" at 0.5 0.5 ~x 0.1 color s pose 1 { } }\nsprite fox { \"f\" at 1.5 0.5 }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("bad.sprite"), "sprite crab {\n").unwrap();
     std::fs::create_dir_all(dir.join("garbage/chunks")).unwrap();
     std::fs::write(dir.join("garbage/world.wmc"), "WMCW and then nothing").unwrap();
     for save in ["far", "broken"] {
@@ -642,6 +648,113 @@ fn odd_command_lines_never_panic() {
         &["rates", "--kind", "nobody"],
         &["rates", "--scenario", "tiny.scenario"],
         &["run", "s1", "1", "--kind", "fox"],
+        &["sprite"],
+        &["sprite", "draw"],
+        &["sprite", "render"],
+        &["sprite", "render", "crab.sprite"],
+        &["sprite", "render", "crab.sprite", "--png", "o.png"],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--rules",
+            rules,
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--sprite",
+            "nope",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--pose",
+            "1",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--pose",
+            "256",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--cell",
+            "3",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--cell",
+            "257",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--cell",
+            "256",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--bg",
+            "red",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "",
+            "--bg",
+            "#000000",
+        ],
+        &["sprite", "render", "crab.sprite", "--png", "."],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "/nonexistent/o.png",
+        ],
+        &["sprite", "render", "bad.sprite", "--png", "o.png"],
+        &["sprite", "render", "afile", "--png", "o.png"],
+        &["sprite", "render", "/nonexistent", "--png", "o.png"],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "crab.sprite",
+            "--png",
+            "o.png",
+        ],
+        &["show", "--png", "o.png"],
+        &["lint", rules, "--cell", "24"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);
@@ -676,6 +789,18 @@ const WORDS: &[&str] = &[
     "why",
     "lint",
     "scenario",
+    "sprite",
+    "render",
+    "--png",
+    "--sprite",
+    "--pose",
+    "--cell",
+    "--bg",
+    "crab.sprite",
+    "bad.sprite",
+    "o.png",
+    "crab",
+    "#00ff00",
     "--threads",
     "--rules",
     "--scenario",
@@ -1110,5 +1235,137 @@ fn several_seeds_name_the_seed_and_take_pass_from_the_file() {
         code == Some(1) && err.contains("it needs 2 seeds to pass, but runs on 1"),
         "{out}{err}"
     );
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `sprite render` writes a sheet of every pose's frames at the cell size
+/// and 8x, says what each row is, and takes the kinds' sizes from the rules.
+#[test]
+fn sprite_render_writes_a_sheet() {
+    let dir = odd_fixtures("sprite-render");
+    let (code, out, err) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--cell",
+            "10",
+        ],
+    );
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(
+        out.contains("row 1: crab (1 x 1): own stamps, 2 frames every 1000ms, 1 stamps"),
+        "{out}"
+    );
+    assert!(
+        out.contains("row 2: crab (1 x 1): pose 1, 2 frames every 1000ms, 0 stamps"),
+        "{out}"
+    );
+    // The fox's stamp reaches into a second cell.
+    assert!(
+        out.contains("row 3: fox (2 x 1): own stamps, a still, 1 stamps"),
+        "{out}"
+    );
+    let png = std::fs::read(dir.join("o.png")).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    // Widest row: the fox's 20 px enlarged 8x, or the crab's two frames of 80
+    // and a gap; 8 px margins; three rows of h * 9 + 3 gaps of 6.
+    let w = u32::from_be_bytes(png[16..20].try_into().unwrap());
+    let h = u32::from_be_bytes(png[20..24].try_into().unwrap());
+    assert_eq!((w, h), (8 * 2 + 2 * 80 + 6, 8 * 2 + 3 * (10 * 9 + 18)));
+    assert!(
+        out.contains(&format!("wrote o.png: {w} x {h} pixels")),
+        "{out}"
+    );
+    // With the rules the fox is one cell; one sprite, one pose.
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let (code, out, _) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--sprite",
+            "fox",
+            "--rules",
+            rules.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(code, Some(0));
+    assert_eq!(
+        out.lines().next(),
+        Some("row 1: fox (1 x 1): own stamps, a still, 1 stamps")
+    );
+    // A pose the sprite lacks shows its own stamps.
+    let (_, out, _) = wmc_in(
+        &dir,
+        &[],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--sprite",
+            "crab",
+            "--pose",
+            "7",
+        ],
+    );
+    assert_eq!(
+        out.lines().next(),
+        Some("row 1: crab (1 x 1): own stamps, 2 frames every 1000ms, 1 stamps")
+    );
+    for (args, want) in [
+        (
+            &["sprite", "render", "crab.sprite"][..],
+            "sprite render needs --png <out.png>",
+        ),
+        (
+            &["sprite", "render", "bad.sprite", "--png", "o.png"],
+            "bad.sprite:1:13: this sprite's `{` is never closed",
+        ),
+        (
+            &[
+                "sprite",
+                "render",
+                "crab.sprite",
+                "--png",
+                "o.png",
+                "--sprite",
+                "eel",
+            ],
+            "crab.sprite: no sprite `eel` (it has: crab, fox)",
+        ),
+        (
+            &[
+                "sprite",
+                "render",
+                "crab.sprite",
+                "--png",
+                "o.png",
+                "--cell",
+                "3",
+            ],
+            "--cell needs a size in pixels from 4 to 256",
+        ),
+        (
+            &["show", "--png", "o.png"],
+            "--png, --sprite, --pose, --cell and --bg are only for sprite",
+        ),
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert!(
+            code == Some(1) && err.contains(want),
+            "{args:?}: {out}{err}"
+        );
+    }
     std::fs::remove_dir_all(&dir).unwrap();
 }

@@ -40,29 +40,38 @@ changes.
 # packs/shore/shore.sprite
 palette {
   shell "#d9623b"
+  dark  "#8a2e16"
   eye   "#101010"
 }
 
 sprite crab {
-  frames 4 every 200ms            # 4 frames, each shown 200 ms
-  "c" at 0.30 0.55 turn 0   ~turn 20      # a claw that swings 20 degrees each way
-  "c" at 0.70 0.55 turn 180 ~turn 20 phase 180
-  "O" at 0.50 0.50 scale 0.8 color shell
-  "." at 0.42 0.38 scale 0.5 color eye
-  "." at 0.58 0.38 scale 0.5 color eye
+  frames 4 every 200ms                                # 4 frames, each shown 200 ms
+  "<" at 0.12 0.68 scale 0.75 color dark ~x 0.03      # legs that shuffle
+  ">" at 0.88 0.68 scale 0.75 color dark ~x 0.03
+  "Y" at 0.18 0.31 scale 0.65 turn -25 ~turn 15 color shell   # claws that swing 15 degrees
+  "Y" at 0.82 0.31 scale 0.65 turn 25 ~turn 15 phase 180 color shell
+  "O" at 0.50 0.66 scale 0.95 turn 90 color shell     # the shell: an O on its side,
+  "=" at 0.50 0.66 scale 0.8 color shell              # filled
+  "'" at 0.40 0.42 scale 0.7 color eye                # eyes on stalks
+  "'" at 0.60 0.42 scale 0.7 color eye
 
-  pose 1 {                        # drawn while the crab's `look` is 1
-    "O" at 0.50 0.60 scale 0.6 color shell
+  pose 1 {                        # drawn while the crab's `look` is 1: tucked in
+    "O" at 0.50 0.62 scale 0.95 turn 90 color shell
+    "=" at 0.50 0.62 scale 0.8 color shell
+    "'" at 0.40 0.50 scale 0.5 color eye
+    "'" at 0.60 0.50 scale 0.5 color eye
   }
 }
 ```
 
 - **A stamp** is `"C" at X Y [turn DEG] [scale S] [color NAME|"#rrggbb"]`.
   - `C` is one printable ASCII character (the atlas's set).
-  - `X Y` is the stamp's centre, in cells from the sprite's top-left: `0.5 0.5` is the middle
-    of a one-cell sprite.
-  - `turn` is whole degrees clockwise (default 0); `scale` is the character's height in
-    cells (default 1.0, 0.1 to 4.0).
+  - `X Y` is the centre of the character's ink (its glyph's box, not its line box), in
+    cells from the sprite's top-left: `0.5 0.5` is the middle of a one-cell sprite, and a
+    `"."` there is a dot in the middle, wherever the font's baseline is.
+  - `turn` is whole degrees clockwise about that centre (default 0); `scale` is the font
+    size in cells (default 1.0, 0.1 to 4.0): a capital is about 0.7 of it tall, an `O`
+    about half of it wide (the font is monospaced), so a wide body is an `O` turned 90.
   - `color` is a palette name or a literal; without one, the kind's `color`.
 - **Order is depth:** stamps are drawn in file order, later over earlier.
 - **Animation:** `frames N every T` (N 1 to 16; T a real time, `200ms` or `1.5s`, from
@@ -132,8 +141,11 @@ agent scores is what a player sees.
 
 - **`wmc sprite render <file.sprite> --png out.png [--sprite NAME] [--pose V] [--cell PX]
   [--bg "#rrggbb"]`**: a sheet with every frame of every pose, each twice: at `--cell`
-  size (24 by default, what a player sees) and enlarged 8x (what an author edits). This is
-  the agent's eyes.
+  size (24 by default, what a player sees) and enlarged 8x, pixel for pixel (what an author
+  edits), over `--bg` (the soil's colour by default); a row per pose, and a legend on
+  stdout. This is the agent's eyes. With `--rules` (or `WMC_RULES`) each sprite takes its
+  kind's colour and size; without, the colour of a kind that declares none, over the cells
+  its stamps reach. `--pose V` shows the pose drawn while `look` is V.
 - **`wmc sprite score <file.sprite> --sprite NAME --target image.png [--diff out.png]`**:
   how close the first frame is to an image, as numbers an agent can compare between tries:
   - `shape`: overlap of the two silhouettes (intersection over union), at 24 px;

@@ -10,6 +10,8 @@
 //!   matched to its kinds ([`Wardrobe`]), with warnings for `wmc lint`.
 
 mod parse;
+pub mod raster;
+pub mod sheet;
 
 #[cfg(test)]
 pub mod gen_sprites;

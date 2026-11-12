@@ -20,6 +20,12 @@
 //!                                              how long its needs last, per rule its dice a
 //!                                              think and a day, lifespans (`app::rates`);
 //!                                              --kind K (repeatable)
+//! wmc sprite render <file.sprite> --png <out.png>
+//!                                              every frame of every pose on one sheet, at the
+//!                                              cell size and enlarged 8x (`app::sprite::sheet`);
+//!                                              --sprite NAME, --pose V (the pose drawn for that
+//!                                              look), --cell PX (24), --bg "#rrggbb" (the soil);
+//!                                              --rules gives the kinds' colours and sizes
 //! wmc observe <time> [w h seed]                make the scenario's world, step it for <time>
 //!                                              (ticks, or 90min, 2h, 4d) and report how its
 //!                                              kinds live and die (`app::observe`); takes
@@ -165,6 +171,13 @@ fn main() -> anyhow::Result<()> {
         sets.push((name, values));
     }
     let threads = take_flag(&mut args, "--threads")?.pop();
+    let render = RenderOpts {
+        png: take_flag(&mut args, "--png")?.pop(),
+        sprite: take_flag(&mut args, "--sprite")?.pop(),
+        pose: take_flag(&mut args, "--pose")?.pop(),
+        cell: take_flag(&mut args, "--cell")?.pop(),
+        bg: take_flag(&mut args, "--bg")?.pop(),
+    };
     // `-v` and negative coordinates start with one `-`, a flag with two.
     if let Some(f) = args.iter().find(|a| a.starts_with("--")) {
         bail!("unknown flag {f}");
@@ -173,6 +186,9 @@ fn main() -> anyhow::Result<()> {
         bail!("--strict is only for lint");
     }
     let command = args.first().map(String::as_str);
+    if command != Some("sprite") && render.any() {
+        bail!("--png, --sprite, --pose, --cell and --bg are only for sprite");
+    }
     if let Some(n) = threads {
         let n: usize = n
             .parse()
@@ -180,8 +196,8 @@ fn main() -> anyhow::Result<()> {
             .filter(|n| (1..=par::MAX_THREADS).contains(n))
             .with_context(|| format!("--threads needs a count from 1 to {}", par::MAX_THREADS))?;
         par::init_task_pool_with(Some(n));
-    } else if !matches!(command, Some("lint" | "rates")) {
-        // Checked here, where threads run (`lint` and `rates` make no
+    } else if !matches!(command, Some("lint" | "rates" | "sprite")) {
+        // Checked here, where threads run (`lint`, `rates` and `sprite` make no
         // world): the pool reads it when a world is made, and panics.
         par::env_threads().map_err(anyhow::Error::msg)?;
     }
@@ -311,6 +327,7 @@ fn main() -> anyhow::Result<()> {
             }
             scenario_test(f, &packs, seeds, pass)
         }
+        Some("sprite") => sprite(&args[1..], &packs, &render),
         Some("lint") => {
             // As for a new world: these, else `WMC_RULES`, else the scenario's.
             let cli: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
@@ -328,12 +345,12 @@ fn main() -> anyhow::Result<()> {
         }
         Some(other) => {
             bail!(
-                "unknown command {other:?}; use `menu`, `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab`, `rates` or `lint`"
+                "unknown command {other:?}; use `menu`, `show`, `play`, `run`, `why`, `observe`, `scenario`, `lab`, `rates`, `lint` or `sprite`"
             )
         }
         None if alone => play::menu(),
         None => bail!(
-            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <time> [w h seed] | wmc why [-v] <dir> <x> <y> [time [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
+            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <time> [w h seed] | wmc why [-v] <dir> <x> <y> [time [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K] | wmc sprite render <file.sprite> --png <out.png> [--sprite NAME] [--pose V] [--cell PX] [--bg \"#rrggbb\"]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
 }
@@ -1007,6 +1024,163 @@ fn scenario_test(
     if passed < pass {
         bail!("{file}: {passed} of {seeds} seeds passed, {pass} needed");
     }
+    Ok(())
+}
+
+/// `wmc sprite`'s flags, taken off the command line with the rest.
+struct RenderOpts {
+    png: Option<String>,
+    sprite: Option<String>,
+    pose: Option<String>,
+    cell: Option<String>,
+    bg: Option<String>,
+}
+
+impl RenderOpts {
+    fn any(&self) -> bool {
+        self.png.is_some()
+            || self.sprite.is_some()
+            || self.pose.is_some()
+            || self.cell.is_some()
+            || self.bg.is_some()
+    }
+}
+
+/// The most pixels a sheet may have: a 16 x 16 sprite at a big cell would
+/// be gigabytes.
+const MAX_SHEET_PIXELS: usize = 64 << 20;
+
+/// `wmc sprite render <file> --png out`: a sheet of a sprite file's poses
+/// and frames. The kinds' colours and sizes come from `--rules` (or
+/// `WMC_RULES`) when given, else each sprite is the kind colour of a kind
+/// that declares none, over the cells its stamps reach.
+fn sprite(args: &[String], packs: &[String], o: &RenderOpts) -> anyhow::Result<()> {
+    use app::sprite::{parse, sheet};
+    match args.first().map(String::as_str) {
+        Some("render") => {}
+        Some(other) => bail!("unknown sprite command {other:?}; use `render`"),
+        None => bail!("sprite needs a command: render"),
+    }
+    let file = args.get(1).context("sprite render needs a sprite file")?;
+    if let Some(a) = args.get(2) {
+        bail!("sprite render takes one file; unexpected {a:?}");
+    }
+    let png = o
+        .png
+        .as_deref()
+        .context("sprite render needs --png <out.png>")?;
+    let cell: u32 = match &o.cell {
+        Some(c) => c
+            .parse()
+            .ok()
+            .filter(|c| (4..=256).contains(c))
+            .context("--cell needs a size in pixels from 4 to 256")?,
+        None => 24,
+    };
+    let bg = match &o.bg {
+        Some(b) => app::sprite::rgb(b)
+            .with_context(|| format!("--bg {b:?} is not a colour \"#rrggbb\""))?,
+        None => app::render::palette::SOIL_BG.0,
+    };
+    let pose: Option<u8> = o
+        .pose
+        .as_ref()
+        .map(|v| v.parse().ok().context("--pose needs a look from 0 to 255"))
+        .transpose()?;
+    let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
+    let f = parse(file, &text)?;
+    let kinds = {
+        let packs = app::packs(packs);
+        if packs.is_empty() {
+            None
+        } else {
+            Some(app::compile(&packs)?)
+        }
+    };
+    let chosen: Vec<&app::sprite::Sprite> = match &o.sprite {
+        Some(n) => vec![f.sprites.iter().find(|s| s.name == *n).with_context(|| {
+            let names: Vec<&str> = f.sprites.iter().map(|s| s.name.as_str()).collect();
+            format!("{file}: no sprite `{n}` (it has: {})", names.join(", "))
+        })?],
+        None => f.sprites.iter().collect(),
+    };
+    if chosen.is_empty() {
+        bail!("{file}: holds no sprite");
+    }
+    let palette: Vec<u32> = f.palette.iter().map(|(_, c)| *c).collect();
+    let mut rows = Vec::new();
+    let mut legend = Vec::new();
+    for s in chosen {
+        let def = kinds.as_ref().and_then(|k| k.by_name(&s.name));
+        let size = def.map_or_else(
+            || {
+                // The cells its stamps reach.
+                let reach = |v: fn(&app::sprite::Stamp) -> i32| {
+                    let m = s
+                        .poses
+                        .iter()
+                        .flat_map(|p| &p.stamps)
+                        .map(v)
+                        .max()
+                        .unwrap_or(0);
+                    u8::try_from(((m + 999) / 1000).clamp(1, 16)).expect("1 to 16")
+                };
+                (reach(|st| st.x), reach(|st| st.y))
+            },
+            |d| d.size,
+        );
+        let kind = def.map_or(sim_core::rules::DEFAULT_COLOR, |d| d.color);
+        let poses: Vec<&app::sprite::Pose> = match pose {
+            Some(v) => vec![
+                s.poses
+                    .iter()
+                    .find(|p| p.look == Some(v))
+                    .unwrap_or(&s.poses[0]),
+            ],
+            None => s.poses.iter().collect(),
+        };
+        for p in poses {
+            legend.push(format!(
+                "{} ({} x {}): {}",
+                s.name,
+                size.0,
+                size.1,
+                sheet::caption(p)
+            ));
+            rows.push(sheet::Row {
+                pose: p,
+                palette: &palette,
+                kind,
+                size,
+            });
+        }
+    }
+    let c = cell as usize;
+    let (w, h) = rows.iter().fold((0usize, 0usize), |(w, h), r| {
+        let (rw, rh) = (usize::from(r.size.0) * c, usize::from(r.size.1) * c);
+        (
+            w.max(usize::from(r.pose.frames.n) * rw * (sheet::ENLARGE + 1)),
+            h + rh * (sheet::ENLARGE + 1),
+        )
+    });
+    if w.saturating_mul(h) > MAX_SHEET_PIXELS {
+        bail!(
+            "the sheet would be about {w} x {h} pixels: choose a smaller --cell, a --sprite or a --pose"
+        );
+    }
+    let pic = sheet::sheet(&rows, cell, bg);
+    sheet::write_png(&pic, std::path::Path::new(png))?;
+    let mut out = std::io::stdout().lock();
+    for (i, l) in legend.iter().enumerate() {
+        writeln!(out, "row {}: {l}", i + 1)?;
+    }
+    writeln!(
+        out,
+        "wrote {png}: {} x {} pixels, cell {cell}, enlarged {}x below each row",
+        pic.width,
+        pic.height,
+        sheet::ENLARGE
+    )?;
     Ok(())
 }
 
