@@ -219,3 +219,62 @@ fn empty_wmc_rules_entries_are_skipped() {
     let (ok, err) = run(trailing);
     assert!(ok, "{err}");
 }
+
+/// `lint` reads a pack's sprite files: what each draws and the tiles it
+/// takes, a warning for a kind the rules lack (`--strict` fails on it), and
+/// a sprite file that does not parse fails with its position.
+#[test]
+fn lint_reads_a_packs_sprite_files() {
+    let root = std::env::temp_dir().join(format!("wmc-lint-sprites-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let pack = root.join("shore");
+    std::fs::create_dir_all(&pack).unwrap();
+    std::fs::write(
+        pack.join("shore.rules"),
+        "kind crab { glyph \"c\" }\nkind hermit extends crab { glyph \"h\" }\nkind king { glyph \"K\" size 2 2 }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        pack.join("shore.sprite"),
+        "sprite crab { frames 4 every 200ms \"O\" at 0.5 0.5 pose 1 { } }\nsprite king { \"K\" at 1 1 scale 2 }\n",
+    )
+    .unwrap();
+    let p = pack.to_str().unwrap();
+    let (ok, out, err) = wmc(&["lint", p]);
+    assert!(ok, "{out}{err}");
+    assert!(
+        out.contains("sprite crab         2 poses, 4 frames, 1 stamps, 8 tiles, worn by hermit"),
+        "{out}"
+    );
+    assert!(
+        out.contains("sprite king         1 poses, 1 frames, 1 stamps, 4 tiles"),
+        "{out}"
+    );
+    assert!(
+        out.contains("2 sprites, 12 tiles (every device holds 256)"),
+        "{out}"
+    );
+    // A sprite for no kind: a warning, which --strict refuses.
+    std::fs::write(pack.join("more.sprite"), "\n\nsprite whale { }\n").unwrap();
+    let (ok, out, _) = wmc(&["lint", p]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("more.sprite:3:8: warning: sprite `whale`: no loaded pack has this kind"),
+        "{out}"
+    );
+    let (ok, _, err) = wmc(&["lint", p, "--strict"]);
+    assert!(!ok && err.contains("1 warnings (--strict)"), "{err}");
+    // A sprite file that does not parse.
+    std::fs::write(
+        pack.join("more.sprite"),
+        "sprite crab2 {\n  \"O\" at 0.5\n}\n",
+    )
+    .unwrap();
+    let (ok, _, err) = wmc(&["lint", p]);
+    assert!(!ok, "{err}");
+    assert!(
+        err.contains("more.sprite:3:1: expected y (a number), found `}`"),
+        "{err}"
+    );
+    std::fs::remove_dir_all(&root).unwrap();
+}

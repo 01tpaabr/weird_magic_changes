@@ -65,8 +65,8 @@ sprite crab {
     cells (default 1.0, 0.1 to 4.0).
   - `color` is a palette name or a literal; without one, the kind's `color`.
 - **Order is depth:** stamps are drawn in file order, later over earlier.
-- **Animation:** `frames N every T` (N 1 to 16; T as times are written in rules, at least
-  50 ms). A stamp value may swing: `~turn A`, `~x A`, `~y A`, `~scale A` add
+- **Animation:** `frames N every T` (N 1 to 16; T a real time, `200ms` or `1.5s`, from
+  50 ms to 60 s: the rules' units are sim time, these are not). A stamp value may swing: `~turn A`, `~x A`, `~y A`, `~scale A` add
   `A * sin(2 pi (f / N) + phase)` at frame `f`, with `phase DEG` shared by a stamp's
   swings. This is where the sine earns its place: one line gives a walk cycle. Frames are
   worked out when the file loads, not per rendered frame.
@@ -235,4 +235,77 @@ image-fitting tools. Each group is useful if the work stops after it.
 
 ## 10. Grammar
 
-Written with step 1.
+What the parser in `crates/app/src/sprite/parse.rs` accepts, token by token, in the
+notation of `GRAMMAR.md` (`[ x ]` optional, `{ x }` zero or more, `"w"` that word or
+symbol). The generator `sprite/gen_sprites.rs` and the fuzzer `sprite/fuzz.rs` are built
+from it: when the parser changes, change all three.
+
+```ebnf
+comment = "#" { any character but LF }               (to the end of the line)
+NAME    = letter_ { letter_ | digit | "." }          (no empty part: `a.`, `a..b` are errors)
+NUMBER  = [ "-" ] digit { digit } [ "." digit [ digit [ digit ] ] ]
+TIME    = digit { digit } [ "." digit { digit } ] ( "ms" | "s" )
+STRING  = '"' { any byte but '"' and LF } '"'
+        | "'" { any byte but "'" and LF } "'"       (no escapes: "\" is a backslash)
+
+file    = { palette | sprite } EOF
+palette = "palette" "{" { NAME STRING } "}"
+sprite  = "sprite" NAME "{" { frames | stamp | pose } "}"
+pose    = "pose" NUMBER "{" { frames | stamp } "}"
+frames  = "frames" NUMBER [ "every" TIME ]
+stamp   = STRING "at" NUMBER NUMBER { option }
+option  = "turn" NUMBER | "scale" NUMBER | "phase" NUMBER
+        | "color" ( NAME | STRING )
+        | "~" ( "turn" | "x" | "y" | "scale" ) NUMBER
+```
+
+- **Tokens.** Whitespace (space, tab, CR, LF) and comments separate tokens; any other
+  character outside a string is an error. A `#` inside a string is not a comment. Letters
+  right after a number are its unit: `ms` or `s`, anything else is an error ("unknown
+  unit"). A number has at most 3 decimals (they are kept exactly, in thousandths, so a
+  picture is the same on every machine). A NAME may hold dots: `weather.cloud`.
+- **The palette.** A colour is `"#rrggbb"` (six hex digits). Names are unique in a file,
+  hold no dot, and number at most 64; a stamp may use one declared anywhere in the file.
+  Several `palette` blocks add to one palette.
+- **A sprite** names a kind; a name appears once in a file. Its body holds at most one
+  `frames` line, its stamps, and its poses; a pose holds at most one `frames` line and its
+  stamps, no pose. A pose without a `frames` line takes the sprite's; a sprite without one
+  is a still (`frames 1`).
+- **Ranges** (checked by the parser, with the range in the message):
+
+  | value | range | default |
+  |---|---|---|
+  | stamp character | one printable ASCII character, `" "` to `"~"` | |
+  | `at X Y` | 0 to 16, in cells | |
+  | `turn` | -360 to 360, whole degrees | 0 |
+  | `scale` | 0.1 to 4, in cells | 1 |
+  | `phase` | 0 to 360, whole degrees | 0 |
+  | `~turn` | 0 to 180, whole degrees | 0 |
+  | `~x`, `~y` | 0 to 16, in cells | 0 |
+  | `~scale` | 0 to 4, in cells | 0 |
+  | `frames N` | 1 to 16; `every` needed when N > 1 | 1 |
+  | `every T` | 50ms to 60s; milliseconds are whole | |
+  | `pose V` | 0 to 255, each once in a sprite | |
+
+- **Options** of a stamp come in any order, each at most once.
+- **Limits:** 32 stamps a pose (the sprite's own list is one), 8 poses a sprite (its own
+  list counted), 64 colours a palette.
+- **Loading** (`wmc lint`, the game): a sprite's name is a kind of the loaded rules (in a
+  player's pack, that player's: `red.ant` for `ant`), else a warning; two sprites for one
+  kind, in any files, are an error. A kind without a sprite wears its nearest parent's of
+  the same size. A stamp centred outside its kind's footprint is a warning.
+
+Errors read as the rules compiler's, `file:line:col: message`:
+
+```sprite error
+palette { shell "#d9623b" }
+sprite crab {
+  "O" at 0.5 0.5 scale 5     # error: scale must be from 0.1 to 4
+}
+```
+
+```sprite error
+sprite crab {
+  frames 4                   # error: `frames 4` needs `every T`
+}
+```

@@ -1041,6 +1041,22 @@ fn lint(
         None => None,
     };
     let mut diagnostics = kinds.debug.diagnostics.clone();
+    // The packs' sprite files: a parse error fails, the rest are warnings.
+    let (wardrobe, sprite_warnings) = app::sprite::read(&kinds)?;
+    diagnostics.extend(sprite_warnings);
+    if wardrobe.tiles() > app::sprite::TILE_FLOOR {
+        diagnostics.push(sim_core::rules::Diagnostic {
+            level: sim_core::rules::Level::Warning,
+            file: "sprites".into(),
+            line: 0,
+            col: 0,
+            msg: format!(
+                "{} sprite tiles: above the {} every device holds (a frame of a pose of a cell each)",
+                wardrobe.tiles(),
+                app::sprite::TILE_FLOOR
+            ),
+        });
+    }
     if let Some((f, s)) = &scenario {
         diagnostics.extend(s.unseen(&kinds));
         diagnostics.extend(s.outside_region(f));
@@ -1094,6 +1110,42 @@ fn lint(
             }
             writeln!(out, "{line}")?;
         }
+    }
+    for w in &wardrobe.sprites {
+        let own = &w.sprite.poses[0];
+        let wearers: Vec<&str> = wardrobe
+            .of_kind
+            .iter()
+            .enumerate()
+            .filter(|&(k, s)| {
+                k != usize::from(w.kind)
+                    && s.is_some_and(|i| wardrobe.sprites[usize::from(i)].kind == w.kind)
+            })
+            .map(|(k, _)| kinds.defs[k].name.as_str())
+            .collect();
+        writeln!(
+            out,
+            "sprite {:<12} {} poses, {} frames, {} stamps, {} tiles{}",
+            kinds.def(w.kind).name,
+            w.sprite.poses.len(),
+            own.frames.n,
+            own.stamps.len(),
+            w.tiles(),
+            if wearers.is_empty() {
+                String::new()
+            } else {
+                format!(", worn by {}", wearers.join(", "))
+            }
+        )?;
+    }
+    if !wardrobe.is_empty() {
+        writeln!(
+            out,
+            "{} sprites, {} tiles (every device holds {})",
+            wardrobe.sprites.len(),
+            wardrobe.tiles(),
+            app::sprite::TILE_FLOOR
+        )?;
     }
     for d in &diagnostics {
         writeln!(out, "{d}")?;
