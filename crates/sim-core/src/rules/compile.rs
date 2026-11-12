@@ -29,8 +29,8 @@ use super::vm::{
 };
 use super::vm::{SEARCH_DEFAULT_LIMIT, SEARCH_STATE};
 use super::{
-    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, KindDef, Kinds, LayerDef, Level,
-    MAX_LAYERS, MaterialDef, Materials, NeedDef, Players, Policy, RuleInfo, RuleShape, Term,
+    DEFAULT_COLOR, DebugInfo, Diagnostic, FieldDef, FieldInit, GeneDef, KindDef, Kinds, LayerDef,
+    Level, MAX_LAYERS, MaterialDef, Materials, NeedDef, Players, Policy, RuleInfo, RuleShape, Term,
 };
 use crate::actors::{MEM_SLOTS, NEED_SLOTS};
 use crate::stage::{Feature, Ground, MAX_FEATURES, MAX_GROUNDS};
@@ -911,6 +911,28 @@ struct Decls {
     tags: Vec<String>,
     needs: Vec<NeedAst>,
     mems: Vec<(String, Pos)>,
+    genes: Vec<GeneAst>,
+}
+
+/// A gene as an instance holds it: by name (its slot is in `mems`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GeneInst {
+    name: String,
+    default: i32,
+    lo: i32,
+    hi: i32,
+    mutate: u8,
+}
+
+/// `gene NAME = DEFAULT from LO to HI [mutate P]`.
+#[derive(Debug, Clone)]
+struct GeneAst {
+    name: String,
+    default: Expr,
+    lo: Expr,
+    hi: Expr,
+    mutate: Option<Expr>,
+    at: Pos,
 }
 
 /// `need NAME max M [decay 0] [vital]`.
@@ -1452,6 +1474,7 @@ pub const KEYWORDS: &[&str] = &[
     "bite",
     "place",
     "need",
+    "gene",
     "max",
     "decay",
     "vital",
@@ -1543,9 +1566,9 @@ pub const KEYWORDS: &[&str] = &[
     "free",
 ];
 /// Words that start a declaration in a kind or trait body.
-const DECL_WORDS: [&str; 18] = [
+const DECL_WORDS: [&str; 19] = [
     "glyph", "tags", "cadence", "sight", "fuel", "food", "bite", "cover", "solid", "color",
-    "place", "need", "mem", "reach", "climb", "layer", "group", "size",
+    "place", "need", "mem", "reach", "climb", "layer", "group", "size", "gene",
 ];
 
 const DIRS: [(&str, i32, i32); 4] = [
@@ -2430,12 +2453,42 @@ impl Parser<'_> {
                     vital,
                     at: p,
                 });
+            } else if self.eat_kw("gene") {
+                let (name, ..) = self.ident("gene name")?;
+                if d.genes.iter().any(|g| g.name == name)
+                    || d.needs.iter().any(|n| n.name == name)
+                    || d.mems
+                        .iter()
+                        .any(|(m, _)| *m == name || array_of(m) == Some(&name))
+                {
+                    return Err(self.err_at(&p, format!("`{name}` declared twice")));
+                }
+                self.expect_sym("=")?;
+                let default = self.additive()?;
+                self.expect_kw("from")?;
+                let lo = self.additive()?;
+                self.expect_kw("to")?;
+                let hi = self.additive()?;
+                let mutate = if self.eat_kw("mutate") {
+                    Some(self.additive()?)
+                } else {
+                    None
+                };
+                d.genes.push(GeneAst {
+                    name,
+                    default,
+                    lo,
+                    hi,
+                    mutate,
+                    at: p,
+                });
             } else if self.eat_kw("mem") {
                 loop {
                     let (name, at) = self.ident("memory slot name")?;
                     let taken = |n: &str| {
                         d.mems.iter().any(|(m, _)| m == n || array_of(m) == Some(n))
                             || d.needs.iter().any(|x| x.name == n)
+                            || d.genes.iter().any(|g| g.name == n)
                     };
                     if taken(&name) {
                         return Err(self.err_at(&at, format!("`{name}` declared twice")));
@@ -3570,6 +3623,8 @@ struct Inst<'a> {
     tags: Vec<String>,
     needs: Vec<NeedDef>,
     mems: Vec<String>,
+    /// Each gene is also in `mems`.
+    genes: Vec<GeneInst>,
     states: Vec<String>,
     /// Member subs after overriding: name, the instance that defines it,
     /// the sub.
@@ -4558,7 +4613,12 @@ impl<'a> Gen<'a> {
                 .mems
                 .iter()
                 .map(|(m, at)| ("mem", array_of(m).unwrap_or(m), at));
-            for (what, n, at) in needs.chain(mems) {
+            let genes = it
+                .decls
+                .genes
+                .iter()
+                .map(|g| ("gene", g.name.as_str(), &g.at));
+            for (what, n, at) in needs.chain(mems).chain(genes) {
                 if self.const_value(n).is_some() {
                     return Err(self.err(
                         at,
@@ -5139,6 +5199,83 @@ impl<'a> Gen<'a> {
                 ),
             ));
         }
+        // Genes by name like needs: the item's own override its parents'.
+        let mut genes: Vec<GeneInst> = Vec::new();
+        let mut gene_from: Vec<usize> = Vec::new();
+        let mut gene_clashes: Vec<(String, usize, usize)> = Vec::new();
+        for &p in &parents {
+            for g in &self.insts[p].genes {
+                match genes.iter().position(|x| x.name == g.name) {
+                    None => {
+                        genes.push(g.clone());
+                        gene_from.push(p);
+                    }
+                    Some(i) if genes[i] == *g => {}
+                    Some(i) => gene_clashes.push((g.name.clone(), gene_from[i], p)),
+                }
+            }
+        }
+        for ga in &d.genes {
+            let (mut default, lo, mut hi) = (
+                self.fold(&ga.default, &ga.at)?,
+                self.fold(&ga.lo, &ga.at)?,
+                self.fold(&ga.hi, &ga.at)?,
+            );
+            let mut mutate = match &ga.mutate {
+                Some(e) => self.fold(e, &ga.at)?,
+                None => 0,
+            };
+            // Traits are checked with every parameter 1: lenient there.
+            if self.checking {
+                hi = hi.max(lo);
+                default = default.clamp(lo, hi);
+                mutate = mutate.clamp(0, 100);
+            }
+            if lo > hi || default < lo || default > hi {
+                return Err(self.err(
+                    &ga.at,
+                    format!(
+                        "gene `{}`: the range is `from LO to HI` with LO <= DEFAULT <= HI (got {default} from {lo} to {hi})",
+                        ga.name
+                    ),
+                ));
+            }
+            if !(0..=100).contains(&mutate) {
+                return Err(self.err(
+                    &ga.at,
+                    format!(
+                        "gene `{}`: `mutate` is a percent, 0 to 100 (got {mutate})",
+                        ga.name
+                    ),
+                ));
+            }
+            let def = GeneInst {
+                name: ga.name.clone(),
+                default,
+                lo,
+                hi,
+                mutate: u8::try_from(mutate).expect("checked 0..=100"),
+            };
+            match genes.iter().position(|x| x.name == def.name) {
+                Some(i) => genes[i] = def,
+                None => genes.push(def),
+            }
+        }
+        if let Some((n, a, b)) = gene_clashes
+            .iter()
+            .find(|(n, ..)| !d.genes.iter().any(|x| x.name == *n))
+        {
+            return Err(self.err(
+                &it.at,
+                format!(
+                    "`{}` inherits gene `{n}` from `{}` and `{}`, declared differently: redeclare it in `{}`",
+                    it.name,
+                    self.inst_name(*a),
+                    self.inst_name(*b),
+                    it.name
+                ),
+            ));
+        }
         // An array has one length: a trait's and its kind's, two parents'.
         let mut lengths: Vec<(&str, usize, &str)> = Vec::new();
         let sources = parents
@@ -5187,8 +5324,40 @@ impl<'a> Gen<'a> {
             if needs.iter().any(|n| n.name == *m) {
                 return Err(self.err(at, format!("`{m}` is a need of `{}` already", it.name)));
             }
+            if genes.iter().any(|g| g.name == *m) {
+                return Err(self.err(at, format!("`{m}` is a gene of `{}` already", it.name)));
+            }
             if !mems.contains(m) {
                 mems.push(m.clone());
+            }
+        }
+        // A gene is a mem slot nobody writes; it takes the end of the list.
+        for g in &genes {
+            if mems.contains(&g.name) {
+                let plain = parents.iter().any(|&p| {
+                    self.insts[p].mems.contains(&g.name)
+                        && !self.insts[p].genes.iter().any(|x| x.name == g.name)
+                });
+                if plain {
+                    return Err(self.err(
+                        &it.at,
+                        format!(
+                            "`{}` inherits `{}` both as a gene and as a mem slot",
+                            it.name, g.name
+                        ),
+                    ));
+                }
+            } else {
+                mems.push(g.name.clone());
+            }
+            if needs.iter().any(|n| n.name == g.name) {
+                return Err(self.err(
+                    &it.at,
+                    format!(
+                        "`{}` has `{}` both as a need and as a gene",
+                        it.name, g.name
+                    ),
+                ));
             }
         }
         if let Some(m) = mems.iter().find(|m| needs.iter().any(|n| n.name == **m)) {
@@ -5226,6 +5395,15 @@ impl<'a> Gen<'a> {
                         ),
                     ));
                 };
+                if genes.iter().any(|g| g.name == *name) {
+                    return Err(self.err(
+                        at,
+                        format!(
+                            "`spawn {} ... with`: `{name}` is a gene, inherited and never set",
+                            it.name
+                        ),
+                    ));
+                }
                 let m = mems.remove(from);
                 mems.insert(i, m);
             }
@@ -5333,6 +5511,7 @@ impl<'a> Gen<'a> {
             tags,
             needs,
             mems,
+            genes,
             states,
             members,
             reflex,
@@ -5541,6 +5720,23 @@ impl<'a> Gen<'a> {
             climb: inst.climb.map(|(n, f)| (f, n)),
             needs: inst.needs.clone(),
             mems: inst.mems.clone(),
+            genes: inst
+                .genes
+                .iter()
+                .map(|g| GeneDef {
+                    slot: u8::try_from(
+                        inst.mems
+                            .iter()
+                            .position(|m| *m == g.name)
+                            .expect("in mems"),
+                    )
+                    .expect("at most MEM_SLOTS mems"),
+                    default: g.default,
+                    lo: g.lo,
+                    hi: g.hi,
+                    mutate: g.mutate,
+                })
+                .collect(),
             states: u8::try_from(inst.states.len().max(1)).expect("at most MAX_STATES states"),
             entry,
             color: inst.color.unwrap_or(DEFAULT_COLOR),
@@ -6894,6 +7090,15 @@ impl<'a> Gen<'a> {
         } else if let Some(i) = self.need_slot(name) {
             self.asm.set_need(i);
         } else if let Some(i) = self.mem_slot(name) {
+            let gene = self
+                .cur
+                .is_some_and(|c| self.insts[c].genes.iter().any(|g| g.name == name));
+            if gene {
+                return Err(self.err(
+                    at,
+                    format!("cannot assign to `{name}`: a gene is inherited, never written"),
+                ));
+            }
             self.asm.set_mem(i);
         } else if self.param(name).is_some() || self.const_value(name).is_some() {
             return Err(self.err(at, format!("cannot assign to `{name}`: it is a constant")));

@@ -1,0 +1,124 @@
+# Arms race: rabbits and wolves on a meadow, for watching genes drift under
+# selection (scenarios/arms_race.scenario). Built on lib.rules (`walker`,
+# `flee`, `turn`); the scenario names both.
+#
+# Both species carry a `speed` gene: in a chase, the chance per think to take
+# a step (speed x 6 in 100). A rabbit a wolf runs down dies; a wolf that does
+# not catch up within STAMINA thinks gives up, winded. Speed costs: a fast
+# rabbit has its kits further apart, and a fast wolf burns food. So wolves
+# select for fast rabbits, fast rabbits for fast wolves, and when either side
+# stops pushing, the cost pulls its speed back down.
+#
+# Genes are not drawn, so each species comes in colours by speed band: a
+# child is born as the base kind (`rabbit`, `wolf`) and on its first think
+# becomes the kind for its gene. The variants extend the base kind, so
+# `rabbit` and `wolf` in a predicate or an `expect` line mean the species.
+
+const STAMINA = 12                  # wolf thinks in one chase
+const SPOOK = 5                     # how near a wolf gets before a rabbit runs
+const SCENT = 8                     # how far off a wolf picks out a rabbit
+
+kind grass {
+  glyph "'"
+  color "#4f8f2f"
+  cover
+  cadence 256
+  sight 2
+  food 2h                           # a whole tuft: each of its four bites gives 30min
+  need health max 4 decay 0 vital
+  mem growth
+
+  when health < 4 and hurt == 0 and chance(50) => health += 1   # grows back while left alone; falls through
+  when true => look = health        # what it can spare (it thinks right after a bite); falls through
+  when true => growth += 1                                      # falls through
+  when growth >= 8 and count grass within 2 < 12 and nearest bare within 1 as c
+       => { growth = 0  spawn grass at c }
+}
+
+trait bunny extends walker(3) {
+  cadence 4
+  sight 6
+  food 5h                           # a wolf's meal
+  need food max 1d vital
+  need health max 1 decay 0 vital   # one bite
+  gene speed = 4 from 1 to 16 mutate 100   # every birth moves it a step
+  mem rest
+
+  when age > 2d and chance(1) => die                            # old age: about two days
+  when rest > 0 => rest -= 1                                    # falls through
+  when nearest wolf within SPOOK as w => {
+    detour = 0
+    if chance(speed * 6) { flee(w) } else { idle }              # a sprint: fast legs step more often
+  }
+  inherit walker
+  when food > 12h and age > 3h and rest == 0 and count rabbit within 2 < 3
+       and nearest free within 1 as c => { rest = 100 + speed * 40  food -= 6h  spawn rabbit at c }   # fast legs, fewer kits
+  when food < 22h and not is(here, grass:1) and is(here, grass) => graze here   # leaves the roots
+  when food < 22h and nearest grass:4 within 6 as g => move toward g
+  when true => wander()
+}
+
+kind rabbit extends bunny {
+  glyph "r"
+  color "#efe6cf"                   # cream: speed 1 to 5
+  when speed >= 11 => become swift_rabbit
+  when speed >= 6 => become quick_rabbit
+  inherit bunny
+}
+
+kind quick_rabbit extends rabbit {
+  glyph "r"
+  color "#e8b030"                   # amber: speed 6 to 10
+  inherit bunny
+}
+
+kind swift_rabbit extends rabbit {
+  glyph "r"
+  color "#ff5fa0"                   # pink: speed 11 to 16
+  inherit bunny
+}
+
+trait lupine extends walker(2) {
+  cadence 4
+  sight 12
+  bite 1
+  food 8h
+  need food max 1d vital
+  need health max 20 decay 0 vital
+  gene speed = 4 from 1 to 16 mutate 100   # every birth moves it a step
+  mem next_litter, chase, tired
+
+  when age > 4d and chance(1) => die                            # old age: about four days
+  when true => food -= speed / 8                                # fast legs are hungry; falls through
+  when tired > 0 => { tired -= 1  idle }                        # winded after a chase that failed
+  inherit walker
+  when food > 20h and age > 1d and day >= next_litter and chance(1) and count wolf within 8 < 3
+       and nearest free within 1 as c => { next_litter = day + 1  food -= 10h  spawn wolf at c }   # well fed, on its own ground
+  when food < 22h and nearest rabbit within 1 as m => { chase = 0  eat m }
+  when food < 22h and chase >= STAMINA => { chase = 0  tired = 30  idle }
+  when food < 22h and nearest rabbit within SCENT as m => {
+    chase += 1
+    if chance(speed * 6) { move toward m } else { idle }
+  }
+  when true => { chase = 0  wander() }
+}
+
+kind wolf extends lupine {
+  glyph "W"
+  color "#9aa0b0"                   # grey: speed 1 to 5
+  when speed >= 11 => become dire_wolf
+  when speed >= 6 => become lean_wolf
+  inherit lupine
+}
+
+kind lean_wolf extends wolf {
+  glyph "W"
+  color "#ff8a2a"                   # orange: speed 6 to 10
+  inherit lupine
+}
+
+kind dire_wolf extends wolf {
+  glyph "W"
+  color "#ff2a2a"                   # red: speed 11 to 16
+  inherit lupine
+}

@@ -40,25 +40,30 @@ fn kind_with() -> impl Strategy<Value = String> {
     )
         .prop_map(|(k, sets)| {
             let d = k.get(&KINDS.defs);
-            let names: Vec<(&str, i64)> = d
+            let names: Vec<(&str, i64, i64)> = d
                 .needs
                 .iter()
-                .map(|n| (n.name.as_str(), i64::from(n.max)))
-                .chain(d.mems.iter().map(|m| (m.as_str(), 0)))
+                .map(|n| (n.name.as_str(), 0, i64::from(n.max)))
+                .chain(d.mems.iter().map(|m| {
+                    match d.genes.iter().find(|g| d.mems[usize::from(g.slot)] == *m) {
+                        Some(g) => (m.as_str(), i64::from(g.lo), i64::from(g.hi)),
+                        None => (m.as_str(), 0, 0),
+                    }
+                }))
                 .collect();
             let mut with: Vec<String> = Vec::new();
             let mut used: Vec<&str> = Vec::new();
             for (i, raw, unit) in sets {
-                let Some(&(name, max)) = (!names.is_empty()).then(|| i.get(&names)) else {
+                let Some(&(name, lo, max)) = (!names.is_empty()).then(|| i.get(&names)) else {
                     break;
                 };
                 if used.contains(&name) {
                     continue;
                 }
                 used.push(name);
-                // A need in `0..=max`; a mem anything small.
-                let v = if max > 0 {
-                    i64::from(raw) % (max + 1)
+                // A need in `0..=max`, a gene in its range; a mem anything small.
+                let v = if max > 0 || lo != 0 {
+                    lo + i64::from(raw) % (max - lo + 1)
                 } else {
                     i64::from(raw % 2001) - 1000
                 };

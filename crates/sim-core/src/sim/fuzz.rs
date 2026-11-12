@@ -164,20 +164,31 @@ fn case(p: &Program, k: &Knobs) -> Case {
             continue; // nothing starts under it here; a big one by its share
         }
         text += &format!("start {} at ({x}, {y})", def.name);
-        // A need at 0, full, or anywhere between; a mem at either end of
-        // what a scenario can write, or anything.
-        let names: Vec<(&str, Option<i32>)> = def
+        // A need at 0, full, or anywhere between; a gene likewise in its
+        // range; a mem at either end of what a scenario can write, or
+        // anything.
+        let range = |m: &str| {
+            def.genes
+                .iter()
+                .find(|g| def.mems[usize::from(g.slot)] == m)
+                .map(|g| (g.lo, g.hi))
+        };
+        let names: Vec<(&str, Option<(i32, i32)>)> = def
             .needs
             .iter()
-            .map(|n| (n.name.as_str(), Some(n.max)))
-            .chain(def.mems.iter().map(|m| (m.as_str(), None)))
+            .map(|n| (n.name.as_str(), Some((0, n.max))))
+            .chain(def.mems.iter().map(|m| (m.as_str(), range(m))))
             .collect();
         if let (Some((slot, edge, v)), false) = (with, names.is_empty()) {
             let (name, max) = *slot.get(&names);
             let v = match (max, edge) {
-                (Some(_), 0) => 0,
-                (Some(max), 1) => max,
-                (Some(max), _) => v.rem_euclid(max.saturating_add(1).max(1)),
+                (Some((lo, _)), 0) => lo,
+                (Some((_, hi)), 1) => hi,
+                (Some((lo, hi)), _) => {
+                    let width = i64::from(hi) - i64::from(lo) + 1;
+                    i32::try_from(i64::from(lo) + i64::from(*v).rem_euclid(width))
+                        .expect("lo..=hi fits an i32")
+                }
                 (None, 0) => -i32::MAX,
                 (None, 1) => i32::MAX,
                 (None, _) => (*v).max(-i32::MAX),

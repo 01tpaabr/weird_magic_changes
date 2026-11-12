@@ -627,6 +627,8 @@ fn load_chunks(
                     for (i, n) in def.needs.iter().enumerate() {
                         m.needs[i] = m.needs[i].clamp(0, n.max);
                     }
+                    // A narrower gene range, as for a need's max.
+                    def.clamp_genes(&mut m.mem);
                     p.heads = p.heads.clamp(1, def.max_heads());
                 }
                 // On the 32-bit clock: the rows' clocks wrap too.
@@ -1177,6 +1179,19 @@ pub(crate) fn invariants(world: &mut World) -> Result<(), String> {
                     "mem slot {i} is {}, past its {} mems",
                     mind.mem[i],
                     def.mems.len()
+                ));
+            }
+            if let Some(g) = def
+                .genes
+                .iter()
+                .find(|g| !(g.lo..=g.hi).contains(&mind.mem[usize::from(g.slot)]))
+            {
+                return bad(format!(
+                    "gene {} is {}, out of {}..={}",
+                    def.mems[usize::from(g.slot)],
+                    mind.mem[usize::from(g.slot)],
+                    g.lo,
+                    g.hi
                 ));
             }
             if mind.state >= def.states.max(1) {
@@ -2018,6 +2033,49 @@ mod tests {
         }
         v.sort_unstable_by_key(|r| r.0);
         v
+    }
+
+    /// A child gets its parent's gene in its own chunk (Apply) and across
+    /// a border (Migrate); `mutate 100` moves it one step, the same every run.
+    #[test]
+    fn children_inherit_genes_in_their_chunk_and_across_a_border() {
+        let src = |mutate: &str| {
+            format!(
+                "kind budder {{ glyph \"b\"  cadence 1  gene g = 3 from 0 to 9{mutate}  mem done
+                   when done == 0 => {{ done = 1  spawn budder at east }} }}"
+            )
+        };
+        // One parent spawns inside chunk (0, 0), the other into (1, 0).
+        let children = |mutate: &str| {
+            let kinds = crate::rules::compile("g.rules", &src(mutate)).unwrap();
+            let mut w = new_world_with(&cfg(4), kinds.clone()).unwrap();
+            flatten(&mut w);
+            let now = tick(&w);
+            for (x, uid) in [(10, 0xA1), (63, 0xA2)] {
+                let mut m = systems::newborn(&kinds, 0, uid, now);
+                m.mem[1] = 7; // g: `done` is slot 0
+                assert!(place_actor(&mut w, Pos::new(x, 10), 0, m));
+            }
+            step(&mut w);
+            let mut born: Vec<(Pos, i32)> = rows(&mut w)
+                .into_iter()
+                .filter(|r| r.0 != 0xA1 && r.0 != 0xA2)
+                .map(|r| (r.2, r.3.mem[1]))
+                .collect();
+            born.sort_by_key(|(p, _)| p.x);
+            born
+        };
+        assert_eq!(
+            children(""),
+            [(Pos::new(11, 10), 7), (Pos::new(64, 10), 7)],
+            "without `mutate`, exact copies"
+        );
+        let moved = children(" mutate 100");
+        assert_eq!(moved.len(), 2);
+        for (_, g) in &moved {
+            assert!(*g == 6 || *g == 8, "one step off 7: {g}");
+        }
+        assert_eq!(children(" mutate 100"), moved, "and the same every run");
     }
 
     /// Resolve + Exchange on hand-made intents: two eaters on one victim
@@ -4302,6 +4360,35 @@ mod tests {
             let dot = rows(&mut w)[0].3;
             assert_eq!(e.after.mem[0], dot.mem[0], "tick {}", tick(&w) - 1);
         }
+    }
+
+    /// A reload carries a gene by name, clamps it to a new range, and starts
+    /// a new gene at its default; the invariants hold every gene in range.
+    #[test]
+    fn reload_clamps_genes_and_starts_new_ones_at_their_default() {
+        use crate::actors::systems::newborn;
+        use crate::reload::reload_rules;
+        use crate::rules::compile;
+        let a = compile(
+            "a.rules",
+            "kind a { mem m  gene g = 5 from 0 to 100  when g > 1 => idle }",
+        )
+        .unwrap();
+        let b = compile(
+            "b.rules",
+            "kind a { gene h = 3 from 1 to 4  gene g = 5 from 0 to 10  when g > h => idle }",
+        )
+        .unwrap();
+        let mut w = new_world_with(&cfg(2), a.clone()).unwrap();
+        flatten(&mut w);
+        let mut m = newborn(&a, 0, 0xA1, tick(&w));
+        assert_eq!(m.mem[..2], [0, 5], "the gene starts at its default");
+        m.mem[..2].copy_from_slice(&[9, 60]);
+        assert!(place_actor(&mut w, Pos::new(5, 5), 0, m));
+        reload_rules(&mut w, None, b).unwrap();
+        check_invariants(&mut w);
+        let a1 = rows(&mut w)[0].3;
+        assert_eq!(a1.mem[..2], [3, 10], "h new, g clamped; m is gone");
     }
 
     /// Hot reload maps rows by name: kinds renumbered, a kind gone (its rows

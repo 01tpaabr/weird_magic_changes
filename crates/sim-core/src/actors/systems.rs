@@ -38,7 +38,7 @@ use crate::actors::{
 };
 use crate::rng::{hash_cell, splitmix64};
 use crate::rules::vm::{self, Action, Ctx, Halo, event, result};
-use crate::rules::{KindDef, Kinds, Policy, Remap};
+use crate::rules::{GeneDef, KindDef, Kinds, Policy, Remap};
 use crate::sim::{SimConfig, Tick};
 use crate::stage::worldgen::{STREAM_UID, STREAM_UID_COVER, STREAM_UID_LAYER};
 use crate::stage::{
@@ -1566,6 +1566,7 @@ pub fn apply(
                                     coord.cell(cell),
                                     it.kind,
                                     it.with,
+                                    (actors.pubs[slot].kind, &actors.minds[slot]),
                                 );
                                 born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                                 result::OK
@@ -1602,6 +1603,7 @@ pub fn apply(
                                     coord.cell(cell),
                                     it.kind,
                                     it.with,
+                                    (actors.pubs[slot].kind, &actors.minds[slot]),
                                 );
                                 born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                                 result::OK
@@ -1624,8 +1626,15 @@ pub fn apply(
                     }
                     Action::Spawn => Some(match target_of(*coord, from, it.dx, it.dy) {
                         Where::Here(cell) if scratch.claim[cell] == it.key && !actors.full() => {
-                            let child =
-                                spawn_mind(kinds, seed, tick, coord.cell(cell), it.kind, it.with);
+                            let child = spawn_mind(
+                                kinds,
+                                seed,
+                                tick,
+                                coord.cell(cell),
+                                it.kind,
+                                it.with,
+                                (actors.pubs[slot].kind, &actors.minds[slot]),
+                            );
                             born(kinds, &mut actors, &mut scratch, cell, it.kind, child);
                             scratch.touch(cell);
                             result::OK
@@ -1883,7 +1892,7 @@ fn split_mind(
     kind: u16,
     parent: &ActorMind,
 ) -> ActorMind {
-    let uid = spawn_mind(kinds, seed, tick, pos, kind, [0; 2]).uid;
+    let uid = spawn_uid(kinds, seed, tick, pos, kind);
     ActorMind {
         uid,
         events: 0,
@@ -2008,7 +2017,8 @@ fn local_target(cell: usize, dx: i8, dy: i8) -> Option<usize> {
     ((ox, oy) == (0, 0)).then_some(local)
 }
 
-/// A fresh mind of `kind`: every need at its max, memory clear, born now.
+/// A fresh mind of `kind`: every need at its max, memory clear (a gene at
+/// its default), born now.
 pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
     let def = kinds.def(kind);
     let mut needs = [0i32; NEED_SLOTS];
@@ -2020,7 +2030,7 @@ pub fn newborn(kinds: &Kinds, kind: u16, uid: u64, tick: u64) -> ActorMind {
         born: stamp(tick),
         last_think: stamp(tick),
         needs,
-        mem: [0; MEM_SLOTS],
+        mem: std::array::from_fn(|i| def.mem_start(i)),
         state: 0,
         events: 0,
         hurt: 0,
@@ -2040,16 +2050,77 @@ fn spawn_mind(
     pos: Pos,
     kind: u16,
     with: [i32; 2],
+    parent: (u16, &ActorMind),
 ) -> ActorMind {
+    let uid = spawn_uid(kinds, seed, tick, pos, kind);
+    let mut child = newborn(kinds, kind, uid, tick);
+    child.mem[..2].copy_from_slice(&with);
+    inherit_genes(kinds, seed, kind, &mut child, parent);
+    child
+}
+
+/// The uid of a child of `kind` born at `pos` this tick.
+fn spawn_uid(kinds: &Kinds, seed: u64, tick: u64, pos: Pos, kind: u16) -> u64 {
     let stream = match kinds.def(kind).layer {
         0 => STREAM_UID,
         1 => STREAM_UID_COVER,
         l => STREAM_UID_LAYER | u64::from(l) << 16,
     };
-    let uid = hash_cell(seed, stream, pos.x, pos.y) ^ splitmix64(tick);
-    let mut child = newborn(kinds, kind, uid, tick);
-    child.mem[..2].copy_from_slice(&with);
-    child
+    hash_cell(seed, stream, pos.x, pos.y) ^ splitmix64(tick)
+}
+
+/// RNG stream of the gene draws at birth.
+pub const STREAM_GENES: u64 = 0x0013;
+
+/// Each gene of `child` (of `kind`) from the parent's gene of the same name
+/// (a plain mem of that name does not count), clamped to the child's range,
+/// else the default `newborn` set; then moved a step with the gene's
+/// `mutate` percent. The draws hash both uids, one per gene.
+fn inherit_genes(
+    kinds: &Kinds,
+    seed: u64,
+    kind: u16,
+    child: &mut ActorMind,
+    (parent_kind, parent): (u16, &ActorMind),
+) {
+    let def = kinds.def(kind);
+    if def.genes.is_empty() {
+        return;
+    }
+    let pdef = kinds.def(parent_kind);
+    let base = splitmix64(seed ^ splitmix64(STREAM_GENES) ^ child.uid ^ splitmix64(parent.uid));
+    for (i, g) in def.genes.iter().enumerate() {
+        let name = &def.mems[usize::from(g.slot)];
+        let from = pdef
+            .genes
+            .iter()
+            .find(|p| pdef.mems[usize::from(p.slot)] == *name);
+        let v = from.map_or(g.default, |p| {
+            parent.mem[usize::from(p.slot)].clamp(g.lo, g.hi)
+        });
+        child.mem[usize::from(g.slot)] = mutate(g, v, splitmix64(base.wrapping_add(i as u64)));
+    }
+}
+
+/// `v` moved by a nonzero step of at most `(hi - lo) / 16` (at least 1) if
+/// the draw's low bits fall under the gene's percent; else `v`. A high bit
+/// picks the direction, the others the size. A step that would leave the
+/// range goes the other way (only a range of one value holds still). In
+/// `i64`: a wide range cannot overflow.
+fn mutate(g: &GeneDef, v: i32, h: u64) -> i32 {
+    if h % 100 >= u64::from(g.mutate) {
+        return v;
+    }
+    let (lo, hi, v) = (i64::from(g.lo), i64::from(g.hi), i64::from(v));
+    let step = ((hi - lo) / 16).max(1);
+    let size = 1 + ((h >> 8) & 0xFFFF_FFFF) as i64 % step;
+    let delta = if (h >> 63) & 1 == 0 { size } else { -size };
+    let moved = if (lo..=hi).contains(&(v + delta)) {
+        v + delta
+    } else {
+        v - delta
+    };
+    i32::try_from(moved.clamp(lo, hi)).expect("clamped to an i32 range")
 }
 
 /// Change a row's kind in place: consumable needs carry over by name
@@ -2088,10 +2159,11 @@ fn change_kind(kinds: &Kinds, tick: u64, actors: &mut ActorsMut<'_>, slot: usize
     }
     for i in 0..MEM_SLOTS {
         m.mem[i] = match remap.mems[i] {
-            Remap::NONE => 0,
+            Remap::NONE => def.mem_start(i),
             src => old.mem[usize::from(src)],
         };
     }
+    def.clamp_genes(&mut m.mem);
     m.state = 0;
     m.born = stamp(tick);
     actors.pubs[slot].kind = to;
@@ -2299,7 +2371,8 @@ pub fn migrate(
                 }
             }
             EffectKind::Spawn { kind, with } => {
-                let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with);
+                let parent = (src_pubs.rows[slot].kind, &src_minds.rows[slot]);
+                let child = spawn_mind(&kinds, seed, tick, fx.to.cell(cell), kind, with, parent);
                 born(&kinds, &mut to, dst_scratch, cell, kind, child);
                 set_result_in(src_minds, slot, result::OK);
             }
@@ -2437,7 +2510,9 @@ fn place_big(
             let EffectKind::Spawn { with, .. } = fx.what else {
                 unreachable!("a move or a birth")
             };
-            spawn_mind(kinds, seed, tick, new, kind, with)
+            let (_, pubs, minds, _, _) = chunks.get(src_e).ok()?;
+            let parent = (pubs.rows[slot].kind, &minds.rows[slot]);
+            spawn_mind(kinds, seed, tick, new, kind, with, parent)
         };
         if mover {
             let (mut cells, mut pubs, mut minds, mut scratch, mut meta) =
@@ -2880,5 +2955,127 @@ mod tests {
         assert_eq!(vm::dir_index(0, -1), 1);
         assert_eq!(vm::dir_index(-1, -1), 8);
         assert_eq!(vm::dir_index(0, 0), 0);
+    }
+
+    fn gene_kinds() -> Kinds {
+        crate::rules::compile(
+            "g.rules",
+            "kind p { gene a = 1 from 0 to 9  gene b = 5 from 0 to 100 }
+             kind c { gene b = 2 from 0 to 10  gene z = 4 from 4 to 4 }
+             kind w { gene span = 0 from -2147483647 - 1 to 2147483647 mutate 100 }
+             kind pm { gene a = 1 from 0 to 9 mutate 100  gene b = 5 from 0 to 100 mutate 100 }
+             kind ph { gene b = 5 from 0 to 100 mutate 50 }
+             kind pl { mem a  gene b = 5 from 0 to 100 }
+             kind wi { mem m  gene g = 5 from 0 to 10 }",
+        )
+        .unwrap()
+    }
+
+    /// A child of `kind` born on column `x` of row 0 at tick 5 to `parent`.
+    fn born_to(k: &Kinds, x: i32, kind: u16, parent: (u16, &ActorMind)) -> ActorMind {
+        spawn_mind(k, 9, 5, Pos::new(x, 0), kind, [0; 2], parent)
+    }
+
+    #[test]
+    fn a_child_inherits_genes_by_name_and_mutates_within_range() {
+        let k = gene_kinds();
+        let id = |n: &str| k.by_name(n).unwrap().id;
+        let (p, c, w, pm, ph, pl) = (id("p"), id("c"), id("w"), id("pm"), id("ph"), id("pl"));
+        let mut parent = newborn(&k, p, 0x51, 0);
+        parent.mem[..2].copy_from_slice(&[7, 60]);
+        assert_eq!(newborn(&k, c, 1, 0).mem[..2], [2, 4], "defaults");
+        // No `mutate`: an exact copy.
+        let child = born_to(&k, 3, p, (p, &parent));
+        assert_eq!(child.mem[..2], [7, 60]);
+        assert_eq!(child.born, 5);
+        // Another kind: by name, clamped to its range; what the parent
+        // lacks keeps the child's default.
+        let child = born_to(&k, 3, c, (p, &parent));
+        assert_eq!(child.mem[..2], [10, 4]);
+        // A plain mem of the same name in the parent is not a gene.
+        let mut plain = newborn(&k, pl, 0x52, 0);
+        plain.mem[..2].copy_from_slice(&[8, 70]);
+        assert_eq!(born_to(&k, 3, p, (pl, &plain)).mem[..2], [1, 70]);
+
+        // `mutate 100`: every gene moves by a nonzero step inside its range.
+        let mut mover = newborn(&k, pm, 0x51, 0);
+        mover.mem[..2].copy_from_slice(&[4, 60]);
+        let mut signs = (false, false);
+        for x in 0..200 {
+            let g = born_to(&k, x, pm, (pm, &mover)).mem;
+            assert!(g[0] == 3 || g[0] == 5, "a: range 9, step 1: {}", g[0]);
+            let d = g[1] - 60;
+            assert!(d != 0 && d.abs() <= 6, "b: range 100, steps up to 6: {d}");
+            signs.0 |= d < 0;
+            signs.1 |= d > 0;
+            assert_eq!(
+                born_to(&k, x, pm, (pm, &mover)).mem,
+                g,
+                "same inputs, same child"
+            );
+        }
+        assert_eq!(signs, (true, true));
+        // The parent's uid is in the draw too.
+        let other = ActorMind { uid: 0x52, ..mover };
+        assert!((0..50).any(|x| {
+            born_to(&k, x, pm, (pm, &mover)).mem != born_to(&k, x, pm, (pm, &other)).mem
+        }));
+        // 50 percent moves about half the children.
+        let mut half = newborn(&k, ph, 0x51, 0);
+        half.mem[0] = 60;
+        let moved = (0..400)
+            .filter(|&x| born_to(&k, x, ph, (ph, &half)).mem[0] != 60)
+            .count();
+        assert!((140..260).contains(&moved), "{moved} of 400");
+        // At an edge a step outward goes inward instead; the widest range
+        // cannot overflow.
+        let mut wide = newborn(&k, w, 0x53, 0);
+        let step = (i64::from(u32::MAX) / 16) as u32;
+        for v in [i32::MAX, i32::MIN] {
+            wide.mem[0] = v;
+            for x in 0..20 {
+                let g = born_to(&k, x, w, (w, &wide)).mem[0];
+                assert!(g != v && g.abs_diff(v) <= step, "{v} -> {g}");
+            }
+        }
+        mover.mem[0] = 9;
+        for x in 0..20 {
+            assert_eq!(
+                born_to(&k, x, pm, (pm, &mover)).mem[0],
+                8,
+                "at the top: down"
+            );
+        }
+    }
+
+    #[test]
+    fn a_with_leaves_the_inherited_gene_alone() {
+        let k = gene_kinds();
+        let wi = k.by_name("wi").unwrap().id;
+        let mut parent = newborn(&k, wi, 0x51, 0);
+        parent.mem[..2].copy_from_slice(&[0, 9]);
+        let child = spawn_mind(&k, 9, 5, Pos::new(1, 1), wi, [4, 4], (wi, &parent));
+        assert_eq!(
+            child.mem[..2],
+            [4, 9],
+            "`with` sets the mem; the gene is the parent's"
+        );
+    }
+
+    #[test]
+    fn become_carries_genes_by_name_clamped() {
+        let k = gene_kinds();
+        let mut d = crate::stage::ChunkData::default();
+        let mut m = newborn(&k, 0, 0x61, 0);
+        m.mem[..2].copy_from_slice(&[7, 60]);
+        let slot = usize::from(d.actors_mut().push(3, 0, m));
+        assert_eq!(change_kind(&k, 9, &mut d.actors_mut(), slot, 1), result::OK);
+        assert_eq!(d.minds.rows[slot].mem[..2], [10, 4], "b clamped, z new");
+        assert_eq!(change_kind(&k, 9, &mut d.actors_mut(), slot, 0), result::OK);
+        assert_eq!(
+            d.minds.rows[slot].mem[..2],
+            [1, 10],
+            "`a` is new again: its default"
+        );
     }
 }

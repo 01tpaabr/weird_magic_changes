@@ -3729,3 +3729,103 @@ fn a_rules_text_ends_at_its_last_token() {
         ]
     );
 }
+
+#[test]
+fn a_gene_is_a_read_only_mem_slot_with_a_range_and_a_rate() {
+    let k = compile_ok(
+        "const D = 5
+         trait t { gene bold = 2 from 1 to D * 2 }
+         kind a extends t { mem m  gene reach = 5 from 1 to 10 mutate D
+           when m < reach and bold > 1 => idle }",
+    );
+    let a = &k.defs[0];
+    assert_eq!(a.mems, ["bold", "m", "reach"]);
+    let slots: Vec<_> = a
+        .genes
+        .iter()
+        .map(|g| (g.slot, g.default, g.lo, g.hi, g.mutate))
+        .collect();
+    assert_eq!(slots, [(0, 2, 1, 10, 0), (2, 5, 1, 10, 5)]);
+    // A range change is a different rule set.
+    let k2 = compile_ok("kind a { gene reach = 5 from 1 to 10 mutate 5  when reach > 1 => idle }");
+    let k3 = compile_ok("kind a { gene reach = 5 from 1 to 11 mutate 5  when reach > 1 => idle }");
+    assert_ne!(k2.hash, k3.hash);
+    // `from`, `to` and `mutate` stay usable as names.
+    compile_ok("kind a { mem to  gene from = 1 from 0 to 2  when to < from => to = 1 }");
+}
+
+#[test]
+fn a_gene_is_declared_right() {
+    let ok = "kind a { gene g = 5 from 1 to 10";
+    for (text, want) in [
+        ("g = 1", "never written"),
+        ("g += 1", "never written"),
+        ("g -= 1", "never written"),
+    ] {
+        let e = compile_err(&format!("{ok} when true => {{ {text}  idle }} }}"));
+        assert!(e.contains(want), "{text}: {e}");
+    }
+    for (decl, want) in [
+        ("gene g = 0 from 1 to 10", "LO <= DEFAULT <= HI"),
+        ("gene g = 11 from 1 to 10", "LO <= DEFAULT <= HI"),
+        ("gene g = 5 from 10 to 1", "LO <= DEFAULT <= HI"),
+        ("gene g = 5 from 1 to 10 mutate 101", "percent"),
+        ("gene g = 5 from 1 to 10 mutate 0 - 1", "percent"),
+        (
+            "gene g = 5 from 1 to 10 gene g = 5 from 1 to 10",
+            "declared twice",
+        ),
+        ("need g max 3 gene g = 5 from 1 to 10", "declared twice"),
+        ("mem g gene g = 5 from 1 to 10", "declared twice"),
+        ("gene g = 5 from 1 to 10 mem g", "declared twice"),
+        ("gene g = 5 from 1", "expected `to`"),
+        ("gene g = 5", "expected `from`"),
+    ] {
+        let e = compile_err(&format!("kind a {{ {decl}  when g > 1 => idle }}"));
+        assert!(e.contains(want), "{decl}: {e}");
+    }
+    let e = compile_err("const g = 1\nkind a { gene g = 5 from 1 to 10  when true => idle }");
+    assert!(e.contains("has the name of the constant"), "{e}");
+    // `spawn ... with` sets mem slots, never genes.
+    let e = compile_err(
+        "kind a { gene g = 5 from 1 to 10  when true => spawn b at random free with (g = 2) }
+         kind b { gene g = 5 from 1 to 10  when g > 1 => idle }",
+    );
+    assert!(e.contains("with"), "{e}");
+}
+
+#[test]
+fn genes_merge_through_extends_like_needs() {
+    let two = "trait p { gene g = 5 from 1 to 10 }
+               trait q { gene g = 6 from 1 to 10 }";
+    let e = compile_err(&format!(
+        "{two} kind a extends p, q {{ when g > 1 => idle }}"
+    ));
+    assert!(e.contains("inherits gene `g`"), "{e}");
+    // The kind settles it by redeclaring.
+    let k = compile_ok(&format!(
+        "{two} kind a extends p, q {{ gene g = 7 from 1 to 10  when g > 1 => idle }}"
+    ));
+    assert_eq!(k.defs[0].genes[0].default, 7);
+    let e = compile_err(
+        "trait p { mem g } trait q { gene g = 6 from 1 to 10 }
+         kind a extends p, q { when g > 1 => idle }",
+    );
+    assert!(e.contains("both as a gene and as a mem slot"), "{e}");
+    let e = compile_err(
+        "trait q { gene g = 6 from 1 to 10 }
+         kind a extends q { mem g  when g > 1 => idle }",
+    );
+    assert!(e.contains("is a gene of"), "{e}");
+}
+
+#[test]
+fn the_with_slots_come_before_a_gene() {
+    let k = compile_ok(
+        "kind a { gene g = 5 from 1 to 10  mem m  when g > 1 => spawn b at random free with (m = 1) }
+         kind b { gene g = 5 from 1 to 10  mem m  when g > 1 => idle }",
+    );
+    let b = &k.defs[1];
+    assert_eq!(b.mems, ["m", "g"]);
+    assert_eq!(b.genes[0].slot, 1);
+}

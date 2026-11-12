@@ -1771,7 +1771,16 @@ pub fn present(starts: &[Start], kinds: &Kinds) -> Vec<Start> {
                     *v = (*v).clamp(0, def.needs[i].max);
                     true
                 }
-                None => def.mems.iter().any(|m| m == name),
+                None => {
+                    if let Some(g) = def
+                        .genes
+                        .iter()
+                        .find(|g| def.mems[usize::from(g.slot)] == *name)
+                    {
+                        *v = (*v).clamp(g.lo, g.hi);
+                    }
+                    def.mems.iter().any(|m| m == name)
+                }
             });
         }
         out.push(s);
@@ -2026,6 +2035,14 @@ impl Placement {
                             }
                             needs.push((u8::try_from(i).expect("at most NEED_SLOTS"), *v));
                         } else if let Some(i) = def.mems.iter().position(|m| m == name) {
+                            if let Some(g) = def.genes.iter().find(|g| usize::from(g.slot) == i)
+                                && !(g.lo..=g.hi).contains(v)
+                            {
+                                return Err(err(format!(
+                                    "`{kind}` at ({x}, {y}) with `{name} = {v}`: the gene `{name}` holds {} to {}",
+                                    g.lo, g.hi
+                                )));
+                            }
                             mems.push((u8::try_from(i).expect("at most MEM_SLOTS"), *v));
                         } else {
                             return Err(err(format!(
@@ -3391,6 +3408,44 @@ legend {
                 assert!(region.is_none_or(|r| r.contains(x, y)), "case {case}");
             }
         }
+    }
+
+    #[test]
+    fn a_gene_start_is_held_to_its_range() {
+        let k = crate::rules::compile(
+            "t.rules",
+            "kind chicken { mem seen } kind fox { need food max 1d vital  gene fear = 5 from 2 to 9 }",
+        )
+        .unwrap();
+        let resolve = |extra: &str| {
+            let s = Scenario::parse(
+                "t",
+                &format!(
+                    "{PEN}{extra}
+"
+                ),
+            )
+            .unwrap();
+            Placement::resolve(&s.starts, &k, &s.terrain())
+        };
+        let pl = resolve("start fox at (4, 0) with (fear = 9)").unwrap();
+        assert_eq!(pl.explicit_in(ChunkCoord::new(0, 0))[0].mems, [(0, 9)]);
+        let e = resolve("start fox at (4, 0) with (fear = 10)").unwrap_err();
+        assert!(
+            e.to_string().contains("the gene `fear` holds 2 to 9"),
+            "{e}"
+        );
+        // A saved start is brought into a changed range, as a need is.
+        let saved = Scenario::parse(
+            "t",
+            "start fox at (4, 0) with (fear = 30)
+",
+        )
+        .unwrap();
+        let Start::At { with, .. } = &present(&saved.starts, &k)[0] else {
+            unreachable!()
+        };
+        assert_eq!(with[..], [("fear".to_string(), 9)]);
     }
 
     #[test]

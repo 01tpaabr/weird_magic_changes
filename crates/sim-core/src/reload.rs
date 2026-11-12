@@ -29,7 +29,7 @@ use bevy_ecs::prelude::*;
 use crate::actors::{
     ActorMind, ActorPub, ActorsMut, ChunkActors, ChunkMinds, MEM_SLOTS, NEED_SLOTS, Tally, slot_u16,
 };
-use crate::rules::{FieldDef, Kinds};
+use crate::rules::{FieldDef, GeneDef, Kinds};
 use crate::scenario::{Placement, absent, present};
 use crate::sim::SimConfig;
 use crate::stage::worldgen::field_layer;
@@ -63,6 +63,9 @@ struct Target {
     maxes: [i32; NEED_SLOTS],
     need_count: usize,
     mems: [Option<usize>; MEM_SLOTS],
+    /// The new kind's genes: a slot with no old one starts at the default,
+    /// and every one is brought into its range.
+    genes: Vec<GeneDef>,
     /// Old state index -> new.
     states: Vec<u8>,
     /// The most heads a row of the new kind holds (1: not a group).
@@ -232,6 +235,7 @@ impl Plan {
                 maxes: [0; NEED_SLOTS],
                 need_count: nd.needs.len(),
                 mems: [None; MEM_SLOTS],
+                genes: nd.genes.clone(),
                 states: Vec::new(),
                 max_heads: nd.max_heads(),
             };
@@ -340,8 +344,10 @@ impl Plan {
                         };
                     }
                     for i in 0..MEM_SLOTS {
-                        m.mem[i] = t.mems[i].map_or(0, |src| old.mem[src]);
+                        m.mem[i] = t.mems[i]
+                            .map_or_else(|| GeneDef::start(&t.genes, i), |src| old.mem[src]);
                     }
+                    GeneDef::clamp_all(&t.genes, &mut m.mem);
                     m.state = t.states.get(usize::from(old.state)).copied().unwrap_or(0);
                     actors.pubs[slot].heads = row.heads.clamp(1, t.max_heads);
                 }
