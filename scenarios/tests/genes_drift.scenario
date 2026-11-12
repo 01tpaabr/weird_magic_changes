@@ -1,0 +1,17 @@
+# A drifter's `reach` has `mutate 100`: every child's gene moves one step up or
+# down (a sixteenth of the range, at least 1), never out of its range.
+# Selection does the rest: a drifter that looks less far counts fewer
+# neighbours, so it keeps budding where one with a long `reach` stops. A line
+# that starts at `reach` 9 is pulled down, and the world fills with
+# short-sighted drifters.
+rules ../../packs/genes
+seed 3
+size 128 128
+terrain water_level 0 rock_on_soil 0 rock_on_water 0   # flat soil everywhere
+start drifter at (62, 62) with (reach = 9)
+
+run 5d
+expect born drifter > 1000
+expect avg reach of drifter < 5
+expect min reach of drifter >= 1
+expect max reach of drifter <= 10

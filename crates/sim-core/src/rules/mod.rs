@@ -52,6 +52,24 @@ pub struct GeneDef {
     pub mutate: u8,
 }
 
+impl GeneDef {
+    /// The value mem slot `slot` starts at: the gene's default, else 0.
+    pub fn start(genes: &[GeneDef], slot: usize) -> i32 {
+        genes
+            .iter()
+            .find(|g| usize::from(g.slot) == slot)
+            .map_or(0, |g| g.default)
+    }
+
+    /// Every gene slot of `mem` brought into its range.
+    pub fn clamp_all(genes: &[GeneDef], mem: &mut [i32; MEM_SLOTS]) {
+        for g in genes {
+            let v = &mut mem[usize::from(g.slot)];
+            *v = (*v).clamp(g.lo, g.hi);
+        }
+    }
+}
+
 /// Who may write a field (`docs/WORLD.md` §4): any write (`add`,
 /// `harvest`, `drop`), only conserved transfers, or none from actors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -444,6 +462,18 @@ impl KindDef {
     #[inline]
     pub fn start_heads(&self) -> u16 {
         self.group.1.max(1)
+    }
+
+    /// What mem slot `i` holds at birth: the gene's default, else 0.
+    #[inline]
+    pub fn mem_start(&self, i: usize) -> i32 {
+        GeneDef::start(&self.genes, i)
+    }
+
+    /// Bring every gene slot of `mem` into its range.
+    #[inline]
+    pub fn clamp_genes(&self, mem: &mut [i32; MEM_SLOTS]) {
+        GeneDef::clamp_all(&self.genes, mem);
     }
 
     /// Slot of the need called `name`, if this kind has one.
