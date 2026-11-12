@@ -437,6 +437,11 @@ impl<'a> Gen<'a> {
             for n in &d.needs {
                 seen.expr(&n.max);
             }
+            for g in &d.genes {
+                for e in [&g.default, &g.lo, &g.hi].into_iter().chain(&g.mutate) {
+                    seen.expr(e);
+                }
+            }
             for r in it
                 .rules
                 .iter()
@@ -659,6 +664,14 @@ impl<'a> Gen<'a> {
                     out.warn(
                         at,
                         format!("mem `{shown}` of {owner} `{}` is never used", it.name),
+                    );
+                }
+            }
+            for g in &it.decls.genes {
+                if !names.all.contains(&g.name) {
+                    out.warn(
+                        &g.at,
+                        format!("gene `{}` of {owner} `{}` is never used", g.name, it.name),
                     );
                 }
             }
@@ -1665,7 +1678,7 @@ mod tests {
         let bad = "const K = 3
                    sub spare() { idle }
                    trait t { mem lost  sub unused() { idle } }
-                   kind ant extends t { need hope max 1d  mem lost2  tags thing
+                   kind ant extends t { need hope max 1d  mem lost2  gene idle_g = 2 from 1 to 3  tags thing
                      inherit t
                      when true => idle
                      state A { when true => idle }
@@ -1677,6 +1690,7 @@ mod tests {
             "sub `unused` of trait `t` is never called",
             "mem `lost` of trait `t` is never used",
             "mem `lost2` of kind `ant` is never used",
+            "gene `idle_g` of kind `ant` is never used",
             "need `hope` of kind `ant` is never read or set",
             "state `B` of kind `ant` is never entered: no rule says `next B`",
             "tag `thing` is named by no predicate",
@@ -1689,8 +1703,8 @@ mod tests {
         );
         let good = "const K = 3
                     sub spare() { idle }
-                    kind ant { need hope max 1d  need health max 3 decay 0 vital  mem m  tags thing
-                      when hope < K and nearest thing within 1 as o => { m += 1  next B }
+                    kind ant { need hope max 1d  need health max 3 decay 0 vital  mem m  gene g = 2 from 1 to 3 mutate K  tags thing
+                      when g > 1 and hope < K and nearest thing within 1 as o => { m += 1  next B }
                       when hope > 20h => spare()
                       state A { when true => idle }
                       state B { when true => idle } }";

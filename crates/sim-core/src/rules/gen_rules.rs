@@ -123,10 +123,14 @@ struct Owner {
     /// Merged: what its code may name.
     needs: Vec<String>,
     mems: Vec<String>,
+    /// Genes (kinds only): readable, never in `mems`, so nothing writes or
+    /// starts them; each takes a mem slot of the 32.
+    genes: Vec<String>,
     states: Vec<String>,
     /// Declared here.
     own_needs: Vec<String>,
     own_mems: Vec<String>,
+    own_genes: Vec<String>,
     /// Memory arrays, `mem NAME[LEN]`: merged (from a kind parent) and its own.
     arrays: Vec<(String, usize)>,
     own_arrays: Vec<(String, usize)>,
@@ -335,6 +339,7 @@ impl<'a> G<'a> {
             .collect();
         if let Some(o) = self.cur() {
             v.extend(o.needs.iter().chain(&o.mems).map(|n| (n.clone(), true)));
+            v.extend(o.genes.iter().map(|n| (n.clone(), false)));
             // An array's ends, past them, and a computed index.
             for (a, len) in &o.arrays {
                 for i in [
@@ -497,6 +502,7 @@ impl<'a> G<'a> {
                 o.reached = p.reached.clone();
                 o.needs = p.needs.clone();
                 o.mems = p.mems.clone();
+                o.genes = p.genes.clone();
                 o.arrays = p.arrays.clone();
                 o.states = p.states.clone();
                 o.inherited = (p.inherited.iter().chain(&p.subs).chain(&p.overrides))
@@ -573,11 +579,17 @@ impl<'a> G<'a> {
                 }
                 o.own_needs.push(name);
             }
-            let used = |o: &Owner| o.mems.len() + o.arrays.iter().map(|a| a.1).sum::<usize>();
+            let used = |o: &Owner| {
+                o.mems.len() + o.genes.len() + o.arrays.iter().map(|a| a.1).sum::<usize>()
+            };
             for j in 0..self.n(9).min(MEM_SLOTS - used(&o)) {
                 o.own_mems.push(format!("k{i}m{j}"));
             }
             o.mems.extend(o.own_mems.iter().cloned());
+            for j in 0..self.n(3).min(MEM_SLOTS - used(&o)) {
+                o.own_genes.push(format!("k{i}g{j}"));
+            }
+            o.genes.extend(o.own_genes.iter().cloned());
             let room = MEM_SLOTS - used(&o);
             if room > 0 && self.maybe(25) {
                 let a = (format!("k{i}a"), 1 + self.n(room.min(8)));
@@ -877,6 +889,15 @@ impl<'a> G<'a> {
         }
         for (a, len) in &o.own_arrays {
             d.push(format!("mem {a}[{len}]"));
+        }
+        for g in &o.own_genes {
+            let lo = self.n(6);
+            let hi = lo + self.n(40);
+            let mut s = format!("gene {g} = {} from {lo} to {hi}", lo + self.n(hi - lo + 1));
+            if self.maybe(60) {
+                s += &format!(" mutate {}", self.n(101));
+            }
+            d.push(s);
         }
         d
     }

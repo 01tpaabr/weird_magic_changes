@@ -2464,6 +2464,7 @@ mod tests {
             climb: None,
             needs,
             mems: vec![],
+            genes: vec![],
             states: 1,
             entry,
             color: 0,

@@ -100,6 +100,7 @@ gives each declaration once; `tags`, `need` and `mem` may repeat, with different
 | `climb N on F` | none | `move` takes no step that rises more than N in field F (a height): it slides past one, as past a taken cell, and is `BLOCKED` if every way is too steep |
 | `need NAME max M [decay 0\|1] [vital]` | `decay 1` | a counter, at most 4 per kind; `decay 1` loses one per tick (ticks until empty), `decay 0` never decays (points). `decay` is a switch, not a rate: any other number is an error |
 | `mem a, b, ...` | | memory slots, at most 32 per kind, all 0 at birth; `mem route[8]` is an array of 8 of them, `route[i]` (below) |
+| `gene NAME = D from LO to HI [mutate P]` | | a number of each individual's own, read like a mem slot and never written; it takes one of the kind's mem slots; no arrays |
 
 **Needs.** A need is an integer from 0 to its max. By default it is *ticks until empty*: it
 loses one per tick, and a value like `water < 30min` reads naturally; `decay 1` says so
@@ -109,6 +110,37 @@ smaller max, or a rule that subtracts from it. A `vital` need at 0 kills. Rules
 read a need by its name and can assign to it, clamped to `0..max`
 (`water = min(water + 6h, 1d)`). Some needs have fixed meanings for actions: `water` for
 `drink`, `health` for bites, and `food` for what eating gives.
+
+**Genes.** A gene is a number the rules read by name, like a mem slot, but each actor has
+its own value and no rule can change it (`=`, `+=`, `-=` and `spawn ... with` are errors).
+A child made by `spawn` takes its parent's value, by name and clamped to `LO..HI`; a gene
+the parent lacks starts at the default `D`, as does everyone a scenario or the world starts.
+With `mutate P` each of the child's genes then moves, with a chance of P percent (0 to
+100, like `chance(P)`), by a small step: up or down by 1 to a sixteenth of the range, never
+out of it (a step that would leave the range goes the other way). Without `mutate` a gene is
+inherited exactly. Over generations a gene drifts, and where it decides who lives to breed,
+selection moves it. `become` carries genes by name too, clamped, never mutated; a group's
+`split` copies them, and `grow` and `join` are not births. `D`, `LO`, `HI` and `P` are
+constant expressions, so a trait can take them from its parameters and `wmc lab --set` can
+sweep a rate held in a const. `from`, `to` and `mutate` are words only here, not reserved.
+
+```rules
+const DRIFT = 5
+trait sipper(thirsty) {
+  need water max 4h vital
+  gene thirst = thirsty from 30min to 6h
+  when water < thirst and nearest water within 1 as w => drink w
+}
+kind sheep extends sipper(2h) {
+  sight 12
+  gene fear = 6 from 1 to 12 mutate DRIFT
+  when nearest fox within fear as f => flee(f)
+}
+```
+
+Genes merge through `extends` like needs: by name, a kind's own declaration overrides its
+parents', and two parents that declare one differently must be settled by the kind. A gene
+can't share its name with a need, mem slot, constant, trait parameter, kind or tag.
 
 **Time literals** are ticks: `30min`, `4h`, `2d`.
 
@@ -870,7 +902,7 @@ start hive at (77, 103)                        # exactly there
 | `start K N / D` | | this share of walkable cells, everywhere in the world, starts as kind K |
 | `start K N / D in (X0, Y0) to (X1, Y1)` | | this share of the walkable cells in that region, both corners included: X0 to X1 across, Y0 to Y1 down |
 | `start K N / D on K2 [in ...]` | | a kind above the standing (ground cover or a declared layer): this share of the cells where a K2 (or a kind that extends it) starts, above it. The only way a share starts a kind whose layer rests on a kind (§12, Layers) |
-| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs or memory by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`), and a group's `heads` |
+| `start K at (X, Y) [with (NAME = V, ...)]` | | one K on that cell, which must be walkable and inside the world (x and y from -1000000000 to 999999999); `with` sets its needs, memory or genes by name (`food = 2h`, `heading = 3`, an array's element `route[2] = 7`; a gene inside its range), and a group's `heads` |
 | `map { ... }` | | cells drawn from (0, 0), one ASCII character each, one row per line, every row as long as the first; the rows stand alone on their lines, with no comments |
 | `legend { ... }` | | what each map character stands for, one entry per line: `soil`, `water`, `rock`, or a kind, which stands on soil and may take a `with`; a character the map never uses is an error (delete its line) |
 | `outside noise` | `noise` | beyond the map: the seed's noise, or all `soil`, `rock` or `water` |
@@ -974,7 +1006,7 @@ expect became chick == 1
 | `expect rows K OP N` | actors of K alive now, a group as one; `in STATE` as for `count` |
 | `expect born\|became\|eaten\|died K OP N` | the life counters so far: born of a spawn, became K, eaten, died. `eaten K by K2` counts only the deaths a bite of K2's family caused, `died K of NEED` only those where that vital need ran out |
 | `expect thinks\|traps K OP N` | the thinks run so far, and those that trapped (out of fuel, a second action, a fault; `expect traps K == 0` guards against a rules bug), as `wmc run` prints them |
-| `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) or memory (an array's element: `max route[0] of K`) over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
+| `expect min\|max\|sum\|avg NAME of K OP V` | a need (as it stands now, decayed since the last think) , memory (an array's element: `max route[0] of K`) or gene over every actor of K, or with `in STATE` those in that state (no actor: the check fails); `avg` is their mean, compared exactly (`avg wealth of villager >= 40`) |
 | `expect min\|max\|sum\|avg FIELD OP V` | a field over every cell of the world: `always sum water == 3276800` holds what a conserved field moves to its total |
 | `expect at (X, Y) K` | someone there, in any layer, is a K; `nobody` for a cell with nobody in any layer; the cell must be inside the world |
 | `expect checksum HEX`, `expect state HEX` | the world, with and without the rules hash |
@@ -1205,8 +1237,9 @@ global, so packs meant to share a world keep their consts and traits apart
 soups in their own regions (§14), and checks that each runs as it does alone.
 
 A save also opens under packs that number things differently, which is what adding a pack
-does. Kinds, needs, memory, states and fields are matched **by name**, so every actor
-keeps its kind, cell, needs (clamped to a lowered max) and memory. The first time the world
+does. Kinds, needs, memory, genes, states and fields are matched **by name**, so every actor
+keeps its kind, cell, needs (clamped to a lowered max), memory and genes (clamped to a
+gene's new range; one the new rules add starts at its default). The first time the world
 writes to the save, the whole directory moves over to the new numbering, and from then on it
 belongs to the new set of packs. Rules that lack one of the save's kinds are refused with the
 list, and so is a kind that moved to another layer (standing, ground cover, a declared one by name). A saved start
@@ -1364,7 +1397,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 - **`TRAPS b3`** on the play status bar means three bee thinks ran out of fuel or faulted.
   `wmc why` on one of them shows where.
 - **`r` in `wmc play`** reloads the rules. A compile error shows on the status bar and
-  changes nothing. Actors keep kind, needs, memory, state and fields by name. Rows of a kind
+  changes nothing. Actors keep kind, needs, memory, genes, state and fields by name. Rows of a kind
   you removed are dropped: the one way to take a kind out of a save. Saved chunks are
   rewritten to match. Its starts stay in the save and place nobody (`starts skipped` on the
   status bar) until the kind is back (§15).
@@ -1403,7 +1436,7 @@ extends rooted(8, 1d, 2d)`; `seed extends rooted(2, 1d, 1d)`; `tree extends root
 | shares with a region in a scenario | 256 |
 | cells each way from (0, 0) | 1000000000 (x and y run from -1000000000 to 999999999; beyond, rock and nobody, §14) |
 
-Reserved words can't name a need, mem, local, kind, sub or constant. They are every keyword
+Reserved words can't name a need, mem, gene, local, kind, sub or constant. They are every keyword
 in this document, the built-in functions among them (`min`, `max`, `abs`, `sign`, `clamp`,
 `rand`, `chance`, `flow`, `dist`, `free`, `is`, ...), plus the sense names (`x`, `y`, `age`,
 `light`, `hour`, `day`, `kind`, `look`, `signal`, `state`, `hurt`, `hurt_dir`, `result`,

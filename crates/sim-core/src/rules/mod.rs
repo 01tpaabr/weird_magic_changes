@@ -39,6 +39,19 @@ pub struct NeedDef {
     pub vital: bool,
 }
 
+/// A gene: a mem slot the rules only read. A child made by `spawn` gets its
+/// parent's value (by name), moved a step with `mutate` percent chance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GeneDef {
+    /// Its index in [`KindDef::mems`].
+    pub slot: u8,
+    pub default: i32,
+    pub lo: i32,
+    pub hi: i32,
+    /// Percent chance per birth, 0 to 100.
+    pub mutate: u8,
+}
+
 /// Who may write a field (`docs/WORLD.md` §4): any write (`add`,
 /// `harvest`, `drop`), only conserved transfers, or none from actors.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -235,6 +248,8 @@ pub struct KindDef {
     pub needs: Vec<NeedDef>,
     /// Memory slot names, at most [`MEM_SLOTS`].
     pub mems: Vec<String>,
+    /// The `mems` that are genes (read-only, inherited by `spawn`).
+    pub genes: Vec<GeneDef>,
     /// Number of `state` blocks (state 0 = none / the first).
     pub states: u8,
     /// Program counter of the think.
@@ -801,6 +816,11 @@ fn hash_all(defs: &[KindDef], code: &[Op], consts: &[i32], subs: &[u32]) -> u64 
                 mix(u64::from(b));
             }
             mix(0xFF);
+        }
+        for g in &d.genes {
+            mix(u64::from(g.slot) | u64::from(g.mutate) << 8 | 1 << 47);
+            mix(u64::from(g.default as u32) | u64::from(g.lo as u32) << 32);
+            mix(u64::from(g.hi as u32) | 1 << 48);
         }
     }
     for op in code {
