@@ -1,11 +1,12 @@
 # Sprites: pictures made of letters (design and build plan)
 
 Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **built**, steps 1
-to 8 (§8, 2026-11-12/13; ARCHITECTURE decision 75). Waiting on the owner: step 8's test
-(does a sprite made with the skill from an image pass?: `packs/pasture`'s sheep and wolf
-are the first) and §9.3 (a filled disc stamp, after step 7's numbers). `packs/crabs` is
-the example pack (`scenarios/crabs.scenario`), `packs/pasture` the one made from images
-with `/sprite-fitting`, `packs/giants` draws its mammoth as one 3 x 3 picture.
+to 8 (§8, 2026-11-12/13; ARCHITECTURE decision 75). Step 8's test passed: the owner
+accepted `packs/pasture`'s sheep and wolf, made with the skill from drawings (2026-11-13).
+Waiting on the owner: §9.3 (a filled disc stamp, now that step 7's numbers are in).
+`packs/crabs` is the example pack (`scenarios/crabs.scenario`), `packs/pasture` the one
+made from images with `/sprite-fitting`, `packs/giants` draws its mammoth as one 3 x 3
+picture.
 
 ## 1. Goal
 
