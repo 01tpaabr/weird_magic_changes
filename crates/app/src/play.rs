@@ -64,7 +64,8 @@ use crate::render::atlas::GlyphAtlas;
 use crate::render::cells::{CellFrame, Viewport, render_cells};
 use crate::render::grid::{self, Layer};
 use crate::render::palette::{
-    Color, GLYPH_MIN, Looks, NIGHT_SOIL, SOIL, SPRITE_MIN, TEXT_BG, TEXT_FG, VOID_BG, brightness,
+    Color, GLYPH_MIN, Looks, NIGHT_SOIL, Rows, SOIL, SPRITE_MIN, TEXT_BG, TEXT_FG, VOID_BG,
+    brightness,
 };
 use crate::sprite::Wardrobe;
 use crate::sprite::tiles::SpriteTiles;
@@ -1405,9 +1406,13 @@ fn dress(
         d.for_hash = Some(kinds.hash);
         d.dirty = false;
     }
-    let limit = device.map_or(crate::sprite::TILE_FLOOR, |dv| {
-        dv.limits().max_texture_array_layers
-    });
+    // Tile numbers are u16 (`PoseTile::first`): a device holding more is
+    // held to that.
+    let limit = device
+        .map_or(crate::sprite::TILE_FLOOR, |dv| {
+            dv.limits().max_texture_array_layers
+        })
+        .min(u32::from(u16::MAX));
     let tiles = d.wardrobe.tiles();
     if tiles > limit && d.over_said != Some(d.generation) {
         let text =
@@ -1453,6 +1458,7 @@ fn render_frame(
     inspector: Res<Inspector>,
     (screen, home, menu): (Res<Screen>, Res<Home>, Option<ResMut<Menu>>),
     (mut pview, dress): (ResMut<PanelView>, Res<Dress>),
+    (directory, real): (Res<sim_core::Stage>, Res<Time<Real>>),
     mut frames: ResMut<Frames>,
 ) {
     if !layout.visible {
@@ -1472,12 +1478,23 @@ fn render_frame(
     } else {
         brightness(time::daylight(tick.0))
     };
+    // A chunk's actor rows, for the sprites' poses and frames.
+    let rows_of = |c: sim_core::ChunkCoord| {
+        directory
+            .entity(c)
+            .and_then(|e| rows.get(e).ok())
+            .map(|a| a.rows.as_slice())
+    };
     // The gallery on a purple-black ground: its pictures stand out.
     // On cells too small for a glyph, whoever stands is a square of colour.
     let looks = Looks {
         soil: if on_menu { NIGHT_SOIL } else { SOIL },
         tiny: layout.cell < GLYPH_MIN,
         sprites: if dress.on { &dress.tiles.table } else { &[] },
+        poses: &dress.tiles.poses,
+        // Real time, not the sim's: a paused world still breathes.
+        clock_ms: u64::try_from(real.elapsed().as_millis()).unwrap_or(u64::MAX),
+        rows: Some(Rows(&rows_of)),
         ..Looks::of(&kinds)
     };
     render_cells(|c| stage.chunk(c), looks, view, light, &mut frames.map);

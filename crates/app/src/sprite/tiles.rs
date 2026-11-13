@@ -16,17 +16,7 @@ use sim_core::Kinds;
 
 use super::Wardrobe;
 use super::raster::draw;
-use crate::render::palette::SpriteTile;
-
-/// A pose's place in the tileset.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PoseTiles {
-    /// `None`: the sprite's own stamps.
-    pub look: Option<u8>,
-    pub first: u16,
-    pub frames: u8,
-    pub every_ms: u32,
-}
+use crate::render::palette::{PoseTile, SpriteTile};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpriteTiles {
@@ -35,10 +25,11 @@ pub struct SpriteTiles {
     pub count: u32,
     /// `count * cell * cell` RGBA8, straight alpha.
     pub rgba: Vec<u8>,
-    /// Per worn sprite, its poses in file order.
-    pub poses: Vec<Vec<PoseTiles>>,
-    /// Per kind: its picture's first tile (the own pose, frame 0) plus one
-    /// and its width, for [`crate::render::palette::Looks::sprites`].
+    /// Every worn sprite's poses, sprite by sprite, each sprite's own
+    /// stamps first ([`crate::render::palette::Looks::poses`]).
+    pub poses: Vec<PoseTile>,
+    /// Per kind: where its poses are and its footprint
+    /// ([`crate::render::palette::Looks::sprites`]).
     pub table: Vec<SpriteTile>,
 }
 
@@ -49,7 +40,9 @@ impl SpriteTiles {
     pub fn build(w: &Wardrobe, kinds: &Kinds, cell: u32) -> Self {
         let c = cell.max(1) as usize;
         let mut rgba = Vec::with_capacity(w.tiles() as usize * c * c * 4);
-        let mut poses = Vec::with_capacity(w.sprites.len());
+        let mut poses = Vec::new();
+        // Per worn sprite, its first pose's index.
+        let mut starts = Vec::with_capacity(w.sprites.len());
         let mut next: u32 = 0;
         for worn in &w.sprites {
             let kind = kinds
@@ -58,11 +51,11 @@ impl SpriteTiles {
                 .copied()
                 .unwrap_or(0);
             let (sw, sh) = (usize::from(worn.size.0), usize::from(worn.size.1));
-            let mut mine = Vec::with_capacity(worn.sprite.poses.len());
+            starts.push(poses.len());
             for p in &worn.sprite.poses {
-                mine.push(PoseTiles {
+                poses.push(PoseTile {
                     look: p.look,
-                    first: u16::try_from(next).expect("a tile budget fits u16"),
+                    first: u16::try_from(next).expect("the tile budget fits u16"),
                     frames: p.frames.n,
                     every_ms: p.frames.every_ms,
                 });
@@ -76,7 +69,6 @@ impl SpriteTiles {
                     next += u32::try_from(sw * sh).expect("16 x 16 at most");
                 }
             }
-            poses.push(mine);
         }
         let table = w
             .of_kind
@@ -84,9 +76,12 @@ impl SpriteTiles {
             .map(|s| match s {
                 Some(i) => {
                     let i = usize::from(*i);
+                    let worn = &w.sprites[i];
                     SpriteTile {
-                        first: poses[i][0].first + 1,
-                        width: w.sprites[i].size.0,
+                        poses: u16::try_from(starts[i] + 1).expect("8 poses a sprite"),
+                        count: u8::try_from(worn.sprite.poses.len()).expect("8 poses a sprite"),
+                        width: worn.size.0,
+                        height: worn.size.1,
                     }
                 }
                 None => SpriteTile::default(),
@@ -150,21 +145,35 @@ mod tests {
         assert_eq!(t.count, w.tiles());
         assert_eq!(t.count, 12);
         assert_eq!(t.rgba.len(), 12 * 8 * 8 * 4);
-        assert_eq!(t.poses[0][0].first, 0);
+        assert_eq!(t.poses[0].first, 0);
         assert_eq!(
-            t.poses[0][1],
-            PoseTiles {
+            t.poses[1],
+            PoseTile {
                 look: Some(1),
                 first: 4,
                 frames: 4,
                 every_ms: 1000
             }
         );
-        assert_eq!(t.poses[1][0].first, 8);
+        assert_eq!(t.poses[2].first, 8);
         let id = |n: &str| usize::from(kinds.by_name(n).unwrap().id);
-        assert_eq!(t.table[id("a")], SpriteTile { first: 1, width: 1 });
-        assert_eq!(t.table[id("b")], SpriteTile { first: 1, width: 1 });
-        assert_eq!(t.table[id("big")], SpriteTile { first: 9, width: 2 });
+        let a = SpriteTile {
+            poses: 1,
+            count: 2,
+            width: 1,
+            height: 1,
+        };
+        assert_eq!(t.table[id("a")], a);
+        assert_eq!(t.table[id("b")], a);
+        assert_eq!(
+            t.table[id("big")],
+            SpriteTile {
+                poses: 3,
+                count: 1,
+                width: 2,
+                height: 2
+            }
+        );
         assert_eq!(t.table[id("none")], SpriteTile::default());
         // Tile 0 is a's first frame, drawn in a's red.
         let tile = |i: usize| &t.rgba[i * 256..(i + 1) * 256];

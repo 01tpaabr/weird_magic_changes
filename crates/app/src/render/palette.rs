@@ -4,6 +4,7 @@
 //! (`Kinds::glyphs`, `Kinds::colors`: declared in its rules file, carried
 //! by the sim, never read by it).
 
+use sim_core::actors::ActorPub;
 use sim_core::rules::{FieldDef, Materials};
 use sim_core::{Feature, Ground};
 
@@ -271,20 +272,51 @@ pub struct Looks<'a> {
     pub fields: &'a [FieldDef],
     /// The rules' grounds and features.
     pub materials: &'a Materials,
-    /// Per kind: its sprite's tile, if it wears one (`crate::sprite`);
-    /// empty when no kind does or the cells are too small
-    /// ([`SPRITE_MIN`]).
+    /// Per kind: its sprite, if it wears one (`crate::sprite`); empty
+    /// when no kind does or the cells are too small ([`SPRITE_MIN`]).
     pub sprites: &'a [SpriteTile],
+    /// The sprites' poses: a kind's are [`SpriteTile::poses`] on.
+    pub poses: &'a [PoseTile],
+    /// Real time in milliseconds: a sprite's frame is `clock_ms / every`,
+    /// offset per actor.
+    pub clock_ms: u64,
+    /// A chunk's actor rows, for the `look` (the pose) and the frame
+    /// offset of whoever wears a sprite; `None`: every sprite shows its
+    /// own stamps from frame `clock_ms / every`.
+    pub rows: Option<Rows<'a>>,
 }
 
-/// Where a kind's picture is in the sprite tileset: `first` is its first
-/// tile plus one (0: no sprite, draw the glyph), `width` its footprint's
-/// width, so a big actor's part `(dx, dy)` is tile `first - 1 + dy *
-/// width + dx`.
+/// A chunk's actor rows by its coordinate (`None`: not loaded).
+#[derive(Clone, Copy)]
+pub struct Rows<'a>(pub &'a (dyn Fn(sim_core::ChunkCoord) -> Option<&'a [ActorPub]> + Sync));
+
+impl std::fmt::Debug for Rows<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Rows(..)")
+    }
+}
+
+/// A kind's sprite: its poses are [`Looks::poses`] from `poses - 1` (0: no
+/// sprite, draw the glyph), `count` of them, the first its own stamps; its
+/// footprint is `width x height` cells.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpriteTile {
-    pub first: u16,
+    pub poses: u16,
+    pub count: u8,
     pub width: u8,
+    pub height: u8,
+}
+
+/// A pose in the sprite tileset: drawn while the actor's `look` is `look`
+/// (`None`: the sprite's own stamps, for every other look), `frames`
+/// pictures from tile `first`, each shown `every_ms`, each `width x height`
+/// tiles row by row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PoseTile {
+    pub look: Option<u8>,
+    pub first: u16,
+    pub frames: u8,
+    pub every_ms: u32,
 }
 
 /// The smallest cell, in physical pixels, a sprite is drawn in; below it
@@ -306,6 +338,9 @@ impl Default for Looks<'_> {
             fields: &[],
             materials: &DEFAULT_MATERIALS,
             sprites: &[],
+            poses: &[],
+            clock_ms: 0,
+            rows: None,
         }
     }
 }
@@ -321,6 +356,9 @@ impl<'a> Looks<'a> {
             fields: &kinds.fields,
             materials: &kinds.materials,
             sprites: &[],
+            poses: &[],
+            clock_ms: 0,
+            rows: None,
         }
     }
 
@@ -332,23 +370,46 @@ impl<'a> Looks<'a> {
             .map(|(g, c, solid)| (g, c, solid || self.tiny))
     }
 
-    /// The sprite tile plus one for `who` (an anchor or a part of a big
-    /// actor), 0 when its kind wears no sprite: one load and a branch for a
-    /// kind without one.
+    /// Does `kind` wear a sprite? One load and a branch.
     #[inline]
-    pub fn sprite(&self, who: sim_core::ActorId) -> u16 {
-        let Some((kind, slot)) = who.unpack() else {
+    pub fn has_sprite(&self, kind: u16) -> bool {
+        self.sprites
+            .get(usize::from(kind))
+            .is_some_and(|t| t.poses != 0)
+    }
+
+    /// The sprite tile plus one for the cell `(dx, dy)` of an actor of
+    /// `kind` (its anchor is `(0, 0)`), whose row shows `look` and has the
+    /// frame offset `stagger` (`None`: no row known, its own stamps from
+    /// offset 0); 0 when the kind wears no sprite. The pose is the one for
+    /// `look`, else the own one; the frame `(clock_ms / every + stagger) %
+    /// frames`.
+    #[inline]
+    pub fn sprite_tile(&self, kind: u16, dx: u16, dy: u16, row: Option<(u8, u16)>) -> u16 {
+        let Some(t) = self.sprites.get(usize::from(kind)).filter(|t| t.poses != 0) else {
             return 0;
         };
-        let Some(t) = self.sprites.get(usize::from(kind)).filter(|t| t.first != 0) else {
+        let Some(poses) = self
+            .poses
+            .get(usize::from(t.poses - 1)..usize::from(t.poses - 1) + usize::from(t.count))
+            .filter(|p| !p.is_empty())
+        else {
             return 0;
         };
-        if slot & sim_core::ActorId::PART == 0 {
-            return t.first;
-        }
-        // A part: its offset from the anchor is in its slot.
-        let (dx, dy) = (slot >> 4 & 15, slot & 15);
-        t.first + dy * u16::from(t.width) + dx
+        let p = row
+            .and_then(|(look, _)| poses[1..].iter().find(|p| p.look == Some(look)))
+            .unwrap_or(&poses[0]);
+        let frame = if p.frames > 1 && p.every_ms > 0 {
+            let offset = row.map_or(0, |(_, s)| u64::from(s));
+            // Below `frames`, at most 16.
+            #[allow(clippy::cast_possible_truncation)]
+            let f = ((self.clock_ms / u64::from(p.every_ms) + offset) % u64::from(p.frames)) as u16;
+            f
+        } else {
+            0
+        };
+        let (w, h) = (u16::from(t.width), u16::from(t.height));
+        p.first + frame * w * h + dy * w + dx + 1
     }
 
     /// Glyph, colour and solidity of whoever stands on a cell: `None` for
@@ -370,30 +431,55 @@ impl<'a> Looks<'a> {
 mod tests {
     use super::*;
 
-    /// An anchor shows its sprite's first tile, a part of a big actor its
-    /// offset from it, a kind without one 0.
+    /// A kind's pose follows its look, its frame the clock and its
+    /// offset; a part adds its place in the footprint; a kind without a
+    /// sprite is 0.
     #[test]
-    fn a_sprite_tile_for_anchors_and_parts() {
-        use sim_core::ActorId;
+    fn a_sprite_tile_by_pose_frame_and_part() {
         let table = [
             SpriteTile::default(),
             SpriteTile {
-                first: 10,
+                poses: 1,
+                count: 2,
                 width: 3,
+                height: 2,
             },
         ];
-        let looks = Looks {
+        let poses = [
+            PoseTile {
+                look: None,
+                first: 10,
+                frames: 4,
+                every_ms: 100,
+            },
+            PoseTile {
+                look: Some(7),
+                first: 40,
+                frames: 1,
+                every_ms: 0,
+            },
+        ];
+        let at = |clock_ms| Looks {
             sprites: &table,
+            poses: &poses,
+            clock_ms,
             ..Looks::default()
         };
-        assert_eq!(looks.sprite(ActorId::NONE), 0);
-        assert_eq!(looks.sprite(ActorId::pack(0, 5)), 0);
-        assert_eq!(looks.sprite(ActorId::pack(1, 5)), 10);
-        assert_eq!(looks.sprite(ActorId::part(1, 2, 1)), 10 + 3 + 2);
-        assert_eq!(looks.sprite(ActorId::part(1, 0, 2)), 10 + 6);
-        // Past the table's end: no sprite.
-        assert_eq!(looks.sprite(ActorId::pack(9, 0)), 0);
-        assert_eq!(Looks::default().sprite(ActorId::pack(1, 0)), 0);
+        assert!(!at(0).has_sprite(0) && at(0).has_sprite(1) && !at(0).has_sprite(9));
+        assert_eq!(at(0).sprite_tile(0, 0, 0, None), 0);
+        assert_eq!(at(0).sprite_tile(9, 0, 0, None), 0);
+        // The own pose, frame 0, then frame 1 a hundred ms later; a frame
+        // is 3 x 2 tiles.
+        assert_eq!(at(0).sprite_tile(1, 0, 0, None), 11);
+        assert_eq!(at(99).sprite_tile(1, 0, 0, None), 11);
+        assert_eq!(at(100).sprite_tile(1, 0, 0, None), 11 + 6);
+        assert_eq!(at(400).sprite_tile(1, 0, 0, None), 11);
+        // An offset of 3 frames; a look without a pose is the own one.
+        assert_eq!(at(100).sprite_tile(1, 0, 0, Some((0, 3))), 11);
+        // Look 7: its still pose; a part (2, 1) adds 1 * 3 + 2.
+        assert_eq!(at(100).sprite_tile(1, 0, 0, Some((7, 3))), 41);
+        assert_eq!(at(100).sprite_tile(1, 2, 1, Some((7, 3))), 41 + 5);
+        assert_eq!(at(0).sprite_tile(1, 2, 1, None), 11 + 5);
     }
 
     #[test]

@@ -79,7 +79,8 @@ pub struct ActorPub {
     /// Rule-written, readable by others (`signal_of`). What an actor broadcasts.
     pub signal: i16,
     /// Rule-written public byte that other actors read (`kind:look`,
-    /// `look_of`) and `wmc why` shows; the renderer does not draw it.
+    /// `look_of`) and `wmc why` shows; the app draws a sprite's pose for
+    /// it (`docs/SPRITES.md`), the sim never reads it for that.
     pub look: u8,
     /// See [`flags`].
     pub flags: u8,

@@ -9,7 +9,7 @@
 
 use bevy::prelude::Resource;
 use bevy::tasks::ComputeTaskPool;
-use sim_core::{CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
+use sim_core::{ActorId, CHUNK_SIZE, ChunkCells, ChunkCoord, Pos};
 
 use super::palette::{Color, Looks, VOID, feature_look, fielded, ground_look, relieved, style_of};
 
@@ -286,20 +286,33 @@ fn render_row<'c>(
                 // on top, else the cover) shows its picture instead.
                 s_out.fill(0);
                 if !looks.sprites.is_empty() {
+                    let rows = looks.rows.and_then(|r| (r.0)(cc));
                     for (k, (so, go)) in s_out.iter_mut().zip(g_out.iter_mut()).enumerate() {
+                        let i = local + k;
                         let top = c
                             .extra
                             .iter()
                             .rev()
-                            .map(|l| l[local + k])
+                            .map(|l| l[i])
                             .find(|id| !id.is_none())
-                            .unwrap_or(c.occupant[local + k]);
-                        let who = if top.is_none() {
-                            c.cover[local + k]
-                        } else {
-                            top
+                            .unwrap_or(c.occupant[i]);
+                        let who = if top.is_none() { c.cover[i] } else { top };
+                        let Some((kind, slot)) = who.unpack() else {
+                            continue;
                         };
-                        let tile = looks.sprite(who);
+                        if !looks.has_sprite(kind) {
+                            continue;
+                        }
+                        let tile = if slot & ActorId::PART == 0 {
+                            // An anchor: its row's look and frame offset.
+                            let row = rows
+                                .and_then(|r| r.get(usize::from(slot)))
+                                .map(|r| (r.look, r.stagger));
+                            looks.sprite_tile(kind, 0, 0, row)
+                        } else {
+                            let (dx, dy) = (slot >> 4 & 15, slot & 15);
+                            looks.sprite_tile(kind, dx, dy, None)
+                        };
                         if tile != 0 {
                             *so = tile;
                             *go = b' ';
@@ -417,7 +430,7 @@ mod tests {
     /// cell, and the whole frame without a sprite table, is as before.
     #[test]
     fn a_kind_with_a_sprite_draws_its_tile_and_no_glyph() {
-        use crate::render::palette::SpriteTile;
+        use crate::render::palette::{PoseTile, SpriteTile};
         let world = world(200, 150, 9);
         let view = Viewport::centered(Pos::new(60, 40), 120, 70);
         let plain = frame_with(&world, view, 200);
@@ -425,11 +438,23 @@ mod tests {
         let kinds = world.resource::<Kinds>();
         let chicken = kinds.by_name("chicken").unwrap().id;
         let mut table = vec![SpriteTile::default(); kinds.len()];
-        table[usize::from(chicken)] = SpriteTile { first: 7, width: 1 };
+        table[usize::from(chicken)] = SpriteTile {
+            poses: 1,
+            count: 1,
+            width: 1,
+            height: 1,
+        };
+        let poses = [PoseTile {
+            look: None,
+            first: 6,
+            frames: 1,
+            every_ms: 0,
+        }];
         let mut f = CellFrame::new();
         f.resize(120, 72);
         let looks = Looks {
             sprites: &table,
+            poses: &poses,
             ..Looks::of(kinds)
         };
         render_cells(|c| stage::chunk(&world, c), looks, view, 200, &mut f);
@@ -450,6 +475,102 @@ mod tests {
         // Status rows never hold sprites.
         f.put_text(70, "status", Color(1), Color(2));
         assert!(f.sprite[70 * 120..71 * 120].iter().all(|&s| s == 0));
+    }
+
+    /// A sprite's pose follows its actor's `look`, its frame the clock
+    /// passed in, offset by the actor's `stagger`; with no rows to read,
+    /// every actor shows its own stamps from offset 0.
+    #[test]
+    fn a_sprite_changes_pose_with_look_and_frame_with_the_clock() {
+        use crate::render::palette::{PoseTile, Rows, SpriteTile};
+        use sim_core::{ChunkActors, Stage};
+        let mut world = world(200, 150, 9);
+        let chicken = world.resource::<Kinds>().by_name("chicken").unwrap().id;
+        // Every other chicken shows look 1.
+        let mut q = world.query::<&mut ChunkActors>();
+        for mut a in q.iter_mut(&mut world) {
+            for r in a.rows.iter_mut().filter(|r| r.kind == chicken) {
+                r.look = u8::from(r.stagger % 2 == 0);
+            }
+        }
+        let kinds = world.resource::<Kinds>();
+        let mut table = vec![SpriteTile::default(); kinds.len()];
+        table[usize::from(chicken)] = SpriteTile {
+            poses: 1,
+            count: 2,
+            width: 1,
+            height: 1,
+        };
+        let poses = [
+            PoseTile {
+                look: None,
+                first: 0,
+                frames: 4,
+                every_ms: 100,
+            },
+            PoseTile {
+                look: Some(1),
+                first: 4,
+                frames: 1,
+                every_ms: 0,
+            },
+        ];
+        let view = Viewport::centered(Pos::new(60, 40), 120, 70);
+        let rows_of = |c: ChunkCoord| {
+            world
+                .resource::<Stage>()
+                .entity(c)
+                .and_then(|e| world.get::<ChunkActors>(e))
+                .map(|a| a.rows.as_slice())
+        };
+        let draw = |clock_ms: u64, with_rows: bool| {
+            let mut f = CellFrame::new();
+            f.resize(120, 70);
+            let looks = Looks {
+                sprites: &table,
+                poses: &poses,
+                clock_ms,
+                rows: with_rows.then_some(Rows(&rows_of)),
+                ..Looks::of(kinds)
+            };
+            render_cells(|c| stage::chunk(&world, c), looks, view, 255, &mut f);
+            f
+        };
+        let (mut tucked, mut walking) = (0, 0);
+        for clock in [0u64, 100, 250, 1_000_000_123] {
+            let f = draw(clock, true);
+            for k in 0..120 * 70 {
+                if f.sprite[k] == 0 {
+                    continue;
+                }
+                let p = Pos::new(
+                    view.origin.x + (k % 120) as i32,
+                    view.origin.y + (k / 120) as i32,
+                );
+                let (cc, i) = p.split();
+                let (_, slot) = stage::chunk(&world, cc).unwrap().occupant[i].row().unwrap();
+                let row = rows_of(cc).unwrap()[usize::from(slot)];
+                let want = if row.look == 1 {
+                    tucked += 1;
+                    5
+                } else {
+                    walking += 1;
+                    1 + ((clock / 100 + u64::from(row.stagger)) % 4) as u16
+                };
+                assert_eq!(f.sprite[k], want, "{p:?} at {clock} ms");
+            }
+            // Without rows: the own stamps, from offset 0, for everyone.
+            let bare = draw(clock, false);
+            let want = 1 + ((clock / 100) % 4) as u16;
+            assert!(bare.sprite.iter().all(|&s| s == 0 || s == want));
+            assert_eq!(
+                bare.sprite.iter().filter(|&&s| s != 0).count(),
+                f.sprite.iter().filter(|&&s| s != 0).count()
+            );
+        }
+        assert!(tucked > 0 && walking > 0, "{tucked} {walking}");
+        // The frames advance: two clocks a frame apart differ somewhere.
+        assert_ne!(draw(0, true).sprite, draw(100, true).sprite);
     }
 
     #[test]

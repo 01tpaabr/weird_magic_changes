@@ -118,12 +118,17 @@ backgrounds under the glyphs, each tile tinted.
   `CellFrame` gets `sprite: Vec<u16>` (0: none); a cell with a sprite has a blank glyph.
 - **Choosing the tile** (`cells::render_row`): a table by kind (`Looks::sprites`) says
   whether a kind has a sprite, so kinds without one pay one load and a branch.
-  With one: the tile is `base + pose * frames + frame`, plus the part's offset for a big
-  actor (`ActorId::part_of` gives `dx, dy` with no lookup).
+  With one: the tile is `pose.first + frame * W * H`, plus the part's place for a big
+  actor (`ActorId::part_of` gives `dx, dy` with no lookup). Poses may have different
+  frame counts, so each pose keeps its first tile (`Looks::poses`).
   - *Pose* needs the row's `look`, so the chunk lookup hands the renderer `ChunkActors`
     beside `ChunkCells`; a part finds its anchor's row through the lookup.
-  - *Frame* is `(clock / every + offset) % frames`: the clock is passed in (a test passes
-    a number); the offset is a hash of the cell, so a herd doesn't step in unison.
+  - *Frame* is `(clock / every + offset) % frames`: the clock is real time in milliseconds,
+    passed in (a test passes a number); the offset is the actor's `stagger` (the low bits
+    of its uid, public in its row), so a herd doesn't step in unison and an animal keeps
+    its frame as it walks (a hash of the cell, as first planned, would jump a frame at
+    every step). Without its row (the anchor's chunk not loaded), the offset is 0 and the
+    pose its own stamps.
 - **Small cells:** below `SPRITE_MIN` (16 physical pixels) a kind is drawn by its glyph,
   below `GLYPH_MIN` (8) as a square, as today.
 - **Who shows:** the kind whose glyph would show (who is on top of a cell, else its ground
