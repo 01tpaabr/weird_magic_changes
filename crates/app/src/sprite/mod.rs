@@ -10,6 +10,7 @@
 //!   matched to its kinds ([`Wardrobe`]), with warnings for `wmc lint`.
 
 pub mod cli;
+pub mod fit;
 mod parse;
 pub mod raster;
 pub mod score;

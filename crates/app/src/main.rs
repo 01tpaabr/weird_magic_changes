@@ -30,6 +30,10 @@
 //!                                              image: shape, colour, detail, stamps
 //!                                              (`app::sprite::score`); --sprite NAME,
 //!                                              --diff out.png, --key "#rrggbb" (the background)
+//! wmc sprite fit <image> --kind K -o out.sprite  a first draft of a sprite from an image
+//!                                              (`app::sprite::fit`); --stamps N (8),
+//!                                              --colors N (3), --chars "...", --size W H,
+//!                                              --seed S, --key "#rrggbb"
 //! wmc observe <time> [w h seed]                make the scenario's world, step it for <time>
 //!                                              (ticks, or 90min, 2h, 4d) and report how its
 //!                                              kinds live and die (`app::observe`); takes
@@ -184,6 +188,24 @@ fn main() -> anyhow::Result<()> {
         target: take_flag(&mut args, "--target")?.pop(),
         diff: take_flag(&mut args, "--diff")?.pop(),
         key: take_flag(&mut args, "--key")?.pop(),
+        kind: None,
+        out: take_flag(&mut args, "-o")?.pop(),
+        stamps: take_flag(&mut args, "--stamps")?.pop(),
+        colors: take_flag(&mut args, "--colors")?.pop(),
+        chars: take_flag(&mut args, "--chars")?.pop(),
+        size: match args.iter().position(|a| a == "--size") {
+            Some(i) => {
+                let w = args.get(i + 1).filter(|v| !v.starts_with("--")).cloned();
+                let h = args.get(i + 2).filter(|v| !v.starts_with("--")).cloned();
+                let (Some(w), Some(h)) = (w, h) else {
+                    bail!("--size needs two values: W H");
+                };
+                args.drain(i..i + 3);
+                Some((w, h))
+            }
+            None => None,
+        },
+        seed: take_flag(&mut args, "--seed")?.pop(),
     };
     // `-v` and negative coordinates start with one `-`, a flag with two.
     if let Some(f) = args.iter().find(|a| a.starts_with("--")) {
@@ -195,7 +217,7 @@ fn main() -> anyhow::Result<()> {
     let command = args.first().map(String::as_str);
     if command != Some("sprite") && render.any() {
         bail!(
-            "--png, --sprite, --pose, --cell, --bg, --target, --diff and --key are only for sprite"
+            "--png, --sprite, --pose, --cell, --bg, --target, --diff, --key, -o, --stamps, --colors, --chars, --size and --seed are only for sprite"
         );
     }
     if let Some(n) = threads {
@@ -213,8 +235,8 @@ fn main() -> anyhow::Result<()> {
     if command != Some("observe") && (every.is_some() || sample.is_some()) {
         bail!("--every and --sample are only for observe");
     }
-    if !matches!(command, Some("observe" | "rates")) && !only.is_empty() {
-        bail!("--kind is only for observe and rates");
+    if !matches!(command, Some("observe" | "rates" | "sprite")) && !only.is_empty() {
+        bail!("--kind is only for observe, rates and sprite fit");
     }
     if !matches!(command, Some("observe" | "lab")) && csv.is_some() {
         bail!("--csv is only for observe and lab");
@@ -336,7 +358,16 @@ fn main() -> anyhow::Result<()> {
             }
             scenario_test(f, &packs, seeds, pass)
         }
-        Some("sprite") => app::sprite::cli::run(&args[1..], &packs, &render),
+        Some("sprite") => {
+            if only.len() > 1 {
+                bail!("--kind: sprite fit takes one");
+            }
+            let render = app::sprite::cli::Opts {
+                kind: only.first().cloned(),
+                ..render
+            };
+            app::sprite::cli::run(&args[1..], &packs, &render)
+        }
         Some("lint") => {
             // As for a new world: these, else `WMC_RULES`, else the scenario's.
             let cli: Vec<String> = args[1..].iter().chain(&packs).cloned().collect();
@@ -359,7 +390,7 @@ fn main() -> anyhow::Result<()> {
         }
         None if alone => play::menu(),
         None => bail!(
-            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <time> [w h seed] | wmc why [-v] <dir> <x> <y> [time [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K] | wmc sprite render <file.sprite> --png <out.png> [--sprite NAME] [--pose V] [--cell PX] [--bg \"#rrggbb\"] | wmc sprite score <file.sprite> --target <image> [--sprite NAME] [--diff out.png] [--key \"#rrggbb\"]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
+            "usage: wmc (the menu) | wmc show [w h seed] | wmc play <dir> [w h seed] | wmc run <dir> <time> [w h seed] | wmc why [-v] <dir> <x> <y> [time [w h seed]] | wmc observe <time> [w h seed] [--gates] | wmc lint [--strict] <pack>... | wmc scenario <file> [--seeds N] [--pass M] | wmc lab <file> [--set NAME=a,b,...]... [--seeds N] [--pass M] [--jobs N] [--full] [--csv f] | wmc rates [pack...] [--kind K] | wmc sprite render <file.sprite> --png <out.png> [--sprite NAME] [--pose V] [--cell PX] [--bg \"#rrggbb\"] | wmc sprite score <file.sprite> --target <image> [--sprite NAME] [--diff out.png] [--key \"#rrggbb\"] | wmc sprite fit <image> --kind K -o out.sprite [--stamps N] [--colors N] [--chars ...] [--size W H] [--seed S]; any takes --rules <pack> (repeatable), --scenario <file>, --set NAME=V, --threads N"
         ),
     }
 }

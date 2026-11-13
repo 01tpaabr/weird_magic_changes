@@ -1,4 +1,4 @@
-//! `wmc sprite render | score`: the sprite tools, headless and
+//! `wmc sprite render | score | fit`: the sprite tools, headless and
 //! deterministic, on the rasterizer the game draws with (`docs/SPRITES.md`
 //! §5). `main.rs` takes the flags off the command line; this runs them.
 
@@ -22,6 +22,15 @@ pub struct Opts {
     pub target: Option<String>,
     pub diff: Option<String>,
     pub key: Option<String>,
+    /// `fit`'s: the kind, `-o`, `--stamps`, `--colors`, `--chars`,
+    /// `--size W H`, `--seed`.
+    pub kind: Option<String>,
+    pub out: Option<String>,
+    pub stamps: Option<String>,
+    pub colors: Option<String>,
+    pub chars: Option<String>,
+    pub size: Option<(String, String)>,
+    pub seed: Option<String>,
 }
 
 impl Opts {
@@ -36,9 +45,16 @@ impl Opts {
             &self.target,
             &self.diff,
             &self.key,
+            &self.kind,
+            &self.out,
+            &self.stamps,
+            &self.colors,
+            &self.chars,
+            &self.seed,
         ]
         .iter()
         .any(|o| o.is_some())
+            || self.size.is_some()
     }
 }
 
@@ -52,9 +68,9 @@ const MAX_SHEET_PIXELS: usize = 64 << 20;
 /// reach.
 pub fn run(args: &[String], packs: &[String], o: &Opts) -> anyhow::Result<()> {
     let command = match args.first().map(String::as_str) {
-        Some(c @ ("render" | "score")) => c,
-        Some(other) => bail!("unknown sprite command {other:?}; use `render` or `score`"),
-        None => bail!("sprite needs a command: render or score"),
+        Some(c @ ("render" | "score" | "fit")) => c,
+        Some(other) => bail!("unknown sprite command {other:?}; use `render`, `score` or `fit`"),
+        None => bail!("sprite needs a command: render, score or fit"),
     };
     let flag_for = |given: bool, flag: &str, only: &str| {
         if given && command != only {
@@ -67,10 +83,27 @@ pub fn run(args: &[String], packs: &[String], o: &Opts) -> anyhow::Result<()> {
     flag_for(o.cell.is_some(), "--cell", "render")?;
     flag_for(o.target.is_some(), "--target", "score")?;
     flag_for(o.diff.is_some(), "--diff", "score")?;
-    flag_for(o.key.is_some(), "--key", "score")?;
-    let file = args
-        .get(1)
-        .with_context(|| format!("sprite {command} needs a sprite file"))?;
+    flag_for(o.key.is_some() && command == "render", "--key", "score")?;
+    flag_for(o.sprite.is_some() && command == "fit", "--sprite", "render")?;
+    flag_for(o.bg.is_some() && command == "fit", "--bg", "render")?;
+    for (given, flag) in [
+        (o.kind.is_some(), "--kind"),
+        (o.out.is_some(), "-o"),
+        (o.stamps.is_some(), "--stamps"),
+        (o.colors.is_some(), "--colors"),
+        (o.chars.is_some(), "--chars"),
+        (o.size.is_some(), "--size"),
+        (o.seed.is_some(), "--seed"),
+    ] {
+        flag_for(given, flag, "fit")?;
+    }
+    let file = args.get(1).with_context(|| {
+        if command == "fit" {
+            "sprite fit needs an image".to_string()
+        } else {
+            format!("sprite {command} needs a sprite file")
+        }
+    })?;
     if let Some(a) = args.get(2) {
         bail!("sprite {command} takes one file; unexpected {a:?}");
     }
@@ -80,6 +113,9 @@ pub fn run(args: &[String], packs: &[String], o: &Opts) -> anyhow::Result<()> {
             .transpose()
     };
     let bg = colour("--bg", &o.bg)?.unwrap_or(crate::render::palette::SOIL_BG.0);
+    if command == "fit" {
+        return fit(file, packs, o, colour("--key", &o.key)?);
+    }
     let text = std::fs::read_to_string(file).with_context(|| format!("reading {file}"))?;
     let f = parse(file, &text)?;
     let kinds = {
@@ -158,6 +194,96 @@ pub fn run(args: &[String], packs: &[String], o: &Opts) -> anyhow::Result<()> {
             score::DETAIL_CELL
         )?;
     }
+    Ok(())
+}
+
+/// `wmc sprite fit <image> --kind NAME -o out.sprite`: a first draft.
+fn fit(image: &str, packs: &[String], o: &Opts, key: Option<u32>) -> anyhow::Result<()> {
+    use super::fit::{CHARS, Options, fit};
+    let kind = o.kind.as_deref().context("sprite fit needs --kind NAME")?;
+    let out = o
+        .out
+        .as_deref()
+        .context("sprite fit needs -o <out.sprite>")?;
+    let count = |flag: &str, v: &Option<String>, lo: usize, hi: usize, default: usize| {
+        v.as_ref().map_or(Ok(default), |n| {
+            n.parse()
+                .ok()
+                .filter(|n| (lo..=hi).contains(n))
+                .with_context(|| format!("{flag} needs a count from {lo} to {hi}"))
+        })
+    };
+    let stamps = count("--stamps", &o.stamps, 1, super::MAX_STAMPS, 8)?;
+    let colors = count("--colors", &o.colors, 1, 8, 3)?;
+    let chars: Vec<u8> = o.chars.as_deref().unwrap_or(CHARS).bytes().collect();
+    if chars.is_empty() || chars.iter().any(|c| !(b'!'..=b'~').contains(c)) {
+        bail!("--chars needs printable ASCII characters, no space");
+    }
+    let seed: u64 = match &o.seed {
+        Some(s) => s.parse().ok().context("--seed needs a whole number")?,
+        None => 1,
+    };
+    // The size: --size, else the kind's in the rules, else one cell.
+    let size = match &o.size {
+        Some((w, h)) => {
+            let side = |v: &str| {
+                v.parse::<u8>()
+                    .ok()
+                    .filter(|n| (1..=16).contains(n))
+                    .context("--size needs two counts from 1 to 16")
+            };
+            (side(w)?, side(h)?)
+        }
+        None => {
+            let packs = crate::packs(packs);
+            if packs.is_empty() {
+                (1, 1)
+            } else {
+                let kinds = crate::compile(&packs)?;
+                kinds
+                    .by_name(kind)
+                    .with_context(|| format!("--kind {kind}: the rules have no such kind"))?
+                    .size
+            }
+        }
+    };
+    let target = Target::open(Path::new(image), key)?;
+    let f = fit(
+        &target,
+        kind,
+        &Options {
+            stamps,
+            colors,
+            chars,
+            size,
+            seed,
+        },
+    );
+    let shown = Path::new(image)
+        .file_name()
+        .map_or_else(|| image.to_string(), |n| n.to_string_lossy().into_owned());
+    let mut text = format!(
+        "# {kind}: drafted by wmc sprite fit from {shown} (seed {seed}, {} x {} cells);\n\
+         # edit it by hand (the /sprite-fitting skill)\n",
+        size.0, size.1
+    );
+    text.push_str(f.file.text().trim_start());
+    std::fs::write(out, &text).with_context(|| format!("writing {out}"))?;
+    let mut w = std::io::stdout().lock();
+    for (i, v) in f.steps.iter().enumerate() {
+        writeln!(w, "stamp {:>2}: value {v:.3}", i + 1)?;
+    }
+    let sc = f.score;
+    writeln!(
+        w,
+        "shape {:.3}, colour {:.3}, detail {:.3} {:.3}, {} stamps, {} colours: wrote {out}",
+        sc.shape,
+        sc.colour,
+        sc.detail_shape,
+        sc.detail_colour,
+        sc.stamps,
+        f.file.palette.len()
+    )?;
     Ok(())
 }
 

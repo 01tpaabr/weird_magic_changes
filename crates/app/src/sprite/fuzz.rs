@@ -244,3 +244,55 @@ fn scores_are_in_range_and_repeatable() {
         }
     });
 }
+
+/// Random small images, keyed or with alpha, at any size and few stamps:
+/// a draft that parses back, never a panic. (At most 64 cases, even in
+/// `make fuzz`: a draft takes a tenth of a second.)
+#[test]
+fn drafts_of_random_images_parse_back() {
+    use super::fit::{Options, fit};
+    use super::score::Target;
+    let cases = std::env::var("WMC_FUZZ_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(6u32)
+        .min(64);
+    let seed = std::env::var("WMC_FUZZ_SEED")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0x5EED);
+    let config = ProptestConfig {
+        cases,
+        failure_persistence: None,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(seed),
+        ..ProptestConfig::default()
+    };
+    proptest!(config, |(
+        w in 1usize..30,
+        h in 1usize..30,
+        bytes in any::<u64>(),
+        alpha in any::<bool>(),
+        stamps in 1usize..3,
+        colors in 1usize..5,
+        sw in 1u8..3,
+        sh in 1u8..3,
+        chars in "[!-~]{1,4}",
+    )| {
+        let mut x = bytes | 1;
+        let rgba: Vec<u8> = (0..w * h * 4)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                if !alpha && i % 4 == 3 { 255 } else { (x >> 32) as u8 }
+            })
+            .collect();
+        let t = Target::from_rgba(w, h, rgba, None);
+        let o = Options { stamps, colors, chars: chars.bytes().collect(), size: (sw, sh), seed: bytes };
+        let f = fit(&t, "k", &o);
+        let text = f.file.text();
+        let back = parse("f", &text).map_err(|e| TestCaseError::fail(format!("{e}\n{text}")))?;
+        prop_assert_eq!(&back.sprites[0].poses, &f.file.sprites[0].poses);
+        prop_assert!(f.score.stamps <= stamps);
+    });
+}

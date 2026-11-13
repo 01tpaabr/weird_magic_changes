@@ -1,6 +1,6 @@
 # Sprites: pictures made of letters (design and build plan)
 
-Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 6
+Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 7
 built** (§8), the rest to come. `packs/crabs` is the example pack
 (`scenarios/crabs.scenario`); `packs/giants` draws its mammoth as one 3 x 3 picture.
 
@@ -188,6 +188,15 @@ agent scores is what a player sees.
   image and seed give the same file), and fast: 8 stamps on a 32-pixel box are a few
   hundred thousand tiny rasters. It writes a still; animation and poses are added by hand
   or by the agent.
+  (Built: it climbs `shape - colour / 4` at 24 px; each new stamp is the best of 400
+  random ones, nudged 250 times; a last pass nudges each stamp 80 times with the others in
+  place; a stamp that adds less than 0.005 ends it. About 6000 small rasters, a tenth of a
+  second a draft in a dev build. Palette names are `c1`, `c2`, ... most used first; the
+  file starts with a comment naming the image and seed. `--key` names the background as
+  for `score`; without `--size`, the kind's size comes from `--rules`, else one cell. On
+  three simple test images (a disc, a tree, a mushroom) the draft's `shape` is 0.876,
+  0.924 and 0.808 against 0.456, 0.449 and 0.396 for the best single character. A draft
+  is shape first and blobby; readability comes from the edits the skill teaches.)
 - **`wmc lint`** also reads a pack's sprite files: parse errors, kinds that don't exist,
   the tile budget.
 

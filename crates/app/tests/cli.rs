@@ -169,8 +169,11 @@ fn unused_arguments_are_refused() {
     let fox_pen = fox_pen.to_str().unwrap();
     let dir = std::env::temp_dir().join(format!("wmc-cli-args-{}", std::process::id()));
     let dir = dir.to_str().unwrap();
+    let (ok, _, err) = wmc(&["show", "20", "5", "42", "--sed", "7"]);
+    assert!(!ok && err.contains("unknown flag --sed"), "{err}");
+    // `--seed` is sprite fit's.
     let (ok, _, err) = wmc(&["show", "20", "5", "42", "--seed", "7"]);
-    assert!(!ok && err.contains("unknown flag --seed"), "{err}");
+    assert!(!ok && err.contains("only for sprite"), "{err}");
     let (ok, _, err) = wmc(&["show", "20", "5", "42", "7"]);
     assert!(!ok && err.contains("unexpected argument \"7\""), "{err}");
     let (ok, _, err) = wmc(&["run", dir, "10", "30", "20", "7", "extra"]);
@@ -838,6 +841,75 @@ fn odd_command_lines_never_panic() {
             "o.png",
         ],
         &["sprite", "score", "bad.sprite", "--target", "o.png"],
+        &["sprite", "fit"],
+        &["sprite", "fit", "o.png"],
+        &["sprite", "fit", "o.png", "--kind", "crab"],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--stamps", "2",
+        ],
+        &["sprite", "fit", "afile", "--kind", "crab", "-o", "f.sprite"],
+        &[
+            "sprite",
+            "fit",
+            "/nonexistent",
+            "--kind",
+            "crab",
+            "-o",
+            "f.sprite",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--stamps", "0",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--stamps", "33",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--colors", "9",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--chars", "",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--chars", "a b",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--size", "2",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--size", "0", "1",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "crab", "-o", "f.sprite", "--seed", "-1",
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "fox", "-o", "f.sprite", "--stamps", "1",
+            "--rules", rules,
+        ],
+        &[
+            "sprite", "fit", "o.png", "--kind", "eel", "-o", "f.sprite", "--rules", rules,
+        ],
+        &[
+            "sprite",
+            "fit",
+            "o.png",
+            "--kind",
+            "crab",
+            "-o",
+            "/nonexistent/f.sprite",
+            "--stamps",
+            "1",
+        ],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--stamps",
+            "2",
+        ],
+        &["show", "-o", "x"],
+        &["show", "--size", "1", "1"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);
@@ -888,6 +960,14 @@ const WORDS: &[&str] = &[
     "--target",
     "--diff",
     "--key",
+    "fit",
+    "-o",
+    "f.sprite",
+    "--stamps",
+    "--colors",
+    "--chars",
+    "--size",
+    "--kind",
     "--threads",
     "--rules",
     "--scenario",
@@ -1445,7 +1525,7 @@ fn sprite_render_writes_a_sheet() {
         ),
         (
             &["show", "--png", "o.png"],
-            "--png, --sprite, --pose, --cell, --bg, --target, --diff and --key are only for sprite",
+            "--png, --sprite, --pose, --cell, --bg, --target, --diff, --key, -o, --stamps, --colors, --chars, --size and --seed are only for sprite",
         ),
     ] {
         let (code, out, err) = wmc_in(&dir, &[], args);
@@ -1534,8 +1614,109 @@ fn sprite_score_measures_a_sprite_against_an_image() {
         ),
         (
             &["sprite", "fill"],
-            "unknown sprite command \"fill\"; use `render` or `score`",
+            "unknown sprite command \"fill\"; use `render`, `score` or `fit`",
         ),
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert!(
+            code == Some(1) && err.contains(want),
+            "{args:?}: {out}{err}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `sprite fit` drafts a file that parses, scores what it says and comes
+/// out the same for the same image and seed.
+#[test]
+fn sprite_fit_drafts_a_sprite_from_an_image() {
+    use app::sprite::{parse, raster, sheet};
+    let dir = odd_fixtures("sprite-fit");
+    let text = std::fs::read_to_string(dir.join("crab.sprite")).unwrap();
+    let f = parse("crab.sprite", &text).unwrap();
+    let own = raster::draw(&f.sprites[0].poses[0], 0, &[0xd9623b], 0, (1, 1), 48);
+    sheet::write_png(&own, &dir.join("own.png")).unwrap();
+    let args = [
+        "sprite", "fit", "own.png", "--kind", "crab", "-o", "f.sprite", "--stamps", "3",
+    ];
+    let (code, out, err) = wmc_in(&dir, &[], &args);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("stamp  1: value"), "{out}");
+    assert!(out.contains("wrote f.sprite"), "{out}");
+    let drafted = std::fs::read_to_string(dir.join("f.sprite")).unwrap();
+    assert!(
+        drafted.starts_with("# crab: drafted by wmc sprite fit from own.png (seed 1, 1 x 1 cells)"),
+        "{drafted}"
+    );
+    let file = parse("f.sprite", &drafted).unwrap();
+    assert_eq!(file.sprites[0].name, "crab");
+    assert!((1..=3).contains(&file.sprites[0].poses[0].stamps.len()));
+    let (_, again, _) = wmc_in(&dir, &[], &args);
+    assert_eq!(again, out);
+    assert_eq!(
+        std::fs::read_to_string(dir.join("f.sprite")).unwrap(),
+        drafted
+    );
+    // Its score is the one fit printed.
+    let shape = out
+        .split("shape ")
+        .nth(1)
+        .unwrap()
+        .split(',')
+        .next()
+        .unwrap();
+    let (_, scored, _) = wmc_in(
+        &dir,
+        &[],
+        &["sprite", "score", "f.sprite", "--target", "own.png"],
+    );
+    assert!(
+        scored.contains(&format!("shape   {shape}")),
+        "{shape}\n{scored}"
+    );
+    // The kind's size from the rules; a kind they lack is an error.
+    let rules = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rules");
+    let r = rules.to_str().unwrap();
+    for (args, want) in [
+        (
+            &["sprite", "fit", "own.png", "-o", "f.sprite"][..],
+            "sprite fit needs --kind NAME",
+        ),
+        (
+            &["sprite", "fit", "own.png", "--kind", "crab"],
+            "sprite fit needs -o <out.sprite>",
+        ),
+        (
+            &[
+                "sprite", "fit", "own.png", "--kind", "eel", "-o", "f.sprite", "--rules", r,
+            ],
+            "--kind eel: the rules have no such kind",
+        ),
+        (
+            &[
+                "sprite", "fit", "own.png", "--kind", "crab", "-o", "f.sprite", "--stamps", "33",
+            ],
+            "--stamps needs a count from 1 to 32",
+        ),
+        (
+            &[
+                "sprite", "fit", "own.png", "--kind", "crab", "-o", "f.sprite", "--size", "2",
+            ],
+            "--size needs two values: W H",
+        ),
+        (
+            &[
+                "sprite",
+                "render",
+                "crab.sprite",
+                "--png",
+                "o.png",
+                "--seed",
+                "3",
+            ],
+            "--seed is only for sprite fit",
+        ),
+        (&["show", "-o", "x"], "only for sprite"),
     ] {
         let (code, out, err) = wmc_in(&dir, &[], args);
         assert!(
