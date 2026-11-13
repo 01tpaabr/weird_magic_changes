@@ -1,0 +1,27 @@
+# giants: the mammoth as one picture over its 3 x 3 cells (docs/SPRITES.md,
+# big actors): a body (an O on its side, filled), a head, a tusk, a trunk
+# that swings, two pairs of legs that step. Coordinates run 0 to 3.
+palette {
+  fur   "#7a5230"
+  dark  "#4a3018"
+  ivory "#efe4c4"
+  eye   "#101010"
+}
+
+sprite mammoth {
+  frames 4 every 250ms
+  "n" at 1.15 2.40 scale 1.5 color dark ~x 0.05
+  "n" at 2.35 2.40 scale 1.5 color dark ~x 0.05 phase 180
+  "O" at 1.75 1.40 scale 3.2 turn 90 color fur
+  "=" at 1.75 1.40 scale 2.6 color fur
+  "#" at 1.40 1.40 scale 1.7 color fur
+  "#" at 2.15 1.40 scale 1.7 color fur
+  "=" at 1.75 1.40 scale 2.6 turn 90 color fur
+  "#" at 1.78 1.50 scale 1.7 turn 45 color fur
+  "/" at 2.95 1.30 scale 0.9 turn 20 color dark
+  "O" at 0.75 1.05 scale 1.6 color fur
+  "#" at 0.75 1.05 scale 1.0 color fur
+  "J" at 0.40 1.95 scale 1.4 turn 10 ~turn 12 color fur
+  "(" at 0.62 1.85 scale 1.0 turn -60 color ivory
+  "." at 0.62 0.85 scale 0.7 color eye
+}

@@ -1,7 +1,8 @@
 # Sprites: pictures made of letters (design and build plan)
 
-Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 3
-built** (§8), the rest to come. `packs/crabs` is the example pack (`scenarios/crabs.scenario`).
+Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 5
+built** (§8), the rest to come. `packs/crabs` is the example pack
+(`scenarios/crabs.scenario`); `packs/giants` draws its mammoth as one 3 x 3 picture.
 
 ## 1. Goal
 
@@ -84,7 +85,11 @@ sprite crab {
   rules and read by nobody's eyes: a rabbit that flees sets `look = 1` and changes pose
   with no new sim code. A pose may carry its own `frames` line.
 - **Big actors:** for a kind declared `size W H`, coordinates run 0 to W and 0 to H; the
-  sprite is drawn across the footprint (one picture over W x H cells).
+  sprite is drawn across the footprint (one picture over W x H cells). Each part shows its
+  slice of the anchor's pose and frame, read from the anchor's row in the same layer, in
+  its chunk or the next; while the anchor's chunk is away, the parts left show their
+  slices of the own stamps from offset 0, all alike (`packs/giants/giants.sprite`, the
+  mammoth).
 - **Which kind:** `sprite NAME` is the kind NAME; a kind without one uses its nearest
   parent's (`KindDef::parent`), so `quick_rabbit` wears `rabbit`'s. In a player's pack the
   name is the player's kind, as the compiler prefixes it; a namespaced kind is written

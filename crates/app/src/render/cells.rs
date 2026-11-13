@@ -289,14 +289,7 @@ fn render_row<'c>(
                     let rows = looks.rows.and_then(|r| (r.0)(cc));
                     for (k, (so, go)) in s_out.iter_mut().zip(g_out.iter_mut()).enumerate() {
                         let i = local + k;
-                        let top = c
-                            .extra
-                            .iter()
-                            .rev()
-                            .map(|l| l[i])
-                            .find(|id| !id.is_none())
-                            .unwrap_or(c.occupant[i]);
-                        let who = if top.is_none() { c.cover[i] } else { top };
+                        let (who, layer) = top_of(c, i);
                         let Some((kind, slot)) = who.unpack() else {
                             continue;
                         };
@@ -310,8 +303,28 @@ fn render_row<'c>(
                                 .map(|r| (r.look, r.stagger));
                             looks.sprite_tile(kind, 0, 0, row)
                         } else {
+                            // A part: its anchor's row, in this chunk or
+                            // another (none if that one is not loaded: the
+                            // own stamps then, which every part shares).
                             let (dx, dy) = (slot >> 4 & 15, slot & 15);
-                            looks.sprite_tile(kind, dx, dy, None)
+                            let at = Pos::new(
+                                x + i32::try_from(k).expect("a span of a chunk") - i32::from(dx),
+                                y - i32::from(dy),
+                            );
+                            let (acc, ai) = at.split();
+                            let anchor = if acc == cc { Some(c) } else { chunk(acc) };
+                            let row = anchor
+                                .and_then(|a| layer.id(a, ai).row())
+                                .filter(|&(k2, _)| k2 == kind)
+                                .and_then(|(_, s)| {
+                                    let r = if acc == cc {
+                                        rows
+                                    } else {
+                                        looks.rows.and_then(|r| (r.0)(acc))
+                                    };
+                                    r?.get(usize::from(s)).map(|r| (r.look, r.stagger))
+                                });
+                            looks.sprite_tile(kind, dx, dy, row)
                         };
                         if tile != 0 {
                             *so = tile;
@@ -329,6 +342,44 @@ fn render_row<'c>(
         }
         x = span_end;
         i += n;
+    }
+}
+
+/// The layer an id was found in, to read the same layer elsewhere (a big
+/// actor's anchor).
+#[derive(Debug, Clone, Copy)]
+enum Layer {
+    Extra(usize),
+    Stand,
+    Cover,
+}
+
+impl Layer {
+    fn id(self, c: &ChunkCells, i: usize) -> ActorId {
+        match self {
+            Layer::Extra(j) => c.extra.get(j).map_or(ActorId::NONE, |l| l[i]),
+            Layer::Stand => c.occupant[i],
+            Layer::Cover => c.cover[i],
+        }
+    }
+}
+
+/// Whose glyph shows on local cell `i`: the last declared layer that holds
+/// someone, else who stands, else the cover; and the layer.
+fn top_of(c: &ChunkCells, i: usize) -> (ActorId, Layer) {
+    if let Some((j, l)) = c
+        .extra
+        .iter()
+        .enumerate()
+        .rev()
+        .find(|(_, l)| !l[i].is_none())
+    {
+        return (l[i], Layer::Extra(j));
+    }
+    if c.occupant[i].is_none() {
+        (c.cover[i], Layer::Cover)
+    } else {
+        (c.occupant[i], Layer::Stand)
     }
 }
 
@@ -571,6 +622,154 @@ mod tests {
         assert!(tucked > 0 && walking > 0, "{tucked} {walking}");
         // The frames advance: two clocks a frame apart differ somewhere.
         assert_ne!(draw(0, true).sprite, draw(100, true).sprite);
+    }
+
+    /// A big actor is one picture over its footprint: each part shows its
+    /// slice of its anchor's pose and frame, across a chunk border; with
+    /// the anchor's chunk away, the parts left show the own stamps from
+    /// offset 0, all alike; with a part's chunk away, the rest stay whole.
+    #[test]
+    fn a_big_sprite_is_whole_across_a_chunk_border() {
+        use crate::render::palette::{PoseTile, Rows, SpriteTile};
+        use sim_core::{CHUNK_CELLS, ChunkActors, Stage};
+        let pack = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packs/giants");
+        let kinds = sim_core::rules::compile_packs(&[pack.as_path()]).unwrap();
+        // Mammoths start inside chunks (a start may not cross a border) and
+        // walk until one stands across one.
+        let scenario = Scenario::parse(
+            "t",
+            "seed 1\nsize 128 128\nterrain water_level 0 rock_on_soil 0 rock_on_water 0\nstart mammoth 1 / 40 in (48, 48) to (76, 76)\n",
+        )
+        .unwrap();
+        let mammoth = kinds.by_name("mammoth").unwrap().id;
+        // A mammoth's anchor across a border and its row's slot.
+        let across = |world: &mut World| -> Option<(Pos, u16)> {
+            let mut q = world.query::<(&ChunkCoord, &ChunkCells)>();
+            let mut found: Vec<(Pos, u16)> = q
+                .iter(world)
+                .flat_map(|(cc, c)| {
+                    (0..CHUNK_CELLS).filter_map(move |i| {
+                        let (k, slot) = c.occupant[i].row()?;
+                        let p = cc.cell(i);
+                        (k == mammoth && (p.x.rem_euclid(64) >= 62 || p.y.rem_euclid(64) >= 62))
+                            .then_some((p, slot))
+                    })
+                })
+                .collect();
+            found.sort_by_key(|(p, _)| (p.y, p.x));
+            found.first().copied()
+        };
+        let walked = || {
+            let mut w = sim::new_world_with(&scenario, kinds.clone()).unwrap();
+            for _ in 0..4000 {
+                if let Some(at) = across(&mut w) {
+                    return (w, at);
+                }
+                sim::step(&mut w);
+            }
+            panic!("no mammoth crossed a border in 4000 ticks");
+        };
+        let set_look = |world: &mut World, look: u8| {
+            let mut q = world.query::<&mut ChunkActors>();
+            for mut a in q.iter_mut(world) {
+                for r in a.rows.iter_mut().filter(|r| r.kind == mammoth) {
+                    r.look = look;
+                }
+            }
+        };
+        let n = kinds.len();
+        let mut table = vec![SpriteTile::default(); n];
+        table[usize::from(mammoth)] = SpriteTile {
+            poses: 1,
+            count: 2,
+            width: 3,
+            height: 3,
+        };
+        let poses = [
+            PoseTile {
+                look: None,
+                first: 0,
+                frames: 4,
+                every_ms: 100,
+            },
+            PoseTile {
+                look: Some(1),
+                first: 36,
+                frames: 1,
+                every_ms: 0,
+            },
+        ];
+        // The nine cells' tiles over the anchor at `p`, row by row (0: none).
+        let nine = |world: &World, p: Pos, clock_ms: u64| -> Vec<u16> {
+            let rows_of = |c: ChunkCoord| {
+                world
+                    .resource::<Stage>()
+                    .entity(c)
+                    .and_then(|e| world.get::<ChunkActors>(e))
+                    .map(|a| a.rows.as_slice())
+            };
+            let view = Viewport {
+                origin: Pos::new(p.x - 6, p.y - 6),
+                width: 16,
+                height: 16,
+            };
+            let mut f = CellFrame::new();
+            f.resize(16, 16);
+            let looks = Looks {
+                sprites: &table,
+                poses: &poses,
+                clock_ms,
+                rows: Some(Rows(&rows_of)),
+                ..Looks::of(world.resource::<Kinds>())
+            };
+            render_cells(|c| stage::chunk(world, c), looks, view, 255, &mut f);
+            (0..3)
+                .flat_map(|dy| (0..3).map(move |dx| (6 + dy) * 16 + 6 + dx))
+                .map(|k| f.sprite[k])
+                .collect()
+        };
+        let slices = |first: u16| (0..9).map(|i| first + i + 1).collect::<Vec<u16>>();
+        let chunk_of = |p: Pos, i: usize| {
+            Pos::new(p.x + (i % 3) as i32, p.y + (i / 3) as i32)
+                .split()
+                .0
+        };
+        let (mut world, (p, slot)) = walked();
+        let (anchor, part) = (chunk_of(p, 0), chunk_of(p, 8));
+        assert_ne!(anchor, part, "it stands across a border");
+        // Look 1: the pose's nine slices, over two or four chunks.
+        set_look(&mut world, 1);
+        assert_eq!(nine(&world, p, 0), slices(36));
+        // Look 0: the anchor's frame on every part, whatever the clock.
+        set_look(&mut world, 0);
+        let rows = world
+            .get::<ChunkActors>(world.resource::<Stage>().entity(anchor).unwrap())
+            .unwrap();
+        let stagger = rows.rows[usize::from(slot)].stagger;
+        for clock in [0u64, 100, 230, 999] {
+            let frame = ((clock / 100 + u64::from(stagger)) % 4) as u16;
+            assert_eq!(nine(&world, p, clock), slices(frame * 9), "at {clock} ms");
+        }
+        // The anchor's chunk away: its cells blank, the parts left on the
+        // own stamps' frame clock / every (offset 0), alike.
+        let (mut gone, _) = walked();
+        set_look(&mut gone, 1);
+        stage::remove(&mut gone, anchor).unwrap();
+        let t = nine(&gone, p, 200);
+        let own = slices(2 * 9);
+        for i in 0..9 {
+            let want = if chunk_of(p, i) == anchor { 0 } else { own[i] };
+            assert_eq!(t[i], want, "cell {i}");
+        }
+        // A part's chunk away: the rest keep the anchor's look 1.
+        set_look(&mut world, 1);
+        stage::remove(&mut world, part).unwrap();
+        let t = nine(&world, p, 200);
+        let pose = slices(36);
+        for i in 0..9 {
+            let want = if chunk_of(p, i) == part { 0 } else { pose[i] };
+            assert_eq!(t[i], want, "cell {i}");
+        }
     }
 
     #[test]
