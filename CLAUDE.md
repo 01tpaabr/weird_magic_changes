@@ -54,14 +54,14 @@ When two of these conflict, the higher one wins.
 ## Layout
 
 ```
-crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer
+crates/app          binary `wmc` (show/play/run): Bevy App, plugins, camera, clock, renderer, sprite/ (*.sprite: parse, raster, tiles, score, fit)
 crates/sim-core     bevy_ecs world: Stage (chunk entities, 64x64 cells), actors (rows per chunk + phases), rules (VM, compiler), scenario, worldgen, store, rng, time, SimTick
-rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them)
-packs/              packs that stand alone (life/: Conway's Life, village/: a social world, gather/: fields, sky/: a flying layer, colony/: an arena with two players, lakes/: water flowing over height, weather/: a pack in a namespace, maze/ and workshop/: searches over cells and over memory, pasture/: far sight, laws reading actors, opaque hedges, forest/: monkeys in a canopy layer that rests on the trees, herds/: groups, many animals in one actor, giants/: big actors, 3 x 3 mammoths and a wood, genes/: genes passed on and drifting, arms_race/: rabbits and wolves evolving speed, turing/, elementary/, cyclic/, turmite/, lsystem/: pictures for the menu), named by a scenario's `rules` line
+rules/              *.rules files: the kinds (built into the binary; a pack: --rules <dir> or WMC_RULES swap or extend them); a pack's *.sprite files draw its kinds (docs/SPRITES.md)
+packs/              packs that stand alone (life/: Conway's Life, village/: a social world, gather/: fields, sky/: a flying layer, colony/: an arena with two players, lakes/: water flowing over height, weather/: a pack in a namespace, maze/ and workshop/: searches over cells and over memory, pasture/: far sight, laws reading actors, opaque hedges, sheep and wolves as sprites, forest/: monkeys in a canopy layer that rests on the trees, herds/: groups, many animals in one actor, giants/: big actors, 3 x 3 mammoths (one sprite each) and a wood, genes/: genes passed on and drifting, arms_race/: rabbits and wolves evolving speed, crabs/: a kind drawn as a sprite, turing/, elementary/, cyclic/, turmite/, lsystem/: pictures for the menu), named by a scenario's `rules` line
 scenarios/          *.scenario files: rules, seed, size, terrain or a drawn map, where kinds start (default.scenario is built in; tests/ holds test worlds)
 tuning/             one folder per goal a world was tuned for (/world-tuning): goal.scenario, notes.md; runs/ is not committed
-docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), WORLD.md (fields, laws, terrain: design), RULES.md (writing rules), PERF.md (baselines)
-.claude/skills/     bevy-dev (auto-loaded each session), parallel-sim, world-tuning (on demand)
+docs/               ARCHITECTURE.md (decisions), ACTORS.md (actor + rules design), WORLD.md (fields, laws, terrain: design), RULES.md (writing rules), SPRITES.md (sprites: format, drawing, tools), PERF.md (baselines)
+.claude/skills/     bevy-dev (auto-loaded each session), parallel-sim, world-tuning, sprite-fitting (on demand)
 ```
 
 ## Commands
@@ -86,6 +86,9 @@ make run ARGS="lab f --set K=1,2,3"         # a scenario's goals for each value 
 make run ARGS="scenario scenarios/tests/fox_pen.scenario"   # a scenario test: its run/expect lines (--threads N);
                                    # `expect always|never|eventually|mean ... from T to T` watch the run,
                                    # `seeds N` + `pass M` (or --seeds/--pass) run it on several seeds
+make run ARGS="sprite render packs/crabs/crabs.sprite --png s.png --rules packs/crabs"   # every frame of every
+                                   # pose at 24 px and 8x; `sprite score f.sprite --target img.png [--diff d.png]`
+                                   # measures it against an image; `sprite fit img.png --kind K -o f.sprite` drafts one
 make scenario-test                 # every scenarios/tests/*.scenario at 1 and 8 threads, checksums compared (make test runs them too)
 make check      fmt + clippy -D warnings        (pre-commit runs this)
 make test       cargo test (unit + the determinism integration test)
@@ -117,7 +120,7 @@ make fmt
 - Tests guard the whole surface, not just the new case. A change also extends what fuzzes it:
   new syntax or sense/action -> `GRAMMAR.md` + `rules/gen_rules.rs` (its `Lively` mode, so
   `sim/fuzz.rs` runs it); new actor state -> `sim::invariants`; new saved field -> the store
-  round trip and `store/fuzz.rs`; new scenario syntax -> `scenario/fuzz.rs`; new doc example
+  round trip and `store/fuzz.rs`; new scenario syntax -> `scenario/fuzz.rs`; new sprite syntax -> `docs/SPRITES.md` §10 + `sprite/gen_sprites.rs`; new doc example
   -> a fence label (`tests/docs.rs` runs it). A fuzz failure becomes a fixed regression test.
   Run `make fuzz` before closing a design step. A narrowing `as` needs a checked conversion
   or `#[allow(clippy::cast_possible_truncation)] // why it fits`. How-to: `/bevy-dev`, Testing.
@@ -135,6 +138,9 @@ make fmt
   session start via hook; invoke again after context compaction.
 - `/parallel-sim` — patterns for parallel systems: phases, chunking, double buffers,
   deterministic reductions, false sharing, job graphs, how to test and profile them.
+- `/sprite-fitting` — make a sprite that reads as the thing at 24 px, from an image or by
+  hand: prepare the target, `wmc sprite fit` a draft, look with `render` (the small copy
+  first), edit with the letter vocabulary, `score`, animate and pose, see it in the window.
 - `/world-tuning` — make a world behave a certain way by measuring: the goal as scenario
   expectations, the baseline from `wmc observe`, a prediction before each change, sweeps
   with `wmc lab`, the margin, the goal kept as a test. With the arithmetic of ticks and

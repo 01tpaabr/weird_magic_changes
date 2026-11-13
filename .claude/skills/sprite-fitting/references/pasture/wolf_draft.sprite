@@ -1,0 +1,18 @@
+# wolf: drafted by wmc sprite fit from wolf.png (seed 2, 1 x 1 cells);
+# edit it by hand (the /sprite-fitting skill)
+palette {
+  c1 "#9b9ba3"
+  c2 "#6e6e76"
+  c3 "#404042"
+}
+
+sprite wolf {
+  ">" at 0.641 0.671 turn -72 scale 1.557 color c2
+  "O" at 0.504 0.69 turn 180 scale 1.011 color c2
+  "-" at 0.333 0.473 turn 10 scale 1.464 color c1
+  "(" at 0.82 0.357 turn -127 scale 1.28 color c1
+  "'" at 0.288 0.393 turn 174 scale 1.069 color c2
+  ")" at 0.973 0 scale 1.017 color c2
+  "<" at 0.406 0.497 turn -96 scale 0.891 color c1
+  "." at 0.407 0.811 turn 83 scale 0.889 color c2
+}

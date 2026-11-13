@@ -1,0 +1,72 @@
+# pasture: the sheep and the wolf as pictures (docs/SPRITES.md), made with
+# the /sprite-fitting skill from two drawings: drafted by `wmc sprite fit`,
+# then rebuilt by hand (the drafts were blobs). A grazing sheep lowers its
+# head (look 1); a hunting wolf runs head low, tail back (look 1).
+
+palette {
+  wool "#f2f2f2"
+  face "#3c3c40"
+  fur  "#a0a0a8"
+  dark "#6e6e76"
+  eye  "#202020"
+}
+
+sprite sheep {
+  frames 4 every 300ms
+  "n" at 0.42 0.83 scale 0.6 color face ~x 0.02
+  "n" at 0.75 0.83 scale 0.6 color face ~x 0.02 phase 180
+  "O" at 0.58 0.57 scale 0.95 turn 90 color wool      # the fleece: an O on its side,
+  "#" at 0.58 0.57 scale 0.7 color wool               # filled,
+  "=" at 0.58 0.62 scale 0.9 color wool
+  "*" at 0.48 0.50 scale 0.75 color wool              # and curly on top
+  "*" at 0.70 0.52 scale 0.7 color wool
+  "." at 0.23 0.47 scale 1.5 color face               # the head: a big dot
+  "^" at 0.30 0.31 scale 0.5 turn -30 color face      # an ear
+
+  pose 1 {                                            # grazing: head down in the grass
+    frames 4 every 400ms
+    "n" at 0.42 0.83 scale 0.6 color face
+    "n" at 0.75 0.83 scale 0.6 color face
+    "O" at 0.58 0.57 scale 0.95 turn 90 color wool
+    "#" at 0.58 0.57 scale 0.7 color wool
+    "=" at 0.58 0.62 scale 0.9 color wool
+    "*" at 0.48 0.50 scale 0.75 color wool
+    "*" at 0.70 0.52 scale 0.7 color wool
+    "." at 0.21 0.64 scale 1.5 color face ~y 0.02
+    "^" at 0.27 0.49 scale 0.5 turn -30 color face ~y 0.02
+  }
+}
+
+sprite wolf {
+  frames 4 every 250ms
+  "n" at 0.36 0.81 scale 0.7 color dark ~x 0.03
+  "n" at 0.77 0.81 scale 0.7 color dark ~x 0.03 phase 180
+  "/" at 0.90 0.40 scale 0.6 turn 20 color dark ~turn 10   # the tail
+  "O" at 0.56 0.56 scale 0.95 turn 90 color fur
+  "#" at 0.56 0.57 scale 0.7 color fur
+  "=" at 0.56 0.58 scale 0.85 color fur
+  "=" at 0.56 0.57 scale 0.8 turn 90 color fur
+  "#" at 0.50 0.58 scale 0.6 turn 45 color fur
+  "-" at 0.58 0.43 scale 1.1 color dark                    # the darker back
+  "<" at 0.13 0.46 scale 0.8 color fur                     # the snout,
+  "." at 0.27 0.45 scale 1.7 color fur                     # the head,
+  "^" at 0.27 0.25 scale 0.6 color dark                    # an ear,
+  "." at 0.22 0.40 scale 0.55 color eye                    # an eye
+
+  pose 1 {                                                 # hunting: at a run, head low
+    frames 4 every 120ms
+    "n" at 0.36 0.81 scale 0.7 color dark ~x 0.06
+    "n" at 0.77 0.81 scale 0.7 color dark ~x 0.06 phase 180
+    "-" at 0.92 0.47 scale 0.7 color dark                  # the tail straight back
+    "O" at 0.56 0.58 scale 0.95 turn 90 color fur
+    "#" at 0.56 0.59 scale 0.7 color fur
+    "=" at 0.56 0.60 scale 0.85 color fur
+    "=" at 0.56 0.59 scale 0.8 turn 90 color fur
+    "#" at 0.50 0.60 scale 0.6 turn 45 color fur
+    "-" at 0.58 0.45 scale 1.1 color dark
+    "<" at 0.10 0.55 scale 0.8 color fur
+    "." at 0.24 0.54 scale 1.7 color fur
+    "^" at 0.28 0.36 scale 0.6 turn -45 color dark         # ears back
+    "." at 0.19 0.50 scale 0.55 color eye
+  }
+}

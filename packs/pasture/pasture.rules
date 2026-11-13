@@ -4,7 +4,8 @@
 # on each cell; grass grows back where none is. Wolves see 64 cells, a
 # whole chunk, but not through the hedges: the engine's rock, redeclared
 # opaque. A wolf that knows of a sheep it can't see keeps count.
-# scenarios/tests/pasture.scenario plays it.
+# scenarios/tests/pasture.scenario plays it. pasture.sprite draws them:
+# `look` 1 is a grazing sheep and a hunting wolf, read by nothing else.
 
 feature rock { blocks  opaque  glyph "%"  color "#3f6b2a" }    # hedges
 
@@ -29,10 +30,10 @@ kind sheep {
   need food max 2d vital
   need health max 1 decay 0 vital
 
-  when food < 1d and grass(here) > 0 => { food = min(food + 4h, 2d)  idle }
-  when food < 1d and best grass on free within 40 as g => move toward g
+  when food < 1d and grass(here) > 0 => { look = 1  food = min(food + 4h, 2d)  idle }   # grazing: its sprite's head goes down
+  when food < 1d and best grass on free within 40 as g => { look = 0  move toward g }
   when food > 40h and chance(1) and count sheep within 4 < 2 and nearest free within 1 as n => spawn sheep at n
-  when true => move random free
+  when true => { look = 0  move random free }
 }
 
 kind wolf {
@@ -44,8 +45,8 @@ kind wolf {
   need food max 2d vital
   mem hidden
 
-  when food < 44h and nearest sheep within 1 as s => eat s
-  when nearest sheep within 64 as s and not sees(s) over level => { hidden += 1  move random free }   # there, behind a hedge
-  when food < 44h and nearest sheep within 64 as s => move toward s
-  when true => move random free
+  when food < 44h and nearest sheep within 1 as s => { look = 1  eat s }
+  when nearest sheep within 64 as s and not sees(s) over level => { look = 0  hidden += 1  move random free }   # there, behind a hedge
+  when food < 44h and nearest sheep within 64 as s => { look = 1  move toward s }   # hunting: its sprite runs
+  when true => { look = 0  move random free }
 }

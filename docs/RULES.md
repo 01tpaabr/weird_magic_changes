@@ -332,7 +332,7 @@ Effects combine with the action and don't end the think.
 
 | effect | |
 |---|---|
-| `look = v` | a public byte, 0 to 255, that other actors read (`kind:look` predicates, `look_of(t)`) and `wmc why` shows; it is not drawn |
+| `look = v` | a public byte, 0 to 255, that other actors read (`kind:look` predicates, `look_of(t)`) and `wmc why` shows; a kind with a sprite draws the pose for it (§15, Sprites), and the sim never reads it for that |
 | `signal = v` | a public 16-bit value others read with `signal_of(t)`, like a bee's dance |
 | `add F v` | adds `v` (negative takes away) to field F on the actor's cell, clamped to the field's `0..max`, in key order with the other actors on the cell. Several adds in one think add up; one think adds to at most 4 fields (a fifth traps). Not on a `conserved` or `fixed` field (§12, Fields) |
 
@@ -1246,6 +1246,20 @@ list, and so is a kind that moved to another layer (standing, ground cover, a de
 naming a kind the rules lack (its rows went in a reload, below) is skipped, said so on
 stderr, and kept in the save: its share keeps its slice of the draw, so the other kinds
 keep their cells, and the kind starts again in new ground when it is back.
+
+### Sprites
+
+A kind can be drawn as a picture made of letters instead of its glyph: a `*.sprite` file
+beside the pack's `*.rules` files (`NAME.sprite` beside a pack that is the file
+`NAME.rules`) names the kinds it draws, as `sprite NAME { ... }`, with stamps (a character
+placed, turned, scaled and coloured), frames that run on real time and a pose for each
+`look` the rules set. Nothing in the rules changes and the sim never sees it: a pack without
+sprite files draws as before, and so does any kind below 16 pixels a cell. The format, the
+tools (`wmc sprite render`, `score`, `fit`) and how big actors are drawn are in
+`docs/SPRITES.md`; `wmc lint` reads a pack's sprite files with its rules. To make one from
+an image, the `/sprite-fitting` skill. Examples: `packs/crabs` (a crab with a tucked-in
+pose), `packs/pasture` (a sheep that lowers its head to graze, a wolf that runs to hunt),
+`packs/giants` (a mammoth as one 3 x 3 picture).
 
 ## 16. The vocabulary
 
