@@ -139,50 +139,76 @@ pub fn ink(i: Ink, palette: &[u32], kind: u32) -> u32 {
 /// `palette` is its file's, `kind` the kind's colour (for stamps without
 /// one).
 pub fn draw(pose: &Pose, f: u8, palette: &[u32], kind: u32, size: (u8, u8), cell: u32) -> Picture {
-    let cell = cell.max(1) as usize;
-    let (w, h) = (
-        usize::from(size.0.max(1)) * cell,
-        usize::from(size.1.max(1)) * cell,
-    );
-    // Premultiplied, at twice the size.
-    let (w2, h2) = (w * 2, h * 2);
-    let mut canvas = vec![[0u32; 4]; w2 * h2];
+    let mut c = Canvas::new(size, cell);
     for s in &pose.stamps {
-        let p = at_frame(s, f, pose.frames.n);
-        stamp(
-            &mut canvas,
-            w2,
-            h2,
+        c.stamp(
             s.ch,
-            p,
+            at_frame(s, f, pose.frames.n),
             ink(s.color, palette, kind),
-            cell,
         );
     }
-    // 2x2 boxes averaged, then straight alpha.
-    let mut out = Picture::new(w, h);
-    for y in 0..h {
-        for x in 0..w {
-            let mut sum = [0u32; 4];
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                let px = canvas[(y * 2 + dy) * w2 + x * 2 + dx];
-                for c in 0..4 {
-                    sum[c] += px[c];
-                }
-            }
-            let a = (sum[3] + 2) / 4;
-            let o = (y * w + x) * 4;
-            if a == 0 {
-                continue;
-            }
-            for (dst, s) in out.rgba[o..o + 3].iter_mut().zip(sum) {
-                let v = ((s + 2) / 4 * 255 + a / 2) / a;
-                *dst = u8::try_from(v.min(255)).expect("clamped");
-            }
-            out.rgba[o + 3] = u8::try_from(a.min(255)).expect("clamped");
+    c.picture()
+}
+
+/// A picture being drawn: premultiplied RGBA at twice its size, stamps
+/// added one by one over what is there ([`draw`] is one of these; `wmc
+/// sprite fit` keeps one per try).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Canvas {
+    cell: usize,
+    w: usize,
+    h: usize,
+    px: Vec<[u32; 4]>,
+}
+
+impl Canvas {
+    /// An empty canvas of `size` cells of `cell` pixels.
+    pub fn new(size: (u8, u8), cell: u32) -> Self {
+        let cell = cell.max(1) as usize;
+        let (w, h) = (
+            usize::from(size.0.max(1)) * cell,
+            usize::from(size.1.max(1)) * cell,
+        );
+        Self {
+            cell,
+            w,
+            h,
+            px: vec![[0u32; 4]; w * h * 4],
         }
     }
-    out
+
+    /// One stamp, `ch` at `p` in `rgb`, over what is drawn.
+    pub fn stamp(&mut self, ch: u8, p: Pos, rgb: u32) {
+        stamp(&mut self.px, self.w * 2, self.h * 2, ch, p, rgb, self.cell);
+    }
+
+    /// The canvas at its size: 2x2 boxes averaged, then straight alpha.
+    pub fn picture(&self) -> Picture {
+        let (w, h, w2) = (self.w, self.h, self.w * 2);
+        let mut out = Picture::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let mut sum = [0u32; 4];
+                for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                    let px = self.px[(y * 2 + dy) * w2 + x * 2 + dx];
+                    for c in 0..4 {
+                        sum[c] += px[c];
+                    }
+                }
+                let a = (sum[3] + 2) / 4;
+                let o = (y * w + x) * 4;
+                if a == 0 {
+                    continue;
+                }
+                for (dst, s) in out.rgba[o..o + 3].iter_mut().zip(sum) {
+                    let v = ((s + 2) / 4 * 255 + a / 2) / a;
+                    *dst = u8::try_from(v.min(255)).expect("clamped");
+                }
+                out.rgba[o + 3] = u8::try_from(a.min(255)).expect("clamped");
+            }
+        }
+        out
+    }
 }
 
 /// Draw one stamp over a premultiplied canvas of `w2 x h2` pixels (twice

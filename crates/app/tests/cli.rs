@@ -755,6 +755,89 @@ fn odd_command_lines_never_panic() {
         ],
         &["show", "--png", "o.png"],
         &["lint", rules, "--cell", "24"],
+        &["sprite", "score"],
+        &["sprite", "score", "crab.sprite"],
+        &["sprite", "score", "crab.sprite", "--target", "o.png"],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "o.png",
+            "--sprite",
+            "crab",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "afile",
+            "--sprite",
+            "crab",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "/nonexistent",
+            "--sprite",
+            "crab",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "crab.sprite",
+            "--sprite",
+            "crab",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "o.png",
+            "--sprite",
+            "crab",
+            "--key",
+            "x",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "o.png",
+            "--sprite",
+            "crab",
+            "--diff",
+            "d.png",
+        ],
+        &[
+            "sprite",
+            "score",
+            "crab.sprite",
+            "--target",
+            "o.png",
+            "--sprite",
+            "crab",
+            "--diff",
+            "/nonexistent/d.png",
+        ],
+        &["sprite", "score", "crab.sprite", "--png", "o.png"],
+        &[
+            "sprite",
+            "render",
+            "crab.sprite",
+            "--png",
+            "o.png",
+            "--target",
+            "o.png",
+        ],
+        &["sprite", "score", "bad.sprite", "--target", "o.png"],
     ];
     for args in cases {
         no_panic(&dir, &[], args);
@@ -801,6 +884,10 @@ const WORDS: &[&str] = &[
     "o.png",
     "crab",
     "#00ff00",
+    "score",
+    "--target",
+    "--diff",
+    "--key",
     "--threads",
     "--rules",
     "--scenario",
@@ -1358,7 +1445,96 @@ fn sprite_render_writes_a_sheet() {
         ),
         (
             &["show", "--png", "o.png"],
-            "--png, --sprite, --pose, --cell and --bg are only for sprite",
+            "--png, --sprite, --pose, --cell, --bg, --target, --diff and --key are only for sprite",
+        ),
+    ] {
+        let (code, out, err) = wmc_in(&dir, &[], args);
+        assert!(
+            code == Some(1) && err.contains(want),
+            "{args:?}: {out}{err}"
+        );
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `sprite score` gives the same numbers twice, 1 for the shape of a
+/// sprite against its own render, and writes the side-by-side diff.
+#[test]
+fn sprite_score_measures_a_sprite_against_an_image() {
+    use app::sprite::{parse, raster, sheet};
+    let dir = odd_fixtures("sprite-score");
+    let text = std::fs::read_to_string(dir.join("crab.sprite")).unwrap();
+    let f = parse("crab.sprite", &text).unwrap();
+    let own = raster::draw(
+        &f.sprites[0].poses[0],
+        0,
+        &[0xd9623b],
+        sim_core::rules::DEFAULT_COLOR,
+        (1, 1),
+        24,
+    );
+    sheet::write_png(&own, &dir.join("own.png")).unwrap();
+    let args = [
+        "sprite",
+        "score",
+        "crab.sprite",
+        "--sprite",
+        "crab",
+        "--target",
+        "own.png",
+        "--diff",
+        "d.png",
+    ];
+    let (code, out, err) = wmc_in(&dir, &[], &args);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("shape   1.000"), "{out}");
+    assert!(out.contains("stamps  1"), "{out}");
+    assert!(out.contains("the subject: its alpha"), "{out}");
+    assert!(out.contains("wrote d.png"), "{out}");
+    let (_, again, _) = wmc_in(&dir, &[], &args);
+    assert_eq!(again, out, "the same numbers twice");
+    let png = std::fs::read(dir.join("d.png")).unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    for (args, want) in [
+        (
+            &["sprite", "score", "crab.sprite", "--target", "own.png"][..],
+            "crab.sprite holds 2 sprites: name one with --sprite (crab, fox)",
+        ),
+        (
+            &["sprite", "score", "crab.sprite", "--sprite", "crab"],
+            "sprite score needs --target <image.png>",
+        ),
+        (
+            &[
+                "sprite",
+                "score",
+                "crab.sprite",
+                "--sprite",
+                "crab",
+                "--target",
+                "afile",
+            ],
+            "afile:",
+        ),
+        (
+            &["sprite", "score", "crab.sprite", "--png", "o.png"],
+            "--png is only for sprite render",
+        ),
+        (
+            &[
+                "sprite",
+                "render",
+                "crab.sprite",
+                "--png",
+                "o.png",
+                "--target",
+                "own.png",
+            ],
+            "--target is only for sprite score",
+        ),
+        (
+            &["sprite", "fill"],
+            "unknown sprite command \"fill\"; use `render` or `score`",
         ),
     ] {
         let (code, out, err) = wmc_in(&dir, &[], args);

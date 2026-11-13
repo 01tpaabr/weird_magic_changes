@@ -9,8 +9,10 @@
 //! - [`sources`] and [`load`]: the sprite files of a rule set's packs,
 //!   matched to its kinds ([`Wardrobe`]), with warnings for `wmc lint`.
 
+pub mod cli;
 mod parse;
 pub mod raster;
+pub mod score;
 pub mod sheet;
 pub mod tiles;
 

@@ -209,3 +209,38 @@ fn generated_files_draw_and_draw_the_same() {
         }
     });
 }
+
+/// Generated sprites against random small images, keyed or with alpha:
+/// the numbers stay in range and come out the same twice.
+#[test]
+fn scores_are_in_range_and_repeatable() {
+    use super::score::{Target, score};
+    proptest!(fuzz_config(48), |(
+        f in file(),
+        w in 1usize..40,
+        h in 1usize..40,
+        seed in any::<u64>(),
+        alpha in any::<bool>(),
+        key in proptest::option::of(any::<u32>()),
+    )| {
+        let mut x = seed | 1;
+        let rgba: Vec<u8> = (0..w * h * 4)
+            .map(|i| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                if !alpha && i % 4 == 3 { 255 } else { (x >> 24) as u8 }
+            })
+            .collect();
+        let t = Target::from_rgba(w, h, rgba, key.map(|k| k & 0x00ff_ffff));
+        let palette: Vec<u32> = f.palette.iter().map(|(_, c)| *c).collect();
+        for s in &f.sprites {
+            let size = super::score::reach(s);
+            let a = score(&s.poses[0], &palette, 0x00ab_cdef, size, &t);
+            for v in [a.shape, a.colour, a.detail_shape, a.detail_colour] {
+                prop_assert!((0.0..=1.0).contains(&v), "{a:?}");
+            }
+            prop_assert_eq!(score(&s.poses[0], &palette, 0x00ab_cdef, size, &t), a);
+        }
+    });
+}

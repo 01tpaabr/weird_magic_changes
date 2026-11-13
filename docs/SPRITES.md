@@ -1,6 +1,6 @@
 # Sprites: pictures made of letters (design and build plan)
 
-Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 5
+Status: **approved** (owner, 2026-11-12: every proposed choice in §9); **steps 1 to 6
 built** (§8), the rest to come. `packs/crabs` is the example pack
 (`scenarios/crabs.scenario`); `packs/giants` draws its mammoth as one 3 x 3 picture.
 
@@ -168,7 +168,13 @@ agent scores is what a player sees.
   - `detail`: the same two at 96 px (a tie-breaker, weighted low: readability first);
   - `stamps`: how many it took.
   The target's background is its alpha channel, else the colour of its corners (`--key`
-  to name it). `--diff` writes target, sprite and difference side by side.
+  to name it), with the colours within 48 of it (RGB distance, of 441). The image is
+  fitted into the sprite's box (its kind's footprint with `--rules`, else the cells its
+  stamps reach), its aspect kept, centred. A pixel is in a silhouette from alpha 128.
+  `colour` is 0 for the same colours, 1 for black against white. It also prints the one
+  number `fit` climbs, `value = 0.9 (shape - colour / 4) + 0.1 (the same at 96 px)`.
+  `--diff` writes target, sprite and difference side by side at 96 px (grey where both
+  are, red where only the image is, blue where only the sprite is). (Built.)
 - **`wmc sprite fit <image.png> --kind NAME -o out.sprite [--stamps 8] [--colors 3]
   [--chars "..."] [--size W H] [--seed S]`**: a first draft from an image, by the method of
   Fogleman's Primitive with letters for shapes:
