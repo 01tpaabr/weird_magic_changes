@@ -52,6 +52,7 @@ fn bench_cells(c: &mut Criterion) {
             count: 1,
             width: 1,
             height: 1,
+            wave: None,
         };
     }
     let poses = [PoseTile {
@@ -70,6 +71,31 @@ fn bench_cells(c: &mut Criterion) {
                     Looks {
                         sprites: &table,
                         poses: &poses,
+                        ..Looks::of(&kinds)
+                    },
+                    view,
+                    200,
+                    &mut frame,
+                )
+            });
+        },
+    );
+    // The built-in world's grounds and rock as pictures (rules/world.sprite):
+    // every bare cell a sprite tile.
+    let (wardrobe, _) = app::sprite::read(&kinds).expect("the built-in sprites load");
+    let tiles = app::sprite::tiles::SpriteTiles::build(&wardrobe, &kinds, 24);
+    g.bench_with_input(
+        BenchmarkId::new("160x90 world sprites", threads),
+        &threads,
+        |b, _| {
+            b.iter(|| {
+                render_cells(
+                    |cc| stage::chunk(&world, cc),
+                    Looks {
+                        grounds: &tiles.grounds,
+                        features: &tiles.features,
+                        poses: &tiles.poses,
+                        clock_ms: 1234,
                         ..Looks::of(&kinds)
                     },
                     view,

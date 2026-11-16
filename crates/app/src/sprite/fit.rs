@@ -342,6 +342,7 @@ pub fn fit(target: &Target, kind: &str, o: &Options) -> Fit {
             line: 0,
             col: 0,
             poses: vec![pose],
+            ..Sprite::default()
         }],
     };
     Fit {

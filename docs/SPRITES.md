@@ -277,6 +277,8 @@ image-fitting tools. Each group is useful if the work stops after it.
    worth adding.
 4. **Kinds only.** Grounds, features and fields are not in this plan: water that ripples
    and grass that sways are a separate, smaller change to how a cell's colour is chosen.
+   (Reversed for grounds and features by the owner, 2026-11-16: "sprites for the world,
+   dirt, water, etc, with animations"; §11. Fields stay tints.)
 5. **No sound** in this plan.
 
 ## 10. Grammar
@@ -294,9 +296,11 @@ TIME    = digit { digit } [ "." digit { digit } ] ( "ms" | "s" )
 STRING  = '"' { any byte but '"' and LF } '"'
         | "'" { any byte but "'" and LF } "'"       (no escapes: "\" is a backslash)
 
-file    = { palette | sprite } EOF
+file    = { palette | sprite | material } EOF
 palette = "palette" "{" { NAME STRING } "}"
 sprite  = "sprite" NAME "{" { frames | stamp | pose } "}"
+material = ( "ground" | "feature" ) NAME "{" { frames | wave | stamp } "}"
+wave    = "wave" NUMBER NUMBER
 pose    = "pose" NUMBER "{" { frames | stamp } "}"
 frames  = "frames" NUMBER [ "every" TIME ]
 stamp   = STRING "at" NUMBER NUMBER { option }
@@ -316,7 +320,11 @@ option  = "turn" NUMBER | "scale" NUMBER | "phase" NUMBER
 - **A sprite** names a kind; a name appears once in a file. Its body holds at most one
   `frames` line, its stamps, and its poses; a pose holds at most one `frames` line and its
   stamps, no pose. A pose without a `frames` line takes the sprite's; a sprite without one
-  is a still (`frames 1`).
+  is a still (`frames 1`). `frames N` without `every` is N still variants: each actor (by
+  its `stagger`) or cell (by its wave, else a hash of it) shows one.
+- **A material** (`ground NAME`, `feature NAME`) draws a ground or a feature; a name appears
+  once a class in a file (a kind, a ground and a feature may share one). It has no poses
+  (nothing sets its look) and at most one `wave`, which it alone may have.
 - **Ranges** (checked by the parser, with the range in the message):
 
   | value | range | default |
@@ -329,7 +337,8 @@ option  = "turn" NUMBER | "scale" NUMBER | "phase" NUMBER
   | `~turn` | 0 to 180, whole degrees | 0 |
   | `~x`, `~y` | 0 to 16, in cells | 0 |
   | `~scale` | 0 to 4, in cells | 0 |
-  | `frames N` | 1 to 16; `every` needed when N > 1 | 1 |
+  | `frames N` | 1 to 16; without `every`, still variants | 1 |
+  | `wave DX DY` | -16 to 16 each, whole frames a cell | none: a hash of the cell |
   | `every T` | 50ms to 60s; milliseconds are whole | |
   | `pose V` | 0 to 255, each once in a sprite | |
 
@@ -339,7 +348,9 @@ option  = "turn" NUMBER | "scale" NUMBER | "phase" NUMBER
 - **Loading** (`wmc lint`, the game): a sprite's name is a kind of the loaded rules (in a
   player's pack, that player's: `red.ant` for `ant`), else a warning; two sprites for one
   kind, in any files, are an error. A kind without a sprite wears its nearest parent's of
-  the same size. A stamp centred outside its kind's footprint is a warning.
+  the same size. A stamp centred outside its kind's footprint is a warning. A material's
+  name is a ground or feature of the loaded rules, else a warning; two for one are an
+  error.
 
 Errors read as the rules compiler's, `file:line:col: message`:
 
@@ -351,7 +362,73 @@ sprite crab {
 ```
 
 ```sprite error
-sprite crab {
-  frames 4                   # error: `frames 4` needs `every T`
+ground water {
+  pose 1 { }                 # error: a ground has no poses
 }
 ```
+
+## 11. Grounds and features (built 2026-11-16)
+
+The owner asked for "sprites for the world, dirt, water, etc, with animations"
+(2026-11-16), reversing §9.4 for the materials. A sprite file may draw a ground or a
+feature as it draws a kind:
+
+```sprite
+# rules/world.sprite
+palette {
+  pebble "#8b663b"
+  foam   "#9fcaf5"
+  glint  "#e8f4ff"
+  stone  "#5a5a5e"
+  light  "#9a9aa0"
+}
+
+ground soil {
+  frames 5                                      # five stills: each cell one, by its place
+  "." at 0.30 0.62 scale 0.55 color pebble ~x 0.18 ~y 0.10
+  "," at 0.70 0.35 scale 0.45 color pebble ~x 0.12 phase 90
+  "'" at 0.55 0.82 scale 0.40 color pebble ~x 0.20 phase 200
+}
+
+ground water {
+  frames 5 every 300ms
+  wave -1 2                                     # a frame behind the cell west, two ahead of the one north: ripples run east
+  "~" at 0.32 0.35 scale 0.70 color foam ~x 0.08 ~y 0.03
+  "~" at 0.68 0.70 scale 0.60 color foam ~x 0.08 ~y 0.03 phase 180
+  "." at 0.78 0.22 scale 0.45 color glint ~scale 0.25 phase 90
+}
+
+feature rock {
+  frames 3                                      # three boulders, by place
+  "O" at 0.50 0.58 scale 0.95 turn 90 color stone ~turn 12
+  "=" at 0.50 0.59 scale 0.75 color stone
+  "=" at 0.50 0.58 scale 0.60 turn 90 color stone
+  "#" at 0.50 0.59 scale 0.55 turn 45 color stone ~turn 12
+  "#" at 0.38 0.60 scale 0.45 color stone
+  "#" at 0.62 0.60 scale 0.45 color stone
+  "@" at 0.50 0.58 scale 0.55 color stone
+  "'" at 0.36 0.44 scale 0.55 turn 60 color light ~x 0.04
+}
+```
+
+- **Where it shows:** where the material's glyph would: a feature's on a cell with a
+  feature and nobody on it, a ground's on a bare cell. Whoever stands there (or ground
+  cover) shows instead, as before. One picture a cell: under a kind's sprite is the cell's
+  colour, not the ground's picture.
+- **Over the colour:** the picture replaces the glyph, not the cell's colour: fields, ground
+  cover, relief and daylight still tint the cell under it. A stamp without a colour takes
+  the material's glyph colour (the rules' `color`, else the palette's).
+- **Variants and waves:** `frames N` without `every` gives N stills, each cell showing one by
+  a hash of its place, so a field of soil does not repeat. With `every` the frames run, each
+  cell offset by its hash (a twinkle), or by `wave DX DY`: `x * DX + y * DY` frames at cell
+  `(x, y)`, so a pattern travels across the material (`wave -1 0`: east, one cell a frame; the
+  built-in water's `wave -1 2` also shifts each row, so a pond does not show stripes).
+  A kind may have variants too (`frames N` without `every`): each actor shows one by its
+  `stagger`.
+- **Which files:** as for kinds, the packs' sprite files; the built-in rules carry
+  `rules/world.sprite` (above). A pack that uses the engine's soil and water and wants them
+  drawn copies it (packs load in many combinations, and a picture pack such as `packs/life`
+  wants its ground plain). The menu's gallery keeps its plain ground.
+- **Cost:** a world whose ground has a sprite draws every bare cell as a picture: one more
+  pass over the span, as for kinds; a world without sprites is as before (`PERF.md`).
+

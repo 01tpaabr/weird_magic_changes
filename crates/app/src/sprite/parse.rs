@@ -3,8 +3,8 @@
 //! position of the token it is about (`file:line:col: message`).
 
 use super::{
-    Frames, Ink, MAX_EVERY_MS, MAX_FRAMES, MAX_PALETTE, MAX_POSES, MAX_SCALE, MAX_STAMPS,
-    MAX_SWING_TURN, MAX_TURN, MAX_XY, MIN_EVERY_MS, MIN_SCALE, Pose, Sprite, SpriteError,
+    Class, Frames, Ink, MAX_EVERY_MS, MAX_FRAMES, MAX_PALETTE, MAX_POSES, MAX_SCALE, MAX_STAMPS,
+    MAX_SWING_TURN, MAX_TURN, MAX_WAVE, MAX_XY, MIN_EVERY_MS, MIN_SCALE, Pose, Sprite, SpriteError,
     SpriteFile, Stamp,
 };
 
@@ -371,11 +371,22 @@ impl Parser<'_> {
                         palette_at.push(at);
                     }
                 }
-                Tok::Name(k) if k == "sprite" => {
-                    let (name, at) = self.name("the name of the kind the sprite draws")?;
-                    if f.sprites.iter().any(|s| s.name == name) {
-                        return Err(self
-                            .err_at(&at, format!("sprite `{name}` is drawn twice in this file")));
+                Tok::Name(k) if k == "sprite" || k == "ground" || k == "feature" => {
+                    let class = match k.as_str() {
+                        "sprite" => Class::Kind,
+                        "ground" => Class::Ground,
+                        _ => Class::Feature,
+                    };
+                    let (name, at) = self.name(match class {
+                        Class::Kind => "the name of the kind the sprite draws",
+                        Class::Ground => "the name of the ground it draws",
+                        Class::Feature => "the name of the feature it draws",
+                    })?;
+                    if f.sprites.iter().any(|s| s.name == name && s.class == class) {
+                        return Err(self.err_at(
+                            &at,
+                            format!("{} `{name}` is drawn twice in this file", class.word()),
+                        ));
                     }
                     let open = self.expect(&Tok::Open, "`{` after the sprite's name")?;
                     let si = f.sprites.len();
@@ -383,6 +394,8 @@ impl Parser<'_> {
                         name,
                         line: at.line,
                         col: at.col,
+                        class,
+                        wave: None,
                         poses: vec![Pose::default()],
                     });
                     self.body(&mut f, si, 0, &open)?;
@@ -409,7 +422,7 @@ impl Parser<'_> {
                     return Err(self.err_at(
                         &t,
                         format!(
-                            "expected `palette` or `sprite`, found {}",
+                            "expected `palette`, `sprite`, `ground` or `feature`, found {}",
                             Self::what(other)
                         ),
                     ));
@@ -461,23 +474,43 @@ impl Parser<'_> {
                     }
                     let n = self.whole("the number of frames", 1, i64::from(MAX_FRAMES))?;
                     let n = u8::try_from(n).expect("at most MAX_FRAMES");
+                    // Without `every`, still variants: each cell or actor
+                    // shows one by its offset.
                     let mut every_ms = 0;
                     if matches!(&self.peek().tok, Tok::Name(e) if e == "every") {
                         self.next();
                         every_ms = self.time()?;
-                    } else if n > 1 {
-                        return Err(self.err_at(
-                            &t,
-                            format!(
-                                "`frames {n}` needs `every T`: how long each is shown (200ms, 1s)"
-                            ),
-                        ));
                     }
                     let p = &mut f.sprites[si].poses[pi];
                     p.frames = Frames { n, every_ms };
                     p.own_frames = true;
                 }
+                Tok::Name(k) if k == "wave" => {
+                    let class = f.sprites[si].class;
+                    if class == Class::Kind {
+                        return Err(self.err_at(
+                            &t,
+                            "`wave` is for grounds and features: a kind's frames are offset by its actor",
+                        ));
+                    }
+                    if pi != 0 || f.sprites[si].wave.is_some() {
+                        return Err(self.err_at(&t, "`wave` given twice"));
+                    }
+                    let dx = self.whole("wave's x", -i64::from(MAX_WAVE), i64::from(MAX_WAVE))?;
+                    let dy = self.whole("wave's y", -i64::from(MAX_WAVE), i64::from(MAX_WAVE))?;
+                    f.sprites[si].wave = Some((
+                        i8::try_from(dx).expect("in range"),
+                        i8::try_from(dy).expect("in range"),
+                    ));
+                }
                 Tok::Name(k) if k == "pose" => {
+                    let class = f.sprites[si].class;
+                    if class != Class::Kind {
+                        return Err(self.err_at(
+                            &t,
+                            format!("a {} has no poses: nothing sets its look", class.word()),
+                        ));
+                    }
                     if pi != 0 {
                         return Err(self.err_at(&t, "a pose holds no pose"));
                     }

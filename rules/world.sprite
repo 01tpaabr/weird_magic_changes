@@ -1,0 +1,39 @@
+# The engine's three materials as pictures (docs/SPRITES.md §11): drawn on a
+# cell where nothing stands, over the cell's colour (fields, cover and
+# relief still tint it). Soil and rock are stills that vary cell by cell;
+# water ripples, its frames running across the cells.
+
+palette {
+  pebble "#8b663b"
+  foam   "#9fcaf5"
+  glint  "#e8f4ff"
+  stone  "#5a5a5e"
+  light  "#9a9aa0"
+}
+
+ground soil {
+  frames 5                                      # five stills: each cell one, by its place
+  "." at 0.30 0.62 scale 0.55 color pebble ~x 0.18 ~y 0.10
+  "," at 0.70 0.35 scale 0.45 color pebble ~x 0.12 phase 90
+  "'" at 0.55 0.82 scale 0.40 color pebble ~x 0.20 phase 200
+}
+
+ground water {
+  frames 5 every 300ms
+  wave -1 2                                     # a frame behind the cell west, two ahead of the one north: ripples run east
+  "~" at 0.32 0.35 scale 0.70 color foam ~x 0.08 ~y 0.03
+  "~" at 0.68 0.70 scale 0.60 color foam ~x 0.08 ~y 0.03 phase 180
+  "." at 0.78 0.22 scale 0.45 color glint ~scale 0.25 phase 90
+}
+
+feature rock {
+  frames 3                                      # three boulders, by place
+  "O" at 0.50 0.58 scale 0.95 turn 90 color stone ~turn 12
+  "=" at 0.50 0.59 scale 0.75 color stone
+  "=" at 0.50 0.58 scale 0.60 turn 90 color stone
+  "#" at 0.50 0.59 scale 0.55 turn 45 color stone ~turn 12
+  "#" at 0.38 0.60 scale 0.45 color stone
+  "#" at 0.62 0.60 scale 0.45 color stone
+  "@" at 0.50 0.58 scale 0.55 color stone
+  "'" at 0.36 0.44 scale 0.55 turn 60 color light ~x 0.04
+}

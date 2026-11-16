@@ -5,13 +5,15 @@
 //! draws programs: each decision takes the next `u32`, and a list that has
 //! run out answers 0, the simplest alternative (end the list, leave the
 //! option out). So shrinking the list shrinks the file. Every file it
-//! makes is valid: in range, within the limits, names declared.
+//! makes is valid: in range, within the limits, names declared. Kinds,
+//! grounds and features, with variants (`frames N` without `every`) and
+//! waves.
 
 use proptest::prelude::*;
 
 use super::{
-    Frames, Ink, MAX_EVERY_MS, MAX_FRAMES, MAX_POSES, MAX_SCALE, MAX_STAMPS, MAX_SWING_TURN,
-    MAX_TURN, MAX_XY, MIN_EVERY_MS, MIN_SCALE, Pose, Sprite, SpriteFile, Stamp, Swing,
+    Class, Frames, Ink, MAX_EVERY_MS, MAX_FRAMES, MAX_POSES, MAX_SCALE, MAX_STAMPS, MAX_SWING_TURN,
+    MAX_TURN, MAX_WAVE, MAX_XY, MIN_EVERY_MS, MIN_SCALE, Pose, Sprite, SpriteFile, Stamp, Swing,
 };
 
 /// Kinds a sprite may name: built-in ones, a namespaced one, and one no
@@ -67,8 +69,8 @@ impl G<'_> {
     fn frames(&mut self) -> Frames {
         let n = u8::try_from(self.range(1, i32::from(MAX_FRAMES))).expect("at most 16");
         let every = self.range(MIN_EVERY_MS as i32, MAX_EVERY_MS as i32);
-        // Whole milliseconds, a frame of n > 1 needs one; a still may say it.
-        let every_ms = if n > 1 || self.below(2) == 1 {
+        // Whole milliseconds; without, still variants (or a still).
+        let every_ms = if self.below(3) != 0 {
             u32::try_from(every).expect("positive")
         } else {
             0
@@ -128,7 +130,45 @@ pub fn generate(choices: &[u32]) -> SpriteFile {
         f.palette.push((format!("c{i}"), g.below(0x0100_0000)));
     }
     let mut names: Vec<&str> = NAMES.to_vec();
+    // Grounds and features: the engine's three, a pack's, one no rules have.
+    let mut materials: Vec<(Class, &str)> = vec![
+        (Class::Ground, "soil"),
+        (Class::Ground, "water"),
+        (Class::Ground, "mud"),
+        (Class::Feature, "rock"),
+        (Class::Feature, "hut"),
+        (Class::Feature, "water"),
+    ];
     for _ in 0..g.below(4) {
+        let class = match g.below(3) {
+            1 if !materials.is_empty() => Class::Ground,
+            _ => Class::Kind,
+        };
+        if class != Class::Kind {
+            let (class, name) = materials.remove(g.below(materials.len() as u32) as usize);
+            let own_frames = g.below(2) == 1;
+            let wave = (g.below(2) == 1).then(|| {
+                let d = |g: &mut G| i8::try_from(g.range(-MAX_WAVE, MAX_WAVE)).expect("in range");
+                (d(&mut g), d(&mut g))
+            });
+            f.sprites.push(Sprite {
+                name: name.to_string(),
+                class,
+                wave,
+                poses: vec![Pose {
+                    look: None,
+                    frames: if own_frames {
+                        g.frames()
+                    } else {
+                        Frames::STILL
+                    },
+                    own_frames,
+                    stamps: g.stamps(f.palette.len()),
+                }],
+                ..Sprite::default()
+            });
+            continue;
+        }
         if names.is_empty() {
             break;
         }
@@ -162,9 +202,8 @@ pub fn generate(choices: &[u32]) -> SpriteFile {
         }
         f.sprites.push(Sprite {
             name: name.to_string(),
-            line: 0,
-            col: 0,
             poses,
+            ..Sprite::default()
         });
     }
     f

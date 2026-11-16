@@ -86,13 +86,43 @@ pub struct SpriteFile {
     pub sprites: Vec<Sprite>,
 }
 
-/// `sprite NAME { ... }`: how the kind NAME is drawn.
+/// What a sprite draws: `sprite NAME` a kind, `ground NAME` a ground,
+/// `feature NAME` a feature.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Class {
+    #[default]
+    Kind,
+    Ground,
+    Feature,
+}
+
+impl Class {
+    /// The word that opens its block.
+    pub fn word(self) -> &'static str {
+        match self {
+            Class::Kind => "sprite",
+            Class::Ground => "ground",
+            Class::Feature => "feature",
+        }
+    }
+}
+
+/// The most a `wave` moves the frame from one cell to the next.
+pub const MAX_WAVE: i32 = 16;
+
+/// `sprite NAME { ... }`: how the kind NAME is drawn; `ground NAME` and
+/// `feature NAME` draw a material where nothing stands.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Sprite {
     pub name: String,
     /// Where the name is, for messages.
     pub line: u32,
     pub col: u32,
+    pub class: Class,
+    /// A ground's or feature's `wave DX DY`: frame offset `x * DX + y *
+    /// DY` at cell `(x, y)` (frames run across the ground); `None`: a hash
+    /// of the cell.
+    pub wave: Option<(i8, i8)>,
     /// `poses[0]` is the sprite's own list (every `look` without a pose of
     /// its own); then each `pose V { ... }` in file order.
     pub poses: Vec<Pose>,
@@ -198,7 +228,10 @@ impl SpriteFile {
             out.push_str("}\n");
         }
         for s in &self.sprites {
-            let _ = writeln!(out, "\nsprite {} {{", s.name);
+            let _ = writeln!(out, "\n{} {} {{", s.class.word(), s.name);
+            if let Some((dx, dy)) = s.wave {
+                let _ = writeln!(out, "  wave {dx} {dy}");
+            }
             for (i, p) in s.poses.iter().enumerate() {
                 let indent = if i == 0 { "  " } else { "    " };
                 if let Some(v) = p.look {
@@ -265,9 +298,12 @@ impl SpriteFile {
     }
 }
 
-/// The built-in kinds' sprite files (`rules/*.sprite`), as the built-in
-/// rules are carried: none yet.
-pub const BUILTIN: [(&str, &str); 0] = [];
+/// The built-in rules' sprite files (`rules/*.sprite`), carried in the
+/// binary as the built-in rules are: the engine's materials.
+pub const BUILTIN: [(&str, &str); 1] = [(
+    "world.sprite",
+    include_str!("../../../../rules/world.sprite"),
+)];
 
 /// A sprite file to load: its label for messages, its text, and the player
 /// whose pack it is in (its sprite names are that player's kinds).
@@ -342,6 +378,8 @@ pub fn sources(packs: &[String]) -> Result<Vec<Source>, String> {
 /// A sprite matched to the kind it draws.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worn {
+    /// What it draws, in the table of its class (`sprite.class`): a kind's
+    /// id, a ground's byte, a feature's byte (1 and up).
     pub kind: u16,
     /// The file it is in, for messages.
     pub file: String,
@@ -372,6 +410,10 @@ pub struct Wardrobe {
     /// Per kind id: its sprite in [`Self::sprites`], its own or its nearest
     /// parent's of the same size; `None` draws the kind's glyph.
     pub of_kind: Vec<Option<u16>>,
+    /// Per ground byte, per feature byte (0, no feature, is `None`): its
+    /// sprite in [`Self::sprites`]; `None` draws its glyph.
+    pub of_ground: Vec<Option<u16>>,
+    pub of_feature: Vec<Option<u16>>,
 }
 
 impl Wardrobe {
@@ -386,20 +428,85 @@ impl Wardrobe {
 }
 
 /// Parse `sources` and match each sprite to the kind it names (a player's
-/// pack prefixes its player, as the compiler does). Two sprites for one
-/// kind are an error; a sprite for a kind the rules lack is a warning
+/// pack prefixes its player, as the compiler does), each `ground` and
+/// `feature` to the material. Two sprites for one kind or material are an
+/// error; a sprite for one the rules lack is a warning
 /// (packs load in many combinations), as is a stamp centred outside its
 /// kind's footprint.
 pub fn load(sources: &[Source], kinds: &Kinds) -> Result<(Wardrobe, Vec<Diagnostic>), SpriteError> {
     let mut w = Wardrobe {
         sprites: Vec::new(),
         of_kind: vec![None; kinds.defs.len()],
+        of_ground: vec![None; kinds.materials.grounds.len()],
+        of_feature: vec![None; kinds.materials.features.len() + 1],
     };
     let mut warnings = Vec::new();
     for src in sources {
         let file = parse(&src.label, &src.text)?;
         let palette: Vec<u32> = file.palette.iter().map(|(_, c)| *c).collect();
         for s in file.sprites {
+            if s.class != Class::Kind {
+                // A ground or a feature, by its name in the rules (a
+                // player declares none: no prefix).
+                let word = s.class.word();
+                let (list, first) = match s.class {
+                    Class::Ground => (&kinds.materials.grounds, 0),
+                    _ => (&kinds.materials.features, 1),
+                };
+                let Some(i) = list.iter().position(|m| m.name == s.name) else {
+                    warnings.push(Diagnostic {
+                        level: Level::Warning,
+                        file: src.label.clone(),
+                        line: s.line,
+                        col: s.col,
+                        msg: format!(
+                            "{word} `{}`: the rules have no such {word}; it draws nothing",
+                            s.name
+                        ),
+                    });
+                    continue;
+                };
+                let idx = i + first;
+                let table = if s.class == Class::Ground {
+                    &mut w.of_ground
+                } else {
+                    &mut w.of_feature
+                };
+                if let Some(j) = table[idx] {
+                    let other = &w.sprites[usize::from(j)];
+                    return Err(SpriteError {
+                        file: src.label.clone(),
+                        line: s.line,
+                        col: s.col,
+                        msg: format!(
+                            "{word} `{}` has a sprite already ({}:{})",
+                            s.name, other.file, other.sprite.line
+                        ),
+                    });
+                }
+                if s.poses[0]
+                    .stamps
+                    .iter()
+                    .any(|st| st.x > 1000 || st.y > 1000)
+                {
+                    warnings.push(Diagnostic {
+                        level: Level::Warning,
+                        file: src.label.clone(),
+                        line: s.line,
+                        col: s.col,
+                        msg: format!("{word} `{}`: a stamp is centred outside its cell", s.name),
+                    });
+                }
+                table[idx] = Some(u16::try_from(w.sprites.len()).expect("few sprites"));
+                w.sprites.push(Worn {
+                    kind: u16::try_from(idx).expect("a material byte"),
+                    file: src.label.clone(),
+                    sprite: s,
+                    palette: palette.clone(),
+                    size: (1, 1),
+                });
+                continue;
+            }
             let name = match &src.owner {
                 Some(o) => format!("{o}.{}", s.name),
                 None => s.name.clone(),

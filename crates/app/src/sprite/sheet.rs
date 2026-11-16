@@ -23,6 +23,8 @@ pub struct Row<'a> {
     /// The kind's colour (stamps without one).
     pub kind: u32,
     pub size: (u8, u8),
+    /// What it is drawn over: `None` the sheet's background.
+    pub bg: Option<u32>,
 }
 
 /// Over an opaque `bg`: straight alpha composed, rounded.
@@ -86,6 +88,7 @@ pub fn sheet(rows: &[Row], cell: u32, bg: u32) -> Picture {
         for f in 0..r.pose.frames.n.max(1) {
             let pic = draw(r.pose, f, r.palette, r.kind, r.size, cell);
             let i = usize::from(f);
+            let bg = r.bg.unwrap_or(bg);
             put(&mut out, &pic, 1, MARGIN + i * (w + GAP), y, bg);
             put(
                 &mut out,
@@ -108,6 +111,10 @@ pub fn caption(pose: &Pose) -> String {
         .map_or_else(|| "own stamps".to_string(), |v| format!("pose {v}"));
     match pose.frames {
         Frames { n: 1, .. } => format!("{which}, a still, {} stamps", pose.stamps.len()),
+        Frames { n, every_ms: 0 } => format!(
+            "{which}, {n} still variants (one a cell or actor), {} stamps",
+            pose.stamps.len()
+        ),
         Frames { n, every_ms } => format!(
             "{which}, {n} frames every {every_ms}ms, {} stamps",
             pose.stamps.len()

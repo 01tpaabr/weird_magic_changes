@@ -275,6 +275,10 @@ pub struct Looks<'a> {
     /// Per kind: its sprite, if it wears one (`crate::sprite`); empty
     /// when no kind does or the cells are too small ([`SPRITE_MIN`]).
     pub sprites: &'a [SpriteTile],
+    /// Per ground byte and per feature byte: its sprite, drawn on a cell
+    /// where nothing stands (empty: none, or the menu's gallery).
+    pub grounds: &'a [SpriteTile],
+    pub features: &'a [SpriteTile],
     /// The sprites' poses: a kind's are [`SpriteTile::poses`] on.
     pub poses: &'a [PoseTile],
     /// Real time in milliseconds: a sprite's frame is `clock_ms / every`,
@@ -305,7 +309,29 @@ pub struct SpriteTile {
     pub count: u8,
     pub width: u8,
     pub height: u8,
+    /// A ground's or feature's `wave DX DY` (`None`: a hash of the cell).
+    pub wave: Option<(i8, i8)>,
 }
+
+impl SpriteTile {
+    /// A material's frame offset at cell `(x, y)`: along its wave, else a
+    /// hash of the cell; below [`OFFSETS`], so any frame count divides it.
+    #[inline]
+    pub fn offset_at(&self, x: i32, y: i32) -> u32 {
+        let v = match self.wave {
+            Some((dx, dy)) => i64::from(x) * i64::from(dx) + i64::from(y) * i64::from(dy),
+            None => {
+                let h = (x as u32).wrapping_mul(0x9E37_79B1) ^ (y as u32).wrapping_mul(0x85EB_CA77);
+                i64::from(h ^ h >> 15)
+            }
+        };
+        u32::try_from(v.rem_euclid(i64::from(OFFSETS))).expect("below OFFSETS")
+    }
+}
+
+/// Frame offsets are kept below this: every frame count from 1 to 16
+/// divides it, so a reduced offset picks the same frame.
+pub const OFFSETS: u32 = 720_720;
 
 /// A pose in the sprite tileset: drawn while the actor's `look` is `look`
 /// (`None`: the sprite's own stamps, for every other look), `frames`
@@ -338,6 +364,8 @@ impl Default for Looks<'_> {
             fields: &[],
             materials: &DEFAULT_MATERIALS,
             sprites: &[],
+            grounds: &[],
+            features: &[],
             poses: &[],
             clock_ms: 0,
             rows: None,
@@ -356,6 +384,8 @@ impl<'a> Looks<'a> {
             fields: &kinds.fields,
             materials: &kinds.materials,
             sprites: &[],
+            grounds: &[],
+            features: &[],
             poses: &[],
             clock_ms: 0,
             rows: None,
@@ -385,10 +415,39 @@ impl<'a> Looks<'a> {
     /// `look`, else the own one; the frame `(clock_ms / every + stagger) %
     /// frames`.
     #[inline]
-    pub fn sprite_tile(&self, kind: u16, dx: u16, dy: u16, row: Option<(u8, u16)>) -> u16 {
+    pub fn sprite_tile(&self, kind: u16, dx: u16, dy: u16, row: Option<(u8, u32)>) -> u16 {
         let Some(t) = self.sprites.get(usize::from(kind)).filter(|t| t.poses != 0) else {
             return 0;
         };
+        self.tile_of(t, dx, dy, row)
+    }
+
+    /// The sprite tile plus one for ground `g` at cell `(x, y)`, 0 without
+    /// a sprite.
+    #[inline]
+    pub fn ground_tile(&self, g: u8, x: i32, y: i32) -> u16 {
+        match self.grounds.get(usize::from(g)).filter(|t| t.poses != 0) {
+            Some(t) => self.tile_of(t, 0, 0, Some((0, t.offset_at(x, y)))),
+            None => 0,
+        }
+    }
+
+    /// The same for feature `f` (1 and up).
+    #[inline]
+    pub fn feature_tile(&self, f: u8, x: i32, y: i32) -> u16 {
+        match self.features.get(usize::from(f)).filter(|t| t.poses != 0) {
+            Some(t) => self.tile_of(t, 0, 0, Some((0, t.offset_at(x, y)))),
+            None => 0,
+        }
+    }
+
+    /// Does any kind, ground or feature wear a sprite here?
+    #[inline]
+    pub fn any_sprites(&self) -> bool {
+        !(self.sprites.is_empty() && self.grounds.is_empty() && self.features.is_empty())
+    }
+
+    fn tile_of(&self, t: &SpriteTile, dx: u16, dy: u16, row: Option<(u8, u32)>) -> u16 {
         let Some(poses) = self
             .poses
             .get(usize::from(t.poses - 1)..usize::from(t.poses - 1) + usize::from(t.count))
@@ -399,11 +458,18 @@ impl<'a> Looks<'a> {
         let p = row
             .and_then(|(look, _)| poses[1..].iter().find(|p| p.look == Some(look)))
             .unwrap_or(&poses[0]);
-        let frame = if p.frames > 1 && p.every_ms > 0 {
+        // Frames run on the clock (`every`), or stand still as variants;
+        // either way offset per actor or cell.
+        let frame = if p.frames > 1 {
             let offset = row.map_or(0, |(_, s)| u64::from(s));
+            let t = if p.every_ms > 0 {
+                self.clock_ms / u64::from(p.every_ms)
+            } else {
+                0
+            };
             // Below `frames`, at most 16.
             #[allow(clippy::cast_possible_truncation)]
-            let f = ((self.clock_ms / u64::from(p.every_ms) + offset) % u64::from(p.frames)) as u16;
+            let f = ((t + offset) % u64::from(p.frames)) as u16;
             f
         } else {
             0
@@ -443,6 +509,7 @@ mod tests {
                 count: 2,
                 width: 3,
                 height: 2,
+                wave: None,
             },
         ];
         let poses = [
@@ -480,6 +547,53 @@ mod tests {
         assert_eq!(at(100).sprite_tile(1, 0, 0, Some((7, 3))), 41);
         assert_eq!(at(100).sprite_tile(1, 2, 1, Some((7, 3))), 41 + 5);
         assert_eq!(at(0).sprite_tile(1, 2, 1, None), 11 + 5);
+    }
+
+    /// A material's offset runs along its wave, else hashes the cell; every
+    /// frame count divides the range, so the frame is the same either way.
+    #[test]
+    fn a_material_offset_follows_its_wave_or_the_cell() {
+        let wave = SpriteTile {
+            wave: Some((-1, 2)),
+            ..SpriteTile::default()
+        };
+        assert_eq!(wave.offset_at(0, 0), 0);
+        assert_eq!(wave.offset_at(3, 1), OFFSETS - 3 + 2);
+        assert_eq!(wave.offset_at(-5, -7), (5 - 14 + OFFSETS as i64) as u32);
+        let hashed = SpriteTile::default();
+        assert_eq!(hashed.offset_at(10, 20), hashed.offset_at(10, 20));
+        let spread: std::collections::BTreeSet<u32> =
+            (0..64).map(|x| hashed.offset_at(x, 7) % 5).collect();
+        assert_eq!(spread.len(), 5, "neighbours differ");
+        for n in 1..=16 {
+            assert_eq!(OFFSETS % n, 0);
+        }
+        // Variants: the frame is the offset's, whatever the clock.
+        let t = [SpriteTile {
+            poses: 1,
+            count: 1,
+            width: 1,
+            height: 1,
+            wave: Some((1, 0)),
+        }];
+        let p = [PoseTile {
+            look: None,
+            first: 0,
+            frames: 4,
+            every_ms: 0,
+        }];
+        let at = |clock_ms| Looks {
+            grounds: &t,
+            poses: &p,
+            clock_ms,
+            ..Looks::default()
+        };
+        assert_eq!(at(0).ground_tile(0, 2, 9), 3);
+        assert_eq!(at(99_999).ground_tile(0, 2, 9), 3);
+        assert_eq!(at(0).ground_tile(0, 5, 9), 2);
+        assert_eq!(at(0).ground_tile(1, 5, 9), 0, "a ground without a sprite");
+        assert_eq!(at(0).feature_tile(1, 5, 9), 0);
+        assert!(at(0).any_sprites() && !Looks::default().any_sprites());
     }
 
     #[test]

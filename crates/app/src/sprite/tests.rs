@@ -153,8 +153,24 @@ fn bad_files_say_where() {
             "t.sprite:1:33: \"red\" is not a colour",
         ),
         (
-            "sprite a { frames 4 }",
-            "t.sprite:1:12: `frames 4` needs `every T`",
+            "ground soil { pose 1 { } }",
+            "t.sprite:1:15: a ground has no poses: nothing sets its look",
+        ),
+        (
+            "sprite a { wave 1 0 }",
+            "t.sprite:1:12: `wave` is for grounds and features",
+        ),
+        (
+            "feature rock { wave 1 0 wave 0 1 }",
+            "t.sprite:1:25: `wave` given twice",
+        ),
+        (
+            "ground soil { wave 17 0 }",
+            "t.sprite:1:20: wave's x must be from -16 to 16",
+        ),
+        (
+            "ground soil { } ground soil { }",
+            "t.sprite:1:24: ground `soil` is drawn twice in this file",
         ),
         (
             "sprite a { frames 2 every 10ms }",
@@ -194,7 +210,7 @@ fn bad_files_say_where() {
         ),
         (
             "kind a { }",
-            "t.sprite:1:1: expected `palette` or `sprite`, found `kind`",
+            "t.sprite:1:1: expected `palette`, `sprite`, `ground` or `feature`, found `kind`",
         ),
         (
             "sprite a { \"x\" at 3w 0 }",
@@ -383,4 +399,76 @@ fn sources_read_a_packs_sprite_files_in_name_order() {
     ];
     assert_eq!(got, want);
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `ground` and `feature` blocks draw materials; `wave` sets how frames run
+/// across cells; `frames N` without `every` is N still variants; a kind, a
+/// ground and a feature may share a name.
+#[test]
+fn grounds_features_waves_and_variants() {
+    let f = parse(
+        "t",
+        "ground water { frames 5 every 300ms wave -1 2 \"~\" at 0.5 0.5 }\nfeature rock { frames 3 \"O\" at 0.5 0.5 }\nsprite water { }\nfeature water { }",
+    )
+    .unwrap();
+    let w = &f.sprites[0];
+    assert_eq!((w.class, w.wave), (Class::Ground, Some((-1, 2))));
+    assert_eq!(
+        w.poses[0].frames,
+        Frames {
+            n: 5,
+            every_ms: 300
+        }
+    );
+    let r = &f.sprites[1];
+    assert_eq!((r.class, r.wave), (Class::Feature, None));
+    assert_eq!(r.poses[0].frames, Frames { n: 3, every_ms: 0 });
+    assert_eq!(f.sprites[2].class, Class::Kind);
+    assert_eq!(f.sprites[3].class, Class::Feature);
+    // It writes back as it reads.
+    let back = parse("t", &f.text()).unwrap();
+    let strip = |mut f: SpriteFile| {
+        for s in &mut f.sprites {
+            (s.line, s.col) = (0, 0);
+        }
+        f
+    };
+    assert_eq!(strip(back), strip(f));
+}
+
+/// Materials match the rules' grounds and features by name; one the rules
+/// lack is a warning, two for one an error.
+#[test]
+fn materials_match_by_name() {
+    let kinds = Kinds::builtin();
+    let text = "ground water { \"~\" at 0.5 0.5 }\nground soil { }\nfeature rock { }\nground lava { }\nfeature hut { }";
+    let (w, warn) = load(&[source("m.sprite", text, None)], &kinds).unwrap();
+    assert_eq!(w.of_ground, vec![Some(1), Some(0)]);
+    assert_eq!(w.of_feature, vec![None, Some(2)]);
+    assert!(w.of_kind.iter().all(Option::is_none));
+    assert_eq!(w.tiles(), 3);
+    let msgs: Vec<String> = warn.iter().map(ToString::to_string).collect();
+    assert_eq!(
+        msgs,
+        [
+            "m.sprite:4:8: warning: ground `lava`: the rules have no such ground; it draws nothing",
+            "m.sprite:5:9: warning: feature `hut`: the rules have no such feature; it draws nothing",
+        ]
+    );
+    let e = load(
+        &[
+            source("a.sprite", "ground soil { }", None),
+            source("b.sprite", "ground soil { }", None),
+        ],
+        &kinds,
+    )
+    .unwrap_err();
+    assert_eq!(
+        e.to_string(),
+        "b.sprite:1:8: ground `soil` has a sprite already (a.sprite:1)"
+    );
+    // The built-in rules wear the engine's materials' sprites.
+    let (w, warn) = read(&kinds).unwrap();
+    assert!(warn.is_empty(), "{warn:?}");
+    assert!(w.of_ground.iter().all(Option::is_some) && w.of_feature[1].is_some());
 }

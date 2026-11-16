@@ -306,11 +306,42 @@ fn find<'f>(file: &str, f: &'f SpriteFile, name: &str) -> anyhow::Result<&'f Spr
 /// else the cells its stamps reach and the colour of a kind that declares
 /// none.
 fn looks(s: &Sprite, kinds: Option<&Kinds>) -> ((u8, u8), u32) {
-    let def = kinds.and_then(|k| k.by_name(&s.name));
-    (
-        def.map_or_else(|| score::reach(s), |d| d.size),
-        def.map_or(sim_core::rules::DEFAULT_COLOR, |d| d.color),
-    )
+    let (size, kind, _) = looks_on(s, kinds);
+    (size, kind)
+}
+
+/// [`looks`], and what a ground or feature is drawn over: its ground's
+/// colour (soil under a feature), from the rules or the engine's three.
+fn looks_on(s: &Sprite, kinds: Option<&Kinds>) -> ((u8, u8), u32, Option<u32>) {
+    use crate::render::palette::{SOIL, feature_look, ground_look};
+    let engine = sim_core::rules::Materials::default();
+    let m = kinds.map_or(&engine, |k| &k.materials);
+    let soil = ground_look(sim_core::Ground(0), SOIL, m);
+    match s.class {
+        super::Class::Kind => {
+            let def = kinds.and_then(|k| k.by_name(&s.name));
+            (
+                def.map_or_else(|| score::reach(s), |d| d.size),
+                def.map_or(sim_core::rules::DEFAULT_COLOR, |d| d.color),
+                None,
+            )
+        }
+        super::Class::Ground => {
+            let g = m.grounds.iter().position(|d| d.name == s.name);
+            let (bg, _, fg) = g
+                .and_then(|g| u8::try_from(g).ok())
+                .map_or(soil, |g| ground_look(sim_core::Ground(g), SOIL, m));
+            ((1, 1), fg.0, Some(bg.0))
+        }
+        super::Class::Feature => {
+            let f = m.features.iter().position(|d| d.name == s.name);
+            let fg = f
+                .and_then(|f| u8::try_from(f + 1).ok())
+                .and_then(|f| feature_look(sim_core::Feature(f), m))
+                .map_or(sim_core::rules::DEFAULT_COLOR, |(_, c)| c.0);
+            ((1, 1), fg, Some(soil.0.0))
+        }
+    }
 }
 
 /// `wmc sprite render <file> --png out`: a sheet of a sprite file's poses
@@ -350,7 +381,7 @@ fn render(
     let mut rows = Vec::new();
     let mut legend = Vec::new();
     for s in chosen {
-        let (size, kind) = looks(s, kinds);
+        let (size, kind, under) = looks_on(s, kinds);
         let poses: Vec<&Pose> = match pose {
             Some(v) => vec![
                 s.poses
@@ -373,6 +404,7 @@ fn render(
                 palette: &palette,
                 kind,
                 size,
+                bg: under.filter(|_| o.bg.is_none()),
             });
         }
     }

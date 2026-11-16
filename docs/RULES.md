@@ -1259,7 +1259,10 @@ tools (`wmc sprite render`, `score`, `fit`) and how big actors are drawn are in
 `docs/SPRITES.md`; `wmc lint` reads a pack's sprite files with its rules. To make one from
 an image, the `/sprite-fitting` skill. Examples: `packs/crabs` (a crab with a tucked-in
 pose), `packs/pasture` (a sheep that lowers its head to graze, a wolf that runs to hunt),
-`packs/giants` (a mammoth as one 3 x 3 picture).
+`packs/giants` (a mammoth as one 3 x 3 picture). Grounds and features can be drawn the
+same way (`ground water { ... }`, `feature rock { ... }`: soil that varies cell by cell,
+water whose ripples run across it), where nobody stands; the built-in rules draw the
+engine's soil, water and rock (`rules/world.sprite`).
 
 ## 16. The vocabulary
 

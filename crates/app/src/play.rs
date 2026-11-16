@@ -1491,6 +1491,18 @@ fn render_frame(
         soil: if on_menu { NIGHT_SOIL } else { SOIL },
         tiny: layout.cell < GLYPH_MIN,
         sprites: if dress.on { &dress.tiles.table } else { &[] },
+        // Grounds and features drawn as pictures, but not under the
+        // menu: the gallery keeps its own ground.
+        grounds: if dress.on && !on_menu {
+            &dress.tiles.grounds
+        } else {
+            &[]
+        },
+        features: if dress.on && !on_menu {
+            &dress.tiles.features
+        } else {
+            &[]
+        },
         poses: &dress.tiles.poses,
         // Real time, not the sim's: a paused world still breathes.
         clock_ms: u64::try_from(real.elapsed().as_millis()).unwrap_or(u64::MAX),

@@ -1168,30 +1168,46 @@ fn lint(
             writeln!(out, "{line}")?;
         }
     }
-    for w in &wardrobe.sprites {
+    for (si, w) in wardrobe.sprites.iter().enumerate() {
         let own = &w.sprite.poses[0];
-        let wearers: Vec<&str> = wardrobe
-            .of_kind
-            .iter()
-            .enumerate()
-            .filter(|&(k, s)| {
-                k != usize::from(w.kind)
-                    && s.is_some_and(|i| wardrobe.sprites[usize::from(i)].kind == w.kind)
-            })
-            .map(|(k, _)| kinds.defs[k].name.as_str())
-            .collect();
+        let class = w.sprite.class;
+        // Kinds that wear a parent's sprite.
+        let wearers: Vec<&str> = match class {
+            app::sprite::Class::Kind => wardrobe
+                .of_kind
+                .iter()
+                .enumerate()
+                .filter(|&(k, s)| k != usize::from(w.kind) && *s == u16::try_from(si).ok())
+                .map(|(k, _)| kinds.defs[k].name.as_str())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let what = match class {
+            app::sprite::Class::Kind => kinds.def(w.kind).name.as_str(),
+            _ => w.sprite.name.as_str(),
+        };
+        let wave = w
+            .sprite
+            .wave
+            .map_or(String::new(), |(dx, dy)| format!(", wave {dx} {dy}"));
         writeln!(
             out,
-            "sprite {:<12} {} poses, {} frames, {} stamps, {} tiles{}",
-            kinds.def(w.kind).name,
+            "{:<6} {:<12} {} poses, {} frames{}, {} stamps, {} tiles{}",
+            class.word(),
+            what,
             w.sprite.poses.len(),
             own.frames.n,
+            if own.frames.n > 1 && own.frames.every_ms == 0 {
+                " (variants)"
+            } else {
+                ""
+            },
             own.stamps.len(),
             w.tiles(),
             if wearers.is_empty() {
-                String::new()
+                wave.clone()
             } else {
-                format!(", worn by {}", wearers.join(", "))
+                format!("{wave}, worn by {}", wearers.join(", "))
             }
         )?;
     }

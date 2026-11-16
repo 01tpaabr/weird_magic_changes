@@ -14,9 +14,9 @@ use bevy::image::{Image, ImageSampler};
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 use sim_core::Kinds;
 
-use super::Wardrobe;
 use super::raster::draw;
-use crate::render::palette::{PoseTile, SpriteTile};
+use super::{Class, Wardrobe};
+use crate::render::palette::{PoseTile, SOIL, SpriteTile, feature_look, ground_look};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpriteTiles {
@@ -31,6 +31,10 @@ pub struct SpriteTiles {
     /// Per kind: where its poses are and its footprint
     /// ([`crate::render::palette::Looks::sprites`]).
     pub table: Vec<SpriteTile>,
+    /// Per ground byte and per feature byte (`Looks::grounds`,
+    /// `Looks::features`).
+    pub grounds: Vec<SpriteTile>,
+    pub features: Vec<SpriteTile>,
 }
 
 impl SpriteTiles {
@@ -45,11 +49,24 @@ impl SpriteTiles {
         let mut starts = Vec::with_capacity(w.sprites.len());
         let mut next: u32 = 0;
         for worn in &w.sprites {
-            let kind = kinds
-                .colors
-                .get(usize::from(worn.kind))
-                .copied()
-                .unwrap_or(0);
+            // The colour of stamps without one: the kind's, or the
+            // material's glyph colour as the palette draws it.
+            let m = &kinds.materials;
+            let kind = match worn.sprite.class {
+                Class::Kind => kinds
+                    .colors
+                    .get(usize::from(worn.kind))
+                    .copied()
+                    .unwrap_or(0),
+                Class::Ground => {
+                    let g = sim_core::Ground(u8::try_from(worn.kind).expect("a ground byte"));
+                    ground_look(g, SOIL, m).2.0
+                }
+                Class::Feature => {
+                    let f = sim_core::Feature(u8::try_from(worn.kind).expect("a feature byte"));
+                    feature_look(f, m).map_or(0, |(_, c)| c.0)
+                }
+            };
             let (sw, sh) = (usize::from(worn.size.0), usize::from(worn.size.1));
             starts.push(poses.len());
             for p in &worn.sprite.poses {
@@ -70,29 +87,36 @@ impl SpriteTiles {
                 }
             }
         }
-        let table = w
-            .of_kind
-            .iter()
-            .map(|s| match s {
-                Some(i) => {
-                    let i = usize::from(*i);
-                    let worn = &w.sprites[i];
-                    SpriteTile {
-                        poses: u16::try_from(starts[i] + 1).expect("8 poses a sprite"),
-                        count: u8::try_from(worn.sprite.poses.len()).expect("8 poses a sprite"),
-                        width: worn.size.0,
-                        height: worn.size.1,
-                    }
+        let entry = |s: &Option<u16>| match s {
+            Some(i) => {
+                let i = usize::from(*i);
+                let worn = &w.sprites[i];
+                SpriteTile {
+                    poses: u16::try_from(starts[i] + 1).expect("8 poses a sprite"),
+                    count: u8::try_from(worn.sprite.poses.len()).expect("8 poses a sprite"),
+                    width: worn.size.0,
+                    height: worn.size.1,
+                    wave: worn.sprite.wave,
                 }
-                None => SpriteTile::default(),
-            })
-            .collect();
+            }
+            None => SpriteTile::default(),
+        };
+        // A table with no sprite in it is empty: the cells skip it.
+        let table_of = |v: &[Option<u16>]| -> Vec<SpriteTile> {
+            if v.iter().all(Option::is_none) {
+                Vec::new()
+            } else {
+                v.iter().map(entry).collect()
+            }
+        };
         Self {
             cell,
             count: next,
             rgba,
             poses,
-            table,
+            table: table_of(&w.of_kind),
+            grounds: table_of(&w.of_ground),
+            features: table_of(&w.of_feature),
         }
     }
 
@@ -162,6 +186,7 @@ mod tests {
             count: 2,
             width: 1,
             height: 1,
+            wave: None,
         };
         assert_eq!(t.table[id("a")], a);
         assert_eq!(t.table[id("b")], a);
@@ -171,7 +196,8 @@ mod tests {
                 poses: 3,
                 count: 1,
                 width: 2,
-                height: 2
+                height: 2,
+                wave: None,
             }
         );
         assert_eq!(t.table[id("none")], SpriteTile::default());

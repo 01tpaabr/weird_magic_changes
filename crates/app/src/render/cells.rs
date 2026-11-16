@@ -285,12 +285,23 @@ fn render_row<'c>(
                 // one fill a span. The kind whose glyph would show (who is
                 // on top, else the cover) shows its picture instead.
                 s_out.fill(0);
-                if !looks.sprites.is_empty() {
+                if looks.any_sprites() {
                     let rows = looks.rows.and_then(|r| (r.0)(cc));
                     for (k, (so, go)) in s_out.iter_mut().zip(g_out.iter_mut()).enumerate() {
                         let i = local + k;
                         let (who, layer) = top_of(c, i);
                         let Some((kind, slot)) = who.unpack() else {
+                            // Nobody here: the feature's picture, else the
+                            // ground's, where their glyph would show.
+                            let cx = x + i32::try_from(k).expect("a span of a chunk");
+                            let tile = match c.feature[i].0 {
+                                0 => looks.ground_tile(c.ground[i].0, cx, y),
+                                f => looks.feature_tile(f, cx, y),
+                            };
+                            if tile != 0 {
+                                *so = tile;
+                                *go = b' ';
+                            }
                             continue;
                         };
                         if !looks.has_sprite(kind) {
@@ -300,7 +311,7 @@ fn render_row<'c>(
                             // An anchor: its row's look and frame offset.
                             let row = rows
                                 .and_then(|r| r.get(usize::from(slot)))
-                                .map(|r| (r.look, r.stagger));
+                                .map(|r| (r.look, u32::from(r.stagger)));
                             looks.sprite_tile(kind, 0, 0, row)
                         } else {
                             // A part: its anchor's row, in this chunk or
@@ -322,7 +333,8 @@ fn render_row<'c>(
                                     } else {
                                         looks.rows.and_then(|r| (r.0)(acc))
                                     };
-                                    r?.get(usize::from(s)).map(|r| (r.look, r.stagger))
+                                    r?.get(usize::from(s))
+                                        .map(|r| (r.look, u32::from(r.stagger)))
                                 });
                             looks.sprite_tile(kind, dx, dy, row)
                         };
@@ -494,6 +506,7 @@ mod tests {
             count: 1,
             width: 1,
             height: 1,
+            wave: None,
         };
         let poses = [PoseTile {
             look: None,
@@ -551,6 +564,7 @@ mod tests {
             count: 2,
             width: 1,
             height: 1,
+            wave: None,
         };
         let poses = [
             PoseTile {
@@ -684,6 +698,7 @@ mod tests {
             count: 2,
             width: 3,
             height: 3,
+            wave: None,
         };
         let poses = [
             PoseTile {
@@ -770,6 +785,111 @@ mod tests {
             let want = if chunk_of(p, i) == part { 0 } else { pose[i] };
             assert_eq!(t[i], want, "cell {i}");
         }
+    }
+
+    /// The built-in world's grounds and features as pictures: on every cell
+    /// where nothing stands (its glyph blank), soil and rock varying cell
+    /// by cell and standing still, water's frames running east one cell a
+    /// frame; where someone stands, the frame is as before.
+    #[test]
+    fn grounds_and_features_draw_where_nothing_stands() {
+        use crate::sprite::tiles::SpriteTiles;
+        let world = world(200, 150, 9);
+        let kinds = world.resource::<Kinds>();
+        let (wardrobe, _) = crate::sprite::read(kinds).unwrap();
+        let t = SpriteTiles::build(&wardrobe, kinds, 24);
+        assert!(t.table.is_empty(), "no kind wears a sprite");
+        let view = Viewport::centered(Pos::new(60, 40), 120, 70);
+        let plain = frame_with(&world, view, 255);
+        let draw = |clock_ms: u64| {
+            let mut f = CellFrame::new();
+            f.resize(120, 70);
+            let looks = Looks {
+                grounds: &t.grounds,
+                features: &t.features,
+                poses: &t.poses,
+                clock_ms,
+                ..Looks::of(kinds)
+            };
+            render_cells(|c| stage::chunk(&world, c), looks, view, 255, &mut f);
+            f
+        };
+        let a = draw(0);
+        let (mut soil, mut water, mut rock, mut stood) = (0, 0, 0, 0);
+        let mut soil_tiles = std::collections::BTreeSet::new();
+        for k in 0..120 * 70 {
+            let p = Pos::new(
+                view.origin.x + (k % 120) as i32,
+                view.origin.y + (k / 120) as i32,
+            );
+            let (cc, i) = p.split();
+            let Some(c) = stage::chunk(&world, cc) else {
+                assert_eq!(a.sprite[k], 0);
+                continue;
+            };
+            assert_eq!(
+                (a.fg[k], a.bg[k]),
+                (plain.fg[k], plain.bg[k]),
+                "colours as before"
+            );
+            if top_of(c, i).0.is_none() {
+                assert_ne!(a.sprite[k], 0, "{p:?}");
+                assert_eq!(a.glyph[k], b' ');
+                match (c.feature[i].0, c.ground[i].0) {
+                    (0, 0) => {
+                        soil += 1;
+                        soil_tiles.insert(a.sprite[k]);
+                    }
+                    (0, _) => water += 1,
+                    _ => rock += 1,
+                }
+            } else {
+                stood += 1;
+                assert_eq!((a.sprite[k], a.glyph[k]), (0, plain.glyph[k]), "{p:?}");
+            }
+        }
+        assert!(
+            soil > 0 && water > 0 && rock > 0 && stood > 0,
+            "{soil} {water} {rock} {stood}"
+        );
+        assert_eq!(soil_tiles.len(), 5, "five soil variants, by place");
+        // Soil and rock stand still; water's frame at (x, y) one frame later
+        // is its west neighbour's now.
+        let b = draw(300);
+        let mut moved = 0;
+        for k in 0..120 * 70 {
+            let p = Pos::new(
+                view.origin.x + (k % 120) as i32,
+                view.origin.y + (k / 120) as i32,
+            );
+            let (cc, i) = p.split();
+            let Some(c) = stage::chunk(&world, cc) else {
+                continue;
+            };
+            if !top_of(c, i).0.is_none() {
+                continue;
+            }
+            if c.ground[i].0 == 1 && c.feature[i].0 == 0 {
+                moved += usize::from(a.sprite[k] != b.sprite[k]);
+                if k % 120 > 0 {
+                    let west = Pos::new(p.x - 1, p.y).split();
+                    let w = stage::chunk(&world, west.0).unwrap();
+                    if w.ground[west.1].0 == 1
+                        && w.feature[west.1].0 == 0
+                        && top_of(w, west.1).0.is_none()
+                    {
+                        assert_eq!(
+                            b.sprite[k],
+                            a.sprite[k - 1],
+                            "{p:?}: the ripple came from the west"
+                        );
+                    }
+                }
+            } else {
+                assert_eq!(a.sprite[k], b.sprite[k], "{p:?}: a still");
+            }
+        }
+        assert_eq!(moved, water, "every water cell moved on");
     }
 
     #[test]
