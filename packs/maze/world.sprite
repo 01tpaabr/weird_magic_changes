@@ -1,0 +1,36 @@
+# The maze as pictures (docs/SPRITES.md §11): the walls (the engine's rock)
+# are brick that meets its neighbours, and the exits (water, redeclared)
+# pulse so a runner's goal shows from afar. The floor (soil) stays plain:
+# the paths read best clean.
+
+palette {
+  mortar "#3a3a3e"
+  brick  "#8a8a90"
+  dark   "#6a6a70"
+  shine  "#ffffff"
+  amber  "#7a5200"
+}
+
+feature rock {
+  frames 1                                      # two courses of brick, the second offset
+  "#" at 0.17 0.25 scale 1.00 color brick
+  "#" at 0.50 0.25 scale 1.00 color brick
+  "#" at 0.83 0.25 scale 1.00 color brick
+  "#" at 0.17 0.75 scale 1.00 color brick
+  "#" at 0.50 0.75 scale 1.00 color brick
+  "#" at 0.83 0.75 scale 1.00 color brick
+  "#" at 0.00 0.50 scale 1.00 color dark
+  "#" at 0.33 0.50 scale 1.00 color dark
+  "#" at 0.67 0.50 scale 1.00 color dark
+  "#" at 1.00 0.50 scale 1.00 color dark
+  "_" at 0.25 0.38 scale 1.00 color mortar      # mortar under each course
+  "_" at 0.75 0.38 scale 1.00 color mortar
+  "_" at 0.25 0.88 scale 1.00 color mortar
+  "_" at 0.75 0.88 scale 1.00 color mortar
+}
+
+ground water {
+  frames 6 every 150ms                          # a star that breathes and turns
+  "*" at 0.50 0.50 scale 1.10 color shine ~scale 0.30 ~turn 30
+  "+" at 0.50 0.50 scale 0.60 color amber ~turn 45 phase 90
+}

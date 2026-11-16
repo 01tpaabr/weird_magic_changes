@@ -1,0 +1,40 @@
+# The pasture's ground and hedges as pictures (docs/SPRITES.md §11). Soil
+# under the grass grows tufts, five ways by place; the hedges (the engine's
+# rock, redeclared) are bushes that stir in the wind, the gust running
+# east across the field. Water, unused here, as in rules/world.sprite.
+
+palette {
+  tuft   "#4f8a30"
+  leaf   "#2c5220"
+  bright "#5e9a3a"
+  foam   "#9fcaf5"
+  glint  "#e8f4ff"
+}
+
+ground soil {
+  frames 5                                      # five stills, by place: a field, not wallpaper
+  '"' at 0.30 0.66 scale 0.50 color tuft ~x 0.20 ~y 0.12 ~turn 20
+  "'" at 0.70 0.36 scale 0.45 color tuft ~x 0.15 ~y 0.10 phase 100
+}
+
+ground water {
+  frames 5 every 300ms
+  wave -1 2
+  "~" at 0.32 0.35 scale 0.70 color foam ~x 0.08 ~y 0.03
+  "~" at 0.68 0.70 scale 0.60 color foam ~x 0.08 ~y 0.03 phase 180
+  "." at 0.78 0.22 scale 0.45 color glint ~scale 0.25 phase 90
+}
+
+feature rock {
+  frames 4 every 500ms
+  wave -1 1                                     # a frame behind the cell west: the wind runs east
+  "#" at 0.50 0.50 scale 0.80 color leaf
+  "@" at 0.30 0.62 scale 0.70 color leaf
+  "@" at 0.70 0.62 scale 0.70 color leaf
+  "@" at 0.50 0.70 scale 0.70 color leaf
+  "@" at 0.50 0.35 scale 0.70 color leaf ~x 0.03
+  "@" at 0.30 0.30 scale 0.55 color leaf ~x 0.03 phase 30
+  "@" at 0.70 0.30 scale 0.55 color leaf ~x 0.03 phase 60
+  "*" at 0.36 0.38 scale 0.50 color bright ~turn 25 phase 30
+  "*" at 0.66 0.62 scale 0.45 color bright ~turn 25 phase 120
+}

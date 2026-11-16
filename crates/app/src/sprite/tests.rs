@@ -472,3 +472,73 @@ fn materials_match_by_name() {
     assert!(warn.is_empty(), "{warn:?}");
     assert!(w.of_ground.iter().all(Option::is_some) && w.of_feature[1].is_some());
 }
+
+/// Every scenario's packs dress without an error or a warning; the world
+/// packs draw their ground, the picture packs (and lakes, whose water is a
+/// field, not a ground) keep it plain, and the maze draws its walls and
+/// exits but not its floor.
+#[test]
+fn every_scenarios_sprites_load_and_the_world_packs_draw_their_ground() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scenarios");
+    let mut files: Vec<PathBuf> = Vec::new();
+    for dir in [root.clone(), root.join("tests")] {
+        for e in std::fs::read_dir(&dir).unwrap() {
+            let p = e.unwrap().path();
+            // test.scenario is the owner's scratch world, not committed.
+            if p.extension().is_some_and(|x| x == "scenario")
+                && !p.ends_with("scenarios/test.scenario")
+            {
+                files.push(p);
+            }
+        }
+    }
+    files.sort();
+    let plain = [
+        "life",
+        "turing",
+        "elementary",
+        "cyclic",
+        "turmite",
+        "lsystem",
+        "lakes",
+    ];
+    for f in &files {
+        let s = crate::read_scenario(f.to_str().unwrap()).unwrap();
+        let packs: Vec<PathBuf> = s.packs.iter().map(PathBuf::from).collect();
+        let kinds = crate::compile(&packs).unwrap();
+        let (w, warnings) = read(&kinds).unwrap_or_else(|e| panic!("{}: {e}", f.display()));
+        assert!(warnings.is_empty(), "{}: {warnings:?}", f.display());
+        let name = |p: &PathBuf| p.file_name().unwrap().to_string_lossy().into_owned();
+        // The built-in rules (none, or `rules/` in the gallery) wear
+        // rules/world.sprite; the menu turns grounds off.
+        let Some(last) = packs.last().map(name) else {
+            continue;
+        };
+        if packs.iter().any(|p| name(p) == "rules") {
+            continue;
+        }
+        let soil = kinds
+            .materials
+            .grounds
+            .iter()
+            .position(|m| m.name == "soil")
+            .unwrap();
+        let drawn = w.of_ground[soil].is_some();
+        if plain.contains(&last.as_str()) {
+            assert!(
+                !drawn,
+                "{}: a picture pack's ground stays plain",
+                f.display()
+            );
+        } else if last == "maze" {
+            assert!(
+                !drawn && w.of_ground.iter().any(Option::is_some),
+                "{}",
+                f.display()
+            );
+            assert!(w.of_feature.iter().any(Option::is_some), "{}", f.display());
+        } else {
+            assert!(drawn, "{}: a world pack draws its soil", f.display());
+        }
+    }
+}

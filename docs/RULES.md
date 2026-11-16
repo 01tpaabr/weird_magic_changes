@@ -1262,7 +1262,9 @@ pose), `packs/pasture` (a sheep that lowers its head to graze, a wolf that runs 
 `packs/giants` (a mammoth as one 3 x 3 picture). Grounds and features can be drawn the
 same way (`ground water { ... }`, `feature rock { ... }`: soil that varies cell by cell,
 water whose ripples run across it), where nobody stands; the built-in rules draw the
-engine's soil, water and rock (`rules/world.sprite`).
+engine's soil, water and rock (`rules/world.sprite`), and so do the world packs, each with
+its own `world.sprite` (`packs/pasture`'s hedges, `packs/maze`'s walls and exits,
+`packs/workshop`'s huts).
 
 ## 16. The vocabulary
 

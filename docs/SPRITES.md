@@ -428,7 +428,13 @@ feature rock {
 - **Which files:** as for kinds, the packs' sprite files; the built-in rules carry
   `rules/world.sprite` (above). A pack that uses the engine's soil and water and wants them
   drawn copies it (packs load in many combinations, and a picture pack such as `packs/life`
-  wants its ground plain). The menu's gallery keeps its plain ground.
+  wants its ground plain). The menu's gallery keeps its plain ground. The world packs carry
+  a `world.sprite`: most a copy of the built-in one; `packs/pasture` grows grass tufts and
+  draws its hedges as bushes that stir in the wind, `packs/maze` draws brick walls and
+  exits that pulse (its floor plain), `packs/workshop` adds a hut with smoke from its
+  chimney. Plain: the picture packs, and `packs/lakes`, whose water is a field (a tint),
+  not a ground. In a pack that layers on another (`packs/weather` on `packs/gather`), only
+  one draws a material: two sprites for one ground are an error.
 - **Cost:** a world whose ground has a sprite draws every bare cell as a picture: one more
   pass over the span, as for kinds; a world without sprites is as before (`PERF.md`).
 
